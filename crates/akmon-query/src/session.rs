@@ -8,8 +8,8 @@ use akmon_core::{
     AuditEvent, Permission, PolicyEngineError, PolicyEngineMode, PolicyVerdict, Sandbox,
 };
 use akmon_models::{
-    CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
-    ModelToolCall, StopReason, StreamEvent, ToolDefinition,
+    approximate_tokens, CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole,
+    ModelError, ModelToolCall, StopReason, StreamEvent, ToolDefinition,
 };
 use akmon_tools::{Tool, ToolContext, ToolOutput};
 use chrono::Utc;
@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::context::{build_followup_messages, build_messages};
+use crate::context_manager::ContextManager;
 
 /// One finished tool invocation recorded for machine-readable run summaries (CLI `--output json`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -63,6 +64,10 @@ pub struct AgentSession {
     result_text: String,
     /// Completed tool calls in chronological order (for JSON run reports).
     tool_call_summaries: Vec<ToolCallSummary>,
+    /// Token-budget and splitting rules for automatic context compaction.
+    context_manager: ContextManager,
+    /// FSM state to restore after a successful [`AgentEvent::ContextSummarized`].
+    post_summary_resume: Option<AgentState>,
 }
 
 impl AgentSession {
@@ -75,6 +80,14 @@ impl AgentSession {
         sandbox: Arc<Sandbox>,
         akmon_md: Option<String>,
     ) -> Self {
+        let max_tokens = provider.context_window_tokens().clamp(1, 100_000);
+        let fixed_system_messages = if akmon_md.is_some() { 2 } else { 1 };
+        let context_manager = ContextManager {
+            max_tokens,
+            threshold: ContextManager::default().threshold,
+            keep_recent: ContextManager::default().keep_recent,
+            fixed_system_messages,
+        };
         Self {
             config,
             state: AgentState::Idle,
@@ -87,6 +100,8 @@ impl AgentSession {
             akmon_md,
             result_text: String::new(),
             tool_call_summaries: Vec::new(),
+            context_manager,
+            post_summary_resume: None,
         }
     }
 
@@ -125,7 +140,8 @@ impl AgentSession {
     /// appended as [`MessageRole::Tool`] messages, the iteration counter increases, and
     /// [`check_iteration_limit`] runs before the next provider call.
     ///
-    /// When the policy is [`PolicyEngineMode::Interactive`] or [`PolicyEngineMode::AutoApproveReads`],
+    /// When the policy is [`PolicyEngineMode::Interactive`], [`PolicyEngineMode::AutoApproveReads`],
+    /// or [`PolicyEngineMode::AutoApproveReadsAndFetch`],
     /// put the session's [`mpsc::Receiver<PolicyVerdict>`] in `interactive_policy_rx` as `Some` so
     /// write confirmations can be answered; the UI must send one verdict after each
     /// [`AgentEvent::ConfirmationRequired`]. Use `&mut None` only when no interactive confirmations are
@@ -167,7 +183,9 @@ impl AgentSession {
             }
 
             let project_root = self.sandbox.primary_root().display().to_string();
-            let tool_names: Vec<&str> = self.tools.iter().map(|t| t.name()).collect();
+            let tool_name_strings: Vec<String> =
+                self.tools.iter().map(|t| t.name().to_string()).collect();
+            let tool_names: Vec<&str> = tool_name_strings.iter().map(|s| s.as_str()).collect();
             let messages = if user_line_committed {
                 build_followup_messages(
                     self.akmon_md.as_deref(),
@@ -184,6 +202,41 @@ impl AgentSession {
                     &tool_names,
                 )
             };
+
+            let mut messages = messages;
+            let mut sum_round = 0u32;
+            while sum_round < 8
+                && self
+                    .context_manager
+                    .needs_summarization(&messages, self.provider.as_ref())
+            {
+                sum_round = sum_round.saturating_add(1);
+                self.run_context_summarization_pass(
+                    &messages,
+                    &event_tx,
+                    task.as_str(),
+                    user_line_committed,
+                )
+                .await?;
+                let tool_names: Vec<&str> =
+                    tool_name_strings.iter().map(|s| s.as_str()).collect();
+                messages = if user_line_committed {
+                    build_followup_messages(
+                        self.akmon_md.as_deref(),
+                        &self.context,
+                        project_root.as_str(),
+                        &tool_names,
+                    )
+                } else {
+                    build_messages(
+                        self.akmon_md.as_deref(),
+                        &self.context,
+                        task.as_str(),
+                        project_root.as_str(),
+                        &tool_names,
+                    )
+                };
+            }
 
             let completion_config = completion_config_for_tools(&self.tools);
             let mut stream: CompletionStream = match self
@@ -407,7 +460,9 @@ impl AgentSession {
 
         for perm in perms {
             let allowed = match self.policy.mode() {
-                PolicyEngineMode::Interactive | PolicyEngineMode::AutoApproveReads { .. } => {
+                PolicyEngineMode::Interactive
+                | PolicyEngineMode::AutoApproveReads { .. }
+                | PolicyEngineMode::AutoApproveReadsAndFetch { .. } => {
                     match self
                         .policy
                         .evaluate_automatic(session_id.as_str(), perm.clone())
@@ -423,6 +478,9 @@ impl AgentSession {
                                         "Shell command requires confirmation.\n  Command: {command}\n  Working directory: {}",
                                         cwd.display()
                                     )
+                                }
+                                Permission::NetworkFetch { url } => {
+                                    format!("Network fetch requires confirmation.\n  URL: {url}")
                                 }
                                 _ => format!("Permission required: {perm:?}"),
                             };
@@ -575,6 +633,300 @@ impl AgentSession {
         Ok(())
     }
 
+    /// Runs one compaction: model-summary of old turns, then folds them into [`Self::context`].
+    async fn run_context_summarization_pass(
+        &mut self,
+        messages_full: &[Message],
+        event_tx: &mpsc::Sender<AgentEvent>,
+        task: &str,
+        user_line_committed: bool,
+    ) -> Result<(), AgentError> {
+        let main_end = if !user_line_committed {
+            messages_full.len().saturating_sub(1)
+        } else {
+            messages_full.len()
+        };
+        let head = &messages_full[..main_end];
+        let (to_s, _to_k) = self.context_manager.messages_to_summarize(head);
+        if to_s.is_empty() {
+            eprintln!(
+                "akmon: context summarization skipped: nothing to fold under keep_recent"
+            );
+            self.trim_oldest_non_system_fraction_of_context(0.2);
+            return Ok(());
+        }
+
+        let resume = match &self.state {
+            AgentState::Planning {
+                task: t,
+                iteration,
+            } => AgentState::Planning {
+                task: t.clone(),
+                iteration: *iteration,
+            },
+            AgentState::Thinking { iteration } => AgentState::Thinking {
+                iteration: *iteration,
+            },
+            _ => {
+                return Err(AgentError::SessionFailed {
+                    message: "context summarization requires Planning or Thinking state".into(),
+                });
+            }
+        };
+        self.post_summary_resume = Some(resume);
+        self.apply_event(event_tx, AgentEvent::SummarizationStarted, task)
+            .await?;
+
+        let tokens_before = approximate_tokens(to_s);
+        let instruct = "Summarize the following conversation history concisely. Preserve key decisions, file paths mentioned, and technical context. Output only the summary, no preamble.";
+        let mut summary_msgs = vec![Message {
+            role: MessageRole::System,
+            content: instruct.into(),
+        }];
+        summary_msgs.extend(to_s.iter().cloned());
+
+        let sum_config = CompletionConfig {
+            tools: Vec::new(),
+            ..CompletionConfig::default()
+        };
+
+        let mut stream = match self.provider.complete(&summary_msgs, &sum_config).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("akmon: warning: context summarization request failed: {e}");
+                self.restore_state_after_summarization_abort();
+                self.trim_oldest_non_system_fraction_of_context(0.2);
+                return Ok(());
+            }
+        };
+
+        let mut summary_text = String::new();
+        loop {
+            let Some(item) = stream.next().await else {
+                if summary_text.is_empty() {
+                    eprintln!("akmon: warning: context summarization stream ended without output");
+                    self.restore_state_after_summarization_abort();
+                    self.trim_oldest_non_system_fraction_of_context(0.2);
+                    return Ok(());
+                }
+                break;
+            };
+            match item {
+                Err(e) => {
+                    eprintln!("akmon: warning: context summarization stream transport error: {e}");
+                    self.restore_state_after_summarization_abort();
+                    self.trim_oldest_non_system_fraction_of_context(0.2);
+                    return Ok(());
+                }
+                Ok(StreamEvent::TextDelta { text }) => summary_text.push_str(&text),
+                Ok(StreamEvent::Error { error }) => {
+                    eprintln!("akmon: warning: context summarization stream error: {error}");
+                    self.restore_state_after_summarization_abort();
+                    self.trim_oldest_non_system_fraction_of_context(0.2);
+                    return Ok(());
+                }
+                Ok(StreamEvent::Done {
+                    stop_reason,
+                    tool_calls,
+                }) => {
+                    if matches!(stop_reason, StopReason::MaxTokens) {
+                        eprintln!("akmon: warning: context summarization truncated");
+                        self.restore_state_after_summarization_abort();
+                        self.trim_oldest_non_system_fraction_of_context(0.2);
+                        return Ok(());
+                    }
+                    if !tool_calls.is_empty() {
+                        eprintln!("akmon: warning: context summarization requested tools");
+                        self.restore_state_after_summarization_abort();
+                        self.trim_oldest_non_system_fraction_of_context(0.2);
+                        return Ok(());
+                    }
+                    break;
+                }
+            }
+        }
+
+        let summary_msg = Message {
+            role: MessageRole::System,
+            content: format!("<<<SUMMARY_START>>>\n{summary_text}\n<<<SUMMARY_END>>>"),
+        };
+        let tokens_after = approximate_tokens(std::slice::from_ref(&summary_msg));
+        let tokens_freed = tokens_before.saturating_sub(tokens_after);
+
+        if self
+            .apply_folded_summary_to_context(to_s, head, summary_msg)
+            .is_err()
+        {
+            eprintln!("akmon: warning: failed to align summary fold with context");
+            self.restore_state_after_summarization_abort();
+            self.trim_oldest_non_system_fraction_of_context(0.2);
+            return Ok(());
+        }
+
+        self.apply_event(
+            event_tx,
+            AgentEvent::ContextSummarized {
+                messages_replaced: to_s.len(),
+                tokens_freed,
+            },
+            task,
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn apply_folded_summary_to_context(
+        &mut self,
+        to_s: &[Message],
+        head: &[Message],
+        summary: Message,
+    ) -> Result<(), AgentError> {
+        let n_fixed = self
+            .context_manager
+            .fixed_system_messages
+            .min(head.len());
+        let body = &head[n_fixed..];
+        if body.len() != self.context.len() {
+            return Err(AgentError::SessionFailed {
+                message: "summary fold: context length mismatch".into(),
+            });
+        }
+        let mut j = 0usize;
+        while j < body.len() && body[j].role == MessageRole::System {
+            j += 1;
+        }
+        if j + to_s.len() > self.context.len() {
+            return Err(AgentError::SessionFailed {
+                message: "summary fold: context shorter than expected".into(),
+            });
+        }
+        if body.get(j..j + to_s.len()) != Some(to_s) {
+            return Err(AgentError::SessionFailed {
+                message: "summary fold: slice mismatch".into(),
+            });
+        }
+        let suffix_from = j + to_s.len();
+        let suffix = self.context[suffix_from..].to_vec();
+        self.context.truncate(j);
+        self.context.push(summary);
+        self.context.extend(suffix);
+        Ok(())
+    }
+
+    fn restore_state_after_summarization_abort(&mut self) {
+        if let Some(s) = self.post_summary_resume.take() {
+            self.state = s;
+        }
+    }
+
+    fn trim_oldest_non_system_fraction_of_context(&mut self, frac: f64) {
+        let non_sys: Vec<usize> = self
+            .context
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role != MessageRole::System)
+            .map(|(i, _)| i)
+            .collect();
+        let n_drop = ((non_sys.len() as f64) * frac).ceil() as usize;
+        if n_drop == 0 {
+            return;
+        }
+        let drop: std::collections::HashSet<usize> =
+            non_sys.iter().take(n_drop).copied().collect();
+        let mut idx = 0usize;
+        self.context.retain(|_| {
+            let this = idx;
+            idx += 1;
+            !drop.contains(&this)
+        });
+    }
+
+    fn next_state_after(&mut self, event: &AgentEvent, task: &str) -> Result<AgentState, AgentError> {
+        match (&self.state, event) {
+            (AgentState::Idle, AgentEvent::IterationStarted { .. }) => Ok(AgentState::Planning {
+                task: task.to_string(),
+                iteration: 0,
+            }),
+            (AgentState::Planning { iteration, .. }, AgentEvent::TextDelta { .. }) => {
+                Ok(AgentState::Thinking {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Thinking { iteration }, AgentEvent::TextDelta { .. }) => {
+                Ok(AgentState::Thinking {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Thinking { .. }, AgentEvent::Done) => Ok(AgentState::Complete),
+            (AgentState::Thinking { iteration }, AgentEvent::ToolCallDispatched { .. }) => {
+                Ok(AgentState::ToolExecution {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::ToolExecution { iteration }, AgentEvent::ToolCallCompleted { .. }) => {
+                Ok(AgentState::Thinking {
+                    iteration: *iteration,
+                })
+            }
+            (
+                AgentState::Thinking { iteration },
+                AgentEvent::ToolCallCompleted {
+                    success: false, ..
+                },
+            ) => Ok(AgentState::Thinking {
+                iteration: *iteration,
+            }),
+            (AgentState::Thinking { iteration }, AgentEvent::ConfirmationRequired { .. }) => {
+                Ok(AgentState::AwaitingConfirmation {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::AwaitingConfirmation { iteration }, AgentEvent::TextDelta { .. }) => {
+                Ok(AgentState::Thinking {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Thinking { .. }, AgentEvent::Error { error, recoverable }) => {
+                Ok(AgentState::Failed {
+                    error: error.clone(),
+                    recoverable: *recoverable,
+                })
+            }
+            (AgentState::Planning { .. }, AgentEvent::Error { error, recoverable }) => {
+                Ok(AgentState::Failed {
+                    error: error.clone(),
+                    recoverable: *recoverable,
+                })
+            }
+            (AgentState::ToolExecution { .. }, AgentEvent::Error { error, recoverable }) => {
+                Ok(AgentState::Failed {
+                    error: error.clone(),
+                    recoverable: *recoverable,
+                })
+            }
+            (AgentState::Planning { iteration, .. }, AgentEvent::SummarizationStarted) => {
+                Ok(AgentState::Summarizing {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Thinking { iteration }, AgentEvent::SummarizationStarted) => {
+                Ok(AgentState::Summarizing {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Summarizing { .. }, AgentEvent::ContextSummarized { .. }) => self
+                .post_summary_resume
+                .take()
+                .ok_or_else(|| AgentError::SessionFailed {
+                    message: "missing post_summary_resume for ContextSummarized".into(),
+                }),
+            _ => Err(AgentError::InvalidTransition {
+                from: self.state.to_string(),
+                to: event.to_string(),
+            }),
+        }
+    }
+
     async fn apply_event(
         &mut self,
         tx: &mpsc::Sender<AgentEvent>,
@@ -596,7 +948,7 @@ impl AgentSession {
         };
 
         validate_transition(&self.state, &event)?;
-        self.state = next_state_after(&self.state, &event, task)?;
+        self.state = self.next_state_after(&event, task)?;
         self.audit_log.push(AuditEvent::AgentStep {
             session_id: self.config.session_id.to_string(),
             timestamp: Utc::now(),
@@ -651,6 +1003,28 @@ fn concrete_permissions(
                 tool.required_permissions().to_vec()
             }
         }
+        "edit" => {
+            if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                vec![Permission::WriteFile {
+                    path: PathBuf::from(p),
+                }]
+            } else {
+                tool.required_permissions().to_vec()
+            }
+        }
+        "patch" => {
+            if let Some(p) = args.get("patch").and_then(|v| v.as_str()) {
+                match akmon_tools::patch_write_relative_paths(p) {
+                    Some(paths) => paths
+                        .into_iter()
+                        .map(|path| Permission::WriteFile { path })
+                        .collect(),
+                    None => tool.required_permissions().to_vec(),
+                }
+            } else {
+                tool.required_permissions().to_vec()
+            }
+        }
         "list_directory" => {
             if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
                 vec![Permission::ListDirectory {
@@ -680,78 +1054,16 @@ fn concrete_permissions(
                 path: PathBuf::from(p),
             }]
         }
+        "web_fetch" => {
+            if let Some(u) = args.get("url").and_then(|v| v.as_str()) {
+                vec![Permission::NetworkFetch {
+                    url: u.to_string(),
+                }]
+            } else {
+                tool.required_permissions().to_vec()
+            }
+        }
         _ => tool.required_permissions().to_vec(),
-    }
-}
-
-fn next_state_after(
-    current: &AgentState,
-    event: &AgentEvent,
-    task: &str,
-) -> Result<AgentState, AgentError> {
-    match (current, event) {
-        (AgentState::Idle, AgentEvent::IterationStarted { .. }) => Ok(AgentState::Planning {
-            task: task.to_string(),
-            iteration: 0,
-        }),
-        (AgentState::Planning { iteration, .. }, AgentEvent::TextDelta { .. }) => {
-            Ok(AgentState::Thinking {
-                iteration: *iteration,
-            })
-        }
-        (AgentState::Thinking { iteration }, AgentEvent::TextDelta { .. }) => {
-            Ok(AgentState::Thinking {
-                iteration: *iteration,
-            })
-        }
-        (AgentState::Thinking { .. }, AgentEvent::Done) => Ok(AgentState::Complete),
-        (AgentState::Thinking { iteration }, AgentEvent::ToolCallDispatched { .. }) => {
-            Ok(AgentState::ToolExecution {
-                iteration: *iteration,
-            })
-        }
-        (AgentState::ToolExecution { iteration }, AgentEvent::ToolCallCompleted { .. }) => {
-            Ok(AgentState::Thinking {
-                iteration: *iteration,
-            })
-        }
-        (AgentState::Thinking { iteration }, AgentEvent::ToolCallCompleted { success: false, .. }) => {
-            Ok(AgentState::Thinking {
-                iteration: *iteration,
-            })
-        }
-        (AgentState::Thinking { iteration }, AgentEvent::ConfirmationRequired { .. }) => {
-            Ok(AgentState::AwaitingConfirmation {
-                iteration: *iteration,
-            })
-        }
-        (AgentState::AwaitingConfirmation { iteration }, AgentEvent::TextDelta { .. }) => {
-            Ok(AgentState::Thinking {
-                iteration: *iteration,
-            })
-        }
-        (AgentState::Thinking { .. }, AgentEvent::Error { error, recoverable }) => {
-            Ok(AgentState::Failed {
-                error: error.clone(),
-                recoverable: *recoverable,
-            })
-        }
-        (AgentState::Planning { .. }, AgentEvent::Error { error, recoverable }) => {
-            Ok(AgentState::Failed {
-                error: error.clone(),
-                recoverable: *recoverable,
-            })
-        }
-        (AgentState::ToolExecution { .. }, AgentEvent::Error { error, recoverable }) => {
-            Ok(AgentState::Failed {
-                error: error.clone(),
-                recoverable: *recoverable,
-            })
-        }
-        _ => Err(AgentError::InvalidTransition {
-            from: current.to_string(),
-            to: event.to_string(),
-        }),
     }
 }
 

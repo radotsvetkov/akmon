@@ -18,6 +18,12 @@ pub const PROJECT_CONTEXT_END: &str = "<<<PROJECT_CONTEXT_END>>>";
 
 fn format_project_context(project_root: &str, tool_names: &[&str]) -> String {
     let tools_line = tool_names.join(", ");
+    let web_fetch_line = if tool_names.contains(&"web_fetch") {
+        "  7. web_fetch url=\"https://...\" \
+     to fetch public documentation\n"
+    } else {
+        ""
+    };
     format!(
         "{PROJECT_CONTEXT_START}\n\
 You are an AI coding assistant \n\
@@ -26,15 +32,27 @@ running inside the Akmon agent.\n\
 Working directory: {project_root}\n\
 Available tools: {tools_line}\n\
 \n\
-To explore the project:\n\
-  FIRST call list_directory with path=\".\" \n\
-  to see what exists before reading anything.\n\
-  THEN call list_directory on subdirectories \n\
-  you want to explore.\n\
-  THEN call read_file on specific files.\n\
-  NEVER call read_file on a directory path.\n\
-  NEVER guess file paths — always \n\
-  list first, then read.\n\
+To work on this project:\n\
+  1. list_directory path=\".\" \n\
+     to explore structure\n\
+  2. search pattern=\"...\" \n\
+     to find relevant code\n\
+  3. read_file path=\"...\" \n\
+     to read specific files\n\
+  4. edit path=\"...\" old_str=\"...\" \n\
+     new_str=\"...\" for surgical \n\
+     single-location changes\n\
+  5. patch patch=\"...\" for changes \n\
+     across multiple locations\n\
+  6. write_file path=\"...\" \n\
+     content=\"...\" only for \n\
+     completely new files\n\
+{web_fetch_line}\
+  NEVER rewrite an entire existing \n\
+  file — use edit or patch instead.\n\
+  NEVER call read_file on a directory.\n\
+  NEVER guess paths — always \n\
+  list or search first.\n\
 \n\
 All paths must be relative to the \n\
 working directory shown above.\n\
@@ -131,6 +149,9 @@ mod tests {
         assert!(msgs[1].content.contains(PROJECT_CONTEXT_START));
         assert!(msgs[1].content.contains("Working directory: /repo"));
         assert!(msgs[1].content.contains("Available tools: read_file"));
+        assert!(msgs[1].content.contains("To work on this project:"));
+        assert!(msgs[1].content.contains("edit path"));
+        assert!(msgs[1].content.contains("patch patch"));
         assert!(msgs[1].content.contains(PROJECT_CONTEXT_END));
     }
 
@@ -158,5 +179,16 @@ mod tests {
             .expect("build_messages always ends with the user task");
         assert_eq!(last.role, MessageRole::User);
         assert_eq!(last.content, "final ask");
+    }
+
+    #[test]
+    fn project_context_mentions_web_fetch_when_tool_enabled() {
+        let msgs = build_messages(None, &[], "t", "/repo", &["read_file", "web_fetch"]);
+        let ctx = msgs
+            .iter()
+            .find(|m| m.role == MessageRole::System && m.content.contains("web_fetch url="))
+            .expect("project context should document web_fetch when listed");
+        assert!(ctx.content.contains("7. web_fetch url=\"https://...\""));
+        assert!(ctx.content.contains("fetch public documentation"));
     }
 }

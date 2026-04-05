@@ -223,7 +223,7 @@ impl Tool for SearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for a pattern in files within the project sandbox. Use this to find function definitions, variable names, imports, or any text pattern. Always search before editing."
+        "Search for a pattern in files within the project sandbox. Use this to find function definitions, variable names, imports, or any text pattern. Always search before editing. On success, the JSON field total_matches is the number of result rows returned in this response (same as the length of results), not necessarily the total count of matches in the codebase; when truncated is true, more matches may exist beyond the limit."
     }
 
     fn required_permissions(&self) -> &[Permission] {
@@ -233,6 +233,7 @@ impl Tool for SearchTool {
     fn parameters_schema(&self) -> JsonValue {
         serde_json::json!({
             "type": "object",
+            "description": "Arguments for search. Successful tool output JSON includes total_matches: the count of entries in results for this response only; when truncated is true, additional matches may exist in the tree beyond that count.",
             "properties": {
                 "pattern": {
                     "type": "string",
@@ -347,6 +348,8 @@ impl Tool for SearchTool {
             }
         };
 
+        // total_matches = number of rows in `results` for this response; when `truncated` is true,
+        // more matches may exist in the project than this count.
         let total_matches = run.results.len();
         let payload = json!({
             "pattern": run.pattern,

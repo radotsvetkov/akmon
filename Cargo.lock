@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-cli"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "akmon-core",
  "akmon-models",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-core"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-models"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "akmon-core",
  "async-trait",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-query"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "akmon-core",
  "akmon-models",
@@ -80,17 +80,20 @@ dependencies = [
 
 [[package]]
 name = "akmon-tools"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "akmon-core",
  "async-trait",
+ "diffy",
  "glob",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "url",
  "walkdir",
 ]
 
@@ -293,6 +296,15 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "diffy"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b545b8c50194bdd008283985ab0b31dba153cfd5b3066a92770634fbc0d7d291"
+dependencies = [
+ "nu-ansi-term",
+]
 
 [[package]]
 name = "displaydoc"
@@ -852,6 +864,15 @@ checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
 dependencies = [
  "libc",
  "wasi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
  "windows-sys 0.61.2",
 ]
 

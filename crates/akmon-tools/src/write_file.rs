@@ -80,7 +80,8 @@ fn split_write_path(path_str: &str) -> Result<(&str, &str), ToolOutput> {
     }
 }
 
-async fn atomic_write_utf8(path: &Path, content: &[u8]) -> std::io::Result<usize> {
+/// Writes `content` to `path` via a unique temp file in the same directory, then renames into place.
+pub(crate) async fn atomic_write_utf8(path: &Path, content: &[u8]) -> std::io::Result<usize> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

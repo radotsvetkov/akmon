@@ -1,21 +1,30 @@
-//! Built-in tools and the [`Tool`] trait (filesystem first; shell/network/MCP later).
+// Akmon tools crate — v1.1
+//! Built-in tools and the [`Tool`] trait (filesystem, optional shell, `web_fetch`, and MCP client proxies).
 
 #![warn(missing_docs)]
 
 mod context;
+mod edit;
 mod list_directory;
+mod mcp_client;
 mod output;
+mod patch;
 mod read_file;
 mod search;
 mod shell;
+mod web_fetch;
 mod write_file;
 
 pub use context::ToolContext;
+pub use edit::EditTool;
 pub use list_directory::ListDirectoryTool;
+pub use mcp_client::{discover_mcp_tools, McpTool};
 pub use output::{ToolErrorCode, ToolOutput};
+pub use patch::{patch_write_relative_paths, PatchTool};
 pub use read_file::{ReadFileTool, DEFAULT_MAX_READ_BYTES};
 pub use search::{SearchTool, DEFAULT_MAX_SEARCH_FILE_BYTES, DEFAULT_MAX_SEARCH_RESULTS};
 pub use shell::ShellTool;
+pub use web_fetch::{validate_url, WebFetchTool};
 pub use write_file::WriteFileTool;
 
 use akmon_core::Permission;

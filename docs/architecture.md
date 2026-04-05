@@ -17,7 +17,7 @@ akmon-cli
 
 **akmon-models** implements **LLM backends** and wire formats: HTTP clients, streaming parsers, and message/tool-call mapping to Akmon’s shared model types. It must never perform filesystem access or policy decisions.
 
-**akmon-tools** defines concrete **tools** (`read_file`, `write_file`, `list_directory`) and their argument validation, delegating path safety to **akmon-core**. It must not talk to the network or embed orchestration policy.
+**akmon-tools** defines concrete **tools** (filesystem, optional `web_fetch`, and MCP HTTP proxies in `mcp_client`) and their argument validation, delegating path safety to **akmon-core** for file paths. Network tools declare **`NetworkFetch`** permissions and are evaluated by the policy engine like any other tool.
 
 **akmon-core** holds **shared primitives**: permissions, policy engine, audit events, sandbox resolution, secrets, and FSM types/transition rules. It must not depend on higher crates (no imports from `akmon-query` or `akmon-cli`) and must remain the single source of truth for “what is allowed” and “what was recorded.”
 
@@ -64,6 +64,14 @@ akmon-cli
 13. The loop continues until **EndTurn** with no further tool work, success completion, or a hard stop (limit, fatal error, policy denial).
 14. **write_audit_jsonl** flushes all **AuditEvent** records for the session to the chosen JSONL path.
 15. The CLI prints either streamed text as already shown or a single **RunReport** JSON object on stdout when `--output json` is set.
+
+## Tools
+
+Built-in tools are registered in **akmon-cli** from **akmon-tools** (read/search/edit/patch/write, optional `shell` and `web_fetch`). The CLI may also append **MCP**-discovered tools after `tools/list` against each `--mcp-server` URL.
+
+### MCP tools
+
+Akmon can connect to any MCP (Model Context Protocol) server and automatically register its tools at startup. Use `--mcp-server` to specify server URLs. Multiple servers are supported. Tool discovery uses `tools/list` and tool execution uses `tools/call` via JSON-RPC 2.0 over HTTP.
 
 ## Security architecture
 

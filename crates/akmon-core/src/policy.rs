@@ -40,6 +40,14 @@ pub enum PolicyEngineMode {
         /// When true, [`Permission::WriteFile`] and [`Permission::ExecuteCommand`] use interactive confirmation instead of automatic denial.
         confirm_writes: bool,
     },
+    /// Like [`Self::AutoApproveReads`], but also auto-allows [`Permission::NetworkFetch`] (SSRF checks still run in the tool before execution).
+    ///
+    /// [`Permission::WriteFile`] still uses interactive confirmation when `confirm_writes` is true.
+    /// [`Permission::ExecuteCommand`] is never auto-approved (same confirmation path as [`Self::AutoApproveReads`]).
+    AutoApproveReadsAndFetch {
+        /// When true, [`Permission::WriteFile`] uses interactive confirmation instead of automatic denial.
+        confirm_writes: bool,
+    },
     /// Rules from [`PolicyConfig`] (skeleton denies until rules exist).
     Configured(PolicyConfig),
 }
@@ -47,11 +55,12 @@ pub enum PolicyEngineMode {
 /// Error returned when the engine is used in a way that does not match its mode.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PolicyEngineError {
-    /// [`PolicyEngineMode::Interactive`] (or write confirmation under [`PolicyEngineMode::AutoApproveReads`]) does not support automatic resolution for this permission.
+    /// [`PolicyEngineMode::Interactive`] (or write confirmation under [`PolicyEngineMode::AutoApproveReads`]
+    /// or [`PolicyEngineMode::AutoApproveReadsAndFetch`]) does not support automatic resolution for this permission.
     #[error("interactive confirmation required; use resolve_interactive after the user supplies a verdict")]
     InteractiveRequiresCaller,
     /// [`PolicyEngine::resolve_interactive`] was called while not in interactive or auto-read-approve mode.
-    #[error("resolve_interactive is only valid in Interactive or AutoApproveReads mode")]
+    #[error("resolve_interactive is only valid in Interactive, AutoApproveReads, or AutoApproveReadsAndFetch mode")]
     NotInteractive,
 }
 
@@ -84,13 +93,14 @@ impl PolicyEngine {
     }
 
     /// Automatic evaluation: [`PolicyEngineMode::DenyAll`], [`PolicyEngineMode::Configured`],
-    /// [`PolicyEngineMode::AutoApproveReads`], and the allow branch of [`PolicyEngineMode::Interactive`]
+    /// [`PolicyEngineMode::AutoApproveReads`], [`PolicyEngineMode::AutoApproveReadsAndFetch`],
+    /// and the allow branch of [`PolicyEngineMode::Interactive`]
     /// (which always signals that the caller must prompt).
     ///
     /// Returns [`PolicyEngineError::InteractiveRequiresCaller`] when the mode is
-    /// [`PolicyEngineMode::Interactive`], or [`PolicyEngineMode::AutoApproveReads`] with
-    /// `confirm_writes: true` and a [`Permission::WriteFile`] or [`Permission::ExecuteCommand`]
-    /// request (shell is never auto-approved).
+    /// [`PolicyEngineMode::Interactive`], or [`PolicyEngineMode::AutoApproveReads`] /
+    /// [`PolicyEngineMode::AutoApproveReadsAndFetch`] with `confirm_writes: true` and a
+    /// [`Permission::WriteFile`], or [`Permission::ExecuteCommand`] (shell is never auto-approved).
     pub fn evaluate_automatic(
         &self,
         session_id: &str,
@@ -111,6 +121,11 @@ impl PolicyEngine {
                     Permission::ReadFile { .. } | Permission::ListDirectory { .. } => {
                         (true, "auto-approved read (--yes)".to_string(), PolicyVerdict::Allow)
                     }
+                    Permission::NetworkFetch { .. } => (
+                        false,
+                        "denied: web fetch is never auto-approved (--yes)".to_string(),
+                        PolicyVerdict::Deny,
+                    ),
                     Permission::WriteFile { .. } => {
                         if *confirm_writes {
                             return Err(PolicyEngineError::InteractiveRequiresCaller);
@@ -124,11 +139,31 @@ impl PolicyEngine {
                     Permission::ExecuteCommand { .. } => {
                         return Err(PolicyEngineError::InteractiveRequiresCaller);
                     }
-                    _ => (
-                        false,
-                        "denied: not auto-approved in AutoApproveReads mode".to_string(),
-                        PolicyVerdict::Deny,
+                }
+            }
+            PolicyEngineMode::AutoApproveReadsAndFetch { confirm_writes } => {
+                match &permission {
+                    Permission::ReadFile { .. } | Permission::ListDirectory { .. } => {
+                        (true, "auto-approved read (--yes)".to_string(), PolicyVerdict::Allow)
+                    }
+                    Permission::NetworkFetch { .. } => (
+                        true,
+                        "auto-approved web fetch (--yes-web)".to_string(),
+                        PolicyVerdict::Allow,
                     ),
+                    Permission::WriteFile { .. } => {
+                        if *confirm_writes {
+                            return Err(PolicyEngineError::InteractiveRequiresCaller);
+                        }
+                        (
+                            false,
+                            "requires confirmation".to_string(),
+                            PolicyVerdict::Deny,
+                        )
+                    }
+                    Permission::ExecuteCommand { .. } => {
+                        return Err(PolicyEngineError::InteractiveRequiresCaller);
+                    }
                 }
             }
             PolicyEngineMode::Configured(cfg) => {
@@ -148,8 +183,9 @@ impl PolicyEngine {
         ))
     }
 
-    /// Records a caller-supplied verdict in [`PolicyEngineMode::Interactive`] or
-    /// [`PolicyEngineMode::AutoApproveReads`] (e.g. write confirmation after `--yes`). Always emits an audit event.
+    /// Records a caller-supplied verdict in [`PolicyEngineMode::Interactive`],
+    /// [`PolicyEngineMode::AutoApproveReads`], or [`PolicyEngineMode::AutoApproveReadsAndFetch`]
+    /// (e.g. write confirmation after `--yes`). Always emits an audit event.
     pub fn resolve_interactive(
         &self,
         session_id: &str,
@@ -159,7 +195,9 @@ impl PolicyEngine {
     ) -> Result<PolicyDecision, PolicyEngineError> {
         if !matches!(
             self.mode,
-            PolicyEngineMode::Interactive | PolicyEngineMode::AutoApproveReads { .. }
+            PolicyEngineMode::Interactive
+                | PolicyEngineMode::AutoApproveReads { .. }
+                | PolicyEngineMode::AutoApproveReadsAndFetch { .. }
         ) {
             return Err(PolicyEngineError::NotInteractive);
         }
@@ -300,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_approve_reads_other_denied() {
+    fn auto_approve_reads_network_fetch_denied() {
         let engine = PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
             confirm_writes: true,
         });
@@ -309,6 +347,11 @@ mod tests {
         };
         let d = engine.evaluate_automatic("s", perm).unwrap();
         assert!(!d.allowed);
+        assert!(
+            d.reason.contains("web fetch"),
+            "expected web-fetch denial reason, got {:?}",
+            d.reason
+        );
     }
 
     #[test]
@@ -328,6 +371,38 @@ mod tests {
     #[test]
     fn auto_approve_reads_execute_command_never_auto_approved() {
         let engine = PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+            confirm_writes: true,
+        });
+        let perm = Permission::ExecuteCommand {
+            command: "cargo test".into(),
+            cwd: PathBuf::from("/tmp"),
+        };
+        assert_eq!(
+            engine.evaluate_automatic("s", perm),
+            Err(PolicyEngineError::InteractiveRequiresCaller)
+        );
+    }
+
+    #[test]
+    fn auto_approve_reads_and_fetch_allows_network_fetch() {
+        let engine = PolicyEngine::new(PolicyEngineMode::AutoApproveReadsAndFetch {
+            confirm_writes: true,
+        });
+        let perm = Permission::NetworkFetch {
+            url: "https://example.com".into(),
+        };
+        let d = engine.evaluate_automatic("s", perm).unwrap();
+        assert!(d.allowed);
+        assert!(
+            d.reason.contains("yes-web"),
+            "expected yes-web in reason, got {:?}",
+            d.reason
+        );
+    }
+
+    #[test]
+    fn auto_approve_reads_and_fetch_execute_command_never_auto_approved() {
+        let engine = PolicyEngine::new(PolicyEngineMode::AutoApproveReadsAndFetch {
             confirm_writes: true,
         });
         let perm = Permission::ExecuteCommand {

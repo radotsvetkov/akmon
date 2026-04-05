@@ -37,6 +37,8 @@ pub enum AgentEvent {
         /// Short description shown in the transparency strip / headless error text.
         description: String,
     },
+    /// Context summarization has started (history compaction before the summary model call).
+    SummarizationStarted,
     /// Context summarization replaced prior messages with a compact summary.
     ContextSummarized {
         /// Number of messages removed or folded into the summary.
@@ -76,6 +78,7 @@ impl fmt::Display for AgentEvent {
                 "ToolCallCompleted({name}, success={success}, message={message})"
             ),
             AgentEvent::ConfirmationRequired { .. } => write!(f, "ConfirmationRequired"),
+            AgentEvent::SummarizationStarted => write!(f, "SummarizationStarted"),
             AgentEvent::ContextSummarized { .. } => write!(f, "ContextSummarized"),
             AgentEvent::IterationStarted { n, max } => {
                 write!(f, "IterationStarted(n={n}, max={max})")

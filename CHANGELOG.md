@@ -4,6 +4,30 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-05
+
+### Added
+
+- SearchTool: search files with regex, file pattern filter, context lines
+- EditTool: surgical string replacement in files, exact match required
+- PatchTool: apply unified diffs to one or more files
+- Context summarization: automatic compression when approaching context window limit
+- WebFetchTool: fetch public URLs with SSRF protection, opt-in via `--web-fetch`
+- MCP client: connect to MCP servers via `--mcp-server`, auto-discover tools
+- `--yes-web` flag: auto-approve web fetch (SSRF always enforced)
+- AutoApproveReadsAndFetch policy mode
+
+### Changed
+
+- Rust edition updated to 2024
+- MSRV set to 1.85
+- Default Anthropic model updated to claude-haiku-4-5
+
+### Security
+
+- SSRF protection on all web fetch requests blocks localhost, RFC1918, link-local, and cloud metadata endpoints
+- Web fetch opt-in by default
+
 ## [1.0.0] - 2026-04-05
 
 ### What Akmon is

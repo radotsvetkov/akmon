@@ -13,6 +13,7 @@ use super::state::AgentState;
 ///
 /// - **Idle** + user input (`TextDelta`, or `IterationStarted` with `n == 1`) → *Planning*
 /// - **Planning** + `TextDelta` → *Thinking* (model began responding)
+/// - **Planning** / **Thinking** + `SummarizationStarted` → *Summarizing* (context compaction)
 /// - **Planning** + `Error(model | policy | iteration limit)` → *Failed*
 /// - **Thinking** + `ToolCallDispatched` → *ToolExecution*
 /// - **Thinking** + `ConfirmationRequired` → *AwaitingConfirmation*
@@ -37,6 +38,10 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
 
         // Planning + model stream → Thinking
         (AgentState::Planning { .. }, AgentEvent::TextDelta { .. }) => Ok(()), // model responded
+
+        // Planning / Thinking → Summarizing (context compaction)
+        (AgentState::Planning { .. }, AgentEvent::SummarizationStarted) => Ok(()),
+        (AgentState::Thinking { .. }, AgentEvent::SummarizationStarted) => Ok(()),
 
         // Thinking + further stream chunks (same turn)
         (AgentState::Thinking { .. }, AgentEvent::TextDelta { .. }) => Ok(()),
@@ -322,6 +327,24 @@ mod tests {
                 },
                 recoverable: false,
             }
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn legal_planning_summarization_started_to_summarizing() {
+        assert!(validate_transition(
+            &planning(),
+            &AgentEvent::SummarizationStarted,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn legal_thinking_summarization_started_to_summarizing() {
+        assert!(validate_transition(
+            &thinking(0),
+            &AgentEvent::SummarizationStarted,
         )
         .is_ok());
     }

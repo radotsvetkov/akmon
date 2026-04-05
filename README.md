@@ -38,7 +38,7 @@ Akmon runs a tight **agent loop** backed by an explicit finite-state machine. Ea
 
 The **sandbox** is rooted at your **git project root** (Akmon walks upward from the current directory to find `.git`). Every filesystem tool path is resolved and validated against that root: paths are normalized, **symlinks are resolved before** the boundary check, and attempts to escape outside the tree are rejected.
 
-The **policy engine** runs in one of three modes (deny-all, interactive, or auto-approve reads with optional write confirmation). **Every** permission check produces an audit record with **verdict and reason**, so you can see not only what happened but why it was allowed or denied.
+The **policy engine** runs in one of several modes (deny-all, interactive, auto-approve reads with optional write confirmation, or auto-approve reads plus optional web fetch when `--yes-web` is used with `--web-fetch`). **Every** permission check produces an audit record with **verdict and reason**, so you can see not only what happened but why it was allowed or denied.
 
 The **audit log** is a **JSON Lines** file (one JSON object per line) written under `.akmon/audit/` by default, named after the session UUID. When you use `--output json`, the printed `RunReport` includes the same `session_id` and `audit_log_path`, so machine-readable stdout and the on-disk audit file stay linked.
 
@@ -51,6 +51,17 @@ The **audit log** is a **JSON Lines** file (one JSON object per line) written un
 | `write_file` | Write content to a file atomically | `WriteFile` (always requires interactive confirmation) |
 | `shell` | Run an allowlisted argv-only subprocess (no shell interpreter) | `ExecuteCommand` (always requires interactive confirmation; opt-in via `--shell-allow`) |
 
+### MCP tools (`--mcp-server`)
+
+Connect Akmon to any MCP server to extend it with additional tools:
+
+```bash
+akmon --mcp-server http://localhost:3000 \
+  --task "use the database tool to..."
+```
+
+Tools are discovered automatically at startup via the MCP protocol (`tools/list`); each invocation uses `tools/call` over JSON-RPC. MCP tools require **`NetworkFetch`** permission to the server base URL (same policy rules as `web_fetch` where applicable).
+
 ## CLI reference
 
 | Flag | Default | Description |
@@ -60,9 +71,12 @@ The **audit log** is a **JSON Lines** file (one JSON object per line) written un
 | `--ollama-url` | `http://localhost:11434` | Ollama base URL |
 | `--anthropic-key` | env `ANTHROPIC_API_KEY` | Anthropic API key |
 | `--yes` / `-y` | false | Auto-approve read-only operations (`ReadFile`, `ListDirectory`) |
+| `--yes-web` | false | With `--yes` and `--web-fetch`, auto-approve `NetworkFetch` to URLs that pass tool-side SSRF checks |
 | `--output` | `text` | Output format: `text` or `json` |
 | `--audit-log` | `.akmon/audit/{session_id}.jsonl` | Audit log file path |
 | `--shell-allow` | _(none)_ | Glob pattern for an allowlisted argv-only `shell` tool command; repeatable (see trust model) |
+| `--web-fetch` | false | Register the `web_fetch` tool (off by default; see trust model) |
+| `--mcp-server` | _(none)_ | MCP server base URL; register all tools from that server (repeatable) |
 
 ## AKMON.md — project memory
 
@@ -86,7 +100,11 @@ Minimal example:
 
 ## Trust model
 
-With **`--yes`**, Akmon pre-approves only **read-only** filesystem checks: **`ReadFile`** and **`ListDirectory`**. It does **not** auto-approve **`WriteFile`**, **`ExecuteCommand`** (the `shell` tool), network fetches, or any other sensitive capability. **`WriteFile` and `shell` always require an explicit confirmation step** in the current design, even when **`--yes`** is set. The `shell` tool is only registered when you pass at least one **`--shell-allow <PATTERN>`**; commands must match your allowlist and are executed as a plain argv split (no shell interpreter). Every policy decision is written to the audit log with a **reason**. To inspect a run, use `cat .akmon/audit/*.jsonl` or pass **`--output json`** to get a session summary on stdout that points at the same audit file via `session_id` and `audit_log_path`.
+With **`--yes`**, Akmon pre-approves only **read-only** filesystem checks: **`ReadFile`** and **`ListDirectory`**. It does **not** auto-approve **`WriteFile`**, **`ExecuteCommand`** (the `shell` tool), or **`NetworkFetch`** (`web_fetch`) unless you opt in further. **`WriteFile` and `shell` always require an explicit confirmation step** in the current design, even when **`--yes`** is set.
+
+When you enable **`--web-fetch`** and want headless runs to fetch public documentation without a prompt, add **`--yes-web`** alongside **`--yes`**. That switches the policy engine to **auto-approve reads and fetch**: **`NetworkFetch`** is allowed automatically after the tool’s SSRF validation (private IPs, metadata endpoints, and other blocked targets are still rejected before any request). **`WriteFile`** and **`shell`** behavior is unchanged—they still require confirmation. If you use **`--yes`** and **`--web-fetch`** but **not** **`--yes-web`**, each fetch still goes through the normal confirmation prompt.
+
+The `shell` tool is only registered when you pass at least one **`--shell-allow <PATTERN>`**; commands must match your allowlist and are executed as a plain argv split (no shell interpreter). Every policy decision is written to the audit log with a **reason**. To inspect a run, use `cat .akmon/audit/*.jsonl` or pass **`--output json`** to get a session summary on stdout that points at the same audit file via `session_id` and `audit_log_path`.
 
 ## Security
 

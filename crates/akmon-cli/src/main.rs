@@ -6,12 +6,15 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use akmon_core::{
-    write_audit_jsonl, AgentConfig, AgentError, AgentEvent, PolicyEngine, PolicyEngineMode,
-    PolicyVerdict, Sandbox, Secret,
+    write_audit_jsonl, AgentConfig, AgentError, AgentEvent, McpServerConfig, PolicyEngine,
+    PolicyEngineMode, PolicyVerdict, Sandbox, Secret,
 };
 use akmon_models::{AnthropicBackend, LlmProvider, OllamaBackend};
 use akmon_query::{AgentSession, ToolCallSummary};
-use akmon_tools::{ListDirectoryTool, ReadFileTool, SearchTool, ShellTool, WriteFileTool};
+use akmon_tools::{
+    discover_mcp_tools, EditTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool, ShellTool,
+    WebFetchTool, WriteFileTool,
+};
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -163,16 +166,32 @@ struct Cli {
     /// Glob pattern allowed for the `shell` tool (argv-style commands only). Repeat for multiple patterns.
     #[arg(long = "shell-allow", value_name = "PATTERN")]
     shell_allow: Vec<String>,
+    /// Enable the `web_fetch` tool. Disabled by default. When enabled, the agent can fetch public URLs. Internal and private network addresses are always blocked.
+    #[arg(long = "web-fetch")]
+    web_fetch: bool,
+    /// Auto-approve `web_fetch` requests to public URLs (use with `--web-fetch` and `--yes`). SSRF protection still applies. `WriteFile` and `shell` still require confirmation.
+    #[arg(long = "yes-web")]
+    yes_web: bool,
+    /// Connect to an MCP server at this URL and register all tools it lists (repeatable for multiple servers).
+    #[arg(long = "mcp-server", value_name = "URL")]
+    mcp_server: Vec<String>,
 }
 
 /// Builds the tool registry; [`ShellTool`] is registered only when at least one `--shell-allow` pattern is set.
-fn build_tool_registry(shell_allow: &[String]) -> Vec<Box<dyn akmon_tools::Tool>> {
+///
+/// [`WebFetchTool`] is registered only when `web_fetch` is true (`--web-fetch`).
+fn build_tool_registry(shell_allow: &[String], web_fetch: bool) -> Vec<Box<dyn akmon_tools::Tool>> {
     let mut tools: Vec<Box<dyn akmon_tools::Tool>> = vec![
         Box::new(ReadFileTool::new()),
         Box::new(WriteFileTool::new()),
         Box::new(ListDirectoryTool::new()),
         Box::new(SearchTool::new()),
+        Box::new(EditTool::new()),
+        Box::new(PatchTool::new()),
     ];
+    if web_fetch {
+        tools.push(Box::new(WebFetchTool::new()));
+    }
     if !shell_allow.is_empty() {
         tools.push(Box::new(ShellTool::new(shell_allow.to_vec())));
     }
@@ -230,6 +249,21 @@ async fn run_event_printer(
                     } else {
                         eprintln!("✗ {name}: {message}");
                     }
+                }
+            }
+            AgentEvent::SummarizationStarted => {
+                if output == OutputFormat::Text {
+                    eprintln!("akmon: context summarization started…");
+                }
+            }
+            AgentEvent::ContextSummarized {
+                messages_replaced,
+                tokens_freed,
+            } => {
+                if output == OutputFormat::Text {
+                    eprintln!(
+                        "akmon: context summarized (messages_replaced={messages_replaced}, tokens_freed≈{tokens_freed})"
+                    );
                 }
             }
             AgentEvent::ConfirmationRequired { description } => {
@@ -331,15 +365,43 @@ async fn main() -> ExitCode {
     };
 
     let policy_mode = if cli.yes {
-        PolicyEngineMode::AutoApproveReads {
-            confirm_writes: true,
+        if cli.web_fetch && cli.yes_web {
+            PolicyEngineMode::AutoApproveReadsAndFetch {
+                confirm_writes: true,
+            }
+        } else {
+            PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            }
         }
     } else {
         PolicyEngineMode::Interactive
     };
     let policy = Arc::new(PolicyEngine::new(policy_mode));
     let sandbox = Arc::new(Sandbox::new(project_root.clone()));
-    let tools = build_tool_registry(&cli.shell_allow);
+    let mut tools = build_tool_registry(&cli.shell_allow, cli.web_fetch);
+    for url in &cli.mcp_server {
+        let server = McpServerConfig {
+            name: url.clone(),
+            url: url.clone(),
+            description: String::new(),
+        };
+        match discover_mcp_tools(&server).await {
+            Ok(mcp_tools) => {
+                eprintln!(
+                    "akmon: MCP server {} — {} tools registered",
+                    url,
+                    mcp_tools.len()
+                );
+                for t in mcp_tools {
+                    tools.push(Box::new(t));
+                }
+            }
+            Err(e) => {
+                eprintln!("akmon: MCP server {} unavailable: {e}", url);
+            }
+        }
+    }
 
     let mut session = AgentSession::new(
         agent_config,
@@ -424,14 +486,26 @@ mod tests {
 
     #[test]
     fn shell_tool_omitted_without_allow_flags() {
-        let t = build_tool_registry(&[]);
+        let t = build_tool_registry(&[], false);
         assert!(!t.iter().any(|x| x.name() == "shell"));
     }
 
     #[test]
     fn shell_tool_registered_when_allow_patterns_present() {
-        let t = build_tool_registry(&["echo *".into()]);
+        let t = build_tool_registry(&["echo *".into()], false);
         assert!(t.iter().any(|x| x.name() == "shell"));
+    }
+
+    #[test]
+    fn web_fetch_tool_omitted_without_flag() {
+        let t = build_tool_registry(&[], false);
+        assert!(!t.iter().any(|x| x.name() == "web_fetch"));
+    }
+
+    #[test]
+    fn web_fetch_tool_registered_when_flag_set() {
+        let t = build_tool_registry(&[], true);
+        assert!(t.iter().any(|x| x.name() == "web_fetch"));
     }
 
     #[test]

@@ -12,11 +12,13 @@
 //! - [`audit`] — [`AuditEvent`] records
 //! - [`policy`] — [`PolicyEngine`] skeleton
 //! - [`fsm`] — agent state machine types and transition validation
+//! - [`mcp`] — MCP server configuration
 
 #![warn(missing_docs)]
 
 pub mod audit;
 pub mod fsm;
+pub mod mcp;
 pub mod permission;
 pub mod policy;
 pub mod sandbox;
@@ -26,6 +28,7 @@ pub use audit::{write_audit_jsonl, AuditEvent, PolicyVerdict, ToolOutcomeKind};
 pub use fsm::{
     check_iteration_limit, validate_transition, AgentConfig, AgentError, AgentEvent, AgentState,
 };
+pub use mcp::McpServerConfig;
 pub use permission::Permission;
 pub use policy::{
     PolicyConfig, PolicyDecision, PolicyEngine, PolicyEngineError, PolicyEngineMode,
