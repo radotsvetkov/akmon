@@ -1,0 +1,12 @@
+/target/
+**/*.rs.bk
+.akmon/
+.DS_Store
+
+# Local reference / vendor trees (not part of Akmon)
+rust_repository/
+typescript_repository/
+
+# Editor / agent tooling (not part of the product)
+.cursor/
+.specstory/

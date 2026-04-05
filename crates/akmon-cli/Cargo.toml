@@ -1,0 +1,25 @@
+[package]
+name = "akmon-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "akmon"
+path = "src/main.rs"
+
+[dependencies]
+akmon-core = { path = "../akmon-core" }
+akmon-models = { path = "../akmon-models" }
+akmon-query = { path = "../akmon-query" }
+akmon-tools = { path = "../akmon-tools" }
+clap = { version = "4", features = ["derive", "env"] }
+dunce = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }

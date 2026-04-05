@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/akmon-core",
+    "crates/akmon-cli",
+    "crates/akmon-models",
+    "crates/akmon-tools",
+    "crates/akmon-query",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/akmon-dev/akmon"
+homepage = "https://github.com/akmon-dev/akmon"
+description = "Local-first, trust-first Rust AI coding agent"
+keywords = ["ai", "agent", "coding", "llm", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+authors = ["Akmon Contributors"]
