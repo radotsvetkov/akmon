@@ -1,0 +1,36 @@
+:root {
+  --akmon-amber: #f59e0b;
+  --akmon-green: #10b981;
+}
+
+.sidebar .sidebar-scrollbox {
+  border-right: 2px solid var(--akmon-amber);
+}
+
+pre {
+  border-left: 3px solid var(--akmon-amber) !important;
+}
+
+.tip {
+  border-left: 4px solid var(--akmon-green);
+  padding: 12px 16px;
+  background: rgba(16, 185, 129, 0.08);
+  border-radius: 0 4px 4px 0;
+  margin: 16px 0;
+}
+
+.warning {
+  border-left: 4px solid #f59e0b;
+  padding: 12px 16px;
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: 0 4px 4px 0;
+  margin: 16px 0;
+}
+
+.chapter li.chapter-item {
+  font-size: 0.95em;
+}
+
+code {
+  font-size: 0.88em;
+}

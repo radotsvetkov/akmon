@@ -1,0 +1,2 @@
+# mdBook output (CI builds fresh for Pages; ignore locally)
+/book/
