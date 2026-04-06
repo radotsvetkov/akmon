@@ -6,6 +6,108 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
+/// Same silhouette as `README.md` (U+2593 / U+2592 + sparks), for a consistent brand mark.
+const ANVIL_BODY: &[&str] = &[
+    "           ▓▓▓",
+    "           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓",
+    "         ▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒",
+    "         ▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒",
+    "           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓",
+    "             ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓",
+    "               ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓",
+    "                   ▓▓▓▓▓▓▓▓▓▓▓▓",
+    "                    ▓▓      ▓▓",
+    "                    ▓▓      ▓▓",
+    "                 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓",
+    "               ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓",
+    "             ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓",
+    "           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓",
+];
+
+const SPARK_COLOR: Color = Color::Rgb(246, 173, 85);
+
+fn anvil_body_color(row: usize, row_count: usize) -> Color {
+    let row_count = row_count.max(1);
+    let denom = row_count.saturating_sub(1).max(1);
+    let t = row as f32 / denom as f32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let lerp = |a: f32, b: f32| (a + t * (b - a)).round() as u8;
+    Color::Rgb(lerp(200.0, 22.0), lerp(228.0, 40.0), lerp(242.0, 56.0))
+}
+
+fn steel_highlight(base: Color) -> Color {
+    match base {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            r.saturating_add(28),
+            g.saturating_add(24),
+            b.saturating_add(20),
+        ),
+        _ => Color::Rgb(220, 238, 250),
+    }
+}
+
+fn spark_line(spark_use_alt: bool) -> String {
+    let c = if spark_use_alt { '✧' } else { '✦' };
+    format!("            {c}        {c}        {c}")
+}
+
+fn styled_anvil_row(row_text: &str, body_row: usize, body_rows: usize) -> Line<'static> {
+    let base = anvil_body_color(body_row, body_rows);
+    let hi = steel_highlight(base);
+    let mut spans: Vec<Span> = Vec::new();
+    for ch in row_text.chars() {
+        let st = match ch {
+            '▓' => Style::default().fg(base),
+            '▒' => Style::default().fg(hi),
+            ' ' => Style::default(),
+            _ => Style::default().fg(base),
+        };
+        spans.push(Span::styled(ch.to_string(), st));
+    }
+    Line::from(spans)
+}
+
+fn draw_centered_line_styled(buf: &mut Buffer, area: Rect, y: u16, line: Line<'static>) -> u16 {
+    if y >= area.y + area.height {
+        return y;
+    }
+    let max_w = area.width as usize;
+    let line = if line.width() > max_w {
+        truncate_line_to_chars(line, max_w)
+    } else {
+        line
+    };
+    let w = line.width().min(max_w) as u16;
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let rw = w
+        .max(1)
+        .min(area.width.saturating_sub(x.saturating_sub(area.x)));
+    Paragraph::new(line).render(Rect::new(x, y, rw, 1), buf);
+    y.saturating_add(1)
+}
+
+fn truncate_line_to_chars(line: Line<'static>, max_chars: usize) -> Line<'static> {
+    let mut taken = 0usize;
+    let mut out: Vec<Span> = Vec::new();
+    for span in line.spans {
+        if taken >= max_chars {
+            break;
+        }
+        let mut chunk = String::new();
+        for ch in span.content.chars() {
+            if taken >= max_chars {
+                break;
+            }
+            chunk.push(ch);
+            taken += 1;
+        }
+        if !chunk.is_empty() {
+            out.push(Span::styled(chunk, span.style));
+        }
+    }
+    Line::from(out)
+}
+
 /// Renders the Akmon welcome art and copy into `buf` inside `area` when the transcript is empty.
 ///
 /// Safe for very small or narrow terminals: returns immediately below 10×5; lines longer than
@@ -25,25 +127,10 @@ pub fn render_welcome(
         return;
     }
 
-    let sparks = if spark_use_alt {
-        "  ✧    ✧  ✧  "
-    } else {
-        "  ✦    ✦  ✦  "
-    };
-
-    let anvil: &[(&str, Color)] = &[
-        (sparks, Color::Rgb(246, 173, 85)),
-        ("    ████████████    ", Color::Rgb(200, 228, 242)),
-        ("  ████████████████  ", Color::Rgb(160, 200, 220)),
-        ("████████████████████", Color::Rgb(122, 170, 191)),
-        ("██████████████████  ", Color::Rgb(106, 152, 172)),
-        ("      ████████      ", Color::Rgb(74, 112, 128)),
-        ("      ████████      ", Color::Rgb(74, 112, 128)),
-        ("    ████████████    ", Color::Rgb(54, 86, 106)),
-        ("  ████████████████  ", Color::Rgb(44, 72, 88)),
-        ("████████████████████", Color::Rgb(30, 52, 64)),
-        ("██████████████████████", Color::Rgb(22, 40, 56)),
-    ];
+    let spark = Line::from(Span::styled(
+        spark_line(spark_use_alt),
+        Style::default().fg(SPARK_COLOR),
+    ));
 
     let title = "A K M O N";
     let subtitle = "local-first ai coding agent";
@@ -55,19 +142,26 @@ pub fn render_welcome(
     let bottom = "type a message or / for commands";
     let proj = format!("· {project_name} ·");
 
-    // 11 anvil + title + subtitle + version + project + [optional 3 nudge lines] + divider + 3 hints + divider + bottom.
+    // Spark + blank + README anvil rows + title + subtitle + version + project + [optional 3 nudge] + divider + 3 hints + divider + bottom.
+    // spark row + blank + anvil rows
+    let art_h = 2u16.saturating_add(ANVIL_BODY.len() as u16);
+    // title, subtitle, version, project + divider + 3 hints + divider + bottom
+    let tail_h = 4u16 + 6u16;
     let total_h = if show_missing_akmon_hint {
-        24u16
+        art_h.saturating_add(tail_h).saturating_add(3)
     } else {
-        21u16
+        art_h.saturating_add(tail_h)
     };
     let mut y = area
         .y
         .saturating_add(area.height.saturating_sub(total_h) / 2);
 
-    for (text, color) in anvil {
-        let style = Style::default().fg(*color);
-        y = draw_centered_line_truncated(buf, area, y, text, style);
+    let body_rows = ANVIL_BODY.len();
+    y = draw_centered_line_styled(buf, area, y, spark);
+    y = y.saturating_add(1);
+    for (i, row) in ANVIL_BODY.iter().enumerate() {
+        let line = styled_anvil_row(row, i, body_rows);
+        y = draw_centered_line_styled(buf, area, y, line);
     }
 
     y = draw_centered_line_truncated(
