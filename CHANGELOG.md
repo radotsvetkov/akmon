@@ -4,6 +4,15 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-04-06
+
+### Added
+
+- **Project intelligence layer** (`akmon-core::lang_profile`): language profiles (Rust, Python, TypeScript, JavaScript, Go, Java, C#, Elixir, Ruby, Swift, Kotlin, Dart/Flutter, C++, Zig), 40+ framework profiles (web, mobile, data, CLI/TUI, API specs), database and data-tool heuristics, architecture hints, and a capped (4000-byte) formatted block for prompts.
+- Detection from manifests and bounded scans: `detect_language`, `detect_frameworks`, `detect_databases`, `detect_data_tools`, `detect_architecture_hints`, plus `build_project_profile` / `format_project_intelligence_for_root`.
+- **Context injection**: the intelligence block is appended to `akmon init` project context and to the agent system prompt in `akmon-query` (normal and plan mode), before the tool reference.
+- **TUI polish (Gemini-style)**: two-line status bar (short cwd, model, provider; session id, tokens, cache, estimated USD, step), optional context row for files touched this session, first-session and missing-`AKMON.md` welcome hints, plaintext exit summary after quit, `$EDITOR` breakout for `/edit-plan` and `/update-context`, and plan-save system lines with `/implement` / `/edit-plan` / `/view-plan`. Idle **Ctrl+C** exits the same way as **Ctrl+D** / `/exit`.
+
 ## [1.5.0] - 2026-04-06
 
 ### Added

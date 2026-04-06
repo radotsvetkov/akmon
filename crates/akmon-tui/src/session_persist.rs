@@ -230,6 +230,50 @@ pub fn session_file_path_for(session_id: Uuid) -> Option<PathBuf> {
     Some(sessions_directory()?.join(format!("{session_id}.json")))
 }
 
+/// `true` when `dir` is missing, unreadable, or contains no `.json` files.
+pub fn saved_sessions_dir_has_no_json(dir: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    !rd.flatten()
+        .any(|e| e.path().extension().is_some_and(|x| x == "json"))
+}
+
+/// `true` when `~/.akmon/sessions` is missing or contains no `.json` snapshots.
+pub fn saved_sessions_directory_empty() -> bool {
+    let Some(dir) = sessions_directory() else {
+        return true;
+    };
+    saved_sessions_dir_has_no_json(&dir)
+}
+
+/// Newest `*.md` under `project_root/.akmon/plans` by filesystem modified time.
+pub fn latest_dot_akmon_plan(project_root: &Path) -> Option<PathBuf> {
+    let dir = project_root.join(".akmon").join("plans");
+    let rd = std::fs::read_dir(&dir).ok()?;
+    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if p.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+        let Ok(meta) = ent.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let replace = match &newest {
+            None => true,
+            Some((t, _)) => modified > *t,
+        };
+        if replace {
+            newest = Some((modified, p));
+        }
+    }
+    newest.map(|(_, p)| p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +365,26 @@ mod tests {
         let raw = std::fs::read_to_string(&path).expect("read");
         assert!(raw.contains("\"session_id\""));
         assert!(raw.contains("00000000-0000-0000-0000-000000000000"));
+    }
+
+    #[test]
+    fn saved_sessions_dir_empty_until_json_exists() {
+        let dir = tempdir().expect("tempdir");
+        assert!(saved_sessions_dir_has_no_json(dir.path()));
+        fs::write(dir.path().join("snap.json"), "{}").expect("write");
+        assert!(!saved_sessions_dir_has_no_json(dir.path()));
+    }
+
+    #[test]
+    fn latest_plan_prefers_newer_mtime() {
+        let root = tempdir().expect("tempdir");
+        let plans = root.path().join(".akmon").join("plans");
+        fs::create_dir_all(&plans).expect("mkdir");
+        fs::write(plans.join("old.md"), "a").expect("w");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(plans.join("new.md"), "b").expect("w");
+        let p = latest_dot_akmon_plan(root.path()).expect("plan");
+        assert!(p.ends_with("new.md"));
     }
 }
 

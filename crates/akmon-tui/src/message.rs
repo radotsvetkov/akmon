@@ -36,6 +36,8 @@ pub enum TuiMessage {
     Confirmation {
         /// Human-readable action description.
         description: String,
+        /// Plain unified diff for file changes; ratatui applies semantic colors per line.
+        diff_preview: Option<String>,
         /// Whether the user has responded.
         answered: bool,
         /// Allow (`true`) or deny (`false`) when answered.

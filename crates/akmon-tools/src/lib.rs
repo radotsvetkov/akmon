@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 mod context;
+mod diff_render;
 mod edit;
 mod git;
 mod list_directory;
@@ -19,6 +20,7 @@ mod web_fetch;
 mod write_file;
 
 pub use context::ToolContext;
+pub use diff_render::{colorize_unified_diff, render_diff, unified_diff_text};
 pub use edit::EditTool;
 pub use git::{GitTool, try_auto_commit_after_file_tool};
 pub use list_directory::ListDirectoryTool;

@@ -1,5 +1,7 @@
 //! Building chat messages for the model from project config and session history.
 
+use std::path::Path;
+
 use akmon_models::{Message, MessageRole};
 
 /// Delimiters wrapping `AKMON.md` so the block reads as **data**, not as hidden instructions.
@@ -46,6 +48,15 @@ Do not be vague. \"Update the policy engine\" is not useful. \"Add a new Network
 crates/akmon-core/src/permission.rs and update the match arms in\n\
 policy.rs lines 45-67\" is useful.\n";
 
+fn project_intelligence_for_prompt(project_root: &str) -> String {
+    let root = Path::new(project_root);
+    if root.is_dir() {
+        akmon_core::format_project_intelligence_for_root(root)
+    } else {
+        String::new()
+    }
+}
+
 fn format_project_context_plan_mode(
     project_root: &str,
     tool_names: &[&str],
@@ -84,6 +95,8 @@ Examples of bad semantic_search queries (use search instead):\n\
         ""
     };
 
+    let intelligence = project_intelligence_for_prompt(project_root);
+
     format!(
         "{PROJECT_CONTEXT_START}\n\
 You are an AI coding assistant running inside the Akmon agent.\n\
@@ -110,6 +123,7 @@ RULES:\n\
 {semantic_block}\
 All paths must be relative to the working directory shown above.\n\
 \n\
+{intelligence}\
 <<<TOOL_REFERENCE_START>>>\n\
 {TOOL_REFERENCE}\
 <<<TOOL_REFERENCE_END>>>\n\
@@ -233,6 +247,8 @@ Examples of bad semantic_search queries\n\
         ""
     };
 
+    let intelligence = project_intelligence_for_prompt(project_root);
+
     format!(
         "{PROJECT_CONTEXT_START}\n\
 You are an AI coding assistant \n\
@@ -296,6 +312,7 @@ working directory shown above.\n\
 Absolute paths and paths with ../ \n\
 will be rejected by the sandbox.\n\
 \n\
+{intelligence}\
 <<<TOOL_REFERENCE_START>>>\n\
 {TOOL_REFERENCE}\
 <<<TOOL_REFERENCE_END>>>\n\
@@ -397,6 +414,17 @@ mod tests {
         assert!(msgs[1].content.contains("patch patch"));
         assert!(msgs[1].content.contains(PROJECT_CONTEXT_END));
         assert!(msgs[1].content.contains("<<<TOOL_REFERENCE_START>>>"));
+    }
+
+    #[test]
+    fn project_context_includes_intelligence_when_root_exists() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root from crates/akmon-query");
+        let ctx = format_project_context(repo.to_str().expect("utf8 path"), &["read_file"], false);
+        assert!(ctx.contains("=== Project intelligence ==="));
+        assert!(ctx.contains("Rust"));
     }
 
     /// Anthropic Claude Haiku 4.5 requires a large cacheable prefix (4096+ tokens); this guards the

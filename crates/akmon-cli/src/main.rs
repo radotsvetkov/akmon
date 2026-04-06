@@ -554,50 +554,6 @@ pub(crate) fn planner_model_for_tui(cli: &Cli) -> String {
         .unwrap_or_else(|| "llama3.2".into())
 }
 
-/// Writes markdown `body` to `.akmon/plans/{unix_timestamp}-{slug}.md`.
-fn save_plan_under_dot_akmon(
-    project_root: &Path,
-    task: &str,
-    body: &str,
-) -> Result<PathBuf, std::io::Error> {
-    let plans_dir = project_root.join(".akmon").join("plans");
-    std::fs::create_dir_all(&plans_dir)?;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let slug = task_slug_for_plan_filename(task);
-    let path = plans_dir.join(format!("{ts}-{slug}.md"));
-    std::fs::write(&path, body)?;
-    Ok(path)
-}
-
-fn task_slug_for_plan_filename(task: &str) -> String {
-    let folded: String = task
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = folded.trim_matches('-');
-    let parts: Vec<&str> = trimmed
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .take(12)
-        .collect();
-    let joined = parts.join("-");
-    let base = if joined.is_empty() {
-        "task".to_string()
-    } else {
-        joined
-    };
-    base.chars().take(80).collect()
-}
-
 /// Default JSONL audit path under `project_root`: `.akmon/audit/{session_id}.jsonl`.
 fn default_audit_log_path(project_root: &Path, session_id: uuid::Uuid) -> PathBuf {
     project_root
@@ -666,8 +622,14 @@ async fn run_event_printer(
                     );
                 }
             }
-            AgentEvent::ConfirmationRequired { description } => {
+            AgentEvent::ConfirmationRequired {
+                description,
+                diff_preview,
+            } => {
                 eprintln!("{description}");
+                if let Some(diff) = diff_preview {
+                    eprint!("{}", akmon_tools::colorize_unified_diff(&diff));
+                }
                 let line: String = tokio::task::spawn_blocking(|| {
                     print!("Allow? [y/N]: ");
                     let _ = std::io::stdout().flush();
@@ -1099,7 +1061,7 @@ async fn main() -> ExitCode {
         drop(policy_opt);
         let _ = printer.await;
         let plan_body = session.result_text().to_string();
-        let saved_path = match save_plan_under_dot_akmon(&project_root, &task, &plan_body) {
+        let saved_path = match akmon_core::save_plan_markdown(&project_root, &task, &plan_body) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("akmon: failed to save plan: {e}");
@@ -1112,8 +1074,13 @@ async fn main() -> ExitCode {
         };
         if cli.output == OutputFormat::Text {
             println!("{plan_body}");
+            println!();
+            println!("Plan saved to {}", saved_path.display());
+            println!();
+            println!("Review:  cat {}", saved_path.display());
+            println!("Edit:    $EDITOR {}", saved_path.display());
             println!(
-                "Plan saved to {}\nReview the plan and run without --plan to implement it.",
+                "Implement: akmon --task 'implement the plan in {}'",
                 saved_path.display()
             );
         }
@@ -1231,7 +1198,7 @@ async fn main() -> ExitCode {
         }
         let plan_text = planner_session.result_text().to_string();
         eprintln!("akmon: architect — plan complete (planner: {planner_model})");
-        if let Err(e) = save_plan_under_dot_akmon(&project_root, &task, &plan_text) {
+        if let Err(e) = akmon_core::save_plan_markdown(&project_root, &task, &plan_text) {
             eprintln!("akmon: warning: failed to save plan file: {e}");
         }
         let provider_main = match resolve_llm(&cli, &global, cli.model.clone()) {

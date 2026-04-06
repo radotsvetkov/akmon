@@ -40,6 +40,8 @@ pub enum AgentEvent {
     ConfirmationRequired {
         /// Short description shown in the transparency strip / headless error text.
         description: String,
+        /// Optional ANSI-colored unified diff for file-changing tools (`write_file`, `edit`).
+        diff_preview: Option<String>,
     },
     /// Context summarization has started (history compaction before the summary model call).
     SummarizationStarted,

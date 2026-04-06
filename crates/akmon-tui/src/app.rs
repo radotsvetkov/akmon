@@ -17,6 +17,15 @@ use crate::message::TuiMessage;
 use crate::session_persist::SessionSummary;
 use crate::slash::SlashCommand;
 
+/// Target file to open in the user's `EDITOR` outside the alternate-screen TUI.
+#[derive(Debug, Clone)]
+pub enum ExternalEditTarget {
+    /// Latest saved implementation plan under `.akmon/plans/`.
+    Plan(std::path::PathBuf),
+    /// Project `AKMON.md`.
+    AkmonMd(std::path::PathBuf),
+}
+
 /// One line in [`Overlay::ModelPicker`]: either a section title or a selectable model id.
 #[derive(Debug, Clone)]
 pub struct ModelPickerRow {
@@ -95,6 +104,12 @@ pub struct TuiApp {
     pub mode_label: String,
     /// Semver string for the header.
     pub version: String,
+    /// Cached [`TuiLaunchConfig::provider_display_name`] for the status bar / exit summary.
+    pub provider_display_name: String,
+    /// Routing via OpenRouter (`model` contains `/`).
+    pub uses_openrouter: bool,
+    /// Ollama fallback (no billable cloud keys in use).
+    pub free_local_inference: bool,
     /// Whether an agent turn is in flight.
     pub agent_running: bool,
     /// Latest iteration index reported by the agent (from [`AgentEvent::IterationStarted`]).
@@ -147,11 +162,36 @@ pub struct TuiApp {
     pub architect_next_turn: bool,
     /// Last plan output for `/implement`.
     pub pending_plan: Option<String>,
+    /// Path of the last plan file written under `.akmon/plans/`, if any.
+    pub latest_plan_path: Option<std::path::PathBuf>,
+    /// Wall-clock start for exit summary duration.
+    pub session_instant: std::time::Instant,
+    /// Hides first-session getting-started hints after the first user send.
+    pub has_sent_first_message: bool,
+    /// User messages submitted this session (exit summary).
+    pub message_count: u32,
+    /// Tool invocations finished this session.
+    pub total_tool_calls: u32,
+    /// Tool runs that reported success (exit summary).
+    pub successful_tool_calls: u32,
+    /// Tool runs that reported failure (exit summary).
+    pub failed_tool_calls: u32,
+    /// Distinct files read successfully (`read_file`).
+    pub files_read: Vec<String>,
+    /// Distinct files written or edited successfully.
+    pub files_written: Vec<String>,
+    /// Union of read/write/edit paths for the context bar (deduplicated, recent-first awareness via order).
+    pub session_touched_files: Vec<String>,
+    /// When set, the input loop opens an external editor before the next redraw.
+    pub pending_external_edit: Option<ExternalEditTarget>,
 }
 
 impl TuiApp {
     /// Builds initial state from launch metadata.
     pub fn new(config: TuiLaunchConfig) -> Self {
+        let provider_display_name = config.provider_display_name();
+        let uses_openrouter = config.uses_openrouter();
+        let free_local_inference = config.is_free_local_inference();
         let session_id = config.session_id;
         let started = Utc::now();
         let project_name = config
@@ -173,6 +213,9 @@ impl TuiApp {
             model_name: config.model_name,
             mode_label: config.mode_label,
             version: config.version,
+            provider_display_name,
+            uses_openrouter,
+            free_local_inference,
             agent_running: false,
             current_iteration: 0,
             max_iterations: config.max_iterations,
@@ -199,6 +242,17 @@ impl TuiApp {
             plan_only_next_turn: false,
             architect_next_turn: false,
             pending_plan: None,
+            latest_plan_path: None,
+            session_instant: std::time::Instant::now(),
+            has_sent_first_message: false,
+            message_count: 0,
+            total_tool_calls: 0,
+            successful_tool_calls: 0,
+            failed_tool_calls: 0,
+            files_read: Vec::new(),
+            files_written: Vec::new(),
+            session_touched_files: Vec::new(),
+            pending_external_edit: None,
         }
     }
 
@@ -251,7 +305,35 @@ impl TuiApp {
         self.input_cursor = 0;
         let t = raw.trim().to_string();
         self.push_user(t.clone());
+        self.has_sent_first_message = true;
+        self.message_count = self.message_count.saturating_add(1);
         Some(t)
+    }
+
+    fn push_unique(list: &mut Vec<String>, path: String) {
+        if path.is_empty() || list.iter().any(|p| p == &path) {
+            return;
+        }
+        list.push(path);
+    }
+
+    /// Records a sandbox-relative path in [`Self::session_touched_files`] for the status context bar.
+    pub fn note_touched_file(&mut self, path: &str) {
+        Self::push_unique(&mut self.session_touched_files, path.to_string());
+    }
+
+    fn tool_path_from_messages(messages: &[TuiMessage], id: &str) -> Option<String> {
+        for m in messages.iter().rev() {
+            if let TuiMessage::ToolCall { id: tid, args, .. } = m
+                && tid == id
+            {
+                return args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(std::string::ToString::to_string);
+            }
+        }
+        None
     }
 
     /// Applies one streamed [`AgentEvent`] to the transcript and counters.
@@ -294,10 +376,27 @@ impl TuiApp {
             }
             AgentEvent::ToolCallCompleted {
                 id,
+                name,
                 success,
                 message,
                 ..
             } => {
+                self.total_tool_calls = self.total_tool_calls.saturating_add(1);
+                if success {
+                    self.successful_tool_calls = self.successful_tool_calls.saturating_add(1);
+                    if let Some(path) = Self::tool_path_from_messages(&self.messages, &id) {
+                        match name.as_str() {
+                            "read_file" => Self::push_unique(&mut self.files_read, path.clone()),
+                            "write_file" | "edit" => {
+                                Self::push_unique(&mut self.files_written, path.clone());
+                            }
+                            _ => {}
+                        }
+                        self.note_touched_file(&path);
+                    }
+                } else {
+                    self.failed_tool_calls = self.failed_tool_calls.saturating_add(1);
+                }
                 if let Some(TuiMessage::ToolCall {
                     result,
                     success: st,
@@ -312,10 +411,14 @@ impl TuiApp {
                     *st = Some(success);
                 }
             }
-            AgentEvent::ConfirmationRequired { description } => {
+            AgentEvent::ConfirmationRequired {
+                description,
+                diff_preview,
+            } => {
                 self.awaiting_confirmation = true;
                 self.messages.push(TuiMessage::Confirmation {
                     description,
+                    diff_preview,
                     answered: false,
                     answer: None,
                 });
@@ -810,6 +913,7 @@ mod tests {
         assert!(!app.awaiting_confirmation);
         app.apply_agent_event(AgentEvent::ConfirmationRequired {
             description: "allow?".into(),
+            diff_preview: None,
         });
         assert!(app.awaiting_confirmation);
     }
@@ -834,6 +938,7 @@ mod tests {
         let mut app = TuiApp::new(sample_config());
         app.apply_agent_event(AgentEvent::ConfirmationRequired {
             description: "x".into(),
+            diff_preview: None,
         });
         app.mark_confirmation_answered(true);
         assert!(!app.awaiting_confirmation);
@@ -846,5 +951,14 @@ mod tests {
             }
             _ => panic!("expected confirmation"),
         }
+    }
+
+    #[test]
+    fn note_touched_file_dedupes_in_order() {
+        let mut app = TuiApp::new(sample_config());
+        app.note_touched_file("src/a.rs");
+        app.note_touched_file("src/a.rs");
+        app.note_touched_file("src/b.rs");
+        assert_eq!(app.session_touched_files, vec!["src/a.rs", "src/b.rs"]);
     }
 }

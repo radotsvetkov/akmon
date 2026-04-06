@@ -1,6 +1,7 @@
 //! Crossterm event loop and ratatui draw pass for the interactive UI.
 
 use std::io::{Stdout, Write, stdout};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,20 +25,23 @@ use tokio::sync::mpsc;
 
 use crate::TuiApp;
 use crate::agent::{AgentTurn, BridgeMsg, run_agent_loop};
-use crate::app::Overlay;
+use crate::app::{ExternalEditTarget, Overlay};
 use crate::command::UiCommand;
 use crate::config::TuiLaunchConfig;
+use crate::cost_estimate::estimate_cost_usd;
 use crate::message::TuiMessage;
 use crate::overlay::{
     draw_message_overlays, draw_slash_autocomplete, slash_autocomplete_row_count,
 };
 use crate::render::{message_to_lines, paint_message_viewport};
-use crate::session_persist::save_session_snapshot;
+use crate::session_persist::{save_session_snapshot, saved_sessions_directory_empty};
 use crate::slash::{matching_commands, slash_command_name_prefix};
 use crate::slash_exec::{
     SlashEnv, SlashHandled, handle_slash_line, model_picker_enter, session_list_enter,
 };
-use crate::theme::{ACCENT, ACCENT_DIM, BORDER, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN};
+use crate::theme::{
+    ACCENT, ACCENT_DIM, BORDER, ERR, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN,
+};
 use crate::tui_project::ProjectUiJob;
 
 /// Milliseconds between cursor blink ticks for streaming assistant rows.
@@ -185,6 +189,7 @@ fn run_terminal_loop(
     let _ = execute!(backend, LeaveAlternateScreen);
     let _ = backend.flush();
     let _ = disable_raw_mode();
+    print_exit_summary(&app);
     result
 }
 
@@ -205,13 +210,13 @@ fn run_loop(
 
     let size = terminal.size().map_err(TuiRunError::Io)?;
     let input_h = input_area_height(app);
-    let msg_h = message_viewport_height(size.height, input_h);
+    let msg_h = message_viewport_height(size.height, input_h, app);
     app.sync_scroll_to_bottom(msg_h as usize, size.width);
 
     while running {
         let size = terminal.size().map_err(TuiRunError::Io)?;
         let input_h = input_area_height(app);
-        let msg_h = message_viewport_height(size.height, input_h) as usize;
+        let msg_h = message_viewport_height(size.height, input_h, app) as usize;
         update_slash_autocomplete_overlay(app);
         drain_bridge_messages(
             app,
@@ -222,6 +227,12 @@ fn run_loop(
             interrupt,
             reload_notify,
         );
+        if app.pending_external_edit.is_some() {
+            process_pending_external_editor(terminal, app, shared_config, reload_notify)?;
+            let input_h = input_area_height(app);
+            let msg_h2 = message_viewport_height(size.height, input_h, app) as usize;
+            app.recompute_scroll_after_append(msg_h2, size.width);
+        }
         let area = Rect::new(0, 0, size.width, size.height);
         terminal
             .draw(|f| {
@@ -259,7 +270,7 @@ fn run_loop(
                 }
                 Event::Resize(w, h) => {
                     let input_h = input_area_height(app);
-                    let msg_h = message_viewport_height(h, input_h);
+                    let msg_h = message_viewport_height(h, input_h, app);
                     app.sync_scroll_to_bottom(msg_h as usize, w);
                 }
                 _ => {}
@@ -300,13 +311,26 @@ fn drain_bridge_messages(
                 app.push_system_info(msg);
                 app.recompute_scroll_after_append(msg_h, width);
             }
-            BridgeMsg::RunFinished { captured_plan } => {
+            BridgeMsg::RunFinished {
+                captured_plan,
+                plan_saved_path,
+            } => {
                 app.agent_running = false;
                 interrupt.store(false, Ordering::SeqCst);
                 let cfg = lock_config_clone(shared_config);
                 let _ = save_session_snapshot(app, &cfg, app.session_started_at, None);
+                if let Some(p) = plan_saved_path {
+                    app.latest_plan_path = Some(p.clone());
+                    let rel = p.strip_prefix(&cfg.project_root).unwrap_or(&p);
+                    app.push_system_info(format!(
+                        "Plan saved to {}\n\n  /implement  execute this plan\n  /edit-plan  open in $EDITOR\n  /view-plan  show in TUI",
+                        rel.display()
+                    ));
+                }
                 if let Some(plan) = captured_plan {
                     app.pending_plan = Some(plan);
+                }
+                if app.pending_plan.is_some() && app.latest_plan_path.is_none() {
                     app.push_system_info(
                         "Plan complete. Review above, then type /implement to execute it or edit the plan and describe changes.".into(),
                     );
@@ -417,8 +441,8 @@ fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
     }
 }
 
-fn session_list_visible_rows(term_h: u16, input_h: u16) -> usize {
-    let msg_h = message_viewport_height(term_h, input_h) as usize;
+fn session_list_visible_rows(term_h: u16, input_h: u16, app: &TuiApp) -> usize {
+    let msg_h = message_viewport_height(term_h, input_h, app) as usize;
     msg_h.saturating_sub(8).max(3)
 }
 
@@ -539,8 +563,8 @@ fn handle_key(
     project_tx: mpsc::UnboundedSender<ProjectUiJob>,
 ) -> Result<bool, TuiRunError> {
     let input_h = input_area_height(app);
-    let msg_h = message_viewport_height(term_height, input_h) as usize;
-    let list_vis = session_list_visible_rows(term_height, input_h);
+    let msg_h = message_viewport_height(term_height, input_h, app) as usize;
+    let list_vis = session_list_visible_rows(term_height, input_h, app);
 
     if key.kind == KeyEventKind::Release {
         return Ok(true);
@@ -720,6 +744,9 @@ fn handle_key(
                 }
                 app.push_system_info("Interrupting after current tool…".into());
                 app.recompute_scroll_after_append(msg_h, term_width);
+            } else {
+                save_session_best_effort(app, shared_config);
+                return Ok(false);
             }
             Ok(true)
         }
@@ -821,14 +848,19 @@ fn handle_key(
 
 fn show_help(app: &mut TuiApp) {
     app.push_system_info(
-        "Keys: Enter submit · Shift+Enter newline · ←→ caret · Tab expand tool · ↑↓ PgUp/PgDn scroll · Ctrl+C interrupt · Ctrl+D exit · q exit when idle · Ctrl+/ help"
+        "Keys: Enter submit · Shift+Enter newline · ←→ caret · Tab expand tool · ↑↓ PgUp/PgDn scroll · Ctrl+C interrupt (exit when idle) · Ctrl+D exit · q exit when idle · Ctrl+/ help"
             .into(),
     );
 }
 
-fn message_viewport_height(term_height: u16, input_block_height: u16) -> u16 {
+fn message_viewport_height(term_height: u16, input_block_height: u16, app: &TuiApp) -> u16 {
+    let header = 1u16;
     term_height
-        .saturating_sub(1 + 1 + input_block_height)
+        .saturating_sub(
+            header
+                .saturating_add(chrome_below_messages(app))
+                .saturating_add(input_block_height),
+        )
         .max(1)
 }
 
@@ -851,18 +883,26 @@ fn flattened_lines(app: &TuiApp, width: u16) -> Vec<Line<'static>> {
 
 fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     let input_h = input_area_height(app);
+    let ctx_h = if app.session_touched_files.is_empty() {
+        0
+    } else {
+        1
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(ctx_h),
             Constraint::Length(input_h),
         ])
         .split(area);
 
     let header = build_header_line(app);
-    let status = build_status_line(app, chunks[2].width);
+    let status_top = build_status_line_top(app, chunks[2].width);
+    let status_bottom = build_status_line_bottom(app, chunks[3].width);
 
     let msg_area = chunks[1];
     let flat = flattened_lines(app, msg_area.width);
@@ -883,7 +923,7 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     let input_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(ac_h), Constraint::Length(input_body_h)])
-        .split(chunks[3]);
+        .split(chunks[5]);
 
     let input_block = Block::default()
         .borders(Borders::ALL)
@@ -896,20 +936,28 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
 
     f.render_widget(Paragraph::new(header), chunks[0]);
     let show_welcome = app.messages.is_empty() && !app.awaiting_confirmation;
-    let show_missing_akmon_hint = show_welcome && !app.has_akmon_md;
+    let first_session_ever = saved_sessions_directory_empty();
     paint_message_viewport(
         f,
         msg_area,
         show_welcome,
-        show_missing_akmon_hint,
         app.version.as_str(),
         app.project_name.as_str(),
         app.welcome_spark_phase,
+        first_session_ever,
+        app.has_sent_first_message,
+        app.has_akmon_md,
         &app.context_scan,
         visible,
     );
     draw_message_overlays(f, app, msg_area);
-    f.render_widget(Paragraph::new(status), chunks[2]);
+    f.render_widget(Paragraph::new(status_top), chunks[2]);
+    f.render_widget(Paragraph::new(status_bottom), chunks[3]);
+    if ctx_h > 0
+        && let Some(ctx_line) = build_context_line(app, chunks[4].width)
+    {
+        f.render_widget(Paragraph::new(ctx_line), chunks[4]);
+    }
     if ac_h > 0 {
         draw_slash_autocomplete(f, app, input_chunks[0]);
     }
@@ -941,36 +989,93 @@ fn handle_input_left_click(app: &mut TuiApp, column: u16, row: u16) {
 }
 
 fn build_header_line(app: &TuiApp) -> Line<'static> {
-    let project = app
-        .project_root
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(".");
     Line::from(vec![
         Span::styled(
             "akmon",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(
-                "  ·  v{}  ·  {}  ·  {}  ·  {}",
-                app.version, project, app.model_name, app.mode_label
-            ),
+            format!("  ·  v{}  ·  {}", app.version, app.mode_label),
             Style::default().fg(FG_MUTED),
         ),
     ])
 }
 
-fn build_status_line(app: &TuiApp, total_width: u16) -> Line<'static> {
+fn build_status_line_top(app: &TuiApp, total_width: u16) -> Line<'static> {
+    let sep = Style::default().fg(BORDER);
+    let line = Line::from(vec![
+        Span::styled(
+            cwd_shortened(&app.project_root),
+            Style::default().fg(FG_PRIMARY),
+        ),
+        Span::styled("  ·  ", sep),
+        Span::styled(app.model_name.clone(), Style::default().fg(ACCENT_DIM)),
+        Span::styled("  ·  ", sep),
+        Span::styled(
+            app.provider_display_name.clone(),
+            Style::default().fg(FG_MUTED),
+        ),
+    ]);
+    let w = total_width as usize;
+    if line.width() <= w {
+        return line;
+    }
+    let flat = format!(
+        "{}  ·  {}  ·  {}",
+        cwd_shortened(&app.project_root),
+        app.model_name,
+        app.provider_display_name
+    );
+    Line::from(Span::styled(
+        shorten_from_left_chars(&flat, w),
+        Style::default().fg(FG_PRIMARY),
+    ))
+}
+
+fn status_cost_span(app: &TuiApp) -> Option<Span<'static>> {
+    if app.free_local_inference {
+        return None;
+    }
+    let est = estimate_cost_usd(
+        u64::from(app.total_input_tokens),
+        u64::from(app.total_output_tokens),
+        u64::from(app.total_cache_read_tokens),
+        &app.model_name,
+        app.uses_openrouter,
+        app.free_local_inference,
+    )?;
+    if est <= 0.0 {
+        return None;
+    }
+    let (text, style) = session_cost_style(est);
+    Some(Span::styled(text, style))
+}
+
+fn session_cost_style(cost: f64) -> (String, Style) {
+    if cost < 0.01 {
+        (
+            "~$0.00".into(),
+            Style::default().fg(FG_MUTED).add_modifier(Modifier::DIM),
+        )
+    } else if cost < 0.10 {
+        (format!("~${cost:.2}"), Style::default().fg(FG_PRIMARY))
+    } else if cost < 1.0 {
+        (format!("~${cost:.2}"), Style::default().fg(WARN))
+    } else {
+        (format!("~${cost:.2}"), Style::default().fg(ERR))
+    }
+}
+
+fn build_status_line_bottom(app: &TuiApp, total_width: u16) -> Line<'static> {
     let sid: String = app.session_id.to_string().chars().take(8).collect();
     let sep = Style::default().fg(BORDER);
+    let tok = app
+        .total_input_tokens
+        .saturating_add(app.total_output_tokens);
     let mut spans: Vec<Span<'static>> = vec![
         Span::styled(sid, Style::default().fg(ACCENT_DIM)),
         Span::styled("  ·  ", sep),
-        Span::styled(
-            format!("in {}", app.total_input_tokens),
-            Style::default().fg(FG_PRIMARY),
-        ),
+        Span::styled(format!("tokens {tok}"), Style::default().fg(FG_PRIMARY)),
         Span::styled("  ·  ", sep),
     ];
     let cache_style = if app.total_cache_read_tokens > 0 {
@@ -982,10 +1087,28 @@ fn build_status_line(app: &TuiApp, total_width: u16) -> Line<'static> {
         format!("cache {}", app.total_cache_read_tokens),
         cache_style,
     ));
+    if !app.free_local_inference {
+        spans.push(Span::styled("  ·  ", sep));
+        if let Some(sp) = status_cost_span(app) {
+            spans.push(sp);
+        } else if estimate_cost_usd(
+            u64::from(app.total_input_tokens),
+            u64::from(app.total_output_tokens),
+            u64::from(app.total_cache_read_tokens),
+            &app.model_name,
+            app.uses_openrouter,
+            app.free_local_inference,
+        )
+        .is_none()
+            && (app.total_input_tokens > 0 || app.total_output_tokens > 0)
+        {
+            spans.push(Span::styled("~$?", Style::default().fg(FG_MUTED)));
+        }
+    }
     if app.agent_running {
         spans.push(Span::styled("  ·  ", sep));
         spans.push(Span::styled(
-            format!("step {}/{}", app.current_iteration, app.max_iterations),
+            format!("step {}", app.current_iteration),
             Style::default().fg(ACCENT_DIM),
         ));
     }
@@ -996,6 +1119,208 @@ fn build_status_line(app: &TuiApp, total_width: u16) -> Line<'static> {
     spans.push(Span::raw(" ".repeat(pad.min(256))));
     spans.push(Span::styled(help, Style::default().fg(FG_MUTED)));
     Line::from(spans)
+}
+
+fn build_context_line(app: &TuiApp, total_width: u16) -> Option<Line<'static>> {
+    if app.session_touched_files.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for p in app.session_touched_files.iter().take(2) {
+        let name = Path::new(p)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(p.as_str());
+        parts.push(name.to_string());
+    }
+    let extra = app.session_touched_files.len().saturating_sub(2);
+    let mut text = format!("↳ context: {}", parts.join("   "));
+    if extra > 0 {
+        text.push_str(&format!("   +{extra} more"));
+    }
+    let w = total_width as usize;
+    if text.chars().count() > w {
+        text = shorten_from_left_chars(&text, w);
+    }
+    Some(Line::from(Span::styled(
+        text,
+        Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
+    )))
+}
+
+/// Project root shown in chrome: `$HOME` → `~`, tail-preserved truncation at `max_chars`.
+pub(crate) fn cwd_shortened(project_root: &Path) -> String {
+    let path = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let mut s = path.to_string_lossy().into_owned();
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+        && s.starts_with(&home)
+    {
+        s = format!("~{}", &s[home.len()..]);
+    }
+    shorten_from_left_chars(&s, 40)
+}
+
+fn shorten_from_left_chars(s: &str, max_chars: usize) -> String {
+    let n = s.chars().count();
+    if n <= max_chars {
+        return s.to_string();
+    }
+    let take = max_chars.saturating_sub(3);
+    let skip = n.saturating_sub(take);
+    let tail: String = s.chars().skip(skip).collect();
+    format!("...{tail}")
+}
+
+fn chrome_below_messages(app: &TuiApp) -> u16 {
+    let ctx = if app.session_touched_files.is_empty() {
+        0
+    } else {
+        1
+    };
+    2u16.saturating_add(ctx)
+}
+
+fn format_session_duration(d: Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
+    }
+}
+
+fn print_exit_summary(app: &TuiApp) {
+    let wall = app.session_instant.elapsed();
+    let cwd = cwd_shortened(&app.project_root);
+    let sid8: String = app.session_id.to_string().chars().take(8).collect();
+    let est = estimate_cost_usd(
+        u64::from(app.total_input_tokens),
+        u64::from(app.total_output_tokens),
+        u64::from(app.total_cache_read_tokens),
+        &app.model_name,
+        app.uses_openrouter,
+        app.free_local_inference,
+    );
+    let in_t = app.total_input_tokens;
+    let out_t = app.total_output_tokens;
+    let cache = app.total_cache_read_tokens;
+    let audit_line = app.audit_log_path.display().to_string();
+    println!();
+    println!("  Akmon session complete");
+    println!();
+    println!("  Session");
+    println!("  ─────────────────────────────────");
+    println!("  ID         {sid8}");
+    println!("  Duration   {}", format_session_duration(wall));
+    println!("  Directory  {cwd}");
+    println!(
+        "  Model      {} ({})",
+        app.model_name, app.provider_display_name
+    );
+    println!();
+    println!("  Activity");
+    println!("  ─────────────────────────────────");
+    println!("  Messages   {}", app.message_count);
+    println!("  Tool calls {}", app.total_tool_calls);
+    println!("    ✓ Succeeded  {}", app.successful_tool_calls);
+    println!("    ✗ Failed     {}", app.failed_tool_calls);
+    println!("  Files read   {}", app.files_read.len());
+    println!("  Files written {}", app.files_written.len());
+    println!();
+    println!("  Tokens");
+    println!("  ─────────────────────────────────");
+    println!("  Input      {in_t}");
+    println!("  Output     {out_t}");
+    if cache > 0 {
+        let pct = u64::from(cache)
+            .saturating_mul(100)
+            .saturating_div(u64::from(in_t).saturating_add(1));
+        println!("  Cache hit  {cache} ({pct}% savings)");
+    }
+    let cost_line = if app.free_local_inference {
+        "free (local model)".to_string()
+    } else if let Some(c) = est {
+        if c <= 0.0 {
+            "free (local model)".to_string()
+        } else {
+            format!("~${c:.3}")
+        }
+    } else {
+        "~$?".to_string()
+    };
+    println!("  Est. cost  {cost_line}");
+    println!();
+    println!("  Audit log");
+    println!("  ─────────────────────────────────");
+    println!("  {audit_line}");
+    println!();
+    println!("  Agent powering down. Goodbye!");
+    println!();
+}
+
+fn process_pending_external_editor(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut TuiApp,
+    shared_config: &Arc<Mutex<TuiLaunchConfig>>,
+    reload_notify: &Arc<Notify>,
+) -> Result<(), TuiRunError> {
+    let Some(target) = app.pending_external_edit.take() else {
+        return Ok(());
+    };
+    let path = match &target {
+        ExternalEditTarget::Plan(p) | ExternalEditTarget::AkmonMd(p) => p.clone(),
+    };
+    let _ = terminal.show_cursor();
+    let mut out = stdout();
+    execute!(out, DisableMouseCapture).map_err(TuiRunError::Io)?;
+    execute!(out, LeaveAlternateScreen).map_err(TuiRunError::Io)?;
+    let _ = out.flush();
+    disable_raw_mode()?;
+
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exec \"${EDITOR:-vi}\" \"$@\"")
+        .arg("_")
+        .arg(&path)
+        .status();
+
+    enable_raw_mode()?;
+    execute!(out, EnterAlternateScreen).map_err(TuiRunError::Io)?;
+    execute!(out, EnableMouseCapture).map_err(TuiRunError::Io)?;
+    let _ = out.flush();
+    terminal.clear().map_err(TuiRunError::Io)?;
+    let _ = terminal.hide_cursor();
+
+    match target {
+        ExternalEditTarget::Plan(p) => match std::fs::read_to_string(&p) {
+            Ok(body) => {
+                app.pending_plan = Some(body);
+                app.latest_plan_path = Some(p);
+                app.push_system_info("Plan updated. /implement to proceed.".into());
+            }
+            Err(e) => app.push_system_info(format!("Could not reload plan: {e}")),
+        },
+        ExternalEditTarget::AkmonMd(_) => {
+            let p = app.project_root.join("AKMON.md");
+            match std::fs::read_to_string(&p) {
+                Ok(text) => {
+                    if let Ok(mut g) = shared_config.lock() {
+                        g.akmon_md = Some(text);
+                        g.has_akmon_md = true;
+                    }
+                    app.has_akmon_md = true;
+                    app.context_scan = akmon_core::scan_context_files(&app.project_root);
+                    reload_notify.notify_one();
+                    app.push_system_info("AKMON.md reloaded.".into());
+                }
+                Err(e) => app.push_system_info(format!("Could not reload AKMON.md: {e}")),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cursor_span() -> Span<'static> {
@@ -1154,5 +1479,38 @@ mod input_mouse_tests {
         app.input_body_inner = Some(Rect::new(0, 0, 80, 8));
         handle_input_left_click(&mut app, 10, 0);
         assert_eq!(app.input_cursor, 2);
+    }
+
+    #[test]
+    fn cwd_shortened_starts_with_tilde_inside_home() {
+        use std::path::Path;
+
+        use super::cwd_shortened;
+
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        if home.is_empty() {
+            return;
+        }
+        let p = Path::new(&home).join("akmon-cwd-test-dir");
+        let s = cwd_shortened(&p);
+        assert!(
+            s.starts_with("~/") || s == "~",
+            "expected home-relative path to start with ~, got {s:?}"
+        );
+    }
+
+    #[test]
+    fn context_bar_line_counts_extra_files() {
+        use super::build_context_line;
+
+        let mut app = TuiApp::new(cfg());
+        app.session_touched_files = vec!["src/x.rs".into(), "src/y.rs".into(), "src/z.rs".into()];
+        let line = build_context_line(&app, 120).expect("line");
+        let flat: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(flat.contains("+1 more"), "{flat}");
+        assert!(flat.contains("x.rs"));
+        assert!(flat.contains("y.rs"));
     }
 }

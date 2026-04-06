@@ -13,7 +13,7 @@ use akmon_models::{
     ModelToolCall, StopReason, StreamEvent, ToolDefinition, UsageReport,
     anthropic_system_block_text, approximate_tokens,
 };
-use akmon_tools::{Tool, ToolContext, ToolOutput};
+use akmon_tools::{Tool, ToolContext, ToolOutput, unified_diff_text};
 use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
@@ -616,6 +616,8 @@ impl AgentSession {
             );
             let session_id = self.config.session_id.to_string();
             let mut policy_denial_message: Option<String> = None;
+            let diff_preview =
+                file_change_diff_preview(self.sandbox.as_ref(), name.as_str(), &args).await;
 
             for perm in perms {
                 let allowed = match self.policy.mode() {
@@ -643,12 +645,19 @@ impl AgentSession {
                                             "Network fetch requires confirmation.\n  URL: {url}"
                                         )
                                     }
+                                    Permission::WriteFile { path } => {
+                                        format!(
+                                            "File change requires confirmation.\n  Path: {}",
+                                            path.display()
+                                        )
+                                    }
                                     _ => format!("Permission required: {perm:?}"),
                                 };
                                 self.apply_event(
                                     event_tx,
                                     AgentEvent::ConfirmationRequired {
                                         description: desc.clone(),
+                                        diff_preview: diff_preview.clone(),
                                     },
                                     task,
                                 )
@@ -1275,6 +1284,40 @@ pub async fn execute_single_tool_call(
 fn map_model_error(e: ModelError) -> AgentError {
     AgentError::ModelError {
         message: e.to_string(),
+    }
+}
+
+fn occurrences_of(haystack: &str, needle: &str) -> usize {
+    haystack.match_indices(needle).count()
+}
+
+async fn file_change_diff_preview(
+    sandbox: &Sandbox,
+    tool_name: &str,
+    args: &Value,
+) -> Option<String> {
+    match tool_name {
+        "write_file" => {
+            let path = args.get("path").and_then(|v| v.as_str())?;
+            let new_c = args.get("content").and_then(|v| v.as_str())?;
+            let full = sandbox.resolve(path).ok()?;
+            let old = tokio::fs::read_to_string(&full).await.unwrap_or_default();
+            Some(unified_diff_text(&old, new_c, path))
+        }
+        "edit" => {
+            let path = args.get("path").and_then(|v| v.as_str())?;
+            let old_str = args.get("old_str").and_then(|v| v.as_str())?;
+            let new_str = args.get("new_str").and_then(|v| v.as_str())?;
+            let full = sandbox.resolve(path).ok()?;
+            let bytes = tokio::fs::read(&full).await.ok()?;
+            let content = String::from_utf8(bytes).ok()?;
+            if occurrences_of(&content, old_str) != 1 {
+                return None;
+            }
+            let new_content = content.replacen(old_str, new_str, 1);
+            Some(unified_diff_text(&content, &new_content, path))
+        }
+        _ => None,
     }
 }
 

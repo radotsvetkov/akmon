@@ -3,12 +3,14 @@
 use akmon_core::ContextScan;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::message::TuiMessage;
-use crate::theme::{ACCENT, ACCENT_DIM, ERR, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN};
+use crate::theme::{
+    ACCENT, ACCENT_DIM, ERR, FG_MUTED, FG_ON_SELECT, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN,
+};
 use crate::welcome::render_welcome;
 
 /// Paints the scrollable transcript area: branded welcome when `show_welcome`, otherwise `visible` lines.
@@ -17,10 +19,12 @@ pub fn paint_message_viewport(
     f: &mut Frame<'_>,
     msg_area: Rect,
     show_welcome: bool,
-    show_missing_akmon_hint: bool,
     version: &str,
     project_name: &str,
     welcome_spark_phase: bool,
+    first_session_ever: bool,
+    has_sent_first_message: bool,
+    has_akmon_md: bool,
     context_scan: &ContextScan,
     visible: Vec<Line<'static>>,
 ) {
@@ -32,7 +36,9 @@ pub fn paint_message_viewport(
             version,
             project_name,
             welcome_spark_phase,
-            show_missing_akmon_hint,
+            first_session_ever,
+            has_sent_first_message,
+            has_akmon_md,
             context_scan,
         );
     } else {
@@ -187,6 +193,7 @@ pub fn message_to_lines(
         }
         TuiMessage::Confirmation {
             description,
+            diff_preview,
             answered,
             answer,
         } => {
@@ -194,6 +201,34 @@ pub fn message_to_lines(
                 format!("⚠ {description}"),
                 Style::default().fg(WARN),
             )])];
+            if let Some(diff) = diff_preview {
+                let mono = Style::default().fg(FG_PRIMARY);
+                let mut line_iter = diff.lines();
+                let mut shown = 0usize;
+                while shown < 80 {
+                    let Some(line) = line_iter.next() else {
+                        break;
+                    };
+                    let st = if line.starts_with('+') && !line.starts_with("+++") {
+                        Style::default().fg(OK_GREEN)
+                    } else if line.starts_with('-') && !line.starts_with("---") {
+                        Style::default().fg(ERR)
+                    } else if line.starts_with("@@") {
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM)
+                    } else {
+                        mono
+                    };
+                    let take = line.chars().take(w).collect::<String>();
+                    out.push(Line::from(vec![Span::styled(take, st)]));
+                    shown += 1;
+                }
+                if line_iter.next().is_some() {
+                    out.push(Line::from(vec![Span::styled(
+                        "… (diff truncated)".to_string(),
+                        Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
+                    )]));
+                }
+            }
             if *answered {
                 let a = answer
                     .map(|b| if b { "allowed" } else { "denied" })
@@ -296,7 +331,7 @@ fn assistant_body_lines(content: &str, width: usize) -> Vec<Line<'static>> {
             for l in wrap_plain(&body, width.saturating_sub(2)) {
                 out.push(Line::from(vec![Span::styled(
                     format!(" {l}"),
-                    Style::default().bg(SELECT_BG).fg(FG_PRIMARY),
+                    Style::default().bg(SELECT_BG).fg(FG_ON_SELECT),
                 )]));
             }
             out.push(Line::from(vec![Span::styled(

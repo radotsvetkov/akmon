@@ -19,6 +19,8 @@
 pub mod audit;
 pub mod context_import;
 pub mod fsm;
+/// Stack detection and capped “project intelligence” snippets for model context.
+pub mod lang_profile;
 pub mod mcp;
 pub mod permission;
 pub mod policy;
@@ -34,8 +36,17 @@ pub use context_import::{
 pub use fsm::{
     AgentConfig, AgentError, AgentEvent, AgentState, check_iteration_limit, validate_transition,
 };
+pub use lang_profile::{
+    ArchitecturePattern, DataTool, Database, DatabaseAbstraction, Framework, FrameworkProfile,
+    LangProfile, Language, ProjectProfile, build_project_profile, detect_architecture_hints,
+    detect_data_tools, detect_databases, detect_frameworks, detect_language,
+    format_project_intelligence_for_root, format_project_profile_capped, framework_profile,
+    lang_profile,
+};
 pub use mcp::McpServerConfig;
 pub use permission::Permission;
 pub use policy::{PolicyConfig, PolicyDecision, PolicyEngine, PolicyEngineError, PolicyEngineMode};
 pub use sandbox::{Sandbox, SandboxError};
 pub use secret::Secret;
+
+pub use project::{save_plan_markdown, task_slug_for_plan_filename};

@@ -9,7 +9,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::app::{Overlay, TuiApp};
 use crate::slash::{COMMANDS, slash_command_name_prefix};
 use crate::slash_exec::{cost_summary_lines, format_session_list_row};
-use crate::theme::{ACCENT, ACCENT_DIM, BORDER, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG};
+use crate::theme::{
+    ACCENT, ACCENT_DIM, BORDER, FG_MUTED, FG_ON_SELECT, FG_PRIMARY, OK_GREEN, SELECT_BG,
+};
 
 /// Max command **content** rows in the slash dropdown (one terminal row each; no wrapping).
 const SLASH_AC_MAX_VISIBLE: usize = 10;
@@ -84,7 +86,7 @@ pub fn draw_slash_autocomplete(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                         .bg(SELECT_BG)
                         .fg(ACCENT)
                         .add_modifier(Modifier::BOLD),
-                    Style::default().bg(SELECT_BG).fg(FG_PRIMARY),
+                    Style::default().bg(SELECT_BG).fg(FG_ON_SELECT),
                 )
             } else {
                 (
@@ -228,7 +230,7 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
                     let style = if i == *selected {
                         Style::default()
                             .bg(SELECT_BG)
-                            .fg(FG_PRIMARY)
+                            .fg(FG_ON_SELECT)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(FG_MUTED)
@@ -321,7 +323,7 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
                     let style = if Some(row_idx) == sel_row {
                         Style::default()
                             .bg(SELECT_BG)
-                            .fg(FG_PRIMARY)
+                            .fg(FG_ON_SELECT)
                             .add_modifier(Modifier::BOLD)
                     } else if row.section_header {
                         Style::default().fg(ACCENT_DIM).add_modifier(Modifier::BOLD)

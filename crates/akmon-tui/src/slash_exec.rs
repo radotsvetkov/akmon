@@ -8,12 +8,12 @@ use tokio::sync::{Notify, mpsc};
 use uuid::Uuid;
 
 use crate::agent::AgentTurn;
-use crate::app::{Overlay, TuiApp};
+use crate::app::{ExternalEditTarget, Overlay, TuiApp};
 use crate::config::TuiLaunchConfig;
 use crate::model_picker::build_model_picker_rows;
 use crate::session_persist::{
-    SessionSummary, default_audit_log_path, load_session_file, load_session_summaries,
-    resolve_session_id, save_session_snapshot, sessions_directory,
+    SessionSummary, default_audit_log_path, latest_dot_akmon_plan, load_session_file,
+    load_session_summaries, resolve_session_id, save_session_snapshot, sessions_directory,
 };
 use crate::slash::{SlashCommand, parse_slash_input};
 use crate::tui_project::ProjectUiJob;
@@ -112,6 +112,17 @@ fn dispatch(
             app.total_output_tokens = 0;
             app.current_iteration = 0;
             app.session_started_at = Utc::now();
+            app.session_instant = std::time::Instant::now();
+            app.has_sent_first_message = false;
+            app.message_count = 0;
+            app.total_tool_calls = 0;
+            app.successful_tool_calls = 0;
+            app.failed_tool_calls = 0;
+            app.files_read.clear();
+            app.files_written.clear();
+            app.session_touched_files.clear();
+            app.pending_plan = None;
+            app.latest_plan_path = None;
             app.scroll_offset = 0;
             app.overlay = Overlay::None;
             env.reload_notify.notify_one();
@@ -331,6 +342,47 @@ fn dispatch(
             app.overlay = Overlay::None;
             SlashHandled::Continue
         }
+        "edit-plan" => {
+            if app.agent_running {
+                app.push_system_info("Finish or interrupt the current turn first.".into());
+                return SlashHandled::Continue;
+            }
+            let path = app
+                .latest_plan_path
+                .clone()
+                .or_else(|| latest_dot_akmon_plan(&app.project_root));
+            match path {
+                Some(p) if p.is_file() => {
+                    app.pending_external_edit = Some(ExternalEditTarget::Plan(p));
+                    app.push_system_info(
+                        "Opening plan in $EDITOR — save and exit to return to Akmon.".into(),
+                    );
+                }
+                _ => app.push_system_info(
+                    "No plan file found. Run /plan with a task message first.".into(),
+                ),
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "view-plan" => {
+            let path = app
+                .latest_plan_path
+                .clone()
+                .or_else(|| latest_dot_akmon_plan(&app.project_root));
+            match path {
+                Some(p) if p.is_file() => match std::fs::read_to_string(&p) {
+                    Ok(body) => {
+                        let snippet: String = body.chars().take(6000).collect();
+                        app.push_system_info(format!("--- {} ---\n{snippet}", p.display()));
+                    }
+                    Err(e) => app.push_system_info(format!("Could not read plan: {e}")),
+                },
+                _ => app.push_system_info("No plan file found.".into()),
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
         "implement" => {
             if app.agent_running {
                 app.push_system_info(
@@ -397,23 +449,10 @@ fn dispatch(
                 app.overlay = Overlay::None;
                 return SlashHandled::Continue;
             }
-            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
-            match std::process::Command::new(&editor).arg(&path).status() {
-                Ok(st) if st.success() => match std::fs::read_to_string(&path) {
-                    Ok(text) => {
-                        if let Ok(mut g) = env.shared_config.lock() {
-                            g.akmon_md = Some(text);
-                            g.has_akmon_md = true;
-                        }
-                        app.has_akmon_md = true;
-                        env.reload_notify.notify_one();
-                        app.push_system_info("AKMON.md reloaded into the session.".into());
-                    }
-                    Err(e) => app.push_system_info(format!("Could not read AKMON.md: {e}")),
-                },
-                Ok(st) => app.push_system_info(format!("Editor exited with {st}")),
-                Err(e) => app.push_system_info(format!("Could not run {editor}: {e}")),
-            }
+            app.pending_external_edit = Some(ExternalEditTarget::AkmonMd(path));
+            app.push_system_info(
+                "Opening AKMON.md in $EDITOR — save and exit to return to Akmon.".into(),
+            );
             app.overlay = Overlay::None;
             SlashHandled::Continue
         }

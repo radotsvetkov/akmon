@@ -109,22 +109,44 @@ fn truncate_line_to_chars(line: Line<'static>, max_chars: usize) -> Line<'static
     Line::from(out)
 }
 
+/// Lines shown on the first-ever local session (empty `~/.akmon/sessions/`) before the first send.
+const FIRST_SESSION_HINTS: &[&str] = &[
+    "  Getting started:",
+    "",
+    "  Describe what you want to build or fix in plain language.",
+    "",
+    "  Examples:",
+    "  › add error handling to the fetch function in src/api.rs",
+    "  › explain how authentication works in this codebase",
+    "  › refactor the database module to use connection pooling",
+    "  › find all TODO comments and summarize what needs doing",
+    "",
+    "  Tips:",
+    "  › /plan first for large changes",
+    "  › /init to generate project memory",
+    "  › /help for all commands",
+    "  › --yes flag to skip confirmations on safe operations",
+];
+
 /// Renders the Akmon welcome art and copy into `buf` inside `area` when the transcript is empty.
 ///
 /// Safe for very small or narrow terminals: returns immediately below 10×5; lines longer than
 /// `area.width` are truncated by character count so layout never panics.
 /// `spark_use_alt` swaps spark glyphs (✦ ↔ ✧) on the UI’s ~500 ms tick.
-/// When `show_missing_akmon_hint` is true, shows dim amber quick-start hints before the divider.
 ///
-/// If other-tool context files exist ([`ContextScan::files`]) and `AKMON.md` is absent, suggests
-/// `/import`; otherwise `/init` and `/new`.
+/// `first_session_ever` / `has_sent_first_message` gate the long getting-started block; when
+/// `AKMON.md` is missing and this is not the first session, a short `/init` nudge is shown (plus
+/// `/import` when [`ContextScan::files`] is non-empty).
+#[allow(clippy::too_many_arguments)]
 pub fn render_welcome(
     area: Rect,
     buf: &mut Buffer,
     version: &str,
     project_name: &str,
     spark_use_alt: bool,
-    show_missing_akmon_hint: bool,
+    first_session_ever: bool,
+    has_sent_first_message: bool,
+    has_akmon_md: bool,
     context_scan: &ContextScan,
 ) {
     if area.width < 10 || area.height < 5 {
@@ -149,20 +171,12 @@ pub fn render_welcome(
     // Spark + blank + README anvil rows + title + subtitle + version + project + [optional nudge block] + divider + 3 hints + divider + bottom.
     // spark row + blank + anvil rows
     let art_h = 2u16.saturating_add(ANVIL_BODY.len() as u16);
-    let mut unique_tools: Vec<&'static str> = context_scan
-        .files
-        .iter()
-        .map(|f| f.tool.display_name())
-        .collect();
-    unique_tools.sort_unstable();
-    unique_tools.dedup();
-    let nudge_lines: u16 = if show_missing_akmon_hint {
-        if context_scan.files.is_empty() {
-            3
-        } else {
-            2u16.saturating_add(unique_tools.len() as u16)
-                .saturating_add(3)
-        }
+    let first_gs = first_session_ever && !has_sent_first_message;
+    let compact_no_akmon = !has_akmon_md && !first_session_ever && !has_sent_first_message;
+    let nudge_lines: u16 = if first_gs {
+        FIRST_SESSION_HINTS.len() as u16
+    } else if compact_no_akmon {
+        if context_scan.files.is_empty() { 3 } else { 4 }
     } else {
         0
     };
@@ -212,51 +226,38 @@ pub fn render_welcome(
         Style::default().fg(Color::Rgb(60, 90, 105)),
     );
 
+    let gs_style = Style::default()
+        .fg(Color::Rgb(74, 112, 128))
+        .add_modifier(Modifier::ITALIC);
     let nudge_style = Style::default()
         .fg(Color::Rgb(181, 131, 55))
         .add_modifier(Modifier::DIM);
-    if show_missing_akmon_hint {
-        y = draw_centered_line_truncated(buf, area, y, "no AKMON.md found", nudge_style);
-        if context_scan.files.is_empty() {
+    if first_gs {
+        for line in FIRST_SESSION_HINTS {
+            y = draw_centered_line_truncated(buf, area, y, line, gs_style);
+        }
+    } else if compact_no_akmon {
+        y = draw_centered_line_truncated(buf, area, y, "  No AKMON.md found.", nudge_style);
+        y = draw_centered_line_truncated(
+            buf,
+            area,
+            y,
+            "  Run /init to give Akmon memory of this project.",
+            nudge_style,
+        );
+        y = draw_centered_line_truncated(
+            buf,
+            area,
+            y,
+            "  This improves output quality significantly.",
+            nudge_style,
+        );
+        if !context_scan.files.is_empty() {
             y = draw_centered_line_truncated(
                 buf,
                 area,
                 y,
-                "/init  analyze this project",
-                nudge_style,
-            );
-            y = draw_centered_line_truncated(
-                buf,
-                area,
-                y,
-                "/new   scaffold a new project",
-                nudge_style,
-            );
-        } else {
-            y = draw_centered_line_truncated(
-                buf,
-                area,
-                y,
-                "context detected from other tools:",
-                nudge_style,
-            );
-            for name in unique_tools {
-                let line = format!("  ✓ {name}");
-                y = draw_centered_line_truncated(buf, area, y, line.as_str(), nudge_style);
-            }
-            y = draw_centered_line_truncated(buf, area, y, "", nudge_style);
-            y = draw_centered_line_truncated(
-                buf,
-                area,
-                y,
-                "/import  convert to AKMON.md",
-                nudge_style,
-            );
-            y = draw_centered_line_truncated(
-                buf,
-                area,
-                y,
-                "/init    analyze project fresh",
+                "  Other tool context detected — try /import",
                 nudge_style,
             );
         }
@@ -323,6 +324,8 @@ mod tests {
             "p",
             false,
             false,
+            false,
+            false,
             &scan,
         );
     }
@@ -341,6 +344,8 @@ mod tests {
             "1.3.0",
             "proj",
             true,
+            false,
+            false,
             true,
             &scan,
         );
@@ -357,7 +362,17 @@ mod tests {
         };
         let _ = term.draw(|f| {
             let area = f.size();
-            render_welcome(area, f.buffer_mut(), "1.3.0", "Akmon", false, false, &scan);
+            render_welcome(
+                area,
+                f.buffer_mut(),
+                "1.3.0",
+                "Akmon",
+                false,
+                false,
+                false,
+                false,
+                &scan,
+            );
         });
     }
 }

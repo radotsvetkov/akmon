@@ -106,6 +106,18 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "edit-plan",
+        aliases: &[],
+        description: "Open the latest plan in $EDITOR",
+        takes_arg: false,
+    },
+    SlashCommand {
+        name: "view-plan",
+        aliases: &[],
+        description: "Show the latest plan in the chat view",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "architect",
         aliases: &[],
         description: "Next message: planner model then main model",

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use akmon_core::{
     AgentConfig, AgentEvent, McpServerConfig, PolicyEngine, PolicyEngineMode, PolicyVerdict,
-    Sandbox, write_audit_jsonl,
+    Sandbox, save_plan_markdown, write_audit_jsonl,
 };
 use akmon_models::LlmProvider;
 use akmon_query::AgentSession;
@@ -43,6 +43,8 @@ pub enum BridgeMsg {
     RunFinished {
         /// When set, the TUI stores this as a pending implementation plan (`/implement`).
         captured_plan: Option<String>,
+        /// Filesystem path when the plan body was saved under `.akmon/plans/`.
+        plan_saved_path: Option<std::path::PathBuf>,
     },
     /// `/init` or `/new` project tooling finished; lines are shown as system info.
     ProjectJobDone {
@@ -428,6 +430,10 @@ pub async fn run_agent_loop(
                     }
                 }
 
+                let plan_saved_path = captured_plan.as_ref().and_then(|body| {
+                    save_plan_markdown(&cfg.project_root, &turn.task, body).ok()
+                });
+
                 if let Err(e) = write_audit_jsonl(&cfg.audit_log_path, session.audit_events()) {
                     let _ = bridge_tx.send(BridgeMsg::Agent(AgentEvent::Error {
                         error: akmon_core::AgentError::SessionFailed {
@@ -439,6 +445,7 @@ pub async fn run_agent_loop(
 
                 let _ = bridge_tx.send(BridgeMsg::RunFinished {
                     captured_plan,
+                    plan_saved_path,
                 });
             }
         }

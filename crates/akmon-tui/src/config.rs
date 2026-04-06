@@ -89,6 +89,83 @@ pub struct TuiLaunchConfig {
 }
 
 impl TuiLaunchConfig {
+    /// Short cloud or local label for the status bar (mirrors [`LlmConnectConfig::resolve`] priority).
+    pub fn provider_display_name(&self) -> String {
+        let model = self.model_name.as_str();
+        let aws_key_here = std::env::var("AWS_ACCESS_KEY_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_some();
+        if self.bedrock || aws_key_here {
+            return "AWS Bedrock".into();
+        }
+        if model.contains('/') {
+            return "OpenRouter".into();
+        }
+        if model.to_lowercase().starts_with("claude")
+            && self
+                .anthropic_key
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .is_some()
+        {
+            return "Anthropic".into();
+        }
+        if self
+            .azure_endpoint
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .is_some()
+            && self
+                .azure_key
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .is_some()
+        {
+            return "Azure OpenAI".into();
+        }
+        if self
+            .openai_key
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .is_some()
+        {
+            return "OpenAI".into();
+        }
+        if self
+            .groq_key
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .is_some()
+        {
+            return "Groq".into();
+        }
+        if self
+            .openai_compatible_url
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+            .is_some()
+        {
+            return "OpenAI-compatible".into();
+        }
+        "Ollama".into()
+    }
+
+    /// `true` when the active model is routed via OpenRouter (`/` in id and key present).
+    pub fn uses_openrouter(&self) -> bool {
+        self.model_name.contains('/')
+            && self
+                .openrouter_key
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .is_some()
+    }
+
+    /// Local inference (Ollama fallback / no billable cloud keys resolved).
+    pub fn is_free_local_inference(&self) -> bool {
+        self.provider_display_name() == "Ollama"
+    }
+
     /// Builds [`LlmConnectConfig`] for `model` using the same merge rules as the CLI headless path.
     pub fn llm_connect_for_model(&self, model: String) -> LlmConnectConfig {
         LlmConnectConfig {

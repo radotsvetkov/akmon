@@ -285,6 +285,7 @@ mod tests {
                 &thinking(0),
                 &AgentEvent::ConfirmationRequired {
                     description: "rm".into(),
+                    diff_preview: None,
                 }
             )
             .is_ok()
@@ -471,6 +472,7 @@ mod tests {
                 &AgentState::ToolExecution { iteration: 0 },
                 &AgentEvent::ConfirmationRequired {
                     description: "x".into(),
+                    diff_preview: None,
                 }
             )
             .is_err()

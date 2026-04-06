@@ -616,7 +616,53 @@ pub fn format_project_context_for_init(summary: &ProjectSummary) -> String {
         s.push('\n');
     }
 
+    s.push('\n');
+    s.push_str(&crate::lang_profile::format_project_intelligence_for_root(
+        &summary.root,
+    ));
+
     s
+}
+
+/// Slugifies a natural-language task for `.akmon/plans/{timestamp}-{slug}.md` filenames.
+pub fn task_slug_for_plan_filename(task: &str) -> String {
+    let folded: String = task
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = folded.trim_matches('-');
+    let parts: Vec<&str> = trimmed
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .take(12)
+        .collect();
+    let joined = parts.join("-");
+    let base = if joined.is_empty() {
+        "task".to_string()
+    } else {
+        joined
+    };
+    base.chars().take(80).collect()
+}
+
+/// Writes markdown `body` to `<project_root>/.akmon/plans/{unix_timestamp}-{slug}.md`.
+pub fn save_plan_markdown(project_root: &Path, task: &str, body: &str) -> io::Result<PathBuf> {
+    let plans_dir = project_root.join(".akmon").join("plans");
+    fs::create_dir_all(&plans_dir)?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let slug = task_slug_for_plan_filename(task);
+    let path = plans_dir.join(format!("{ts}-{slug}.md"));
+    fs::write(&path, body)?;
+    Ok(path)
 }
 
 fn write_file(root: &Path, rel: &str, body: &str, created: &mut Vec<String>) -> io::Result<()> {
