@@ -182,10 +182,7 @@ pub fn primary_tool_from_files(files: &[ContextFile]) -> Option<ToolOrigin> {
     for f in files {
         *totals.entry(f.tool).or_insert(0) += f.size_bytes;
     }
-    totals
-        .into_iter()
-        .max_by_key(|(_, n)| *n)
-        .map(|(t, _)| t)
+    totals.into_iter().max_by_key(|(_, n)| *n).map(|(t, _)| t)
 }
 
 fn dedup_paths(mut files: Vec<ContextFile>) -> Vec<ContextFile> {
@@ -204,7 +201,12 @@ pub fn scan_context_files(root: &Path) -> ContextScan {
     push_single(root, &mut files, "AGENTS.md", ToolOrigin::Generic);
     push_single(root, &mut files, "llms.txt", ToolOrigin::Generic);
     push_single(root, &mut files, "CLAUDE.md", ToolOrigin::ClaudeCode);
-    push_single(root, &mut files, ".claude/CLAUDE.md", ToolOrigin::ClaudeCode);
+    push_single(
+        root,
+        &mut files,
+        ".claude/CLAUDE.md",
+        ToolOrigin::ClaudeCode,
+    );
     push_single(root, &mut files, ".cursorrules", ToolOrigin::CursorLegacy);
     push_glob_files(
         root,
@@ -258,7 +260,13 @@ pub fn scan_context_files(root: &Path) -> ContextScan {
         false,
     );
     push_single(root, &mut files, ".clinerules", ToolOrigin::Cline);
-    push_glob_files(root, &mut files, ".roo/rules/*.md", ToolOrigin::RooCode, false);
+    push_glob_files(
+        root,
+        &mut files,
+        ".roo/rules/*.md",
+        ToolOrigin::RooCode,
+        false,
+    );
 
     let files = dedup_paths(files);
     let primary_tool = primary_tool_from_files(&files);
@@ -310,10 +318,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tmp");
         let root = dir.path();
         let p = root.join(".cursor/rules/r.mdc");
-        write(
-            &p,
-            "---\nfoo: bar\n---\n\n# Body\n",
-        );
+        write(&p, "---\nfoo: bar\n---\n\n# Body\n");
         let s = scan_context_files(root);
         assert_eq!(s.files.len(), 1);
         assert_eq!(s.files[0].tool, ToolOrigin::Cursor);

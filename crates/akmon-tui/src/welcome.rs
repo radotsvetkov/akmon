@@ -160,7 +160,8 @@ pub fn render_welcome(
         if context_scan.files.is_empty() {
             3
         } else {
-            2u16.saturating_add(unique_tools.len() as u16).saturating_add(3)
+            2u16.saturating_add(unique_tools.len() as u16)
+                .saturating_add(3)
         }
     } else {
         0
@@ -356,15 +357,7 @@ mod tests {
         };
         let _ = term.draw(|f| {
             let area = f.size();
-            render_welcome(
-                area,
-                f.buffer_mut(),
-                "1.3.0",
-                "Akmon",
-                false,
-                false,
-                &scan,
-            );
+            render_welcome(area, f.buffer_mut(), "1.3.0", "Akmon", false, false, &scan);
         });
     }
 }

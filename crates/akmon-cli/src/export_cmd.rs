@@ -133,7 +133,9 @@ pub fn run_export(args: ExportArgs, project_root: &Path) -> anyhow::Result<()> {
         ExportTarget::all_targets().to_vec()
     } else if let Some(ref t) = args.tool {
         let Some(tg) = parse_tool(t) else {
-            bail!("Unknown --tool {t}. Try: claude-code, codex, cursor, gemini, copilot, windsurf, cline, kiro");
+            bail!(
+                "Unknown --tool {t}. Try: claude-code, codex, cursor, gemini, copilot, windsurf, cline, kiro"
+            );
         };
         vec![tg]
     } else {

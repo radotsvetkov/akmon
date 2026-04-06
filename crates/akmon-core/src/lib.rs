@@ -28,8 +28,8 @@ pub mod secret;
 
 pub use audit::{AuditEvent, PolicyVerdict, ToolOutcomeKind, write_audit_jsonl};
 pub use context_import::{
-    ContextFile, ContextScan, ToolOrigin, primary_tool_from_files, scan_context_files,
-    strip_mdc_style_frontmatter, CONTEXT_FILE_MAX_BYTES,
+    CONTEXT_FILE_MAX_BYTES, ContextFile, ContextScan, ToolOrigin, primary_tool_from_files,
+    scan_context_files, strip_mdc_style_frontmatter,
 };
 pub use fsm::{
     AgentConfig, AgentError, AgentEvent, AgentState, check_iteration_limit, validate_transition,

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use akmon_core::{ContextFile, ContextScan, scan_context_files, primary_tool_from_files};
+use akmon_core::{ContextFile, ContextScan, primary_tool_from_files, scan_context_files};
 use akmon_models::{CompletionConfig, LlmProvider, Message, MessageRole, StreamEvent};
 use anyhow::{Context as _, bail};
 use clap::Args;
@@ -65,7 +65,9 @@ fn synthesis_user_prompt(files: &[ContextFile], project_root: &Path) -> String {
         .unwrap_or("project");
     let mut s = String::new();
     s.push_str(&format!("Project directory: {}\n", project_root.display()));
-    s.push_str(&format!("Project name for the `#` title: {project_name}\n\n"));
+    s.push_str(&format!(
+        "Project name for the `#` title: {project_name}\n\n"
+    ));
     for cf in files {
         s.push_str(&format!(
             "=== {}: {} ===\n{}\n=== END ===\n\n",

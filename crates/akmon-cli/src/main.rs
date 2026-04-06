@@ -749,7 +749,8 @@ async fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            return match import_cmd::run_import(args.clone(), project_root.clone(), provider).await {
+            return match import_cmd::run_import(args.clone(), project_root.clone(), provider).await
+            {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("akmon: import: {e:#}");
