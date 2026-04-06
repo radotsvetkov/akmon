@@ -12,7 +12,7 @@ use akmon_core::{
 use akmon_models::{
     CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
     ModelToolCall, StopReason, StreamEvent, ToolDefinition, UsageReport,
-    anthropic_system_block_text, approximate_tokens,
+    anthropic_system_block_text, approximate_tokens, max_tokens_for_model,
 };
 use akmon_tools::{Tool, ToolContext, ToolOutput, unified_diff_text};
 use chrono::Utc;
@@ -61,8 +61,11 @@ pub struct ToolCallResult {
     pub arguments: Value,
 }
 
-/// Builds [`CompletionConfig`] with `tools` populated from registered [`Tool`] instances.
-fn completion_config_for_tools(tools: &[Arc<dyn Tool>]) -> CompletionConfig {
+/// Builds [`CompletionConfig`] with `tools` populated and model-appropriate [`CompletionConfig::max_tokens`].
+fn completion_config_for_tools(
+    tools: &[Arc<dyn Tool>],
+    provider: &dyn LlmProvider,
+) -> CompletionConfig {
     let defs: Vec<ToolDefinition> = tools
         .iter()
         .map(|t| ToolDefinition {
@@ -73,7 +76,8 @@ fn completion_config_for_tools(tools: &[Arc<dyn Tool>]) -> CompletionConfig {
         .collect();
     CompletionConfig {
         tools: defs,
-        ..Default::default()
+        max_tokens: max_tokens_for_model(provider.completion_model_id()),
+        ..CompletionConfig::default()
     }
 }
 
@@ -275,6 +279,7 @@ impl AgentSession {
 
         let mut iteration: u32 = 0;
         let mut user_line_committed = false;
+        let mut continuation_count: u32 = 0;
 
         'session: loop {
             match &self.state {
@@ -368,7 +373,8 @@ impl AgentSession {
                 );
             }
 
-            let completion_config = completion_config_for_tools(&self.tools);
+            let completion_config =
+                completion_config_for_tools(&self.tools, self.provider.as_ref());
             let mut stream: CompletionStream =
                 match self.provider.complete(&messages, &completion_config).await {
                     Ok(s) => s,
@@ -453,17 +459,72 @@ impl AgentSession {
 
                         match stop_reason {
                             StopReason::MaxTokens => {
-                                let ae = AgentError::ResponseTruncated;
+                                if !tool_calls.is_empty() {
+                                    let ae = AgentError::ModelError {
+                                        message: "model hit output limit mid tool-call; retry or shorten the request"
+                                            .into(),
+                                    };
+                                    self.apply_event(
+                                        &event_tx,
+                                        AgentEvent::Error {
+                                            error: ae.clone(),
+                                            recoverable: false,
+                                        },
+                                        &task,
+                                    )
+                                    .await?;
+                                    return Err(ae);
+                                }
+
+                                continuation_count = continuation_count.saturating_add(1);
+                                if continuation_count >= 3 {
+                                    self.apply_event(
+                                        &event_tx,
+                                        AgentEvent::StatusInfo {
+                                            message: "─ maximum continuations reached ─".into(),
+                                        },
+                                        &task,
+                                    )
+                                    .await?;
+                                    let ae = AgentError::ResponseTruncated;
+                                    self.apply_event(
+                                        &event_tx,
+                                        AgentEvent::Error {
+                                            error: ae.clone(),
+                                            recoverable: false,
+                                        },
+                                        &task,
+                                    )
+                                    .await?;
+                                    return Err(ae);
+                                }
+
                                 self.apply_event(
                                     &event_tx,
-                                    AgentEvent::Error {
-                                        error: ae.clone(),
-                                        recoverable: false,
+                                    AgentEvent::StatusInfo {
+                                        message: "─ response truncated, continuing… ─".into(),
                                     },
                                     &task,
                                 )
                                 .await?;
-                                return Err(ae);
+
+                                if !user_line_committed {
+                                    self.context.push(Message {
+                                        role: MessageRole::User,
+                                        content: task.clone(),
+                                    });
+                                    user_line_committed = true;
+                                }
+                                self.context.push(Message {
+                                    role: MessageRole::Assistant,
+                                    content: accumulated,
+                                });
+                                self.context.push(Message {
+                                    role: MessageRole::User,
+                                    content: "Continue from exactly where you left off. Do not repeat anything. Start from the point of truncation.".into(),
+                                });
+
+                                continue 'session;
                             }
                             StopReason::EndTurn => {
                                 self.apply_event(&event_tx, AgentEvent::Done, &task).await?;
@@ -480,6 +541,7 @@ impl AgentSession {
                                 return Ok(());
                             }
                             StopReason::ToolUse => {
+                                continuation_count = 0;
                                 if tool_calls.is_empty() {
                                     let ae = AgentError::ModelError {
                                         message: "model returned ToolUse with no tool_calls".into(),
@@ -967,6 +1029,7 @@ impl AgentSession {
 
         let sum_config = CompletionConfig {
             tools: Vec::new(),
+            max_tokens: max_tokens_for_model(self.provider.completion_model_id()),
             ..CompletionConfig::default()
         };
 
@@ -1148,6 +1211,27 @@ impl AgentSession {
                 })
             }
             (AgentState::Summarizing { iteration }, AgentEvent::UsageReport { .. }) => {
+                Ok(AgentState::Summarizing {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Planning { task, iteration }, AgentEvent::StatusInfo { .. }) => {
+                Ok(AgentState::Planning {
+                    task: task.clone(),
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Thinking { iteration }, AgentEvent::StatusInfo { .. }) => {
+                Ok(AgentState::Thinking {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::ToolExecution { iteration }, AgentEvent::StatusInfo { .. }) => {
+                Ok(AgentState::ToolExecution {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Summarizing { iteration }, AgentEvent::StatusInfo { .. }) => {
                 Ok(AgentState::Summarizing {
                     iteration: *iteration,
                 })
@@ -1561,6 +1645,10 @@ mod tests {
             200_000
         }
 
+        fn completion_model_id(&self) -> &str {
+            "stub-model"
+        }
+
         async fn complete(
             &self,
             _messages: &[Message],
@@ -1596,6 +1684,10 @@ mod tests {
             200_000
         }
 
+        fn completion_model_id(&self) -> &str {
+            "seq-model"
+        }
+
         async fn complete(
             &self,
             _messages: &[Message],
@@ -1605,6 +1697,99 @@ mod tests {
             let events = self.sequences.get(i).cloned().unwrap_or_default();
             Ok(Box::pin(stream::iter(events)))
         }
+    }
+
+    #[tokio::test]
+    async fn max_tokens_then_end_turn_continues_without_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let seq = SeqProvider::new(vec![
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "partial".into(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop_reason: StopReason::MaxTokens,
+                    tool_calls: vec![],
+                }),
+            ],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(seq),
+            vec![],
+            sandbox,
+            None,
+            false,
+        );
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        let r = session.run("task".into(), tx, &mut no_policy, None).await;
+        assert!(r.is_ok(), "{r:?}");
+        assert!(
+            session.result_text().contains("partial"),
+            "result_text={}",
+            session.result_text()
+        );
+
+        let mut saw_trunc_status = false;
+        while let Ok(e) = rx.try_recv() {
+            if let AgentEvent::StatusInfo { message } = e {
+                if message.contains("truncated, continuing") {
+                    saw_trunc_status = true;
+                }
+            }
+        }
+        assert!(saw_trunc_status, "expected continuation StatusInfo");
+    }
+
+    #[tokio::test]
+    async fn max_tokens_with_tool_calls_errors() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let seq = SeqProvider::new(vec![vec![Ok(StreamEvent::Done {
+            stop_reason: StopReason::MaxTokens,
+            tool_calls: vec![ModelToolCall {
+                id: "t".into(),
+                name: "read_file".into(),
+                arguments: json!({}),
+            }],
+        })]]);
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(seq),
+            vec![],
+            sandbox,
+            None,
+            false,
+        );
+
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        let err = session
+            .run("t".into(), tx, &mut no_policy, None)
+            .await
+            .expect_err("expected model error");
+        assert!(matches!(err, AgentError::ModelError { .. }), "got {err:?}");
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@
 
 use akmon_models::{
     CompletionConfig, LlmProvider, Message, MessageRole, ModelError, StopReason, StreamEvent,
+    max_tokens_for_model,
 };
 use futures::StreamExt;
 
@@ -57,6 +58,7 @@ Brief completed milestones for historical context.\n",
 
     let cfg = CompletionConfig {
         tools: Vec::new(),
+        max_tokens: max_tokens_for_model(provider.completion_model_id()),
         ..CompletionConfig::default()
     };
     let mut stream = provider.complete(&messages, &cfg).await?;

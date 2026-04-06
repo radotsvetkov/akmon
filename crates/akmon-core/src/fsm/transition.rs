@@ -44,6 +44,12 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
         (AgentState::Thinking { .. }, AgentEvent::UsageReport { .. }) => Ok(()),
         (AgentState::ToolExecution { .. }, AgentEvent::UsageReport { .. }) => Ok(()),
 
+        // Same states: status-only messages (no state change)
+        (AgentState::Planning { .. }, AgentEvent::StatusInfo { .. }) => Ok(()),
+        (AgentState::Thinking { .. }, AgentEvent::StatusInfo { .. }) => Ok(()),
+        (AgentState::ToolExecution { .. }, AgentEvent::StatusInfo { .. }) => Ok(()),
+        (AgentState::Summarizing { .. }, AgentEvent::StatusInfo { .. }) => Ok(()),
+
         // Planning / Thinking → Summarizing (context compaction)
         (AgentState::Planning { .. }, AgentEvent::SummarizationStarted) => Ok(()),
         (AgentState::Thinking { .. }, AgentEvent::SummarizationStarted) => Ok(()),
@@ -194,6 +200,19 @@ mod tests {
                 &thinking(0),
                 &AgentEvent::TextDelta {
                     text: "chunk".into(),
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn legal_thinking_status_info_no_state_change() {
+        assert!(
+            validate_transition(
+                &thinking(0),
+                &AgentEvent::StatusInfo {
+                    message: "continuing…".into(),
                 }
             )
             .is_ok()

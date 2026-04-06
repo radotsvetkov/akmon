@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 
 [workspace.package]
-version = "1.5.2"
+version = "1.5.3"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"

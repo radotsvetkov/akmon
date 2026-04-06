@@ -690,6 +690,10 @@ impl LlmProvider for AnthropicBackend {
         self.inner.context_window
     }
 
+    fn completion_model_id(&self) -> &str {
+        self.inner.model.as_str()
+    }
+
     async fn complete(
         &self,
         messages: &[Message],

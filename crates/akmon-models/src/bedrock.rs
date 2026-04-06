@@ -508,6 +508,10 @@ impl LlmProvider for BedrockBackend {
         self.inner.context_window
     }
 
+    fn completion_model_id(&self) -> &str {
+        self.inner.model_id.as_str()
+    }
+
     async fn complete(
         &self,
         messages: &[Message],

@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use akmon_core::{ContextFile, ContextScan, primary_tool_from_files, scan_context_files};
-use akmon_models::{CompletionConfig, LlmProvider, Message, MessageRole, StreamEvent};
+use akmon_models::{
+    CompletionConfig, LlmProvider, Message, MessageRole, StreamEvent, max_tokens_for_model,
+};
 use anyhow::{Context as _, bail};
 use clap::Args;
 use futures_util::StreamExt;
@@ -172,7 +174,7 @@ pub async fn run_import(
     ];
 
     let config = CompletionConfig {
-        max_tokens: 2000,
+        max_tokens: max_tokens_for_model(provider.completion_model_id()),
         tools: Vec::new(),
         ..CompletionConfig::default()
     };

@@ -52,6 +52,11 @@ pub enum AgentEvent {
         /// Estimated tokens reclaimed (best-effort).
         tokens_freed: usize,
     },
+    /// User-visible status line (e.g. continuation hint); does not advance FSM on its own.
+    StatusInfo {
+        /// Short message for transcript / activity line.
+        message: String,
+    },
     /// Marks the start of iteration `n` of at most `max` (inclusive ceiling check uses `max`).
     IterationStarted {
         /// 1-based or 0-based per orchestrator convention; `n == 1` often means a new user turn from [`super::AgentState::Idle`].
@@ -98,6 +103,7 @@ impl fmt::Display for AgentEvent {
                 "ToolCallCompleted({name}, success={success}, message={message})"
             ),
             AgentEvent::ConfirmationRequired { .. } => write!(f, "ConfirmationRequired"),
+            AgentEvent::StatusInfo { message } => write!(f, "StatusInfo({message})"),
             AgentEvent::SummarizationStarted => write!(f, "SummarizationStarted"),
             AgentEvent::ContextSummarized { .. } => write!(f, "ContextSummarized"),
             AgentEvent::IterationStarted { n, max } => {

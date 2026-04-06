@@ -629,6 +629,10 @@ impl LlmProvider for OllamaBackend {
         self.context_window_tokens
     }
 
+    fn completion_model_id(&self) -> &str {
+        self.model.as_str()
+    }
+
     async fn complete(
         &self,
         messages: &[Message],

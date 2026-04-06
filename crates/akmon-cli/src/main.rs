@@ -607,6 +607,11 @@ async fn run_event_printer(
                     }
                 }
             }
+            AgentEvent::StatusInfo { message } => {
+                if output == OutputFormat::Text {
+                    eprintln!("{message}");
+                }
+            }
             AgentEvent::SummarizationStarted => {
                 if output == OutputFormat::Text {
                     eprintln!("akmon: context summarization started…");

@@ -7,6 +7,7 @@ mod bedrock;
 mod config;
 mod error;
 mod llm_connect;
+mod max_tokens;
 mod message;
 mod ollama;
 mod openai_compat;
@@ -21,6 +22,7 @@ pub use bedrock::{BEDROCK_DISPLAY_MODEL_IDS, BedrockBackend};
 pub use config::CompletionConfig;
 pub use error::ModelError;
 pub use llm_connect::LlmConnectConfig;
+pub use max_tokens::max_tokens_for_model;
 pub use message::{Message, MessageRole};
 pub use ollama::OllamaBackend;
 pub use openai_compat::{OpenAiCompatBackend, infer_context_window_tokens};
@@ -44,6 +46,11 @@ pub trait LlmProvider: Send + Sync {
 
     /// Advertised context window size in tokens (best-effort for local servers).
     fn context_window_tokens(&self) -> usize;
+
+    /// API model id string (e.g. `claude-haiku-4-5-20251001`, Ollama tag, OpenRouter slug).
+    ///
+    /// Used with [`crate::max_tokens_for_model`] to set per-request output limits.
+    fn completion_model_id(&self) -> &str;
 
     /// Estimate the token count for a slice of messages.
     ///

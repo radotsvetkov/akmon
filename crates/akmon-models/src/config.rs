@@ -1,5 +1,6 @@
 //! Per-completion tuning for model calls.
 
+use crate::max_tokens_for_model;
 use crate::tool_def::ToolDefinition;
 
 /// Parameters for a single [`crate::LlmProvider::complete`] invocation.
@@ -20,10 +21,11 @@ pub struct CompletionConfig {
 }
 
 impl Default for CompletionConfig {
-    /// Defaults: `max_tokens` 4096, `temperature` 0.7, `first_token_deadline_ms` 5000, `stream` true.
+    /// Defaults: `max_tokens` 8192 (see [`crate::max_tokens_for_model`] for model-specific values),
+    /// `temperature` 0.7, `first_token_deadline_ms` 5000, `stream` true.
     fn default() -> Self {
         Self {
-            max_tokens: 4096,
+            max_tokens: max_tokens_for_model(""),
             temperature: 0.7,
             first_token_deadline_ms: 5000,
             stream: true,
@@ -39,6 +41,7 @@ mod tests {
     #[test]
     fn default_temperature_deadline_stream() {
         let c = CompletionConfig::default();
+        assert_eq!(c.max_tokens, 8192);
         assert_eq!(c.temperature, 0.7);
         assert_eq!(c.first_token_deadline_ms, 5000);
         assert!(c.stream);

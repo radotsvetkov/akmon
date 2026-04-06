@@ -96,6 +96,10 @@ mod tests {
             10_000
         }
 
+        fn completion_model_id(&self) -> &str {
+            "fixed-token-model"
+        }
+
         fn estimate_tokens(&self, messages: &[Message]) -> Option<usize> {
             let c = self.n.fetch_add(1, Ordering::SeqCst);
             Some(

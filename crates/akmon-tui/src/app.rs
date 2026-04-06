@@ -501,6 +501,12 @@ impl TuiApp {
                     "Context summarized to fit context window (messages_replaced={messages_replaced}, tokens_freed≈{tokens_freed})"
                 ));
             }
+            AgentEvent::StatusInfo { message } => {
+                self.push_system_info(message.clone());
+                if message.contains("continuing") {
+                    self.agent_activity_line = "continuing response…".into();
+                }
+            }
             AgentEvent::SummarizationStarted => {
                 self.push_system_info("Context summarization started…".into());
             }
