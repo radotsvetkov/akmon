@@ -1,16 +1,20 @@
 <div align="center">
 
 <pre>
-    ✦    ✦  ✦
+          ✦         ✦         ✦
 
-  ▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-      ▓▓▓▓▓▓▓▓
-    ▓▓▓▓▓▓▓▓▓▓▓▓
-  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+    ▓▓▓▓▓
+    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+        ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+             ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+                  ▓▓▓▓▓▓▓▓▓▓▓▓
+                   ▓▓    ▓▓
+                   ▓▓    ▓▓
+               ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+            ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+         ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+      ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 </pre>
 
 # Akmon
@@ -32,40 +36,39 @@ who take security seriously.**
 
 ## Why Akmon
 
-Every AI coding agent today requires you 
-to trust a vendor with your code, your 
-API keys, and your development workflow. 
-Anthropic can block your access overnight 
-(they did on April 4th, 2026). Cursor can 
-change billing and drain your credits. 
-Claude Code requires a subscription you 
-do not control.
+Most hosted coding agents ask you to hand over trust by default: your 
+repo, your keys, and your workflow ride inside someone else’s product, 
+pricing, and uptime. We think you should **see** what happened, **own** 
+the binary, and **choose** who gets paid—not rent the forge.
 
 Akmon is different by design:
 
 | | Akmon | Typical agents |
 | --- | :---: | :---: |
-| Audited tool calls | ✅ | ❌ |
-| Sandboxed repo | ✅ | ❌ |
-| No subscription | ✅ | ❌ |
+| **Full JSONL audit trail** (policy, tools, outcomes) | ✅ | ❌ |
+| **Explicit policy engine** + confirm/deny path | ✅ | ⚠️ varies |
+| **Sandboxed to your git root** (path hardening) | ✅ | ⚠️ varies |
+| **SSRF-hardened** optional web fetch | ✅ | ⚠️ varies |
+| **Secrets as `Secret<T>`** (zeroized, not logged) | ✅ | ❌ |
+| **Single static binary** — no extra runtime | ✅ | ❌ |
+| **Runs offline** (local model runtime) | ✅ | ❌ |
+| **Bring your own keys / endpoints** | ✅ | ⚠️ often tied to vendor |
+| **Open source** — build, fork, pin your version | ✅ | ❌ |
+| **No product subscription** for the agent itself | ✅ | ❌ |
 
-**Every action is audited.** Every tool call, 
-every permission decision, every model 
-response is logged to a JSONL file with 
-timestamps and reasons. No other coding 
-agent has this.
+**Every action is audited.** Every tool call, permission decision, and 
+model turn can land in a timestamped JSONL file—so we can answer 
+“what ran, why was it allowed, and what changed?” long after the session.
 
-**Nothing leaves your machine without 
-permission.** Files are sandboxed to your 
-git root. Web requests are SSRF-protected. 
-API keys are zeroized in memory on drop. 
-The policy engine enforces every boundary.
+**Nothing leaves your machine without your rules.** Paths are resolved 
+against the repo sandbox; network fetch is off until you opt in and 
+still blocks common abuse targets. The policy layer is part of the 
+product, not an afterthought.
 
-**No subscription. No vendor lock-in.** 
-Bring your own API key for any provider — 
-Anthropic, OpenAI, OpenRouter (500+ models), 
-Groq, Azure, Bedrock, or run fully offline 
-with Ollama. One binary. You own the tool.
+**You keep the keys and the binary.** Point Akmon at the APIs or 
+compatible endpoints you already pay for, use a model router with one 
+key, plug in cloud inference, or stay entirely on a local stack—one 
+forge you can ship, script, and run in CI, under your control.
 
 ---
 
@@ -102,7 +105,7 @@ ollama pull qwen2.5-coder:7b
 akmon chat
 ```
 
-### Anthropic API
+### Cloud API (frontier model)
 
 ```bash
 export ANTHROPIC_API_KEY=your-key
@@ -134,7 +137,7 @@ akmon config
 <table>
 <tr>
 <td>
-akmon v1.4.0  │  project: my-app  │  claude-haiku  │  INTERACTIVE
+akmon v1.4.0  │  project: my-app  │  your-model  │  INTERACTIVE
 ──────────────────────────────────────────────────────────────────
 You: find the auth code and explain how tokens work
 → semantic_search
@@ -156,9 +159,9 @@ type a message or / for commands
 </tr>
 </table>
 
-The `cache:8779` means 8,779 tokens were served from
-Anthropic's prompt cache — approximately 90% cheaper than
-fresh tokens. No other tool surfaces this information.
+The `cache:8779` means 8,779 tokens were served from the model
+host’s prompt cache—often far cheaper than fresh tokens for repeated
+context. We surface that number so you can see what the session saved.
 
 ---
 
