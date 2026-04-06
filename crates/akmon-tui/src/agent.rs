@@ -13,8 +13,7 @@ use akmon_query::AgentSession;
 use akmon_tools::SemanticSearchTool;
 use akmon_tools::{
     ApplyPatchTool, EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
-    ShellTool,
-    WebFetchTool, WriteFileTool, discover_mcp_tools,
+    ShellTool, WebFetchTool, WriteFileTool, discover_mcp_tools,
 };
 use tokio::sync::Notify;
 use tokio::sync::mpsc;

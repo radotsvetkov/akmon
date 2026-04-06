@@ -25,8 +25,7 @@ use akmon_query::{AgentSession, ToolCallSummary};
 use akmon_tools::SemanticSearchTool;
 use akmon_tools::{
     ApplyPatchTool, EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
-    ShellTool,
-    WebFetchTool, WriteFileTool, discover_mcp_tools,
+    ShellTool, WebFetchTool, WriteFileTool, discover_mcp_tools,
 };
 use akmon_tui::TuiLaunchConfig;
 use clap::{Parser, Subcommand, ValueEnum};

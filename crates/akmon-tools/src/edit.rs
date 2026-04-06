@@ -66,7 +66,8 @@ fn find_closest_line_hint(content: &str, search: &str) -> String {
             return format!("Closest match found at line {}:\n{}", i + 1, line);
         }
     }
-    "The first line of old_str was not found. The file may have changed; use read_file first.".into()
+    "The first line of old_str was not found. The file may have changed; use read_file first."
+        .into()
 }
 
 fn diff_stats_from_unified(diff: &str) -> (usize, usize, usize) {
@@ -352,7 +353,11 @@ mod tests {
         let v: JsonValue = serde_json::from_str(&content).expect("json");
         assert_eq!(v["type"], "file_edit_diff");
         assert_eq!(v["replaced"], true);
-        assert!(v["diff"].as_str().is_some_and(|d| d.contains("-BETA") && d.contains("+delta")));
+        assert!(
+            v["diff"]
+                .as_str()
+                .is_some_and(|d| d.contains("-BETA") && d.contains("+delta"))
+        );
         let disk = std::fs::read_to_string(dir.path().join("f.txt")).expect("read");
         assert_eq!(disk, "alpha\ndelta\ngamma\n");
     }

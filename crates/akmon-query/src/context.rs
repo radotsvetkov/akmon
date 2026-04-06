@@ -505,14 +505,14 @@ mod tests {
         let msgs = build_messages(None, &[], "task", repo, &["read_file"], false);
         assert!(
             msgs.iter().any(|m| {
-                m.role == MessageRole::System && m.content.contains("=== Language-specific rules ===")
+                m.role == MessageRole::System
+                    && m.content.contains("=== Language-specific rules ===")
             }),
             "expected language rules system block"
         );
         assert!(
-            msgs.iter().any(|m| {
-                m.role == MessageRole::System && m.content.contains("cargo check")
-            }),
+            msgs.iter()
+                .any(|m| { m.role == MessageRole::System && m.content.contains("cargo check") }),
             "expected Rust verify hint"
         );
     }

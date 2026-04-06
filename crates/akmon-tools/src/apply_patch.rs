@@ -59,15 +59,17 @@ fn normalize_single_file_patch(rel: &str, patch_body: &str) -> Result<String, To
     if chunks.is_empty() {
         return Err(ToolOutput::Error {
             code: ToolErrorCode::InvalidArgs,
-            message: "patch must contain at least one hunk (or a full unified diff with --- headers)"
-                .into(),
+            message:
+                "patch must contain at least one hunk (or a full unified diff with --- headers)"
+                    .into(),
         });
     }
     if chunks.len() > 1 {
         return Err(ToolOutput::Error {
             code: ToolErrorCode::InvalidArgs,
-            message: "apply_patch applies to one file only; use the `patch` tool for multi-file diffs"
-                .into(),
+            message:
+                "apply_patch applies to one file only; use the `patch` tool for multi-file diffs"
+                    .into(),
         });
     }
 

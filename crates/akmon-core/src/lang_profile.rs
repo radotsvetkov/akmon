@@ -928,7 +928,10 @@ fn framework_incremental_extra(fw: Framework) -> Option<&'static str> {
 }
 
 /// Builds incremental-writing guidance when the primary language is known ([`Language::Unknown`] → `None`).
-pub fn language_incremental_profile(root: &Path, project: &ProjectProfile) -> Option<LanguageProfile> {
+pub fn language_incremental_profile(
+    root: &Path,
+    project: &ProjectProfile,
+) -> Option<LanguageProfile> {
     if project.language == Language::Unknown {
         return None;
     }
