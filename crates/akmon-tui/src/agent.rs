@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use akmon_core::{
-    AgentConfig, AgentEvent, McpServerConfig, PolicyEngine, PolicyEngineMode, PolicyVerdict,
-    Sandbox, save_plan_markdown, write_audit_jsonl,
+    AgentConfig, AgentEvent, InteractivePolicyReply, McpServerConfig, PolicyEngine,
+    PolicyEngineMode, PolicyVerdict, Sandbox, save_plan_markdown, write_audit_jsonl,
 };
 use akmon_models::LlmProvider;
 use akmon_query::AgentSession;
@@ -55,7 +55,7 @@ pub enum BridgeMsg {
     },
 }
 
-type PolicySenderSlot = Arc<tokio::sync::Mutex<Option<mpsc::Sender<PolicyVerdict>>>>;
+type PolicySenderSlot = Arc<tokio::sync::Mutex<Option<mpsc::Sender<InteractivePolicyReply>>>>;
 
 fn build_tool_registry(
     shell_allow: &[String],
@@ -108,8 +108,8 @@ async fn build_agent_session(
     policy_tx_slot: &PolicySenderSlot,
     plan_mode: bool,
     model_override: Option<&str>,
-) -> Result<(AgentSession, mpsc::Receiver<PolicyVerdict>), String> {
-    let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
+) -> Result<(AgentSession, mpsc::Receiver<InteractivePolicyReply>), String> {
+    let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
     {
         let mut guard = policy_tx_slot.lock().await;
         *guard = Some(policy_tx);
@@ -252,15 +252,21 @@ pub async fn run_agent_loop(
     tokio::spawn(async move {
         while let Some(cmd) = ui_cmd_rx.recv().await {
             match cmd {
-                UiCommand::Confirm { allow } => {
-                    let v = if allow {
-                        PolicyVerdict::Allow
-                    } else {
-                        PolicyVerdict::Deny
+                UiCommand::Confirm {
+                    allow,
+                    remember_for_session,
+                } => {
+                    let reply = InteractivePolicyReply {
+                        verdict: if allow {
+                            PolicyVerdict::Allow
+                        } else {
+                            PolicyVerdict::Deny
+                        },
+                        remember_for_session: allow && remember_for_session,
                     };
                     let guard = slot_for_ui.lock().await;
                     if let Some(tx) = guard.as_ref() {
-                        let _ = tx.send(v).await;
+                        let _ = tx.send(reply).await;
                     }
                 }
                 UiCommand::Interrupt => interrupt_ui.store(true, Ordering::SeqCst),
@@ -329,7 +335,7 @@ pub async fn run_agent_loop(
                                     }
                                 }
                             });
-                            let mut pop: Option<mpsc::Receiver<PolicyVerdict>> = Some(prx);
+                            let mut pop: Option<mpsc::Receiver<InteractivePolicyReply>> = Some(prx);
                             let _ = planner_session
                                 .run(
                                     turn.task.clone(),

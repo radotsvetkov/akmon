@@ -305,6 +305,7 @@ RULES:\n\
     relevant code\n\
   - NEVER guess file paths\n\
   - NEVER rewrite entire existing files\n\
+  - Before each write_file, edit, patch, shell, git, or web_fetch tool call, write one short plain sentence stating what you are about to do and why. The user sees tool cards and approval prompts in the UI.\n\
 \n\
 {semantic_block}\
 All paths must be relative to the \n\

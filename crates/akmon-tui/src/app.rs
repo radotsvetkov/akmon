@@ -13,9 +13,11 @@ use uuid::Uuid;
 
 use crate::command::UiCommand;
 use crate::config::TuiLaunchConfig;
+use crate::layout::LayoutRects;
 use crate::message::TuiMessage;
 use crate::session_persist::SessionSummary;
 use crate::slash::SlashCommand;
+use crate::state::{AgentDisplayState, ConfirmationDialog};
 
 /// Target file to open in the user's `EDITOR` outside the alternate-screen TUI.
 #[derive(Debug, Clone)]
@@ -82,6 +84,16 @@ pub enum Overlay {
 
 /// Primary application state for the interactive terminal UI.
 pub struct TuiApp {
+    /// Last known full-terminal bounds (updated each frame and on resize).
+    pub terminal_size: Rect,
+    /// Cached root layout from [`crate::layout::compute_layout`].
+    pub layout_rects: LayoutRects,
+    /// Centered permission dialog state while [`Self::awaiting_confirmation`].
+    pub confirmation_dialog: Option<ConfirmationDialog>,
+    /// Short status-bar hint after Ctrl+C on an empty buffer (cleared on next input).
+    pub status_flash: Option<String>,
+    /// High-level agent UI phase (spinner / streaming / …).
+    pub agent_display: AgentDisplayState,
     /// Transcript rows (user, assistant, tools, …).
     pub messages: Vec<TuiMessage>,
     /// Current input draft (may contain newlines).
@@ -112,6 +124,8 @@ pub struct TuiApp {
     pub free_local_inference: bool,
     /// Whether an agent turn is in flight.
     pub agent_running: bool,
+    /// Short status for the header when [`Self::agent_running`] (e.g. “Model is responding…”).
+    pub agent_activity_line: String,
     /// Latest iteration index reported by the agent (from [`AgentEvent::IterationStarted`]).
     pub current_iteration: u32,
     /// Maximum agent iterations (updated from events when present).
@@ -184,6 +198,13 @@ pub struct TuiApp {
     pub session_touched_files: Vec<String>,
     /// When set, the input loop opens an external editor before the next redraw.
     pub pending_external_edit: Option<ExternalEditTarget>,
+    /// Rotating braille spinner frame (0..SPINNER_LEN) for the activity indicator.
+    pub spinner_frame: u8,
+    /// When `true`, the terminal sends mouse events (wheel scroll in the transcript).
+    /// When `false`, native click/drag text selection works; scroll with ↑↓ / PgUp/PgDn.
+    pub mouse_capture_enabled: bool,
+    /// Last value applied to the terminal via crossterm (keeps state in sync after toggles).
+    pub mouse_capture_applied: bool,
 }
 
 impl TuiApp {
@@ -202,6 +223,18 @@ impl TuiApp {
             .to_string();
         let context_scan = scan_context_files(&config.project_root);
         Self {
+            terminal_size: Rect::default(),
+            layout_rects: LayoutRects {
+                header: Rect::default(),
+                viewport: Rect::default(),
+                context_bar: None,
+                slash_autocomplete: None,
+                input: Rect::default(),
+                status: Rect::default(),
+            },
+            confirmation_dialog: None,
+            status_flash: None,
+            agent_display: AgentDisplayState::Idle,
             messages: Vec::new(),
             input_buffer: String::new(),
             input_cursor: 0,
@@ -217,6 +250,7 @@ impl TuiApp {
             uses_openrouter,
             free_local_inference,
             agent_running: false,
+            agent_activity_line: String::new(),
             current_iteration: 0,
             max_iterations: config.max_iterations,
             total_input_tokens: 0,
@@ -253,7 +287,16 @@ impl TuiApp {
             files_written: Vec::new(),
             session_touched_files: Vec::new(),
             pending_external_edit: None,
+            spinner_frame: 0,
+            mouse_capture_enabled: true,
+            mouse_capture_applied: false,
         }
+    }
+
+    /// Advances the spinner one frame (call on a ~100 ms tick).
+    pub fn tick_spinner(&mut self) {
+        const LEN: u8 = 10;
+        self.spinner_frame = (self.spinner_frame + 1) % LEN;
     }
 
     /// Consumes the `/plan` flag for the next submitted user message.
@@ -343,6 +386,9 @@ impl TuiApp {
                 if text.is_empty() {
                     return;
                 }
+                if self.agent_running {
+                    self.agent_activity_line = "Model is responding…".into();
+                }
                 let append_to_last = match self.messages.last_mut() {
                     Some(TuiMessage::Assistant {
                         content,
@@ -365,6 +411,18 @@ impl TuiApp {
                 name,
                 arguments,
             } => {
+                self.agent_activity_line = match name.as_str() {
+                    "write_file" => "Preparing file write — review approval below",
+                    "edit" | "patch" => "Preparing edit — review diff when prompted",
+                    "read_file" | "list_directory" | "search" | "semantic_search" => {
+                        "Reading project files…"
+                    }
+                    "shell" => "Shell command — approval required before run",
+                    "web_fetch" => "Web request — approval may be required",
+                    "git" => "Git operation — approval may be required",
+                    _ => "Running tool…",
+                }
+                .into();
                 self.messages.push(TuiMessage::ToolCall {
                     id,
                     name,
@@ -381,6 +439,12 @@ impl TuiApp {
                 message,
                 ..
             } => {
+                self.agent_activity_line = if success {
+                    "Tool finished — continuing…"
+                } else {
+                    "Tool failed — model may adjust…"
+                }
+                .into();
                 self.total_tool_calls = self.total_tool_calls.saturating_add(1);
                 if success {
                     self.successful_tool_calls = self.successful_tool_calls.saturating_add(1);
@@ -415,7 +479,13 @@ impl TuiApp {
                 description,
                 diff_preview,
             } => {
+                self.agent_activity_line =
+                    "Waiting for your approval — choose an option below".into();
                 self.awaiting_confirmation = true;
+                self.confirmation_dialog = Some(crate::render::dialog_from_confirmation(
+                    &description,
+                    diff_preview.as_deref(),
+                ));
                 self.messages.push(TuiMessage::Confirmation {
                     description,
                     diff_preview,
@@ -453,6 +523,7 @@ impl TuiApp {
             AgentEvent::IterationStarted { n, max } => {
                 self.current_iteration = n;
                 self.max_iterations = max;
+                self.agent_activity_line = format!("Step {n}/{max} · contacting model…");
             }
             AgentEvent::Done => {
                 if let Some(TuiMessage::Assistant { complete, .. }) = self
@@ -482,6 +553,7 @@ impl TuiApp {
     /// Records a confirmation answer in the transcript and clears the awaiting flag.
     pub fn mark_confirmation_answered(&mut self, allowed: bool) {
         self.awaiting_confirmation = false;
+        self.confirmation_dialog = None;
         if let Some(TuiMessage::Confirmation {
             answered, answer, ..
         }) = self
@@ -647,6 +719,48 @@ impl TuiApp {
         if self.auto_scroll {
             self.scroll_offset = self.max_scroll_offset(viewport_height, width);
         }
+    }
+
+    /// Derives [`Self::agent_display`] from flags and the transcript tail.
+    pub fn sync_agent_display(&mut self) {
+        self.agent_display = if self.awaiting_confirmation {
+            AgentDisplayState::WaitingForConfirmation
+        } else if !self.agent_running {
+            AgentDisplayState::Idle
+        } else if let Some(name) = self.messages.iter().rev().find_map(|m| {
+            if let TuiMessage::ToolCall {
+                name,
+                success: None,
+                ..
+            } = m
+            {
+                Some(name.clone())
+            } else {
+                None
+            }
+        }) {
+            AgentDisplayState::CallingTool {
+                tool_name: name,
+                step: self.current_iteration,
+            }
+        } else if let Some(n) = self.messages.iter().rev().find_map(|m| {
+            if let TuiMessage::Assistant {
+                content,
+                complete: false,
+                ..
+            } = m
+            {
+                Some(content.len() as u64)
+            } else {
+                None
+            }
+        }) {
+            AgentDisplayState::Streaming {
+                chars_received: n,
+            }
+        } else {
+            AgentDisplayState::Thinking
+        };
     }
 }
 

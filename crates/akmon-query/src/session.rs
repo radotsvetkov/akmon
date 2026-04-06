@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use akmon_core::{
-    AgentConfig, AgentError, AgentEvent, AgentState, AuditEvent, Permission, PolicyEngineError,
-    PolicyEngineMode, PolicyVerdict, Sandbox, check_iteration_limit, validate_transition,
+    AgentConfig, AgentError, AgentEvent, AgentState, AuditEvent, InteractivePolicyReply,
+    Permission, PolicyEngineError, PolicyEngineMode, PolicyVerdict, Sandbox, check_iteration_limit,
+    validate_transition,
 };
 use akmon_models::{
     CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
@@ -108,6 +109,8 @@ pub struct AgentSession {
     total_output_tokens: u32,
     /// When `true`, project system prompts are read-only (plan mode); tools should match.
     plan_mode: bool,
+    /// Permissions the user allowed with “remember for session”; matched exactly before interactive prompts.
+    permission_session_allowlist: Vec<Permission>,
 }
 
 impl AgentSession {
@@ -150,6 +153,7 @@ impl AgentSession {
             total_cache_read_tokens: 0,
             total_output_tokens: 0,
             plan_mode,
+            permission_session_allowlist: Vec::new(),
         }
     }
 
@@ -247,8 +251,8 @@ impl AgentSession {
     ///
     /// When the policy is [`PolicyEngineMode::Interactive`], [`PolicyEngineMode::AutoApproveReads`],
     /// or [`PolicyEngineMode::AutoApproveReadsAndFetch`],
-    /// put the session's [`mpsc::Receiver<PolicyVerdict>`] in `interactive_policy_rx` as `Some` so
-    /// write confirmations can be answered; the UI must send one verdict after each
+    /// put the session's [`mpsc::Receiver<InteractivePolicyReply>`] in `interactive_policy_rx` as `Some` so
+    /// write confirmations can be answered; the UI must send one reply after each
     /// [`AgentEvent::ConfirmationRequired`]. Use `&mut None` only when no interactive confirmations are
     /// possible (reads-only sessions may still use `Some` harmlessly).
     ///
@@ -258,7 +262,7 @@ impl AgentSession {
         &mut self,
         task: String,
         event_tx: mpsc::Sender<AgentEvent>,
-        interactive_policy_rx: &mut Option<mpsc::Receiver<PolicyVerdict>>,
+        interactive_policy_rx: &mut Option<mpsc::Receiver<InteractivePolicyReply>>,
         interrupt_after_current_tools: Option<Arc<AtomicBool>>,
     ) -> Result<(), AgentError> {
         self.prepare_for_new_user_turn()?;
@@ -563,7 +567,7 @@ impl AgentSession {
         tool_calls: Vec<ModelToolCall>,
         event_tx: &mpsc::Sender<AgentEvent>,
         task: &str,
-        interactive_policy_rx: &mut Option<mpsc::Receiver<PolicyVerdict>>,
+        interactive_policy_rx: &mut Option<mpsc::Receiver<InteractivePolicyReply>>,
     ) -> Result<(), AgentError> {
         let n = tool_calls.len();
         let mut slots: Vec<Option<ToolCallResult>> = vec![None; n];
@@ -608,6 +612,8 @@ impl AgentSession {
                 continue;
             };
 
+            // Resolve policy before dispatch so confirmations stay in Thinking and parallel
+            // batches do not emit completions while `parallel_tool_batch_remaining` is unset.
             let perms = concrete_permissions(
                 self.tools[tool_idx].as_ref(),
                 &name,
@@ -620,6 +626,29 @@ impl AgentSession {
                 file_change_diff_preview(self.sandbox.as_ref(), name.as_str(), &args).await;
 
             for perm in perms {
+                if self.permission_session_allowlist.contains(&perm) {
+                    let decision = self.policy.resolve_interactive(
+                        session_id.as_str(),
+                        perm.clone(),
+                        PolicyVerdict::Allow,
+                        "session remembered approval for identical permission",
+                    );
+                    let decision = match decision {
+                        Ok(d) => d,
+                        Err(e) => {
+                            return Err(AgentError::SessionFailed {
+                                message: e.to_string(),
+                            });
+                        }
+                    };
+                    self.audit_log.push(decision.audit.clone());
+                    if !decision.allowed {
+                        policy_denial_message = Some(format!("policy denied: {perm:?}"));
+                        break;
+                    }
+                    continue;
+                }
+
                 let allowed = match self.policy.mode() {
                     PolicyEngineMode::Interactive
                     | PolicyEngineMode::AutoApproveReads { .. }
@@ -636,7 +665,7 @@ impl AgentSession {
                                 let desc = match &perm {
                                     Permission::ExecuteCommand { command, cwd } => {
                                         format!(
-                                            "Shell command requires confirmation.\n  Command: {command}\n  Working directory: {}",
+                                            "Shell command requires confirmation.\n  Proposed command:\n    {command}\n  Working directory: {}",
                                             cwd.display()
                                         )
                                     }
@@ -668,7 +697,7 @@ impl AgentSession {
                                             .into(),
                                     });
                                 };
-                                let verdict = match rx.recv().await {
+                                let reply = match rx.recv().await {
                                     Some(v) => v,
                                     None => {
                                         return Err(AgentError::SessionFailed {
@@ -676,14 +705,20 @@ impl AgentSession {
                                         });
                                     }
                                 };
-                                let reason: String = match verdict {
-                                    PolicyVerdict::Allow => "user approved (stdin)".into(),
-                                    PolicyVerdict::Deny => "user denied (stdin)".into(),
+                                let reason: String = match reply.verdict {
+                                    PolicyVerdict::Allow => {
+                                        if reply.remember_for_session {
+                                            "user approved; remembered for this session".into()
+                                        } else {
+                                            "user approved (interactive)".into()
+                                        }
+                                    }
+                                    PolicyVerdict::Deny => "user denied (interactive)".into(),
                                 };
                                 let decision = self.policy.resolve_interactive(
                                     session_id.as_str(),
                                     perm.clone(),
-                                    verdict,
+                                    reply.verdict,
                                     reason,
                                 );
                                 let decision = match decision {
@@ -695,6 +730,12 @@ impl AgentSession {
                                     }
                                 };
                                 self.audit_log.push(decision.audit.clone());
+                                if reply.remember_for_session
+                                    && decision.allowed
+                                    && !self.permission_session_allowlist.contains(&perm)
+                                {
+                                    self.permission_session_allowlist.push(perm.clone());
+                                }
                                 self.apply_event(
                                     event_tx,
                                     AgentEvent::TextDelta {
@@ -769,22 +810,22 @@ impl AgentSession {
             });
         }
 
+        for a in &approved {
+            self.apply_event(
+                event_tx,
+                AgentEvent::ToolCallDispatched {
+                    id: a.id.clone(),
+                    name: a.name.clone(),
+                    arguments: a.arguments.clone(),
+                },
+                task,
+            )
+            .await?;
+        }
+
         if !approved.is_empty() {
             let batch_n = approved.len() as u32;
             self.parallel_tool_batch_remaining = batch_n;
-
-            for a in &approved {
-                self.apply_event(
-                    event_tx,
-                    AgentEvent::ToolCallDispatched {
-                        id: a.id.clone(),
-                        name: a.name.clone(),
-                        arguments: a.arguments.clone(),
-                    },
-                    task,
-                )
-                .await?;
-            }
 
             let sandbox = Arc::clone(&self.sandbox);
             let policy = Arc::clone(&self.policy);
@@ -892,7 +933,8 @@ impl AgentSession {
         let head = &messages_full[..main_end];
         let (to_s, _to_k) = self.context_manager.messages_to_summarize(head);
         if to_s.is_empty() {
-            eprintln!("akmon: context summarization skipped: nothing to fold under keep_recent");
+            // Do not eprintln here: the interactive TUI uses the same terminal as stderr, and a
+            // line on every turn corrupts the layout (text appears over the compose area).
             self.trim_oldest_non_system_fraction_of_context(0.2);
             return Ok(());
         }
@@ -930,8 +972,7 @@ impl AgentSession {
 
         let mut stream = match self.provider.complete(&summary_msgs, &sum_config).await {
             Ok(s) => s,
-            Err(e) => {
-                eprintln!("akmon: warning: context summarization request failed: {e}");
+            Err(_) => {
                 self.restore_state_after_summarization_abort();
                 self.trim_oldest_non_system_fraction_of_context(0.2);
                 return Ok(());
@@ -942,7 +983,6 @@ impl AgentSession {
         loop {
             let Some(item) = stream.next().await else {
                 if summary_text.is_empty() {
-                    eprintln!("akmon: warning: context summarization stream ended without output");
                     self.restore_state_after_summarization_abort();
                     self.trim_oldest_non_system_fraction_of_context(0.2);
                     return Ok(());
@@ -950,16 +990,14 @@ impl AgentSession {
                 break;
             };
             match item {
-                Err(e) => {
-                    eprintln!("akmon: warning: context summarization stream transport error: {e}");
+                Err(_) => {
                     self.restore_state_after_summarization_abort();
                     self.trim_oldest_non_system_fraction_of_context(0.2);
                     return Ok(());
                 }
                 Ok(StreamEvent::TextDelta { text }) => summary_text.push_str(&text),
                 Ok(StreamEvent::UsageReport(_)) => {}
-                Ok(StreamEvent::Error { error }) => {
-                    eprintln!("akmon: warning: context summarization stream error: {error}");
+                Ok(StreamEvent::Error { .. }) => {
                     self.restore_state_after_summarization_abort();
                     self.trim_oldest_non_system_fraction_of_context(0.2);
                     return Ok(());
@@ -969,13 +1007,11 @@ impl AgentSession {
                     tool_calls,
                 }) => {
                     if matches!(stop_reason, StopReason::MaxTokens) {
-                        eprintln!("akmon: warning: context summarization truncated");
                         self.restore_state_after_summarization_abort();
                         self.trim_oldest_non_system_fraction_of_context(0.2);
                         return Ok(());
                     }
                     if !tool_calls.is_empty() {
-                        eprintln!("akmon: warning: context summarization requested tools");
                         self.restore_state_after_summarization_abort();
                         self.trim_oldest_non_system_fraction_of_context(0.2);
                         return Ok(());
@@ -996,7 +1032,6 @@ impl AgentSession {
             .apply_folded_summary_to_context(to_s, head, summary_msg)
             .is_err()
         {
-            eprintln!("akmon: warning: failed to align summary fold with context");
             self.restore_state_after_summarization_abort();
             self.trim_oldest_non_system_fraction_of_context(0.2);
             return Ok(());
@@ -2153,8 +2188,8 @@ mod tests {
             })],
         ]);
 
-        let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(4);
-        let _ = policy_tx.send(PolicyVerdict::Allow).await;
+        let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(4);
+        let _ = policy_tx.send(InteractivePolicyReply::allow_once()).await;
 
         let mut session = AgentSession::new(
             AgentConfig {

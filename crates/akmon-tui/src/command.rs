@@ -7,6 +7,8 @@ pub enum UiCommand {
     Confirm {
         /// When `true`, the policy engine records an allow verdict; otherwise deny.
         allow: bool,
+        /// When `true` with `allow`, identical permissions auto-approve for the rest of this session.
+        remember_for_session: bool,
     },
     /// Request a graceful stop after the in-flight tool batch completes.
     Interrupt,

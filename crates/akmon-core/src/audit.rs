@@ -19,13 +19,42 @@ pub enum ToolOutcomeKind {
 }
 
 /// Result of a policy check as recorded in the audit log.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PolicyVerdict {
     /// Request permitted under active policy.
     Allow,
     /// Request denied under active policy.
     Deny,
+}
+
+/// Verdict from an interactive prompt (TUI or stdin), optionally remembering this permission for the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractivePolicyReply {
+    /// Whether the user allowed or denied the pending permission.
+    pub verdict: PolicyVerdict,
+    /// When `true` with [`PolicyVerdict::Allow`], identical [`crate::permission::Permission`] values
+    /// may auto-approve for the rest of the agent session without prompting again (orchestrator-defined).
+    #[serde(default)]
+    pub remember_for_session: bool,
+}
+
+impl InteractivePolicyReply {
+    /// Allow this action once (default for stdin / CLI).
+    pub fn allow_once() -> Self {
+        Self {
+            verdict: PolicyVerdict::Allow,
+            remember_for_session: false,
+        }
+    }
+
+    /// Deny this action.
+    pub fn deny() -> Self {
+        Self {
+            verdict: PolicyVerdict::Deny,
+            remember_for_session: false,
+        }
+    }
 }
 
 /// One append-only audit record. Serialized with `serde_json` for files and CLI `--output json`.

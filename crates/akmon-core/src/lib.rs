@@ -28,7 +28,9 @@ pub mod project;
 pub mod sandbox;
 pub mod secret;
 
-pub use audit::{AuditEvent, PolicyVerdict, ToolOutcomeKind, write_audit_jsonl};
+pub use audit::{
+    AuditEvent, InteractivePolicyReply, PolicyVerdict, ToolOutcomeKind, write_audit_jsonl,
+};
 pub use context_import::{
     CONTEXT_FILE_MAX_BYTES, ContextFile, ContextScan, ToolOrigin, primary_tool_from_files,
     scan_context_files, strip_mdc_style_frontmatter,

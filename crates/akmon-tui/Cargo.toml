@@ -30,6 +30,7 @@ ratatui = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+unicode-width = "0.2"
 uuid = { workspace = true }
 
 [dev-dependencies]

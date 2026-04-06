@@ -2,7 +2,9 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+
+use crate::layout::centered_rect;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
@@ -394,10 +396,21 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
     }
 }
 
-fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    let x = area.x.saturating_add(area.width.saturating_sub(w) / 2);
-    let y = area.y.saturating_add(area.height.saturating_sub(h) / 2);
-    Rect::new(x, y, w, h)
+
+/// Dims the transcript behind a permission dialog (Claude Code–style focus).
+pub fn draw_transcript_dim_layer(f: &mut Frame<'_>, msg_area: Rect) {
+    f.render_widget(
+        Paragraph::new("").block(
+            Block::default()
+                .style(
+                    Style::default()
+                        .bg(Color::Rgb(22, 24, 32))
+                        .fg(FG_MUTED)
+                        .add_modifier(Modifier::DIM),
+                )
+                .borders(Borders::NONE),
+        ),
+        msg_area,
+    );
 }
+

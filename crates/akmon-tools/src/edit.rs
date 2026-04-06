@@ -79,7 +79,7 @@ impl Tool for EditTool {
                 },
                 "old_str": {
                     "type": "string",
-                    "description": "The exact string to replace. Must appear exactly once in the file. Include enough surrounding context to be unique."
+                    "description": "Required non-empty exact UTF-8 substring from the file (copy from read_file). Must occur exactly once. Never pass \"\" or whitespace-only — use write_file to replace a whole file."
                 },
                 "new_str": {
                     "type": "string",
@@ -106,7 +106,7 @@ impl Tool for EditTool {
             Some(_) => {
                 return ToolOutput::Error {
                     code: ToolErrorCode::InvalidArgs,
-                    message: "\"old_str\" must be non-empty".into(),
+                    message: "edit: \"old_str\" must be a non-empty exact snippet from the file (read it first, copy the text to change verbatim). Empty old_str is invalid — use write_file for full rewrites.".into(),
                 };
             }
             None => {

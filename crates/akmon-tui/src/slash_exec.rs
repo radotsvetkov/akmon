@@ -412,6 +412,7 @@ fn dispatch(
                 return SlashHandled::Continue;
             }
             app.agent_running = true;
+            app.agent_activity_line = "Working — contacting model…".into();
             app.push_system_info("Implementation run queued.".into());
             app.overlay = Overlay::None;
             SlashHandled::Continue

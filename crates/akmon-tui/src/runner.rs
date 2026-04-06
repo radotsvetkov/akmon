@@ -16,10 +16,10 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
@@ -30,10 +30,16 @@ use crate::command::UiCommand;
 use crate::config::TuiLaunchConfig;
 use crate::cost_estimate::estimate_cost_usd;
 use crate::message::TuiMessage;
+use crate::layout::{self, rect_contains};
 use crate::overlay::{
-    draw_message_overlays, draw_slash_autocomplete, slash_autocomplete_row_count,
+    draw_message_overlays, draw_slash_autocomplete, draw_transcript_dim_layer,
+    slash_autocomplete_row_count,
 };
-use crate::render::{INPUT_UI_LINE_CAP, message_to_lines, paint_message_viewport};
+use crate::render::{
+    flatten_transcript, paint_message_viewport, paint_terminal_too_small,
+    render_confirmation_overlay, render_header_bar, render_status_bar, CostFrag, StatusParts,
+};
+use crate::state::{AgentDisplayState, ConfirmChoice};
 use crate::session_persist::{save_session_snapshot, saved_sessions_directory_empty};
 use crate::slash::{matching_commands, slash_command_name_prefix};
 use crate::slash_exec::{
@@ -52,6 +58,42 @@ const WELCOME_SPARK_MS: u64 = 500;
 
 /// Poll interval when waiting for input or a blink tick.
 const POLL_TICK_MS: u64 = 50;
+
+/// Content rows inside the compose border (3–8), from wrap-aware height so long lines do not spill.
+fn input_inner_rows_wrapped(buffer: &str, term_width: u16) -> u16 {
+    let inner_w = term_width.saturating_sub(2).max(8);
+    let body_rows = crate::render::input_body_row_count(buffer, inner_w).max(1) as u16;
+    body_rows.saturating_add(2).clamp(3, 8)
+}
+
+fn compose_stack_inputs(app: &TuiApp, term_width: u16) -> (u16, u16) {
+    let input_inner = if app.awaiting_confirmation || app.agent_running {
+        3
+    } else {
+        input_inner_rows_wrapped(&app.input_buffer, term_width)
+    };
+    let ac = if app.awaiting_confirmation {
+        0
+    } else {
+        slash_autocomplete_row_count(app)
+    };
+    (input_inner, ac)
+}
+
+fn viewport_msg_h(term_w: u16, term_h: u16, app: &TuiApp) -> usize {
+    let area = Rect::new(0, 0, term_w, term_h);
+    let show_ctx = !app.session_touched_files.is_empty();
+    let (input_inner, ac) = compose_stack_inputs(app, term_w);
+    layout::compute_layout(area, show_ctx, input_inner, ac)
+        .viewport
+        .height as usize
+}
+
+/// Milliseconds between spinner frame advances (activity indicator).
+const SPINNER_MS: u64 = 100;
+
+/// Braille spinner frames for the activity indicator.
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Errors returned by [`run_interactive`] / [`run_blocking`].
 #[derive(Debug)]
@@ -172,7 +214,6 @@ fn run_terminal_loop(
     enable_raw_mode()?;
     let mut stdout_mut = stdout_h;
     execute!(stdout_mut, EnterAlternateScreen)?;
-    execute!(stdout_mut, EnableMouseCapture)?;
     let _ = execute!(stdout_mut, EnableBracketedPaste);
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout_mut))?;
     let result = run_loop(
@@ -195,6 +236,23 @@ fn run_terminal_loop(
     result
 }
 
+fn sync_mouse_capture(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut TuiApp,
+) -> Result<(), TuiRunError> {
+    if app.mouse_capture_enabled == app.mouse_capture_applied {
+        return Ok(());
+    }
+    let backend = terminal.backend_mut();
+    if app.mouse_capture_enabled {
+        execute!(backend, EnableMouseCapture)?;
+    } else {
+        execute!(backend, DisableMouseCapture)?;
+    }
+    app.mouse_capture_applied = app.mouse_capture_enabled;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -208,17 +266,17 @@ fn run_loop(
 ) -> Result<(), TuiRunError> {
     let mut blink_accum: u64 = 0;
     let mut welcome_accum: u64 = 0;
+    let mut spinner_accum: u64 = 0;
     let mut running = true;
 
     let size = terminal.size().map_err(TuiRunError::Io)?;
-    let input_h = input_area_height(app);
-    let msg_h = message_viewport_height(size.height, input_h, app);
-    app.sync_scroll_to_bottom(msg_h as usize, size.width);
+    let msg_h = viewport_msg_h(size.width, size.height, app);
+    app.sync_scroll_to_bottom(msg_h, size.width);
 
     while running {
+        sync_mouse_capture(terminal, app)?;
         let size = terminal.size().map_err(TuiRunError::Io)?;
-        let input_h = input_area_height(app);
-        let msg_h = message_viewport_height(size.height, input_h, app) as usize;
+        let msg_h = viewport_msg_h(size.width, size.height, app);
         update_slash_autocomplete_overlay(app);
         drain_bridge_messages(
             app,
@@ -231,8 +289,7 @@ fn run_loop(
         );
         if app.pending_external_edit.is_some() {
             process_pending_external_editor(terminal, app, shared_config, reload_notify)?;
-            let input_h = input_area_height(app);
-            let msg_h2 = message_viewport_height(size.height, input_h, app) as usize;
+            let msg_h2 = viewport_msg_h(size.width, size.height, app);
             app.recompute_scroll_after_append(msg_h2, size.width);
         }
         let area = Rect::new(0, 0, size.width, size.height);
@@ -270,14 +327,40 @@ fn run_loop(
                     app.recompute_scroll_after_append(msg_h, size.width);
                 }
                 Event::Mouse(m) => {
-                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                        handle_input_left_click(app, m.column, m.row);
+                    if !app.mouse_capture_enabled {
+                        continue;
+                    }
+                    let area_sz = Rect::new(0, 0, size.width, size.height);
+                    let show_ctx = !app.session_touched_files.is_empty();
+                    let (ii, ac) = compose_stack_inputs(app, size.width);
+                    let lay = layout::compute_layout(area_sz, show_ctx, ii, ac);
+                    match m.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            handle_input_left_click(app, m.column, m.row);
+                        }
+                        MouseEventKind::ScrollUp => {
+                            if rect_contains(lay.viewport, m.column, m.row) {
+                                let ev_msg_h = lay.viewport.height as usize;
+                                app.scroll_up(3, ev_msg_h, size.width);
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if rect_contains(lay.viewport, m.column, m.row) {
+                                let ev_msg_h = lay.viewport.height as usize;
+                                app.scroll_down(3, ev_msg_h, size.width);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Event::Resize(w, h) => {
-                    let input_h = input_area_height(app);
-                    let msg_h = message_viewport_height(h, input_h, app);
-                    app.sync_scroll_to_bottom(msg_h as usize, w);
+                    let msg_h = viewport_msg_h(w, h, app);
+                    if app.auto_scroll {
+                        app.sync_scroll_to_bottom(msg_h, w);
+                    } else {
+                        let max_off = app.max_scroll_offset(msg_h, w);
+                        app.scroll_offset = app.scroll_offset.min(max_off);
+                    }
                 }
                 _ => {}
             }
@@ -293,6 +376,15 @@ fn run_loop(
         if welcome_accum >= WELCOME_SPARK_MS {
             welcome_accum = 0;
             app.welcome_spark_phase = !app.welcome_spark_phase;
+        }
+        if app.agent_running {
+            spinner_accum = spinner_accum.saturating_add(POLL_TICK_MS);
+            if spinner_accum >= SPINNER_MS {
+                spinner_accum = 0;
+                app.tick_spinner();
+            }
+        } else {
+            spinner_accum = 0;
         }
     }
     Ok(())
@@ -322,6 +414,7 @@ fn drain_bridge_messages(
                 plan_saved_path,
             } => {
                 app.agent_running = false;
+                app.agent_activity_line.clear();
                 interrupt.store(false, Ordering::SeqCst);
                 let cfg = lock_config_clone(shared_config);
                 let _ = save_session_snapshot(app, &cfg, app.session_started_at, None);
@@ -447,8 +540,8 @@ fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
     }
 }
 
-fn session_list_visible_rows(term_h: u16, input_h: u16, app: &TuiApp) -> usize {
-    let msg_h = message_viewport_height(term_h, input_h, app) as usize;
+fn session_list_visible_rows(term_w: u16, term_h: u16, app: &TuiApp) -> usize {
+    let msg_h = viewport_msg_h(term_w, term_h, app);
     msg_h.saturating_sub(8).max(3)
 }
 
@@ -568,33 +661,130 @@ fn handle_key(
     shared_config: &Arc<Mutex<TuiLaunchConfig>>,
     project_tx: mpsc::UnboundedSender<ProjectUiJob>,
 ) -> Result<bool, TuiRunError> {
-    let input_h = input_area_height(app);
-    let msg_h = message_viewport_height(term_height, input_h, app) as usize;
-    let list_vis = session_list_visible_rows(term_height, input_h, app);
+    let msg_h = viewport_msg_h(term_width, term_height, app);
+    let list_vis = session_list_visible_rows(term_width, term_height, app);
 
     if key.kind == KeyEventKind::Release {
         return Ok(true);
     }
 
+    let is_ctrl_c =
+        key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+    if !is_ctrl_c {
+        app.status_flash = None;
+    }
+
+    if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.mouse_capture_enabled = !app.mouse_capture_enabled;
+        app.push_system_info(if app.mouse_capture_enabled {
+            "Mouse wheel ON — scrolls transcript. In many terminals hold Shift while dragging to select text.".into()
+        } else {
+            "Mouse wheel OFF — click/drag selects text; use ↑↓ PgUp/PgDn to scroll. Ctrl+M enables wheel again.".into()
+        });
+        return Ok(true);
+    }
+
     if app.awaiting_confirmation {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                if let Some(tx) = app.ui_command_tx.as_ref() {
-                    let _ = tx.send(UiCommand::Confirm { allow: true });
-                }
-                app.mark_confirmation_answered(true);
-                app.recompute_scroll_after_append(msg_h, term_width);
-                return Ok(true);
+        if app.confirmation_dialog.is_none()
+            && let Some(TuiMessage::Confirmation {
+                description,
+                diff_preview,
+                answered: false,
+                ..
+            }) = app.messages.iter().rev().find(|m| {
+                matches!(
+                    m,
+                    TuiMessage::Confirmation {
+                        answered: false,
+                        ..
+                    }
+                )
+            })
+        {
+            app.confirmation_dialog = Some(crate::render::dialog_from_confirmation(
+                description,
+                diff_preview.as_deref(),
+            ));
+        }
+        let send_confirm = |app: &mut TuiApp, allow: bool, remember: bool| {
+            if let Some(tx) = app.ui_command_tx.as_ref() {
+                let _ = tx.send(UiCommand::Confirm {
+                    allow,
+                    remember_for_session: remember,
+                });
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                if let Some(tx) = app.ui_command_tx.as_ref() {
-                    let _ = tx.send(UiCommand::Confirm { allow: false });
+        };
+        if let Some(ref mut dlg) = app.confirmation_dialog {
+            match key.code {
+                KeyCode::Tab => {
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        dlg.cycle_choice_back();
+                    } else {
+                        dlg.cycle_choice();
+                    }
+                    return Ok(true);
                 }
-                app.mark_confirmation_answered(false);
-                app.recompute_scroll_after_append(msg_h, term_width);
-                return Ok(true);
+                KeyCode::Left => {
+                    dlg.cycle_choice_back();
+                    return Ok(true);
+                }
+                KeyCode::Right => {
+                    dlg.cycle_choice();
+                    return Ok(true);
+                }
+                KeyCode::PageUp | KeyCode::Char('k') => {
+                    dlg.scroll_offset = dlg.scroll_offset.saturating_sub(2);
+                    return Ok(true);
+                }
+                KeyCode::PageDown | KeyCode::Char('j') => {
+                    dlg.scroll_offset = dlg.scroll_offset.saturating_add(2);
+                    return Ok(true);
+                }
+                KeyCode::Enter => {
+                    let (allow, remember) = match dlg.selected_option {
+                        ConfirmChoice::Allow => (true, false),
+                        ConfirmChoice::AllowAlways => (true, true),
+                        ConfirmChoice::Deny | ConfirmChoice::ViewMore => (false, false),
+                    };
+                    send_confirm(app, allow, remember);
+                    app.mark_confirmation_answered(allow);
+                    app.recompute_scroll_after_append(msg_h, term_width);
+                    return Ok(true);
+                }
+                KeyCode::Char('1') | KeyCode::Char('y') => {
+                    send_confirm(app, true, false);
+                    app.mark_confirmation_answered(true);
+                    app.recompute_scroll_after_append(msg_h, term_width);
+                    return Ok(true);
+                }
+                KeyCode::Char('2') | KeyCode::Char('Y') => {
+                    send_confirm(app, true, true);
+                    app.mark_confirmation_answered(true);
+                    app.recompute_scroll_after_append(msg_h, term_width);
+                    return Ok(true);
+                }
+                KeyCode::Char('3') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    send_confirm(app, false, false);
+                    app.mark_confirmation_answered(false);
+                    app.recompute_scroll_after_append(msg_h, term_width);
+                    return Ok(true);
+                }
+                _ => return Ok(true),
             }
-            _ => return Ok(true),
+        } else {
+            // Desync (e.g. resumed session): deny so the agent run cannot hang with a dead UI.
+            if let Some(tx) = app.ui_command_tx.as_ref() {
+                let _ = tx.send(UiCommand::Confirm {
+                    allow: false,
+                    remember_for_session: false,
+                });
+            }
+            app.mark_confirmation_answered(false);
+            app.push_system_info(
+                "Permission prompt was missing — denied to unblock (retry the action)."
+                    .into(),
+            );
+            return Ok(true);
         }
     }
 
@@ -748,11 +938,17 @@ fn handle_key(
                 if let Some(tx) = app.ui_command_tx.as_ref() {
                     let _ = tx.send(UiCommand::Interrupt);
                 }
-                app.push_system_info("Interrupting after current tool…".into());
+                app.push_system_info(
+                    "─ interrupted ───────────────────────────────────".into(),
+                );
+                app.agent_running = false;
+                app.agent_activity_line.clear();
                 app.recompute_scroll_after_append(msg_h, term_width);
+            } else if !app.input_buffer.is_empty() {
+                app.input_buffer.clear();
+                app.input_cursor = 0;
             } else {
-                save_session_best_effort(app, shared_config);
-                return Ok(false);
+                app.status_flash = Some("use /exit to quit".into());
             }
             Ok(true)
         }
@@ -780,19 +976,46 @@ fn handle_key(
             Ok(true)
         }
         KeyCode::Up => {
-            app.scroll_up(1, msg_h, term_width);
+            if app.input_buffer.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) {
+                let d = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    3
+                } else {
+                    1
+                };
+                app.scroll_up(d, msg_h, term_width);
+            }
             Ok(true)
         }
         KeyCode::Down => {
-            app.scroll_down(1, msg_h, term_width);
+            if app.input_buffer.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) {
+                let d = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    3
+                } else {
+                    1
+                };
+                app.scroll_down(d, msg_h, term_width);
+            }
             Ok(true)
         }
         KeyCode::PageUp => {
-            app.scroll_up(msg_h.max(1), msg_h, term_width);
+            let delta = msg_h.saturating_sub(2).max(1);
+            app.scroll_up(delta, msg_h, term_width);
             Ok(true)
         }
         KeyCode::PageDown => {
-            app.scroll_down(msg_h.max(1), msg_h, term_width);
+            let delta = msg_h.saturating_sub(2).max(1);
+            app.scroll_down(delta, msg_h, term_width);
+            Ok(true)
+        }
+        KeyCode::Home => {
+            app.scroll_offset = 0;
+            app.auto_scroll = false;
+            Ok(true)
+        }
+        KeyCode::End => {
+            let max = app.max_scroll_offset(msg_h, term_width);
+            app.scroll_offset = max;
+            app.auto_scroll = true;
             Ok(true)
         }
         KeyCode::Enter => {
@@ -822,6 +1045,7 @@ fn handle_key(
                     architect,
                 });
                 app.agent_running = true;
+                app.agent_activity_line = "Working — contacting model…".into();
                 app.recompute_scroll_after_append(msg_h, term_width);
             }
             Ok(true)
@@ -854,71 +1078,114 @@ fn handle_key(
 
 fn show_help(app: &mut TuiApp) {
     app.push_system_info(
-        "Keys: Enter submit · Shift+Enter newline · paste multi-line text · ←→ caret · Tab expand tool · ↑↓ PgUp/PgDn scroll · Ctrl+C interrupt (exit when idle) · Ctrl+D exit · q exit when idle · Ctrl+/ help"
+        "Keys: Enter submit  ·  Shift+Enter newline  ·  ←→ caret  ·  Tab expand tool\n\
+         Scroll: PgUp/PgDn  ·  ↑↓ when input empty  ·  Ctrl+↑↓ always  ·  mouse wheel on transcript  ·  End = latest\n\
+         Approvals: centered dialog — Tab / ←→ choose  ·  Enter / 1 / y (once)  ·  2 / Y (session)  ·  Esc / 3 / n (deny)\n\
+         Ctrl+C (running)=interrupt  ·  Ctrl+D / q exit  ·  Ctrl+/ this help"
             .into(),
     );
 }
 
-fn message_viewport_height(term_height: u16, input_block_height: u16, app: &TuiApp) -> u16 {
-    let header = 1u16;
-    term_height
-        .saturating_sub(
-            header
-                .saturating_add(chrome_below_messages(app))
-                .saturating_add(input_block_height),
+fn status_bar_parts(app: &TuiApp) -> StatusParts {
+    let sid: String = app.session_id.to_string().chars().take(8).collect();
+    let tok = app
+        .total_input_tokens
+        .saturating_add(app.total_output_tokens);
+    let cache_style = if app.total_cache_read_tokens > 0 {
+        Style::default().fg(OK_GREEN)
+    } else {
+        Style::default().fg(FG_MUTED)
+    };
+
+    let cost_line = if app.free_local_inference {
+        Some(CostFrag {
+            text: "free".into(),
+            style: Style::default().fg(FG_MUTED),
+        })
+    } else if let Some(est) = estimate_cost_usd(
+        u64::from(app.total_input_tokens),
+        u64::from(app.total_output_tokens),
+        u64::from(app.total_cache_read_tokens),
+        &app.model_name,
+        app.uses_openrouter,
+        app.free_local_inference,
+    ) {
+        let (text, style) = session_cost_style(est);
+        Some(CostFrag { text, style })
+    } else if app.total_input_tokens > 0 || app.total_output_tokens > 0 {
+        Some(CostFrag {
+            text: "~$?".into(),
+            style: Style::default().fg(FG_MUTED),
+        })
+    } else {
+        None
+    };
+
+    let mut hint = if let Some(ref s) = app.status_flash {
+        s.clone()
+    } else if app.awaiting_confirmation {
+        "Permission: Tab pick · Enter/1/y once · 2/Y remember · Esc/3/n deny".into()
+    } else if app.agent_running {
+        if let AgentDisplayState::Streaming { chars_received } = app.agent_display {
+            format!("streaming {chars_received} chars")
+        } else {
+            "Ctrl+C interrupt".into()
+        }
+    } else if !app.auto_scroll {
+        "End latest · Ctrl+↑↓ scroll".into()
+    } else {
+        "Ctrl+? help · Ctrl+↑↓ history".into()
+    };
+
+    if app.stream_cursor_visible
+        && matches!(
+            app.agent_display,
+            AgentDisplayState::Streaming { .. }
         )
-        .max(1)
-}
-
-fn input_area_height(app: &TuiApp) -> u16 {
-    if app.awaiting_confirmation {
-        return 5;
+    {
+        hint.push_str(" ▊");
     }
-    let ac = slash_autocomplete_row_count(app);
-    let line_count = app
-        .input_buffer
-        .split('\n')
-        .count()
-        .clamp(1, INPUT_UI_LINE_CAP);
-    let body = (line_count.max(3) as u16).saturating_add(1);
-    ac.saturating_add(body)
-}
 
-fn flattened_lines(app: &TuiApp, width: u16) -> Vec<Line<'static>> {
-    app.messages
-        .iter()
-        .flat_map(|m| message_to_lines(m, width, app.stream_cursor_visible))
-        .collect()
+    StatusParts {
+        session_prefix: sid,
+        tokens: tok,
+        cache: app.total_cache_read_tokens,
+        cache_style,
+        cost_line,
+        hint,
+    }
 }
 
 fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
-    let input_h = input_area_height(app);
-    let ctx_h = if app.session_touched_files.is_empty() {
-        0
-    } else {
-        1
-    };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(ctx_h),
-            Constraint::Length(input_h),
-        ])
-        .split(area);
+    app.sync_agent_display();
+    let show_ctx = !app.session_touched_files.is_empty();
+    let (input_inner, ac_h) = compose_stack_inputs(app, area.width);
+    app.terminal_size = area;
+    app.layout_rects = layout::compute_layout(area, show_ctx, input_inner, ac_h);
 
-    let header = build_header_line(app);
-    let status_top = build_status_line_top(app, chunks[2].width);
-    let status_bottom = build_status_line_bottom(app, chunks[3].width);
+    if layout::terminal_too_small(area) {
+        paint_terminal_too_small(f, area);
+        return;
+    }
 
-    let msg_area = chunks[1];
-    let flat = flattened_lines(app, msg_area.width);
-    let viewport_h = msg_area.height as usize;
+    let clip = |r: Rect| layout::intersect_rect(area, r);
+    let rects = app.layout_rects;
+
+    render_header_bar(
+        f,
+        clip(rects.header),
+        app.version.as_str(),
+        &app.project_root,
+        app.model_name.as_str(),
+        app.provider_display_name.as_str(),
+    );
+
+    let vp = clip(rects.viewport);
+    let flat = flatten_transcript(&app.messages, vp.width, app.stream_cursor_visible);
+    let viewport_h = vp.height as usize;
     let max_off = flat.len().saturating_sub(viewport_h);
-    let scroll = app.scroll_offset.min(max_off);
+    app.scroll_offset = app.scroll_offset.min(max_off);
+    let scroll = app.scroll_offset;
     let end = (scroll + viewport_h).min(flat.len());
     let visible: Vec<Line<'static>> = if scroll < flat.len() {
         flat[scroll..end].to_vec()
@@ -926,34 +1193,11 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
         Vec::new()
     };
 
-    let input_text = build_input_widget(app);
-    let ac_h = slash_autocomplete_row_count(app);
-    let line_count = app
-        .input_buffer
-        .split('\n')
-        .count()
-        .clamp(1, INPUT_UI_LINE_CAP);
-    let input_body_h = (line_count.max(3) as u16).saturating_add(1);
-    let input_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(ac_h), Constraint::Length(input_body_h)])
-        .split(chunks[5]);
-
-    let input_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(BORDER))
-        .title(Span::styled(
-            " compose ",
-            Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
-        ));
-    app.input_body_inner = Some(input_block.clone().inner(input_chunks[1]));
-
-    f.render_widget(Paragraph::new(header), chunks[0]);
     let show_welcome = app.messages.is_empty() && !app.awaiting_confirmation;
     let first_session_ever = saved_sessions_directory_empty();
     paint_message_viewport(
         f,
-        msg_area,
+        vp,
         show_welcome,
         app.version.as_str(),
         app.project_name.as_str(),
@@ -964,27 +1208,83 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
         &app.context_scan,
         visible,
     );
-    draw_message_overlays(f, app, msg_area);
-    f.render_widget(Paragraph::new(status_top), chunks[2]);
-    f.render_widget(Paragraph::new(status_bottom), chunks[3]);
-    if ctx_h > 0
-        && let Some(ctx_line) = build_context_line(app, chunks[4].width)
-    {
-        f.render_widget(Paragraph::new(ctx_line), chunks[4]);
+
+    draw_message_overlays(f, app, vp);
+
+    if app.awaiting_confirmation {
+        draw_transcript_dim_layer(f, vp);
+        if let Some(ref dlg) = app.confirmation_dialog {
+            render_confirmation_overlay(f, vp, dlg);
+        }
     }
-    if ac_h > 0 {
-        draw_slash_autocomplete(f, app, input_chunks[0]);
+
+    if let Some(ctx_r) = rects.context_bar {
+        let cr = clip(ctx_r);
+        if let Some(ctx_line) = build_context_line(app, cr.width) {
+            f.render_widget(Paragraph::new(ctx_line), cr);
+        }
     }
-    f.render_widget(
-        Paragraph::new(input_text)
-            .block(input_block)
-            .wrap(Wrap { trim: false }),
-        input_chunks[1],
-    );
+
+    if let Some(ac_r) = rects.slash_autocomplete {
+        draw_slash_autocomplete(f, app, clip(ac_r));
+    }
+
+    let inp = clip(rects.input);
+    if app.awaiting_confirmation {
+        app.input_body_inner = None;
+        f.render_widget(Clear, inp);
+        let hint = Paragraph::new(Line::from(vec![Span::styled(
+            "  Compose locked — use the permission dialog (Tab to choose, then Enter or Esc)",
+            Style::default().fg(FG_MUTED),
+        )]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(WARN)),
+        );
+        f.render_widget(hint, inp);
+    } else if app.agent_running {
+        app.input_body_inner = None;
+        let thinking = Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                SPINNER_FRAMES[app.spinner_frame as usize % SPINNER_FRAMES.len()].to_string(),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", app.agent_activity_line),
+                Style::default().fg(FG_MUTED),
+            ),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER)),
+        );
+        f.render_widget(thinking, inp);
+    } else {
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(ACCENT))
+            .title(Span::styled(
+                " compose ",
+                Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
+            ));
+        app.input_body_inner = Some(input_block.clone().inner(inp));
+        let input_text = build_input_widget(app);
+        f.render_widget(
+            Paragraph::new(input_text)
+                .block(input_block)
+                .wrap(Wrap { trim: false }),
+            inp,
+        );
+    }
+
+    render_status_bar(f, clip(rects.status), status_bar_parts(app));
 }
 
 fn handle_input_left_click(app: &mut TuiApp, column: u16, row: u16) {
-    if app.awaiting_confirmation {
+    if app.awaiting_confirmation || app.agent_running {
         return;
     }
     let Some(inner) = app.input_body_inner else {
@@ -998,71 +1298,9 @@ fn handle_input_left_click(app: &mut TuiApp, column: u16, row: u16) {
     }
     let rel_col = (column - inner.x) as usize;
     let rel_row = (row - inner.y) as usize;
-    let b = crate::render::map_input_click_to_byte_index(&app.input_buffer, rel_row, rel_col);
+    let b =
+        crate::render::map_input_click_wrapped(&app.input_buffer, inner.width, rel_row, rel_col);
     app.input_cursor = crate::render::snap_utf8_cursor(&app.input_buffer, b);
-}
-
-fn build_header_line(app: &TuiApp) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            "akmon",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  ·  v{}  ·  {}", app.version, app.mode_label),
-            Style::default().fg(FG_MUTED),
-        ),
-    ])
-}
-
-fn build_status_line_top(app: &TuiApp, total_width: u16) -> Line<'static> {
-    let sep = Style::default().fg(BORDER);
-    let line = Line::from(vec![
-        Span::styled(
-            cwd_shortened(&app.project_root),
-            Style::default().fg(FG_PRIMARY),
-        ),
-        Span::styled("  ·  ", sep),
-        Span::styled(app.model_name.clone(), Style::default().fg(ACCENT_DIM)),
-        Span::styled("  ·  ", sep),
-        Span::styled(
-            app.provider_display_name.clone(),
-            Style::default().fg(FG_MUTED),
-        ),
-    ]);
-    let w = total_width as usize;
-    if line.width() <= w {
-        return line;
-    }
-    let flat = format!(
-        "{}  ·  {}  ·  {}",
-        cwd_shortened(&app.project_root),
-        app.model_name,
-        app.provider_display_name
-    );
-    Line::from(Span::styled(
-        shorten_from_left_chars(&flat, w),
-        Style::default().fg(FG_PRIMARY),
-    ))
-}
-
-fn status_cost_span(app: &TuiApp) -> Option<Span<'static>> {
-    if app.free_local_inference {
-        return None;
-    }
-    let est = estimate_cost_usd(
-        u64::from(app.total_input_tokens),
-        u64::from(app.total_output_tokens),
-        u64::from(app.total_cache_read_tokens),
-        &app.model_name,
-        app.uses_openrouter,
-        app.free_local_inference,
-    )?;
-    if est <= 0.0 {
-        return None;
-    }
-    let (text, style) = session_cost_style(est);
-    Some(Span::styled(text, style))
 }
 
 fn session_cost_style(cost: f64) -> (String, Style) {
@@ -1078,61 +1316,6 @@ fn session_cost_style(cost: f64) -> (String, Style) {
     } else {
         (format!("~${cost:.2}"), Style::default().fg(ERR))
     }
-}
-
-fn build_status_line_bottom(app: &TuiApp, total_width: u16) -> Line<'static> {
-    let sid: String = app.session_id.to_string().chars().take(8).collect();
-    let sep = Style::default().fg(BORDER);
-    let tok = app
-        .total_input_tokens
-        .saturating_add(app.total_output_tokens);
-    let mut spans: Vec<Span<'static>> = vec![
-        Span::styled(sid, Style::default().fg(ACCENT_DIM)),
-        Span::styled("  ·  ", sep),
-        Span::styled(format!("tokens {tok}"), Style::default().fg(FG_PRIMARY)),
-        Span::styled("  ·  ", sep),
-    ];
-    let cache_style = if app.total_cache_read_tokens > 0 {
-        Style::default().fg(OK_GREEN)
-    } else {
-        Style::default().fg(FG_MUTED)
-    };
-    spans.push(Span::styled(
-        format!("cache {}", app.total_cache_read_tokens),
-        cache_style,
-    ));
-    if !app.free_local_inference {
-        spans.push(Span::styled("  ·  ", sep));
-        if let Some(sp) = status_cost_span(app) {
-            spans.push(sp);
-        } else if estimate_cost_usd(
-            u64::from(app.total_input_tokens),
-            u64::from(app.total_output_tokens),
-            u64::from(app.total_cache_read_tokens),
-            &app.model_name,
-            app.uses_openrouter,
-            app.free_local_inference,
-        )
-        .is_none()
-            && (app.total_input_tokens > 0 || app.total_output_tokens > 0)
-        {
-            spans.push(Span::styled("~$?", Style::default().fg(FG_MUTED)));
-        }
-    }
-    if app.agent_running {
-        spans.push(Span::styled("  ·  ", sep));
-        spans.push(Span::styled(
-            format!("step {}", app.current_iteration),
-            Style::default().fg(ACCENT_DIM),
-        ));
-    }
-    let left_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let help = "Ctrl+/ help";
-    let w = total_width as usize;
-    let pad = w.saturating_sub(left_len + help.chars().count());
-    spans.push(Span::raw(" ".repeat(pad.min(256))));
-    spans.push(Span::styled(help, Style::default().fg(FG_MUTED)));
-    Line::from(spans)
 }
 
 fn build_context_line(app: &TuiApp, total_width: u16) -> Option<Line<'static>> {
@@ -1154,45 +1337,12 @@ fn build_context_line(app: &TuiApp, total_width: u16) -> Option<Line<'static>> {
     }
     let w = total_width as usize;
     if text.chars().count() > w {
-        text = shorten_from_left_chars(&text, w);
+        text = crate::paths::shorten_from_left_chars(&text, w);
     }
     Some(Line::from(Span::styled(
         text,
         Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
     )))
-}
-
-/// Project root shown in chrome: `$HOME` → `~`, tail-preserved truncation at `max_chars`.
-pub(crate) fn cwd_shortened(project_root: &Path) -> String {
-    let path = std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
-    let mut s = path.to_string_lossy().into_owned();
-    if let Ok(home) = std::env::var("HOME")
-        && !home.is_empty()
-        && s.starts_with(&home)
-    {
-        s = format!("~{}", &s[home.len()..]);
-    }
-    shorten_from_left_chars(&s, 40)
-}
-
-fn shorten_from_left_chars(s: &str, max_chars: usize) -> String {
-    let n = s.chars().count();
-    if n <= max_chars {
-        return s.to_string();
-    }
-    let take = max_chars.saturating_sub(3);
-    let skip = n.saturating_sub(take);
-    let tail: String = s.chars().skip(skip).collect();
-    format!("...{tail}")
-}
-
-fn chrome_below_messages(app: &TuiApp) -> u16 {
-    let ctx = if app.session_touched_files.is_empty() {
-        0
-    } else {
-        1
-    };
-    2u16.saturating_add(ctx)
 }
 
 fn format_session_duration(d: Duration) -> String {
@@ -1208,7 +1358,7 @@ fn format_session_duration(d: Duration) -> String {
 
 fn print_exit_summary(app: &TuiApp) {
     let wall = app.session_instant.elapsed();
-    let cwd = cwd_shortened(&app.project_root);
+    let cwd = crate::paths::cwd_shortened(&app.project_root);
     let sid8: String = app.session_id.to_string().chars().take(8).collect();
     let est = estimate_cost_usd(
         u64::from(app.total_input_tokens),
@@ -1303,7 +1453,12 @@ fn process_pending_external_editor(
 
     enable_raw_mode()?;
     execute!(out, EnterAlternateScreen).map_err(TuiRunError::Io)?;
-    execute!(out, EnableMouseCapture).map_err(TuiRunError::Io)?;
+    if app.mouse_capture_enabled {
+        execute!(out, EnableMouseCapture).map_err(TuiRunError::Io)?;
+    } else {
+        execute!(out, DisableMouseCapture).map_err(TuiRunError::Io)?;
+    }
+    app.mouse_capture_applied = app.mouse_capture_enabled;
     let _ = out.flush();
     terminal.clear().map_err(TuiRunError::Io)?;
     let _ = terminal.hide_cursor();
@@ -1355,36 +1510,6 @@ fn span_char_under_caret(ch: char) -> Span<'static> {
 }
 
 fn build_input_widget(app: &TuiApp) -> Text<'static> {
-    if app.awaiting_confirmation {
-        let desc = app
-            .messages
-            .iter()
-            .rev()
-            .find_map(|m| {
-                if let TuiMessage::Confirmation {
-                    description,
-                    answered,
-                    ..
-                } = m
-                    && !answered
-                {
-                    return Some(description.as_str());
-                }
-                None
-            })
-            .unwrap_or("Confirmation required");
-        return Text::from(vec![
-            Line::from(vec![Span::styled(
-                format!("⚠ {desc}"),
-                Style::default().fg(WARN),
-            )]),
-            Line::from(vec![Span::styled(
-                "[y] Allow   [n] Deny",
-                Style::default().fg(FG_PRIMARY),
-            )]),
-        ]);
-    }
-
     let buf = &app.input_buffer;
     let cur = app.input_cursor.min(buf.len());
     let mut line_spans: Vec<Span<'static>> = vec![Span::styled(
@@ -1499,7 +1624,7 @@ mod input_mouse_tests {
     fn cwd_shortened_starts_with_tilde_inside_home() {
         use std::path::Path;
 
-        use super::cwd_shortened;
+        use crate::paths::cwd_shortened;
 
         let Ok(home) = std::env::var("HOME") else {
             return;

@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use akmon_config::AkmonGlobalConfig;
 use akmon_core::{
-    AgentConfig, AgentError, AgentEvent, AuditEvent, McpServerConfig, PolicyEngine,
-    PolicyEngineMode, PolicyVerdict, Sandbox, write_audit_jsonl,
+    AgentConfig, AgentError, AgentEvent, AuditEvent, InteractivePolicyReply, McpServerConfig,
+    PolicyEngine, PolicyEngineMode, PolicyVerdict, Sandbox, write_audit_jsonl,
 };
 use akmon_models::{LlmConnectConfig, LlmProvider};
 use akmon_query::{AgentSession, ToolCallSummary};
@@ -577,7 +577,7 @@ fn resolve_audit_log_path(
 /// Prints [`AgentEvent`]s for the TTY and forwards interactive policy replies.
 async fn run_event_printer(
     mut ev_rx: mpsc::Receiver<AgentEvent>,
-    policy_tx: mpsc::Sender<PolicyVerdict>,
+    policy_tx: mpsc::Sender<InteractivePolicyReply>,
     output: OutputFormat,
 ) {
     while let Some(ev) = ev_rx.recv().await {
@@ -631,7 +631,7 @@ async fn run_event_printer(
                     eprint!("{}", akmon_tools::colorize_unified_diff(&diff));
                 }
                 let line: String = tokio::task::spawn_blocking(|| {
-                    print!("Allow? [y/N]: ");
+                    print!("Allow? [y=once / Y=remember session / n=N]: ");
                     let _ = std::io::stdout().flush();
                     let mut buf = String::new();
                     let _ = std::io::stdin().read_line(&mut buf);
@@ -639,12 +639,18 @@ async fn run_event_printer(
                 })
                 .await
                 .unwrap_or_default();
-                let verdict = if line.trim().eq_ignore_ascii_case("y") {
-                    PolicyVerdict::Allow
+                let t = line.trim();
+                let reply = if t == "Y" {
+                    InteractivePolicyReply {
+                        verdict: PolicyVerdict::Allow,
+                        remember_for_session: true,
+                    }
+                } else if t.eq_ignore_ascii_case("y") {
+                    InteractivePolicyReply::allow_once()
                 } else {
-                    PolicyVerdict::Deny
+                    InteractivePolicyReply::deny()
                 };
-                let _ = policy_tx.send(verdict).await;
+                let _ = policy_tx.send(reply).await;
             }
             AgentEvent::UsageReport {
                 input_tokens,
@@ -1064,7 +1070,7 @@ async fn main() -> ExitCode {
             true,
         );
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
-        let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
+        let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
         let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
         let mut policy_opt = Some(policy_rx);
         let run_outcome = session
@@ -1182,7 +1188,7 @@ async fn main() -> ExitCode {
             true,
         );
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
-        let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
+        let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
         let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
         let mut policy_opt = Some(policy_rx);
         let plan_run = planner_session
@@ -1267,7 +1273,7 @@ async fn main() -> ExitCode {
             "Implement this plan exactly:\n\n{plan_text}\n\nOriginal task: {task}\n\nFollow the plan step by step.\nDo not deviate from the plan without explaining why."
         );
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
-        let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
+        let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
         let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
         let mut policy_opt = Some(policy_rx);
         let run_outcome = session.run(impl_task, ev_tx, &mut policy_opt, None).await;
@@ -1381,7 +1387,7 @@ async fn main() -> ExitCode {
     );
 
     let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
-    let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
+    let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
     let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
 
     let mut policy_opt = Some(policy_rx);
