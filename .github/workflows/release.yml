@@ -9,6 +9,9 @@ jobs:
   release:
     name: Create release
     runs-on: ubuntu-latest
+    # Default GITHUB_TOKEN is read-only unless granted; releases + generate_release_notes need write.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
