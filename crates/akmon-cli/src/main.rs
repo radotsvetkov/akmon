@@ -1239,7 +1239,7 @@ async fn main() -> ExitCode {
                     }
                 }
                 Err(e) => {
-                    eprintln!("akmon: MCP server {} unavailable: {e}", url);
+                    eprintln!("akmon: MCP server {url} unavailable: {e}");
                 }
             }
         }
@@ -1354,7 +1354,7 @@ async fn main() -> ExitCode {
                 }
             }
             Err(e) => {
-                eprintln!("akmon: MCP server {} unavailable: {e}", url);
+                eprintln!("akmon: MCP server {url} unavailable: {e}");
             }
         }
     }
