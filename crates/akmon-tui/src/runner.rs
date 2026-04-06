@@ -22,7 +22,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
-use crate::agent::{run_agent_loop, BridgeMsg};
+use crate::agent::{run_agent_loop, AgentTurn, BridgeMsg};
 use crate::tui_project::ProjectUiJob;
 use crate::app::Overlay;
 use crate::command::UiCommand;
@@ -32,7 +32,9 @@ use crate::overlay::{draw_message_overlays, draw_slash_autocomplete, slash_autoc
 use crate::render::{message_to_lines, paint_message_viewport};
 use crate::session_persist::save_session_snapshot;
 use crate::slash::{matching_commands, slash_command_name_prefix};
-use crate::slash_exec::{handle_slash_line, session_list_enter, SlashEnv, SlashHandled};
+use crate::slash_exec::{
+    handle_slash_line, model_picker_enter, session_list_enter, SlashEnv, SlashHandled,
+};
 use crate::theme::{ACCENT, ACCENT_DIM, BORDER, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN};
 use crate::TuiApp;
 
@@ -81,7 +83,7 @@ impl From<std::io::Error> for TuiRunError {
 /// Runs the TUI and agent concurrently (requires an active Tokio runtime).
 pub async fn run_interactive(config: TuiLaunchConfig) -> Result<(), TuiRunError> {
     let (bridge_tx, bridge_rx) = std::sync::mpsc::sync_channel::<BridgeMsg>(512);
-    let (task_tx, task_rx) = mpsc::unbounded_channel::<String>();
+    let (task_tx, task_rx) = mpsc::unbounded_channel::<AgentTurn>();
     let (ui_cmd_tx, ui_cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
     let interrupt = Arc::new(AtomicBool::new(false));
 
@@ -150,7 +152,7 @@ pub fn run_blocking(config: TuiLaunchConfig) -> Result<(), TuiRunError> {
 fn run_terminal_loop(
     config: TuiLaunchConfig,
     bridge_rx: std::sync::mpsc::Receiver<BridgeMsg>,
-    task_tx: mpsc::UnboundedSender<String>,
+    task_tx: mpsc::UnboundedSender<AgentTurn>,
     ui_cmd_tx: mpsc::UnboundedSender<UiCommand>,
     interrupt: Arc<AtomicBool>,
     shared_config: Arc<Mutex<TuiLaunchConfig>>,
@@ -189,7 +191,7 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut TuiApp,
     bridge_rx: &std::sync::mpsc::Receiver<BridgeMsg>,
-    task_tx: &mpsc::UnboundedSender<String>,
+    task_tx: &mpsc::UnboundedSender<AgentTurn>,
     interrupt: &Arc<AtomicBool>,
     shared_config: &Arc<Mutex<TuiLaunchConfig>>,
     reload_notify: &Arc<Notify>,
@@ -291,11 +293,21 @@ fn drain_bridge_messages(
                 app.apply_agent_event(ev);
                 app.recompute_scroll_after_append(msg_h, width);
             }
-            BridgeMsg::RunFinished => {
+            BridgeMsg::StatusInfo(msg) => {
+                app.push_system_info(msg);
+                app.recompute_scroll_after_append(msg_h, width);
+            }
+            BridgeMsg::RunFinished { captured_plan } => {
                 app.agent_running = false;
                 interrupt.store(false, Ordering::SeqCst);
                 let cfg = lock_config_clone(shared_config);
                 let _ = save_session_snapshot(app, &cfg, app.session_started_at, None);
+                if let Some(plan) = captured_plan {
+                    app.pending_plan = Some(plan);
+                    app.push_system_info(
+                        "Plan complete. Review above, then type /implement to execute it or edit the plan and describe changes.".into(),
+                    );
+                }
                 app.recompute_scroll_after_append(msg_h, width);
             }
             BridgeMsg::ProjectJobDone {
@@ -339,6 +351,7 @@ fn slash_env_for(
     app: &TuiApp,
     shared_config: &Arc<Mutex<TuiLaunchConfig>>,
     project_tx: mpsc::UnboundedSender<ProjectUiJob>,
+    agent_task_tx: mpsc::UnboundedSender<AgentTurn>,
 ) -> SlashEnv {
     SlashEnv {
         shared_config: Arc::clone(shared_config),
@@ -349,6 +362,7 @@ fn slash_env_for(
         index_enabled_flag: app.index_enabled,
         index_bin_path: app.project_root.join(".akmon").join("index.bin"),
         project_job_tx: project_tx,
+        agent_task_tx,
     }
 }
 
@@ -357,6 +371,7 @@ fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
         app.overlay,
         Overlay::Help
             | Overlay::SessionList { .. }
+            | Overlay::ModelPicker { .. }
             | Overlay::AuditLog { .. }
             | Overlay::CostSummary
     ) {
@@ -405,6 +420,40 @@ fn session_list_visible_rows(term_h: u16, input_h: u16) -> usize {
     msg_h.saturating_sub(8).max(3)
 }
 
+fn model_picker_clamp(app: &mut TuiApp, visible: usize) {
+    let Overlay::ModelPicker {
+        rows,
+        selectable,
+        selected,
+        scroll,
+    } = &mut app.overlay
+    else {
+        return;
+    };
+    if selectable.is_empty() || rows.is_empty() {
+        return;
+    }
+    let vis = visible.max(1);
+    if *selected >= selectable.len() {
+        *selected = selectable.len() - 1;
+    }
+    let row_i = selectable[*selected];
+    if rows.len() <= vis {
+        *scroll = 0;
+        return;
+    }
+    if row_i < *scroll {
+        *scroll = row_i;
+    }
+    if row_i >= *scroll + vis {
+        *scroll = row_i + 1 - vis;
+    }
+    let max_scroll = rows.len().saturating_sub(vis);
+    if *scroll > max_scroll {
+        *scroll = max_scroll;
+    }
+}
+
 fn session_list_clamp(app: &mut TuiApp, visible: usize) {
     let Overlay::SessionList {
         sessions,
@@ -439,8 +488,9 @@ fn submit_slash_autocomplete_or_line(
     msg_h: usize,
     term_width: u16,
     project_tx: mpsc::UnboundedSender<ProjectUiJob>,
+    agent_task_tx: mpsc::UnboundedSender<AgentTurn>,
 ) -> Result<bool, TuiRunError> {
-    let env = slash_env_for(app, shared_config, project_tx);
+    let env = slash_env_for(app, shared_config, project_tx, agent_task_tx);
     if let Overlay::SlashAutocomplete { matches, .. } = &app.overlay {
         if !matches.is_empty() {
             let sel = app.slash_ac_selected.min(matches.len().saturating_sub(1));
@@ -481,7 +531,7 @@ fn handle_key(
     key: KeyEvent,
     term_width: u16,
     term_height: u16,
-    task_tx: &mpsc::UnboundedSender<String>,
+    task_tx: &mpsc::UnboundedSender<AgentTurn>,
     interrupt: &Arc<AtomicBool>,
     shared_config: &Arc<Mutex<TuiLaunchConfig>>,
     project_tx: mpsc::UnboundedSender<ProjectUiJob>,
@@ -530,7 +580,7 @@ fn handle_key(
                 app.overlay = Overlay::None;
             }
             KeyCode::Enter => {
-                let env = slash_env_for(app, shared_config, project_tx.clone());
+                let env = slash_env_for(app, shared_config, project_tx.clone(), task_tx.clone());
                 session_list_enter(app, &env);
                 app.recompute_scroll_after_append(msg_h, term_width);
             }
@@ -554,6 +604,42 @@ fn handle_key(
                     }
                 }
                 session_list_clamp(app, list_vis);
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    if matches!(app.overlay, Overlay::ModelPicker { .. }) {
+        match key.code {
+            KeyCode::Esc => {
+                app.overlay = Overlay::None;
+            }
+            KeyCode::Enter => {
+                let env = slash_env_for(app, shared_config, project_tx.clone(), task_tx.clone());
+                model_picker_enter(app, &env);
+                app.recompute_scroll_after_append(msg_h, term_width);
+            }
+            KeyCode::Up => {
+                if let Overlay::ModelPicker { selected, .. } = &mut app.overlay {
+                    if *selected > 0 {
+                        *selected -= 1;
+                    }
+                }
+                model_picker_clamp(app, list_vis);
+            }
+            KeyCode::Down => {
+                if let Overlay::ModelPicker {
+                    selectable,
+                    selected,
+                    ..
+                } = &mut app.overlay
+                {
+                    if *selected + 1 < selectable.len() {
+                        *selected += 1;
+                    }
+                }
+                model_picker_clamp(app, list_vis);
             }
             _ => {}
         }
@@ -624,6 +710,7 @@ fn handle_key(
                     msg_h,
                     term_width,
                     project_tx.clone(),
+                    task_tx.clone(),
                 );
             }
             _ => {}
@@ -695,13 +782,20 @@ fn handle_key(
                 msg_h,
                 term_width,
                 project_tx.clone(),
+                task_tx.clone(),
             )? {
                 return Ok(false);
             }
             if !app.agent_running {
                 if let Some(task) = app.submit_user_message() {
                     interrupt.store(false, Ordering::SeqCst);
-                    let _ = task_tx.send(task);
+                    let plan_only = app.take_plan_only_next_turn();
+                    let architect = app.take_architect_next_turn();
+                    let _ = task_tx.send(AgentTurn {
+                        task,
+                        plan_only,
+                        architect,
+                    });
                     app.agent_running = true;
                     app.recompute_scroll_after_append(msg_h, term_width);
                 }
@@ -1030,6 +1124,16 @@ mod input_mouse_tests {
             max_iterations: 5,
             index_enabled: false,
             anthropic_key: None,
+            openrouter_key: None,
+            openai_key: None,
+            groq_key: None,
+            azure_endpoint: None,
+            azure_key: None,
+            azure_api_version: "2024-02-01".into(),
+            bedrock: false,
+            aws_region: "us-east-1".into(),
+            openai_compatible_url: None,
+            openai_compatible_key: None,
             ollama_url: "http://x".into(),
             shell_allow: Vec::new(),
             web_fetch: false,
@@ -1042,6 +1146,7 @@ mod input_mouse_tests {
             sandbox_has_git_root: true,
             semantic_index: None,
             auto_commit: false,
+            planner_model: "llama3.2".into(),
         }
     }
 

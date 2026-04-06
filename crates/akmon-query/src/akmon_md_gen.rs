@@ -6,7 +6,7 @@ use akmon_models::{
 use futures::StreamExt;
 
 /// System instructions for the one-shot `AKMON.md` author model call.
-pub const AKMON_MD_SYSTEM_PROMPT: &str = "You are generating an AKMON.md project memory file. Write in concise markdown. This file will be loaded as system context for an AI coding agent. Be accurate and specific. Output only the markdown content, no preamble.";
+pub const AKMON_MD_SYSTEM_PROMPT: &str = "You are generating an AKMON.md project steering document. Write in concise markdown. This file is loaded as system context for an AI coding agent. Be accurate and specific. The Current sprint section is the highest-impact steering signal—keep it concrete. Output only the markdown content, no preamble.";
 
 /// Calls the configured provider once (streaming) and returns concatenated assistant markdown.
 ///
@@ -28,7 +28,20 @@ pub async fn generate_akmon_md_markdown(
         }
     }
     user.push_str(&format!(
-        "\n\nFollow this structure:\n# {title}\n\n## What this is\nOne paragraph describing the project.\n\n## Project structure\nBullet list of key files/directories with one-line descriptions.\n\n## Tech stack\nKey languages, frameworks, and dependencies.\n\n## Conventions\nCoding conventions if detectable from the project.\n\n## Current goals\n(Leave this section empty with a comment: \"# Update this section with your current sprint goals\")\n",
+        "\n\nFollow this structure exactly (use these ## headings):\n\
+# {title}\n\n\
+## Product\n\
+What this is, who it is for, what problem it solves. One paragraph. Plain language, no jargon.\n\n\
+## Architecture\n\
+High-level structure: key components and how they relate. Tell the reader where to look in the repo.\n\n\
+## Tech stack\n\
+Languages, frameworks, and important crates/packages. Include versions when relevant.\n\n\
+## Conventions\n\
+Coding standards the agent must follow (error handling, naming, tests layout, commit style, etc.). Use bullets.\n\n\
+## Current sprint\n\
+What you are working on right now. Update at the start of each session. If unknown, write: _Update this at the start of each work session._\n\n\
+## Done\n\
+Brief completed milestones for historical context.\n",
         title = title_for_heading
     ));
 

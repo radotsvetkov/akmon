@@ -8,15 +8,24 @@ description = "Ratatui-based interactive terminal UI for Akmon."
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+semantic-index = [
+    "dep:akmon-index",
+    "dep:fastembed",
+    "akmon-index/semantic-index",
+    "akmon-tools/semantic-index",
+]
+
 [dependencies]
 akmon-core = { path = "../akmon-core" }
-akmon-index = { path = "../akmon-index" }
+akmon-index = { path = "../akmon-index", optional = true }
 akmon-models = { path = "../akmon-models" }
 akmon-query = { path = "../akmon-query" }
 akmon-tools = { path = "../akmon-tools" }
 chrono = { version = "0.4", features = ["serde"] }
 crossterm = { workspace = true }
-fastembed = { version = "5", default-features = true }
+fastembed = { version = "5", default-features = true, optional = true }
 ratatui = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }

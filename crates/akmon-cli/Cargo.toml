@@ -12,17 +12,26 @@ repository.workspace = true
 name = "akmon"
 path = "src/main.rs"
 
+[features]
+default = ["semantic-index"]
+semantic-index = [
+    "dep:akmon-index",
+    "dep:fastembed",
+    "akmon-index/semantic-index",
+    "akmon-tools/semantic-index",
+    "akmon-tui/semantic-index",
+]
+
 [dependencies]
 akmon-config = { path = "../akmon-config" }
 akmon-core = { path = "../akmon-core" }
-akmon-index = { path = "../akmon-index" }
+akmon-index = { path = "../akmon-index", optional = true }
 akmon-models = { path = "../akmon-models" }
 akmon-query = { path = "../akmon-query" }
 akmon-tools = { path = "../akmon-tools" }
 akmon-tui = { path = "../akmon-tui" }
-# v5: see `akmon-index` for rationale (`--index` / semantic embeddings).
-fastembed = { version = "5", default-features = true }
 clap = { version = "4", features = ["derive", "env"] }
+fastembed = { version = "5", default-features = true, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 dunce = "1"
 serde = { version = "1", features = ["derive"] }

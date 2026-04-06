@@ -174,7 +174,7 @@ fn non_tool_message_to_anthropic(m: &Message) -> Option<Value> {
     }
 }
 
-fn build_anthropic_api_messages(msgs: &[&Message]) -> Vec<Value> {
+pub(crate) fn build_anthropic_api_messages(msgs: &[&Message]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut i: usize = 0;
     while i < msgs.len() {
@@ -200,7 +200,7 @@ fn build_anthropic_api_messages(msgs: &[&Message]) -> Vec<Value> {
     out
 }
 
-fn anthropic_tools_from_config(config: &CompletionConfig) -> Vec<Value> {
+pub(crate) fn anthropic_tools_from_config(config: &CompletionConfig) -> Vec<Value> {
     config
         .tools
         .iter()
@@ -252,6 +252,39 @@ fn build_request_json(
                 );
             }
         }
+        map.insert("tools".to_string(), Value::Array(tools));
+    }
+    Value::Object(map)
+}
+
+/// JSON body for **Amazon Bedrock** `InvokeModelWithResponseStream` (Claude Messages-shaped payload).
+pub(crate) fn build_bedrock_anthropic_invoke_json(
+    messages: &[Message],
+    config: &CompletionConfig,
+) -> Value {
+    let (system, rest) = anthropic_system_and_rest(messages);
+    let api_messages = build_anthropic_api_messages(&rest);
+    let mut tools = anthropic_tools_from_config(config);
+    for t in &mut tools {
+        if let Some(obj) = t.as_object_mut() {
+            obj.remove("cache_control");
+        }
+    }
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "anthropic_version".to_string(),
+        json!("bedrock-2023-05-31"),
+    );
+    map.insert("max_tokens".to_string(), json!(config.max_tokens));
+    map.insert("temperature".to_string(), json!(config.temperature));
+    if !system.is_empty() {
+        map.insert(
+            "system".to_string(),
+            json!([{ "type": "text", "text": system }]),
+        );
+    }
+    map.insert("messages".to_string(), Value::Array(api_messages));
+    if !tools.is_empty() {
         map.insert("tools".to_string(), Value::Array(tools));
     }
     Value::Object(map)
@@ -331,7 +364,8 @@ fn sse_block_to_json(block: &str) -> Result<Option<Value>, ModelError> {
     })
 }
 
-struct ToolAccum {
+/// Incremental tool-use state for Anthropic-style streaming JSON (shared with Bedrock Claude streaming).
+pub(crate) struct ToolAccum {
     id: String,
     name: String,
     partial_json: String,
@@ -365,7 +399,8 @@ where
     }
 }
 
-fn apply_anthropic_sse_json(
+/// Applies one Anthropic/Bedrock Claude streaming protocol JSON object (`type` discriminant).
+pub(crate) fn apply_anthropic_sse_json(
     v: &Value,
     tool_builds: &mut BTreeMap<usize, ToolAccum>,
     finished_tools: &mut BTreeMap<usize, ModelToolCall>,

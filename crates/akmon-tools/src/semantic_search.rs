@@ -179,7 +179,7 @@ impl Tool for SemanticSearchTool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-index"))]
 mod tests {
     use super::*;
     use akmon_core::{PolicyEngine, PolicyEngineMode, Sandbox};

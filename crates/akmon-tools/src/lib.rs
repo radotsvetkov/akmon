@@ -12,6 +12,7 @@ mod output;
 mod patch;
 mod read_file;
 mod search;
+#[cfg(feature = "semantic-index")]
 mod semantic_search;
 mod shell;
 mod web_fetch;
@@ -26,6 +27,7 @@ pub use output::{ToolErrorCode, ToolOutput};
 pub use patch::{patch_write_relative_paths, PatchTool};
 pub use read_file::{ReadFileTool, DEFAULT_MAX_READ_BYTES};
 pub use search::{SearchTool, DEFAULT_MAX_SEARCH_FILE_BYTES, DEFAULT_MAX_SEARCH_RESULTS};
+#[cfg(feature = "semantic-index")]
 pub use semantic_search::SemanticSearchTool;
 pub use shell::ShellTool;
 pub use web_fetch::{validate_url, WebFetchTool};

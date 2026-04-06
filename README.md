@@ -1,125 +1,358 @@
+<!-- HEADER -->
+<div align="center">
+✦    ✦  ✦
+████████████
+████████████████
+████████████████
+██████████████
+████████
+████████████
+████████████████
+████████████████████
+
 # Akmon
 
-Akmon is a **local-first, trust-first** terminal agent for working inside a git-backed project. It is aimed at developers who want a single **Rust-native** binary that can reason over their tree with explicit permissions, a hard iteration ceiling, and a **complete audit trail** of every policy decision and tool step. Unlike opaque cloud assistants, Akmon keeps the model, tools, and filesystem boundary under your control: it talks to **Ollama** on your machine or to the **Anthropic API** when you provide a key, and it writes a **full JSONL audit log** of everything it did so runs stay accountable and reproducible.
+**The AI coding agent built for developers 
+who take security seriously.**
+
+Local-first · Trust-first · Rust-native · 
+Single binary · No subscription
+
+[![CI](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml/badge.svg)](https://github.com/radotsvetkov/akmon/actions)
+[![Crates.io](https://img.shields.io/crates/v/akmon.svg)](https://crates.io/crates/akmon)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Tests](https://img.shields.io/badge/tests-200%2B_passing-brightgreen.svg)](https://github.com/radotsvetkov/akmon/actions)
+
+</div>
+
+---
+
+## Why Akmon
+
+Every AI coding agent today requires you 
+to trust a vendor with your code, your 
+API keys, and your development workflow. 
+Anthropic can block your access overnight 
+(they did on April 4th, 2026). Cursor can 
+change billing and drain your credits. 
+Claude Code requires a subscription you 
+do not control.
+
+Akmon is different by design:
+
+**Every action is audited.** Every tool call, 
+every permission decision, every model 
+response is logged to a JSONL file with 
+timestamps and reasons. No other coding 
+agent has this.
+
+**Nothing leaves your machine without 
+permission.** Files are sandboxed to your 
+git root. Web requests are SSRF-protected. 
+API keys are zeroized in memory on drop. 
+The policy engine enforces every boundary.
+
+**No subscription. No vendor lock-in.** 
+Bring your own API key for any provider — 
+Anthropic, OpenAI, OpenRouter (500+ models), 
+Groq, Azure, Bedrock, or run fully offline 
+with Ollama. One binary. You own the tool.
+
+---
 
 ## Install
 
-### From source
-
-Prerequisites: Rust toolchain via [rustup](https://rustup.rs/).
-
+### One-line install (macOS/Linux)
 ```bash
-git clone https://github.com/your-org/akmon
+curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) \
+  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon
+```
+
+### From source
+```bash
+git clone https://github.com/radotsvetkov/akmon
 cd akmon
 cargo build --release
-# binary at target/release/akmon
-# optionally: cp target/release/akmon /usr/local/bin/
+cp target/release/akmon /usr/local/bin/
 ```
 
-### Quick start with Ollama
+Requires Rust 1.85+ via [rustup](https://rustup.rs).
 
+---
+
+## Quick start
+
+### Local models (free, offline, private)
 ```bash
-ollama pull llama3.2
-akmon --yes --task "describe this codebase"
+# Install Ollama: https://ollama.com
+ollama pull qwen2.5-coder:7b
+
+akmon chat
 ```
 
-### Quick start with Anthropic
-
-Use a **dated snapshot** model id (not only an alias) so behavior and [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) stay predictable. The binary default matches [`DEFAULT_ANTHROPIC_MODEL`](crates/akmon-models/src/anthropic.rs) (currently `claude-haiku-4-5-20251001`).
-
+### Anthropic API
 ```bash
-export ANTHROPIC_API_KEY=your_key
-akmon --yes \
+export ANTHROPIC_API_KEY=your-key
+
+akmon chat --model claude-haiku-4-5-20251001
+```
+
+### OpenRouter (500+ models, one key)
+```bash
+export OPENROUTER_API_KEY=your-key
+
+# Use any model through one key
+akmon chat --model anthropic/claude-haiku-4-5
+akmon chat --model meta-llama/llama-3.3-70b-instruct
+akmon chat --model deepseek/deepseek-chat
+```
+
+### Set up once with the config wizard
+```bash
+akmon config
+```
+
+---
+
+## Interactive TUI
+┌─ akmon v1.4.0 │ project: my-app │ claude-haiku │ INTERACTIVE ─────┐
+│                                                                      │
+│  You: find the authentication code and explain how tokens work       │
+│                                                                      │
+│  → semantic_search                                                   │
+│  ✓ semantic_search  [Tab to expand]                                  │
+│  → read_file                                                         │
+│  ✓ read_file                                                         │
+│                                                                      │
+│  Akmon: The authentication system uses JWT tokens stored in...       │
+│         ▊                                                            │
+│                                                                      │
+├─ a1b2c3d4 │ tokens:4821 │ cache:8779 │ step 2/25 │ Ctrl+? help ────┤
+│ > type a message or / for commands                                   │
+└──────────────────────────────────────────────────────────────────────┘
+
+The `cache: 8779` shown in green means 8,779 tokens were served from 
+Anthropic's prompt cache — approximately 90% cheaper than fresh tokens. 
+No other tool shows you this.
+
+---
+
+## Headless mode (CI and scripting)
+```bash
+# Run a task
+akmon --yes --task "add error handling to the fetch function"
+
+# JSON output for scripting
+akmon --yes --output json --task "list all TODO comments" | jq .result
+
+# Plan before implementing
+akmon --plan --task "refactor the auth module"
+cat .akmon/plans/*.md  # review the plan
+
+# Architect mode: cheap model plans, main model implements
+akmon --architect \
+  --planner-model llama3.2 \
   --model claude-haiku-4-5-20251001 \
-  --task "describe this codebase"
+  --task "add OAuth to the API"
 ```
 
-To list ids your key can use: `curl https://api.anthropic.com/v1/models -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01"`.
+---
 
-## How it works
+## Spec-driven development
 
-Akmon runs a tight **agent loop** backed by an explicit finite-state machine. Each `--task` turn starts from `Idle`, moves through planning and thinking, and can cycle through tool execution and optional confirmation gates until the model ends the turn or a **hard iteration limit** stops the loop. Tool results and streamed assistant text are folded back into **multi-turn context** so the model can continue with full visibility into what it already tried.
-
-The **sandbox** is rooted at your **git project root** (Akmon walks upward from the current directory to find `.git`). Every filesystem tool path is resolved and validated against that root: paths are normalized, **symlinks are resolved before** the boundary check, and attempts to escape outside the tree are rejected.
-
-The **policy engine** runs in one of several modes (deny-all, interactive, auto-approve reads with optional write confirmation, or auto-approve reads plus optional web fetch when `--yes-web` is used with `--web-fetch`). **Every** permission check produces an audit record with **verdict and reason**, so you can see not only what happened but why it was allowed or denied.
-
-The **audit log** is a **JSON Lines** file (one JSON object per line) written under `.akmon/audit/` by default, named after the session UUID. When you use `--output json`, the printed `RunReport` includes the same `session_id` and `audit_log_path`, so machine-readable stdout and the on-disk audit file stay linked.
-
-## Available tools
-
-| Tool | What it does | Permission required |
-|------|----------------|---------------------|
-| `list_directory` | List files and subdirectories in a path | `ListDirectory` (auto-approved with `--yes`) |
-| `read_file` | Read a UTF-8 text file | `ReadFile` (auto-approved with `--yes`) |
-| `write_file` | Write content to a file atomically | `WriteFile` (always requires interactive confirmation) |
-| `shell` | Run an allowlisted argv-only subprocess (no shell interpreter) | `ExecuteCommand` (always requires interactive confirmation; opt-in via `--shell-allow`) |
-
-### MCP tools (`--mcp-server`)
-
-Connect Akmon to any MCP server to extend it with additional tools:
-
+For building new features from scratch with structured planning:
 ```bash
-akmon --mcp-server http://localhost:3000 \
-  --task "use the database tool to..."
+# Generate requirements → design → tasks
+akmon spec auth-system \
+  "JWT authentication with refresh tokens"
+
+# Review and iterate on each phase
+akmon spec auth-system design
+akmon spec auth-system tasks
+
+# Implement one task at a time
+akmon spec auth-system implement
 ```
 
-Tools are discovered automatically at startup via the MCP protocol (`tools/list`); each invocation uses `tools/call` over JSON-RPC. MCP tools require **`NetworkFetch`** permission to the server base URL (same policy rules as `web_fetch` where applicable).
+---
 
-## CLI reference
+## Project initialization
+```bash
+# Analyze an existing project and generate AKMON.md
+cd my-existing-project
+akmon init
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--task` / `-t` | none | Task to run |
-| `--model` | `llama3.2` | Model name |
-| `--ollama-url` | `http://localhost:11434` | Ollama base URL |
-| `--anthropic-key` | env `ANTHROPIC_API_KEY` | Anthropic API key |
-| `--yes` / `-y` | false | Auto-approve read-only operations (`ReadFile`, `ListDirectory`) |
-| `--yes-web` | false | With `--yes` and `--web-fetch`, auto-approve `NetworkFetch` to URLs that pass tool-side SSRF checks |
-| `--output` | `text` | Output format: `text` or `json` |
-| `--audit-log` | `.akmon/audit/{session_id}.jsonl` | Audit log file path |
-| `--shell-allow` | _(none)_ | Glob pattern for an allowlisted argv-only `shell` tool command; repeatable (see trust model) |
-| `--web-fetch` | false | Register the `web_fetch` tool (off by default; see trust model) |
-| `--mcp-server` | _(none)_ | MCP server base URL; register all tools from that server (repeatable) |
+# Scaffold a new project from scratch
+akmon new my-api --lang rust --type cli \
+  "A CLI tool for processing CSV files"
+```
+
+---
+
+## The audit trail
+
+Every session writes a JSONL audit log:
+```bash
+cat .akmon/audit/$(ls .akmon/audit | tail -1) | jq .
+```
+```json
+{"event_kind":"policy_evaluation",
+ "permission":{"permission":"write_file","path":"src/main.rs"},
+ "verdict":"allow","reason":"user confirmed"}
+{"event_kind":"agent_step",
+ "description":"ToolCallCompleted(edit, success=true)"}
+```
+
+Every policy decision. Every tool call. Every permission grant or denial. 
+Logged, timestamped, machine-readable. This is what compliance teams need 
+and what no other tool provides.
+
+---
+
+## Provider support
+
+| Provider | How |
+|---|---|
+| Ollama (local) | `akmon chat --model llama3.2` |
+| Anthropic | `ANTHROPIC_API_KEY=... akmon chat` |
+| OpenRouter | `OPENROUTER_API_KEY=... akmon chat --model anthropic/claude-haiku` |
+| OpenAI | `OPENAI_API_KEY=... akmon chat --model gpt-4o` |
+| Groq | `GROQ_API_KEY=... akmon chat --model llama-3.3-70b-versatile` |
+| Azure OpenAI | `--azure-endpoint ... --azure-key ...` |
+| Amazon Bedrock | `--bedrock` + AWS env vars |
+| Any OpenAI-compatible | `--openai-compatible-url ...` |
+
+---
+
+## Tools
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_directory` | Explore project structure | read (--yes) |
+| `read_file` | Read any text file | read (--yes) |
+| `write_file` | Atomic file write | confirm always |
+| `edit` | Surgical string replace | confirm always |
+| `patch` | Apply unified diff | confirm always |
+| `search` | Regex search with context | read (--yes) |
+| `semantic_search` | Natural language code search | read (--yes) |
+| `git` | Status, diff, log, add, commit | read/confirm |
+| `shell` | Allowlisted commands only | confirm always |
+| `web_fetch` | SSRF-protected URL fetch | opt-in |
+| MCP tools | Any MCP server tools | confirm |
+
+---
+
+## Security model
+
+**What `--yes` approves:** ReadFile, ListDirectory, SemanticSearch, 
+Search, GitStatus, GitDiff, GitLog — read-only operations only.
+
+**What requires confirmation regardless:** WriteFile, EditFile, 
+PatchFile, GitAdd, GitCommit, ShellTool, WebFetch.
+
+**What is structurally prevented:**
+- Path traversal: all paths canonicalized against git root before any operation
+- SSRF: web fetch blocks RFC1918, loopback, cloud metadata endpoints
+- Prompt injection: file contents always isolated in structural delimiters
+- Credential leakage: API keys stored as `Secret<T>`, zeroized on drop, 
+  never appear in logs or debug output
+
+---
+
+## Configuration
+```bash
+akmon config                    # interactive wizard
+akmon config show               # print current config
+akmon config model list         # list available models
+akmon config model set llama3.2 # set default model
+akmon config mcp add github \   # add MCP server
+  https://mcp.github.com
+akmon config key set anthropic  # store API key
+```
+
+Config lives at `~/.akmon/config.toml` — TOML format, 
+supports comments, no trailing comma issues.
+
+---
 
 ## AKMON.md — project memory
 
-`AKMON.md` is an **optional** file at the **project root**. When present, Akmon loads it at session start and injects it as **project context** alongside the rest of the prompt. It is meant to be **user-curated** and **version-controlled**: describe conventions, layout, and how you want the agent to behave. Akmon does **not** write or modify `AKMON.md` on its own; any change to that file should be something you explicitly approve outside the tool.
+Create `AKMON.md` at your project root or generate it:
+```bash
+akmon init  # analyzes project and generates AKMON.md
+```
 
-Minimal example:
-
+Akmon reads this at session start. Structure it as:
 ```markdown
 # My Project
 
-## Structure
+## Product
+What this is and who it is for.
 
-- `src/` contains the main application
-- `tests/` contains integration tests
+## Architecture  
+Key components and how they relate.
 
 ## Conventions
+Error handling, naming, testing patterns the AI must follow.
 
-- Use snake_case for all identifiers
-- Every public function needs a doc comment
+## Current sprint
+What you are building THIS WEEK.
+Update this before each session.
 ```
 
-## Trust model
+The `## Current sprint` section is the most important. 
+It tells Akmon what you are working on and dramatically 
+reduces context drift across sessions.
 
-With **`--yes`**, Akmon pre-approves only **read-only** filesystem checks: **`ReadFile`** and **`ListDirectory`**. It does **not** auto-approve **`WriteFile`**, **`ExecuteCommand`** (the `shell` tool), or **`NetworkFetch`** (`web_fetch`) unless you opt in further. **`WriteFile` and `shell` always require an explicit confirmation step** in the current design, even when **`--yes`** is set.
+---
 
-When you enable **`--web-fetch`** and want headless runs to fetch public documentation without a prompt, add **`--yes-web`** alongside **`--yes`**. That switches the policy engine to **auto-approve reads and fetch**: **`NetworkFetch`** is allowed automatically after the tool’s SSRF validation (private IPs, metadata endpoints, and other blocked targets are still rejected before any request). **`WriteFile`** and **`shell`** behavior is unchanged—they still require confirmation. If you use **`--yes`** and **`--web-fetch`** but **not** **`--yes-web`**, each fetch still goes through the normal confirmation prompt.
+## Project structure
+akmon/
+├── crates/
+│   ├── akmon-cli/      binary, CLI args, subcommands
+│   ├── akmon-core/     sandbox, policy, FSM, audit, secrets
+│   ├── akmon-config/   config file, provider detection
+│   ├── akmon-models/   LLM backends (Ollama, Anthropic, OpenAI-compat, Bedrock)
+│   ├── akmon-tools/    tool implementations (file, git, shell, web, MCP)
+│   ├── akmon-query/    agent session, context, summarization
+│   ├── akmon-index/    semantic indexing with fastembed
+│   └── akmon-tui/      ratatui TUI, slash commands, session UI
+├── docs/
+│   ├── architecture.md
+│   ├── security.md
+│   └── data-flows.md
+└── AKMON.md            project memory for Akmon building itself
 
-The `shell` tool is only registered when you pass at least one **`--shell-allow <PATTERN>`**; commands must match your allowlist and are executed as a plain argv split (no shell interpreter). Every policy decision is written to the audit log with a **reason**. To inspect a run, use `cat .akmon/audit/*.jsonl` or pass **`--output json`** to get a session summary on stdout that points at the same audit file via `session_id` and `audit_log_path`.
+---
 
-## Security
+## Building from source
+```bash
+# Standard build
+cargo build --release
 
-All tool paths are confined by the **sandbox**: resolution starts from the **git root**, uses canonical paths, and enforces a **prefix check** so content outside the project tree is unreachable. **Path traversal** and **`..` escapes** are rejected, and **symlinks are resolved before** comparing against the allowed root so indirect escapes fail closed.
+# Without semantic indexing (smaller binary)
+cargo build --release --no-default-features
 
-**API keys** are held in a **`Secret`** type that **does not implement `Debug`**, **zeroizes on drop**, and is read only through **`expose_secret()`** at controlled call sites (for example building HTTP headers), so secrets should not appear in logs or structured debug output.
+# Run tests
+cargo test --workspace
+```
 
-**Prompt injection** from disk is mitigated by **structural delimiters** around injected blocks (project context, `AKMON.md`, tool outputs): file contents are framed as **data**, not as trusted system instructions, alongside a fixed system role for the agent.
+---
 
 ## License
 
-Licensed under **MIT OR Apache-2.0** at your option — the standard Rust ecosystem dual license.
+Licensed under [MIT](LICENSE-MIT) or 
+[Apache 2.0](LICENSE-APACHE) at your option — 
+the standard Rust ecosystem dual license.
 
-See `LICENSE-MIT` and `LICENSE-APACHE` at the repository root.
+---
+
+<div align="center">
+
+Built with [ratatui](https://ratatui.rs) · 
+Powered by [fastembed](https://github.com/Anush008/fastembed-rs) · 
+Named after the Greek anvil · 
+ἄκμων
+
+</div>

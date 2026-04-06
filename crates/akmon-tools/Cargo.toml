@@ -8,12 +8,15 @@ authors.workspace = true
 repository.workspace = true
 description = "Akmon tool trait and built-in tools (filesystem, …)."
 
+[features]
+default = []
+semantic-index = ["dep:akmon-index", "dep:fastembed", "akmon-index/semantic-index"]
+
 [dependencies]
 akmon-core = { path = "../akmon-core" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-akmon-index = { path = "../akmon-index" }
-# v5: see `akmon-index` for rationale (ONNX download + TLS; `fastembed` 3.x is broken with current `ort`).
-fastembed = { version = "5", default-features = true }
+akmon-index = { path = "../akmon-index", optional = true }
+fastembed = { version = "5", default-features = true, optional = true }
 async-trait = "0.1"
 diffy = "0.4.2"
 glob = "0.3"

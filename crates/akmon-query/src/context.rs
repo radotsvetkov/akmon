@@ -22,12 +22,110 @@ pub const PROJECT_CONTEXT_END: &str = "<<<PROJECT_CONTEXT_END>>>";
 /// per Anthropic documentation).
 const TOOL_REFERENCE: &str = include_str!("tool_reference.txt");
 
-fn format_project_context(project_root: &str, tool_names: &[&str]) -> String {
+/// Markdown-style instructions injected when the session is in read-only plan mode (`--plan`, `/plan`).
+pub const PLAN_MODE_SYSTEM_ADDON: &str = "\n\
+PLAN MODE ACTIVE.\n\
+You are in read-only analysis mode.\n\
+You CANNOT write, edit, or delete files.\n\
+You CANNOT run shell commands.\n\
+You CANNOT commit to git.\n\
+\n\
+Your task: analyze the codebase and produce a detailed implementation plan.\n\
+\n\
+Your plan MUST include:\n\
+1. Understanding: what does the relevant existing code do?\n\
+   Reference specific files and functions by name.\n\
+2. Impact analysis: which files will need to change and why?\n\
+3. New files: what new files are needed and what will they contain?\n\
+4. Implementation sequence: in what order should changes be made, and why that order?\n\
+5. Risks: what could go wrong, and how should it be handled?\n\
+6. Open questions: what do you need the developer to clarify before implementation?\n\
+\n\
+Format the plan as a markdown document. Be specific — include exact file paths, function names, struct names, and type signatures.\n\
+Do not be vague. \"Update the policy engine\" is not useful. \"Add a new NetworkFetch variant to the Permission enum in\n\
+crates/akmon-core/src/permission.rs and update the match arms in\n\
+policy.rs lines 45-67\" is useful.\n";
+
+fn format_project_context_plan_mode(
+    project_root: &str,
+    tool_names: &[&str],
+    has_semantic: bool,
+    has_web_fetch: bool,
+) -> String {
     let tools_line = tool_names.join(", ");
+    let step1 = if has_semantic {
+        "  STEP 1 — Understand the codebase:\n\
+    Start with semantic_search for conceptual queries before search or list_directory.\n"
+    } else {
+        "  STEP 1 — Explore:\n\
+    Use search with focused patterns; avoid list_directory-only loops.\n"
+    };
+
+    let semantic_block = if has_semantic {
+        "\n\
+SEMANTIC SEARCH IS AVAILABLE.\n\
+Use it as your primary exploration tool.\n\
+Examples of good semantic_search queries:\n\
+  \"policy permission evaluation\"\n\
+  \"error handling for file operations\"\n\
+Examples of bad semantic_search queries (use search instead):\n\
+  \"fn validate_url\" ← use search\n\
+  \"TODO\" ← use search\n\n"
+    } else {
+        ""
+    };
+
+    let step_web = if has_web_fetch {
+        "\n\
+  STEP 5 — Optional documentation:\n\
+    web_fetch url=\"https://...\"\n\
+    Only when web_fetch is in your tool list.\n"
+    } else {
+        ""
+    };
+
+    format!(
+        "{PROJECT_CONTEXT_START}\n\
+You are an AI coding assistant running inside the Akmon agent.\n\
+\n\
+Working directory: {project_root}\n\
+Available tools (read-only session): {tools_line}\n\
+{PLAN_MODE_SYSTEM_ADDON}\n\
+To work on this project in PLAN MODE:\n\
+{step1}\
+\n\
+  STEP 2 — Navigate structure:\n\
+    list_directory path=\".\" only when you need to see filenames.\n\
+\n\
+  STEP 3 — Find exact strings:\n\
+    search pattern=\"exact_string\" for identifiers and literals.\n\
+\n\
+  STEP 4 — Read specific files:\n\
+    read_file path=\"...\" after you know a file is relevant.\n\
+{step_web}\
+RULES:\n\
+  - Produce a written plan only; do not propose tool calls that modify the repository.\n\
+  - read_file only after locating paths via semantic_search or search.\n\
+  - NEVER guess file paths.\n\
+{semantic_block}\
+All paths must be relative to the working directory shown above.\n\
+\n\
+<<<TOOL_REFERENCE_START>>>\n\
+{TOOL_REFERENCE}\
+<<<TOOL_REFERENCE_END>>>\n\
+{PROJECT_CONTEXT_END}"
+    )
+}
+
+fn format_project_context(project_root: &str, tool_names: &[&str], plan_mode: bool) -> String {
     let has_semantic = tool_names.contains(&"semantic_search");
+    let has_web_fetch = tool_names.contains(&"web_fetch");
+    if plan_mode {
+        return format_project_context_plan_mode(project_root, tool_names, has_semantic, has_web_fetch);
+    }
+    let tools_line = tool_names.join(", ");
     let has_git = tool_names.contains(&"git");
     let has_shell = tool_names.contains(&"shell");
-    let has_web_fetch = tool_names.contains(&"web_fetch");
 
     let step1 = if has_semantic {
         "  STEP 1 — Understand the codebase:\n\
@@ -209,6 +307,7 @@ pub fn build_messages(
     task: &str,
     project_root: &str,
     tool_names: &[&str],
+    plan_mode: bool,
 ) -> Vec<Message> {
     let mut out = Vec::new();
 
@@ -225,7 +324,7 @@ pub fn build_messages(
 
     out.push(Message {
         role: MessageRole::System,
-        content: format_project_context(project_root, tool_names),
+        content: format_project_context(project_root, tool_names, plan_mode),
     });
 
     out.extend(history.iter().cloned());
@@ -247,6 +346,7 @@ pub fn build_followup_messages(
     history: &[Message],
     project_root: &str,
     tool_names: &[&str],
+    plan_mode: bool,
 ) -> Vec<Message> {
     let mut out = Vec::new();
 
@@ -263,7 +363,7 @@ pub fn build_followup_messages(
 
     out.push(Message {
         role: MessageRole::System,
-        content: format_project_context(project_root, tool_names),
+        content: format_project_context(project_root, tool_names, plan_mode),
     });
 
     out.extend(history.iter().cloned());
@@ -276,7 +376,7 @@ mod tests {
 
     #[test]
     fn build_messages_with_akmon_md_starts_with_delimited_system() {
-        let msgs = build_messages(Some("rules"), &[], "do it", "/repo", &["read_file"]);
+        let msgs = build_messages(Some("rules"), &[], "do it", "/repo", &["read_file"], false);
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, MessageRole::System);
         assert!(msgs[0].content.contains("Project configuration (AKMON.md):"));
@@ -312,6 +412,7 @@ mod tests {
                 "edit",
                 "patch",
             ],
+            false,
         );
         let mut joined_len = 0usize;
         let mut n_sys = 0usize;
@@ -333,7 +434,7 @@ mod tests {
 
     #[test]
     fn project_context_alone_meets_haiku_45_cache_char_threshold_without_akmon_md() {
-        let msgs = build_messages(None, &[], "t", "/wd", &["read_file"]);
+        let msgs = build_messages(None, &[], "t", "/wd", &["read_file"], false);
         let sys = msgs
             .iter()
             .find(|m| m.role == MessageRole::System)
@@ -348,7 +449,7 @@ mod tests {
 
     #[test]
     fn build_messages_without_akmon_md_still_injects_project_context() {
-        let msgs = build_messages(None, &[], "task", "/wd", &["a", "b"]);
+        let msgs = build_messages(None, &[], "task", "/wd", &["a", "b"], false);
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, MessageRole::System);
         assert!(msgs[0].content.contains(PROJECT_CONTEXT_START));
@@ -364,7 +465,7 @@ mod tests {
             role: MessageRole::Assistant,
             content: "prev".into(),
         }];
-        let msgs = build_messages(None, &hist, "final ask", "/", &[]);
+        let msgs = build_messages(None, &hist, "final ask", "/", &[], false);
         let last = msgs
             .last()
             .expect("build_messages always ends with the user task");
@@ -374,7 +475,7 @@ mod tests {
 
     #[test]
     fn project_context_mentions_web_fetch_when_tool_enabled() {
-        let msgs = build_messages(None, &[], "t", "/repo", &["read_file", "web_fetch"]);
+        let msgs = build_messages(None, &[], "t", "/repo", &["read_file", "web_fetch"], false);
         let ctx = msgs
             .iter()
             .find(|m| m.role == MessageRole::System && m.content.contains("web_fetch url="))
@@ -385,7 +486,7 @@ mod tests {
 
     #[test]
     fn project_context_mentions_semantic_search_when_tool_enabled() {
-        let msgs = build_messages(None, &[], "t", "/repo", &["read_file", "semantic_search"]);
+        let msgs = build_messages(None, &[], "t", "/repo", &["read_file", "semantic_search"], false);
         let ctx = msgs
             .iter()
             .find(|m| m.role == MessageRole::System && m.content.contains("semantic_search query="))
@@ -405,6 +506,7 @@ mod tests {
             "t",
             "/repo",
             &["read_file", "search", "semantic_search"],
+            false,
         );
         let ctx = msgs
             .iter()
@@ -421,5 +523,23 @@ mod tests {
             i_sem < i_search,
             "semantic_search guidance must appear before exact-string search step"
         );
+    }
+
+    #[test]
+    fn plan_mode_system_contains_active_banner() {
+        let msgs = build_messages(
+            None,
+            &[],
+            "task",
+            "/r",
+            &["read_file", "search", "list_directory"],
+            true,
+        );
+        let ctx = msgs
+            .iter()
+            .find(|m| m.role == MessageRole::System)
+            .expect("ctx");
+        assert!(ctx.content.contains("PLAN MODE ACTIVE."));
+        assert!(!ctx.content.contains("STEP 5 — Edit existing files"));
     }
 }

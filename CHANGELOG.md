@@ -4,6 +4,16 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-04-06
+
+### Added
+
+- Plan mode (`--plan` flag, `/plan` in TUI): read-only analysis that produces a written plan before any code is written. Write/edit/shell/git/MCP tools are not registered in plan mode.
+- Architect mode (`--architect`, `--planner-model`, `[architect]` in `~/.akmon/config.toml`): two-phase workflow—planner model produces a plan, main model implements. Plan is saved under `.akmon/plans/`.
+- Spec workflow (`akmon spec`): three-phase documents under `.akmon/specs/<feature>/` (`requirements.md` → `design.md` → `tasks.md`) plus `implement` for one unchecked task at a time (re-spawns the agent with forwarded CLI flags).
+- TUI slash commands: `/plan`, `/implement`, `/architect`, `/spec`, `/update-context` (open `AKMON.md` in `$EDITOR` and reload).
+- Improved `AKMON.md` generation template: Product, Architecture, Conventions, **Current sprint**, and Done sections for better steering across sessions.
+
 ## [1.3.0] - 2026-04-06
 
 ### Added

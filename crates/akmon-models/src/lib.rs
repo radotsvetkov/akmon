@@ -3,10 +3,13 @@
 #![warn(missing_docs)]
 
 mod anthropic;
+mod bedrock;
 mod config;
 mod error;
+mod llm_connect;
 mod message;
 mod ollama;
+mod openai_compat;
 mod stream;
 mod tool_def;
 
@@ -14,10 +17,13 @@ pub use anthropic::{
     anthropic_system_block_text, AnthropicBackend, DEFAULT_ANTHROPIC_BASE_URL,
     DEFAULT_ANTHROPIC_CONTEXT_WINDOW, DEFAULT_ANTHROPIC_MODEL,
 };
+pub use bedrock::{BedrockBackend, BEDROCK_DISPLAY_MODEL_IDS};
 pub use config::CompletionConfig;
 pub use error::ModelError;
+pub use llm_connect::LlmConnectConfig;
 pub use message::{Message, MessageRole};
 pub use ollama::OllamaBackend;
+pub use openai_compat::{infer_context_window_tokens, OpenAiCompatBackend};
 pub use stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 pub use tool_def::ToolDefinition;
 

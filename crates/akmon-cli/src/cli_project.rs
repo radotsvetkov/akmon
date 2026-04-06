@@ -9,8 +9,7 @@ use akmon_core::project::{
     scaffold_project, suggested_akmon_title, ProjectSummary, ProjectType, ScaffoldKind,
     ScaffoldLanguage,
 };
-use akmon_core::Secret;
-use akmon_models::{AnthropicBackend, LlmProvider, OllamaBackend};
+use akmon_models::LlmProvider;
 use akmon_query::generate_akmon_md_markdown;
 use clap::Args;
 use clap::ValueEnum;
@@ -83,16 +82,15 @@ impl From<NewKind> for ScaffoldKind {
     }
 }
 
-fn build_provider(cli: &Cli) -> Arc<dyn LlmProvider> {
-    match &cli.anthropic_key {
-        Some(key) if cli.model.to_lowercase().starts_with("claude") => Arc::new(
-            AnthropicBackend::new(Secret::new(key.clone()), cli.model.clone()),
-        ),
-        _ => Arc::new(OllamaBackend::new(
-            cli.ollama_url.clone(),
-            cli.model.clone(),
-        )),
-    }
+fn load_global_config() -> akmon_config::AkmonGlobalConfig {
+    akmon_config::load_user_config()
+        .map(|(_, c)| c)
+        .unwrap_or_default()
+}
+
+fn resolve_provider(cli: &Cli) -> Result<Arc<dyn LlmProvider>, String> {
+    let global = load_global_config();
+    crate::llm_connect_from_cli(cli, &global, cli.model.clone()).resolve()
 }
 
 fn init_headline(summary: &ProjectSummary) -> String {
@@ -161,7 +159,13 @@ pub async fn run_init(cli: &Cli, project_root: &Path) -> ExitCode {
 
     let ctx = format_project_context_for_init(&summary);
     let title = suggested_akmon_title(&summary);
-    let provider = build_provider(cli);
+    let provider = match resolve_provider(cli) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("akmon: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     println!(
         "Generating AKMON.md with {}...",
@@ -288,7 +292,13 @@ pub async fn run_new(cli: &Cli, args: &NewCmd, cwd: &Path) -> ExitCode {
 
     let ctx = format_project_context_for_init(&summary);
     let title = suggested_akmon_title(&summary);
-    let provider = build_provider(cli);
+    let provider = match resolve_provider(cli) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("akmon: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     println!("\nGenerating AKMON.md...");
     let body = match generate_akmon_md_markdown(

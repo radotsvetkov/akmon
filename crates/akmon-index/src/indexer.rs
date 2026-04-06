@@ -2,7 +2,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -41,19 +41,7 @@ const BLOCKED_EXTENSIONS: &[&str] = &[
     "lock", "bin", "so", "dylib", "dll", "a", "rlib", "wasm", "pb",
 ];
 
-/// Failure building, embedding, or persisting an index.
-#[derive(Debug, thiserror::Error)]
-pub enum IndexError {
-    /// Underlying filesystem error.
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    /// Embedding model or batch call failed.
-    #[error("Embedding error: {0}")]
-    Embedding(String),
-    /// `bincode` encode/decode failure.
-    #[error("Serialization error: {0}")]
-    Serialization(String),
-}
+use crate::error::IndexError;
 
 fn map_ignore_err(e: IgnoreError) -> IndexError {
     match e {
@@ -398,24 +386,7 @@ fn relative_posix_path(path: &Path, root: &Path) -> Option<String> {
         .map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
-/// Writes `index` to `path` (creates parent directories).
-pub fn save_index(index: &RepoIndex, path: &Path) -> Result<(), IndexError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut f = File::create(path)?;
-    bincode::serialize_into(&mut f, index).map_err(|e| IndexError::Serialization(e.to_string()))?;
-    f.flush()?;
-    Ok(())
-}
-
-/// Reads a [`RepoIndex`] previously written by [`save_index`].
-pub fn load_index(path: &Path) -> Result<RepoIndex, IndexError> {
-    let f = File::open(path)?;
-    bincode::deserialize_from(f).map_err(|e| IndexError::Serialization(e.to_string()))
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-index"))]
 mod tests {
     use super::*;
     use akmon_core::Sandbox;
@@ -436,12 +407,6 @@ mod tests {
         assert_eq!(chunks[1].1, 90);
         assert_eq!(chunks[2].0, 81);
         assert_eq!(chunks[2].1, 100);
-    }
-
-    #[test]
-    fn index_error_display_non_empty() {
-        let e = IndexError::Embedding("msg".into());
-        assert!(!e.to_string().is_empty());
     }
 
     #[test]

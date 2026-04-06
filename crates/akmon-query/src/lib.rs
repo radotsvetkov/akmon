@@ -11,8 +11,8 @@ mod session;
 pub use akmon_md_gen::{generate_akmon_md_markdown, AKMON_MD_SYSTEM_PROMPT};
 
 pub use context::{
-    build_followup_messages, build_messages, AKMON_MD_END, AKMON_MD_START, PROJECT_CONTEXT_END,
-    PROJECT_CONTEXT_START,
+    build_followup_messages, build_messages, PLAN_MODE_SYSTEM_ADDON, AKMON_MD_END, AKMON_MD_START,
+    PROJECT_CONTEXT_END, PROJECT_CONTEXT_START,
 };
 pub use context_manager::ContextManager;
 pub use error::SessionError;

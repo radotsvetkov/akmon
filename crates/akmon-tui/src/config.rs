@@ -1,14 +1,20 @@
 //! Launch configuration for the interactive TUI.
 
 use std::path::PathBuf;
+#[cfg(feature = "semantic-index")]
 use std::sync::{Arc, Mutex};
 
+use akmon_models::LlmConnectConfig;
+#[cfg(feature = "semantic-index")]
 use akmon_index::RepoIndex;
+#[cfg(feature = "semantic-index")]
 use fastembed::TextEmbedding;
+#[cfg(feature = "semantic-index")]
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 /// Shared semantic index handle (optional `--index` mode).
+#[cfg(feature = "semantic-index")]
 pub type SemanticIndexSlot = (
     Arc<RwLock<Option<RepoIndex>>>,
     Arc<Mutex<TextEmbedding>>,
@@ -33,6 +39,26 @@ pub struct TuiLaunchConfig {
     pub index_enabled: bool,
     /// Optional Anthropic API key (same semantics as CLI `--anthropic-key`).
     pub anthropic_key: Option<String>,
+    /// OpenRouter API key (`OPENROUTER_API_KEY` / `--openrouter-key`).
+    pub openrouter_key: Option<String>,
+    /// OpenAI API key.
+    pub openai_key: Option<String>,
+    /// Groq API key.
+    pub groq_key: Option<String>,
+    /// Azure OpenAI deployment URL (full `.../chat/completions` path).
+    pub azure_endpoint: Option<String>,
+    /// Azure API key.
+    pub azure_key: Option<String>,
+    /// Azure `api-version` query parameter.
+    pub azure_api_version: String,
+    /// When `true`, prefer Bedrock if AWS credentials are present (`--bedrock`).
+    pub bedrock: bool,
+    /// AWS region for Bedrock.
+    pub aws_region: String,
+    /// Custom OpenAI-compatible base URL.
+    pub openai_compatible_url: Option<String>,
+    /// API key for [`Self::openai_compatible_url`].
+    pub openai_compatible_key: Option<String>,
     /// Ollama base URL when not using Anthropic.
     pub ollama_url: String,
     /// `--shell-allow` patterns.
@@ -53,13 +79,38 @@ pub struct TuiLaunchConfig {
     pub has_akmon_md: bool,
     /// Whether the sandbox root came from a `.git` work tree (see [`akmon_core::Sandbox::has_git_root`]).
     pub sandbox_has_git_root: bool,
-    /// Live semantic index slot when `--index` succeeded.
+    /// Live semantic index slot when `--index` succeeded (`--index` requires the `semantic-index` feature).
+    #[cfg(feature = "semantic-index")]
     pub semantic_index: Option<SemanticIndexSlot>,
+    /// Always `None` when this crate was built without `semantic-index`.
+    #[cfg(not(feature = "semantic-index"))]
+    pub semantic_index: Option<()>,
     /// `--auto-commit`: auto `git commit` after each successful file edit/write.
     pub auto_commit: bool,
+    /// Model id for `/architect` planning phase (`--planner-model` / config).
+    pub planner_model: String,
 }
 
 impl TuiLaunchConfig {
+    /// Builds [`LlmConnectConfig`] for `model` using the same merge rules as the CLI headless path.
+    pub fn llm_connect_for_model(&self, model: String) -> LlmConnectConfig {
+        LlmConnectConfig {
+            model,
+            ollama_url: self.ollama_url.clone(),
+            anthropic_api_key: self.anthropic_key.clone(),
+            openrouter_api_key: self.openrouter_key.clone(),
+            openai_api_key: self.openai_key.clone(),
+            groq_api_key: self.groq_key.clone(),
+            azure_openai_endpoint: self.azure_endpoint.clone(),
+            azure_openai_api_key: self.azure_key.clone(),
+            azure_api_version: self.azure_api_version.clone(),
+            bedrock_explicit: self.bedrock,
+            aws_region: self.aws_region.clone(),
+            openai_compatible_url: self.openai_compatible_url.clone(),
+            openai_compatible_api_key: self.openai_compatible_key.clone(),
+        }
+    }
+
     /// Last path segment of [`Self::project_root`], or `"."` if missing.
     pub fn project_display_name(&self) -> String {
         self.project_root
@@ -81,6 +132,7 @@ impl std::fmt::Debug for TuiLaunchConfig {
             .field("has_akmon_md", &self.has_akmon_md)
             .field("sandbox_has_git_root", &self.sandbox_has_git_root)
             .field("auto_commit", &self.auto_commit)
+            .field("planner_model", &self.planner_model)
             .finish_non_exhaustive()
     }
 }

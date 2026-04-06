@@ -170,6 +170,15 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                     "default_model": cfg.default_model,
                     "ollama_url": cfg.ollama_url,
                     "anthropic_api_key": cfg.anthropic_api_key.as_ref().map(|k| mask_key(k)),
+                    "openrouter_api_key": cfg.openrouter_api_key.as_ref().map(|k| mask_key(k)),
+                    "openai_api_key": cfg.openai_api_key.as_ref().map(|k| mask_key(k)),
+                    "groq_api_key": cfg.groq_api_key.as_ref().map(|k| mask_key(k)),
+                    "azure_openai_endpoint": cfg.azure_openai_endpoint,
+                    "azure_openai_api_key": cfg.azure_openai_api_key.as_ref().map(|k| mask_key(k)),
+                    "azure_api_version": cfg.azure_api_version,
+                    "openai_compatible_url": cfg.openai_compatible_url,
+                    "openai_compatible_api_key": cfg.openai_compatible_api_key.as_ref().map(|k| mask_key(k)),
+                    "architect": cfg.architect,
                     "mcp": cfg.mcp,
                 });
                 println!("{}", serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?);
@@ -336,6 +345,72 @@ fn mask_key(k: &str) -> String {
     }
 }
 
+async fn openrouter_models_top_display(api_key: &str) -> Result<String, String> {
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(25))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let r = client
+        .get("https://openrouter.ai/api/v1/models")
+        .header(
+            "Authorization",
+            format!("Bearer {}", api_key.trim()),
+        )
+        .header("HTTP-Referer", "https://akmon.dev")
+        .header("X-Title", "Akmon")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !r.status().is_success() {
+        return Err(format!("HTTP {}", r.status()));
+    }
+    let v: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
+    let Some(arr) = v.get("data").and_then(|x| x.as_array()) else {
+        return Ok("  (no data)\n".into());
+    };
+    #[derive(Clone)]
+    struct Row {
+        id: String,
+        ctx: u64,
+        price: String,
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    for m in arr {
+        let id = m.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let ctx = m
+            .get("context_length")
+            .and_then(|x| x.as_u64())
+            .or_else(|| {
+                m.get("top_provider")
+                    .and_then(|t| t.get("context_length"))
+                    .and_then(|x| x.as_u64())
+            })
+            .unwrap_or(0);
+        let price = m
+            .get("pricing")
+            .map(|p| {
+                let prompt = p.get("prompt").and_then(|x| x.as_str()).unwrap_or("?");
+                let comp = p.get("completion").and_then(|x| x.as_str()).unwrap_or("?");
+                format!("{prompt}/{comp}")
+            })
+            .unwrap_or_else(|| "?".into());
+        rows.push(Row { id, ctx, price });
+    }
+    rows.sort_by(|a, b| b.ctx.cmp(&a.ctx));
+    rows.truncate(20);
+    let mut s = String::new();
+    for row in rows {
+        let ck = row.ctx / 1000;
+        s.push_str(&format!("  {}  {}k  {}\n", row.id, ck, row.price));
+    }
+    Ok(s)
+}
+
 async fn model_list(args: &ConfigArgs) -> Result<(), String> {
     let (_, cfg) = load_user_config().map_err(|e| e.to_string())?;
     let url = cfg
@@ -356,9 +431,35 @@ async fn model_list(args: &ConfigArgs) -> Result<(), String> {
             out.push_str(&line);
         }
     }
+    let mut openrouter_text: Option<String> = None;
+    if let Some(or_key) = cfg.openrouter_api_key.as_deref() {
+        let key = or_key.trim();
+        if !key.is_empty() {
+            out.push_str("OpenRouter:\n");
+            match openrouter_models_top_display(key).await {
+                Ok(s) => {
+                    out.push_str(&s);
+                    openrouter_text = Some(s);
+                }
+                Err(e) => {
+                    let line = format!("  (could not list: {e})\n");
+                    out.push_str(&line);
+                    openrouter_text = Some(line);
+                }
+            }
+        }
+    }
     if args.json {
         let tags = ollama_tags_json(&url).await.unwrap_or_default();
-        println!("{}", json!({ "ollama": tags, "anthropic_key_set": cfg.anthropic_api_key.is_some() }));
+        println!(
+            "{}",
+            json!({
+                "ollama": tags,
+                "anthropic_key_set": cfg.anthropic_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
+                "openrouter_key_set": cfg.openrouter_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
+                "openrouter_top_display": openrouter_text,
+            })
+        );
     } else {
         print!("{out}");
     }

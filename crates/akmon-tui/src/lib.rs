@@ -10,6 +10,7 @@ mod app;
 mod command;
 mod config;
 mod message;
+mod model_picker;
 mod overlay;
 mod render;
 mod runner;
@@ -20,10 +21,12 @@ mod theme;
 mod tui_project;
 mod welcome;
 
-pub use agent::BridgeMsg;
+pub use agent::{AgentTurn, BridgeMsg};
 pub use app::TuiApp;
 pub use command::UiCommand;
-pub use config::{SemanticIndexSlot, TuiLaunchConfig};
+#[cfg(feature = "semantic-index")]
+pub use config::SemanticIndexSlot;
+pub use config::TuiLaunchConfig;
 pub use message::TuiMessage;
 pub use render::{message_line_count, message_to_lines, paint_message_viewport};
 pub use runner::{run_blocking, run_interactive, TuiRunError};

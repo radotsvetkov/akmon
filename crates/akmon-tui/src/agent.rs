@@ -5,27 +5,45 @@ use std::sync::{Arc, Mutex};
 
 use akmon_core::{
     write_audit_jsonl, AgentConfig, AgentEvent, McpServerConfig, PolicyEngine, PolicyEngineMode,
-    PolicyVerdict, Sandbox, Secret,
+    PolicyVerdict, Sandbox,
 };
-use akmon_models::{AnthropicBackend, LlmProvider, OllamaBackend};
+use akmon_models::LlmProvider;
 use akmon_query::AgentSession;
 use akmon_tools::{
     discover_mcp_tools, EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
-    SemanticSearchTool, ShellTool, WebFetchTool, WriteFileTool,
+    ShellTool, WebFetchTool, WriteFileTool,
 };
+#[cfg(feature = "semantic-index")]
+use akmon_tools::SemanticSearchTool;
 use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
 use crate::command::UiCommand;
 use crate::config::TuiLaunchConfig;
 
+/// One user-submitted agent invocation from the TUI input loop.
+#[derive(Debug, Clone)]
+pub struct AgentTurn {
+    /// Prompt text for the model.
+    pub task: String,
+    /// Read-only plan pass (matches `--plan` / `/plan`).
+    pub plan_only: bool,
+    /// Run a cheap planner model first, then the main model (matches `--architect`).
+    pub architect: bool,
+}
+
 /// Message from the agent task to the terminal loop (over a `std::sync::mpsc` bridge).
 #[derive(Debug)]
 pub enum BridgeMsg {
     /// One streamed FSM / UI event.
     Agent(AgentEvent),
+    /// Status line for long operations (e.g. architect mode).
+    StatusInfo(String),
     /// The current user task finished (the session wrote audit + snapshot on the agent side).
-    RunFinished,
+    RunFinished {
+        /// When set, the TUI stores this as a pending implementation plan (`/implement`).
+        captured_plan: Option<String>,
+    },
     /// `/init` or `/new` project tooling finished; lines are shown as system info.
     ProjectJobDone {
         /// Human-readable status lines for the transcript.
@@ -40,9 +58,25 @@ type PolicySenderSlot = Arc<tokio::sync::Mutex<Option<mpsc::Sender<PolicyVerdict
 fn build_tool_registry(
     shell_allow: &[String],
     web_fetch: bool,
-    semantic: Option<crate::config::SemanticIndexSlot>,
+    #[cfg(feature = "semantic-index")] semantic: Option<crate::config::SemanticIndexSlot>,
     has_git_root: bool,
+    plan_mode: bool,
 ) -> Vec<Box<dyn akmon_tools::Tool>> {
+    if plan_mode {
+        let mut tools: Vec<Box<dyn akmon_tools::Tool>> = vec![
+            Box::new(ReadFileTool::new()),
+            Box::new(ListDirectoryTool::new()),
+            Box::new(SearchTool::new()),
+        ];
+        if web_fetch {
+            tools.push(Box::new(WebFetchTool::new()));
+        }
+        #[cfg(feature = "semantic-index")]
+        if let Some((slot, emb)) = semantic {
+            tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
+        }
+        return tools;
+    }
     let mut tools: Vec<Box<dyn akmon_tools::Tool>> = vec![
         Box::new(ReadFileTool::new()),
         Box::new(WriteFileTool::new()),
@@ -57,6 +91,7 @@ fn build_tool_registry(
     if !shell_allow.is_empty() {
         tools.push(Box::new(ShellTool::new(shell_allow.to_vec())));
     }
+    #[cfg(feature = "semantic-index")]
     if let Some((slot, emb)) = semantic {
         tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
     }
@@ -69,6 +104,8 @@ fn build_tool_registry(
 async fn build_agent_session(
     config: &TuiLaunchConfig,
     policy_tx_slot: &PolicySenderSlot,
+    plan_mode: bool,
+    model_override: Option<&str>,
 ) -> Result<(AgentSession, mpsc::Receiver<PolicyVerdict>), String> {
     let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
     {
@@ -76,14 +113,12 @@ async fn build_agent_session(
         *guard = Some(policy_tx);
     }
 
-    let provider: Arc<dyn LlmProvider> = match &config.anthropic_key {
-        Some(key) if config.model_name.to_lowercase().starts_with("claude") => Arc::new(
-            AnthropicBackend::new(Secret::new(key.clone()), config.model_name.clone()),
-        ),
-        _ => Arc::new(OllamaBackend::new(
-            config.ollama_url.clone(),
-            config.model_name.clone(),
-        )),
+    let model = model_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| config.model_name.clone());
+    let provider: Arc<dyn LlmProvider> = match config.llm_connect_for_model(model).resolve() {
+        Ok(p) => p,
+        Err(msg) => return Err(msg),
     };
 
     let policy_mode = if config.auto_yes {
@@ -108,10 +143,76 @@ async fn build_agent_session(
     let mut tools = build_tool_registry(
         &config.shell_allow,
         config.web_fetch,
+        #[cfg(feature = "semantic-index")]
         config.semantic_index.clone(),
         config.sandbox_has_git_root,
+        plan_mode,
     );
-    for url in &config.mcp_servers {
+    if !plan_mode {
+        for url in &config.mcp_servers {
+            let server = McpServerConfig {
+                name: url.to_string(),
+                url: url.to_string(),
+                description: String::new(),
+            };
+            if let Ok(mcp_tools) = discover_mcp_tools(&server).await {
+                for t in mcp_tools {
+                    tools.push(Box::new(t));
+                }
+            }
+        }
+    }
+
+    let agent_config = AgentConfig {
+        max_iterations: config.max_iterations,
+        confirmation_timeout_secs: 30,
+        session_id: config.session_id,
+        auto_commit: if plan_mode {
+            false
+        } else {
+            config.auto_commit
+        },
+    };
+
+    let session = AgentSession::new(
+        agent_config,
+        Arc::clone(&policy),
+        provider,
+        tools,
+        Arc::clone(&sandbox),
+        config.akmon_md.clone(),
+        plan_mode,
+    );
+
+    Ok((session, policy_rx))
+}
+
+fn apply_plan_tool_state(session: &mut AgentSession, cfg: &TuiLaunchConfig) {
+    let tools = build_tool_registry(
+        &cfg.shell_allow,
+        cfg.web_fetch,
+        #[cfg(feature = "semantic-index")]
+        cfg.semantic_index.clone(),
+        cfg.sandbox_has_git_root,
+        true,
+    );
+    session.replace_tools(tools);
+    session.set_plan_mode(true);
+}
+
+async fn apply_full_tools_with_mcp(
+    session: &mut AgentSession,
+    cfg: &TuiLaunchConfig,
+) -> Result<(), String> {
+    let mut tools = build_tool_registry(
+        &cfg.shell_allow,
+        cfg.web_fetch,
+        #[cfg(feature = "semantic-index")]
+        cfg.semantic_index.clone(),
+        cfg.sandbox_has_git_root,
+        false,
+    );
+    for url in &cfg.mcp_servers {
         let server = McpServerConfig {
             name: url.to_string(),
             url: url.to_string(),
@@ -123,24 +224,9 @@ async fn build_agent_session(
             }
         }
     }
-
-    let agent_config = AgentConfig {
-        max_iterations: config.max_iterations,
-        confirmation_timeout_secs: 30,
-        session_id: config.session_id,
-        auto_commit: config.auto_commit,
-    };
-
-    let session = AgentSession::new(
-        agent_config,
-        Arc::clone(&policy),
-        provider,
-        tools,
-        Arc::clone(&sandbox),
-        config.akmon_md.clone(),
-    );
-
-    Ok((session, policy_rx))
+    session.replace_tools(tools);
+    session.set_plan_mode(false);
+    Ok(())
 }
 
 fn lock_config(shared: &Arc<Mutex<TuiLaunchConfig>>) -> TuiLaunchConfig {
@@ -157,7 +243,7 @@ fn lock_config(shared: &Arc<Mutex<TuiLaunchConfig>>) -> TuiLaunchConfig {
 pub async fn run_agent_loop(
     shared_config: Arc<Mutex<TuiLaunchConfig>>,
     reload_notify: Arc<Notify>,
-    mut task_rx: mpsc::UnboundedReceiver<String>,
+    mut task_rx: mpsc::UnboundedReceiver<AgentTurn>,
     mut ui_cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     bridge_tx: std::sync::mpsc::SyncSender<BridgeMsg>,
     interrupt: Arc<AtomicBool>,
@@ -185,23 +271,24 @@ pub async fn run_agent_loop(
     });
 
     let initial = lock_config(&shared_config);
-    let (mut session, policy_rx) = match build_agent_session(&initial, &policy_tx_slot).await {
-        Ok(x) => x,
-        Err(msg) => {
-            let _ = bridge_tx.send(BridgeMsg::Agent(AgentEvent::Error {
-                error: akmon_core::AgentError::SessionFailed { message: msg },
-                recoverable: false,
-            }));
-            return;
-        }
-    };
+    let (mut session, policy_rx) =
+        match build_agent_session(&initial, &policy_tx_slot, false, None).await {
+            Ok(x) => x,
+            Err(msg) => {
+                let _ = bridge_tx.send(BridgeMsg::Agent(AgentEvent::Error {
+                    error: akmon_core::AgentError::SessionFailed { message: msg },
+                    recoverable: false,
+                }));
+                return;
+            }
+        };
     let mut policy_opt = Some(policy_rx);
 
     loop {
         tokio::select! {
             _ = reload_notify.notified() => {
                 let cfg = lock_config(&shared_config);
-                match build_agent_session(&cfg, &policy_tx_slot).await {
+                match build_agent_session(&cfg, &policy_tx_slot, false, None).await {
                     Ok((s, prx)) => {
                         session = s;
                         policy_opt = Some(prx);
@@ -214,32 +301,136 @@ pub async fn run_agent_loop(
                     }
                 }
             }
-            task = task_rx.recv() => {
-                let Some(task) = task else {
+            recv = task_rx.recv() => {
+                let Some(turn) = recv else {
                     break;
                 };
                 let cfg = lock_config(&shared_config);
                 interrupt.store(false, Ordering::SeqCst);
-                let (ev_tx, mut ev_rx) = mpsc::channel::<AgentEvent>(256);
-                let bridge_ev = bridge_tx.clone();
-                let forward = tokio::spawn(async move {
-                    while let Some(ev) = ev_rx.recv().await {
-                        if bridge_ev.send(BridgeMsg::Agent(ev)).is_err() {
-                            break;
+
+                let mut captured_plan: Option<String> = None;
+
+                if turn.architect {
+                    let pm = cfg.planner_model.trim();
+                    let planner_model = if pm.is_empty() {
+                        "llama3.2"
+                    } else {
+                        pm
+                    };
+                    let _ = bridge_tx.send(BridgeMsg::StatusInfo(format!(
+                        "Planner: {planner_model} — analyzing…"
+                    )));
+                    match build_agent_session(&cfg, &policy_tx_slot, true, Some(planner_model)).await {
+                        Ok((mut planner_session, prx)) => {
+                            let (ev_tx, mut ev_rx) = mpsc::channel::<AgentEvent>(256);
+                            let bridge_ev = bridge_tx.clone();
+                            let forward = tokio::spawn(async move {
+                                while let Some(ev) = ev_rx.recv().await {
+                                    if bridge_ev.send(BridgeMsg::Agent(ev)).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                            let mut pop: Option<mpsc::Receiver<PolicyVerdict>> = Some(prx);
+                            let _ = planner_session
+                                .run(
+                                    turn.task.clone(),
+                                    ev_tx,
+                                    &mut pop,
+                                    Some(Arc::clone(&interrupt)),
+                                )
+                                .await;
+                            let _ = forward.await;
+                            let plan = planner_session.result_text().to_string();
+                            let _ = bridge_tx.send(BridgeMsg::StatusInfo(format!(
+                                "Implementer: {} — implementing…",
+                                cfg.model_name
+                            )));
+                            match build_agent_session(&cfg, &policy_tx_slot, false, None).await {
+                                Ok((s, prx)) => {
+                                    session = s;
+                                    policy_opt = Some(prx);
+                                }
+                                Err(msg) => {
+                                    let _ = bridge_tx.send(BridgeMsg::Agent(AgentEvent::Error {
+                                        error: akmon_core::AgentError::SessionFailed {
+                                            message: msg,
+                                        },
+                                        recoverable: true,
+                                    }));
+                                    continue;
+                                }
+                            }
+                            let impl_task = format!(
+                                "Implement this plan exactly:\n\n{plan}\n\nOriginal task: {}\n\nFollow the plan step by step. Do not deviate from the plan without explaining why.",
+                                turn.task
+                            );
+                            let (ev_tx, mut ev_rx) = mpsc::channel::<AgentEvent>(256);
+                            let bridge_ev = bridge_tx.clone();
+                            let forward = tokio::spawn(async move {
+                                while let Some(ev) = ev_rx.recv().await {
+                                    if bridge_ev.send(BridgeMsg::Agent(ev)).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                            let _ = session
+                                .run(
+                                    impl_task,
+                                    ev_tx,
+                                    &mut policy_opt,
+                                    Some(Arc::clone(&interrupt)),
+                                )
+                                .await;
+                            let _ = forward.await;
+                        }
+                        Err(msg) => {
+                            let _ = bridge_tx.send(BridgeMsg::Agent(AgentEvent::Error {
+                                error: akmon_core::AgentError::SessionFailed { message: msg },
+                                recoverable: true,
+                            }));
+                            continue;
                         }
                     }
-                });
+                } else {
+                    if turn.plan_only {
+                        apply_plan_tool_state(&mut session, &cfg);
+                    } else if let Err(e) = apply_full_tools_with_mcp(&mut session, &cfg).await {
+                        let _ = bridge_tx.send(BridgeMsg::Agent(AgentEvent::Error {
+                            error: akmon_core::AgentError::SessionFailed { message: e },
+                            recoverable: true,
+                        }));
+                        continue;
+                    }
+                    let (ev_tx, mut ev_rx) = mpsc::channel::<AgentEvent>(256);
+                    let bridge_ev = bridge_tx.clone();
+                    let forward = tokio::spawn(async move {
+                        while let Some(ev) = ev_rx.recv().await {
+                            if bridge_ev.send(BridgeMsg::Agent(ev)).is_err() {
+                                break;
+                            }
+                        }
+                    });
 
-                let run_outcome = session
-                    .run(
-                        task,
-                        ev_tx,
-                        &mut policy_opt,
-                        Some(Arc::clone(&interrupt)),
-                    )
-                    .await;
+                    let run_outcome = session
+                        .run(
+                            turn.task.clone(),
+                            ev_tx,
+                            &mut policy_opt,
+                            Some(Arc::clone(&interrupt)),
+                        )
+                        .await;
 
-                let _ = forward.await;
+                    let _ = forward.await;
+
+                    if turn.plan_only {
+                        captured_plan = Some(session.result_text().to_string());
+                    }
+
+                    if run_outcome.is_err() {
+                        captured_plan = None;
+                    }
+                }
 
                 if let Err(e) = write_audit_jsonl(&cfg.audit_log_path, session.audit_events()) {
                     let _ = bridge_tx.send(BridgeMsg::Agent(AgentEvent::Error {
@@ -250,9 +441,9 @@ pub async fn run_agent_loop(
                     }));
                 }
 
-                let _ = run_outcome;
-
-                let _ = bridge_tx.send(BridgeMsg::RunFinished);
+                let _ = bridge_tx.send(BridgeMsg::RunFinished {
+                    captured_plan,
+                });
             }
         }
     }

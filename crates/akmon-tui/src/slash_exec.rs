@@ -7,12 +7,14 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
 
+use crate::agent::AgentTurn;
 use crate::config::TuiLaunchConfig;
 use crate::session_persist::{
     default_audit_log_path, load_session_file, load_session_summaries, resolve_session_id,
     save_session_snapshot, sessions_directory, SessionSummary,
 };
 use crate::app::{Overlay, TuiApp};
+use crate::model_picker::build_model_picker_rows;
 use crate::slash::{parse_slash_input, SlashCommand};
 use crate::tui_project::ProjectUiJob;
 
@@ -28,6 +30,8 @@ pub struct SlashEnv {
     pub index_bin_path: PathBuf,
     /// Queues `/init` and `/new` work on the async runtime.
     pub project_job_tx: mpsc::UnboundedSender<ProjectUiJob>,
+    /// Queues `/implement` runs on the agent task.
+    pub agent_task_tx: mpsc::UnboundedSender<AgentTurn>,
 }
 
 /// Outcome of handling one slash line (buffer already consumed by caller).
@@ -210,32 +214,64 @@ fn dispatch(
                 app.model_name = name.to_string();
                 env.reload_notify.notify_one();
                 app.push_system_info(format!("Model changed to {name}"));
+                app.overlay = Overlay::None;
             } else {
-                app.push_system_info(format!("Current model: {}", app.model_name));
+                let cfg_snapshot = match env.shared_config.lock() {
+                    Ok(g) => g.clone(),
+                    Err(e) => e.into_inner().clone(),
+                };
+                let rows = build_model_picker_rows(&cfg_snapshot);
+                let selectable: Vec<usize> = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| !r.section_header)
+                    .map(|(i, _)| i)
+                    .collect();
+                if selectable.is_empty() {
+                    app.push_system_info(format!("Current model: {}", app.model_name));
+                    app.overlay = Overlay::None;
+                } else {
+                    app.push_system_info(format!("Pick a model (↑↓ Enter) — current: {}", app.model_name));
+                    app.overlay = Overlay::ModelPicker {
+                        rows,
+                        selectable,
+                        selected: 0,
+                        scroll: 0,
+                    };
+                }
             }
-            app.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "index" => {
-            if !env.index_enabled_flag {
-                app.push_system_info(
-                    "Semantic index not loaded. Restart with --index to enable.".into(),
-                );
-            } else {
-                match akmon_index::load_index(&env.index_bin_path) {
-                    Ok(idx) => {
-                        let ago = format_index_age(idx.indexed_at);
-                        app.push_system_info(format!(
-                            "Semantic index: {} files, {} chunks, built {ago}",
-                            idx.file_count, idx.chunk_count
-                        ));
-                    }
-                    Err(_) => {
-                        app.push_system_info(
-                            "Semantic index not loaded. Restart with --index to enable.".into(),
-                        );
+            #[cfg(feature = "semantic-index")]
+            {
+                if !env.index_enabled_flag {
+                    app.push_system_info(
+                        "Semantic index not loaded. Restart with --index to enable.".into(),
+                    );
+                } else {
+                    match akmon_index::load_index(&env.index_bin_path) {
+                        Ok(idx) => {
+                            let ago = format_index_age(idx.indexed_at);
+                            app.push_system_info(format!(
+                                "Semantic index: {} files, {} chunks, built {ago}",
+                                idx.file_count, idx.chunk_count
+                            ));
+                        }
+                        Err(_) => {
+                            app.push_system_info(
+                                "Semantic index not loaded. Restart with --index to enable.".into(),
+                            );
+                        }
                     }
                 }
+            }
+            #[cfg(not(feature = "semantic-index"))]
+            {
+                app.push_system_info(
+                    "Semantic index is not available in this build (no `semantic-index` feature)."
+                        .into(),
+                );
             }
             app.overlay = Overlay::None;
             SlashHandled::Continue
@@ -248,6 +284,107 @@ fn dispatch(
         }
         "cost" => {
             app.overlay = Overlay::CostSummary;
+            SlashHandled::Continue
+        }
+        "plan" => {
+            app.plan_only_next_turn = true;
+            app.push_system_info(
+                "Next message runs in read-only plan mode (no file edits, shell, or git).".into(),
+            );
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "architect" => {
+            app.architect_next_turn = true;
+            app.push_system_info(
+                "Next message uses architect mode: planner model first, then your main model."
+                    .into(),
+            );
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "implement" => {
+            if app.agent_running {
+                app.push_system_info("Finish or interrupt the current turn before /implement.".into());
+                return SlashHandled::Continue;
+            }
+            let Some(plan) = app.pending_plan.clone() else {
+                app.push_system_info(
+                    "No plan stored yet. Use /plan, describe the task, then try again.".into(),
+                );
+                return SlashHandled::Continue;
+            };
+            let task = format!(
+                "Implement the plan you just produced. Follow it exactly. Start with step 1.\n\n--- Plan ---\n{plan}\n---"
+            );
+            if env
+                .agent_task_tx
+                .send(AgentTurn {
+                    task,
+                    plan_only: false,
+                    architect: false,
+                })
+                .is_err()
+            {
+                app.push_system_info("Agent task channel closed.".into());
+                return SlashHandled::Continue;
+            }
+            app.agent_running = true;
+            app.push_system_info("Implementation run queued.".into());
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "spec" => {
+            let root = app.project_root.join(".akmon").join("specs");
+            let Ok(rd) = std::fs::read_dir(&root) else {
+                app.push_system_info(
+                    "No .akmon/specs yet. CLI: akmon spec <name> \"description\"".into(),
+                );
+                app.overlay = Overlay::None;
+                return SlashHandled::Continue;
+            };
+            let mut names: Vec<String> = rd
+                .flatten()
+                .filter_map(|e| {
+                    e.path()
+                        .is_dir()
+                        .then(|| e.file_name().to_string_lossy().into_owned())
+                })
+                .collect();
+            names.sort();
+            if names.is_empty() {
+                app.push_system_info("No specs in .akmon/specs.".into());
+            } else {
+                app.push_system_info(format!("Specs: {}", names.join(", ")));
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "update-context" => {
+            let path = app.project_root.join("AKMON.md");
+            if !path.is_file() {
+                app.push_system_info("AKMON.md not found in project root.".into());
+                app.overlay = Overlay::None;
+                return SlashHandled::Continue;
+            }
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".into());
+            match std::process::Command::new(&editor).arg(&path).status() {
+                Ok(st) if st.success() => match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        if let Ok(mut g) = env.shared_config.lock() {
+                            g.akmon_md = Some(text);
+                            g.has_akmon_md = true;
+                        }
+                        app.has_akmon_md = true;
+                        env.reload_notify.notify_one();
+                        app.push_system_info("AKMON.md reloaded into the session.".into());
+                    }
+                    Err(e) => app.push_system_info(format!("Could not read AKMON.md: {e}")),
+                },
+                Ok(st) => app.push_system_info(format!("Editor exited with {st}")),
+                Err(e) => app.push_system_info(format!("Could not run {editor}: {e}")),
+            }
+            app.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "exit" => SlashHandled::Quit,
@@ -314,6 +451,7 @@ fn apply_loaded_session(app: &mut TuiApp, env: &SlashEnv, loaded: crate::session
     app.push_system_info(format!("Resumed session {short}"));
 }
 
+#[cfg(feature = "semantic-index")]
 fn format_index_age(dt: DateTime<Utc>) -> String {
     let d = Utc::now().signed_duration_since(dt);
     if d.num_seconds() < 60 {
@@ -422,6 +560,41 @@ fn estimate_cost_usd(app: &TuiApp) -> String {
     } else {
         "rate unknown".to_string()
     }
+}
+
+/// Applies the highlighted `/model` row and rebuilds the agent session.
+pub fn model_picker_enter(app: &mut TuiApp, env: &SlashEnv) {
+    let name = match &app.overlay {
+        Overlay::ModelPicker {
+            rows,
+            selectable,
+            selected,
+            ..
+        } => {
+            let Some(&row_i) = selectable.get(*selected) else {
+                return;
+            };
+            let Some(row) = rows.get(row_i) else {
+                return;
+            };
+            if row.section_header {
+                return;
+            }
+            row.label.clone()
+        }
+        _ => return,
+    };
+    {
+        let mut g = match env.shared_config.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        g.model_name = name.clone();
+    }
+    app.model_name = name.clone();
+    env.reload_notify.notify_one();
+    app.push_system_info(format!("Model changed to {name}"));
+    app.overlay = Overlay::None;
 }
 
 /// Resumes the highlighted session from [`Overlay::SessionList`] when Enter is pressed.

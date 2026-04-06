@@ -1,32 +1,41 @@
 //! Akmon CLI — project discovery, optional `AKMON.md`, and headless `--task` runs.
 
+mod cli_forward;
 mod cli_project;
 mod config_cmd;
+mod spec_cmd;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+#[cfg(feature = "semantic-index")]
 use std::time::Duration;
 
+use akmon_config::AkmonGlobalConfig;
 use akmon_core::{
-    write_audit_jsonl, AgentConfig, AgentError, AgentEvent, McpServerConfig, PolicyEngine,
-    PolicyEngineMode, PolicyVerdict, Sandbox, Secret,
+    write_audit_jsonl, AgentConfig, AgentError, AgentEvent, AuditEvent, McpServerConfig,
+    PolicyEngine, PolicyEngineMode, PolicyVerdict, Sandbox,
 };
-use akmon_models::{AnthropicBackend, LlmProvider, OllamaBackend};
+use akmon_models::{LlmConnectConfig, LlmProvider};
 use akmon_query::{AgentSession, ToolCallSummary};
 use akmon_tools::{
     discover_mcp_tools, EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
-    SemanticSearchTool, ShellTool, WebFetchTool, WriteFileTool,
+    ShellTool, WebFetchTool, WriteFileTool,
 };
+#[cfg(feature = "semantic-index")]
+use akmon_tools::SemanticSearchTool;
 use akmon_tui::TuiLaunchConfig;
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(feature = "semantic-index")]
 use fastembed::{TextEmbedding, TextInitOptions};
 use serde::Serialize;
 use tokio::sync::mpsc;
+#[cfg(feature = "semantic-index")]
 use tokio::sync::RwLock;
 
 /// Builds a semantic index in the background and writes `index_path`, then fills `slot`.
+#[cfg(feature = "semantic-index")]
 async fn semantic_index_background_build(
     project_root: PathBuf,
     embedder: Arc<std::sync::Mutex<TextEmbedding>>,
@@ -75,6 +84,7 @@ async fn semantic_index_background_build(
 ///
 /// The caller should [`std::thread::JoinHandle::join`] the handle before process exit so
 /// `index.bin` can be written reliably.
+#[cfg(feature = "semantic-index")]
 fn spawn_semantic_index_os_thread(
     project_root: PathBuf,
     embedder: Arc<std::sync::Mutex<TextEmbedding>>,
@@ -112,6 +122,7 @@ fn spawn_semantic_index_os_thread(
 }
 
 /// Gives a short background build time to finish so the first model turn may see an index.
+#[cfg(feature = "semantic-index")]
 async fn poll_index_ready_up_to_3s(slot: &Arc<RwLock<Option<akmon_index::RepoIndex>>>) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
@@ -279,6 +290,34 @@ pub(crate) struct Cli {
         help = "Anthropic API key (falls back to ANTHROPIC_API_KEY env var)"
     )]
     anthropic_key: Option<String>,
+    /// OpenRouter API key (`OPENROUTER_API_KEY`).
+    #[arg(long = "openrouter-key", env = "OPENROUTER_API_KEY", hide_env_values = true, global = true)]
+    openrouter_key: Option<String>,
+    /// OpenAI API key (`OPENAI_API_KEY`).
+    #[arg(long = "openai-key", env = "OPENAI_API_KEY", hide_env_values = true, global = true)]
+    openai_key: Option<String>,
+    /// Groq API key (`GROQ_API_KEY`).
+    #[arg(long = "groq-key", env = "GROQ_API_KEY", hide_env_values = true, global = true)]
+    groq_key: Option<String>,
+    /// Azure OpenAI deployment URL (…/deployments/NAME/chat/completions).
+    #[arg(long = "azure-endpoint", env = "AZURE_OPENAI_ENDPOINT", global = true)]
+    azure_endpoint: Option<String>,
+    #[arg(long = "azure-key", env = "AZURE_OPENAI_API_KEY", hide_env_values = true, global = true)]
+    azure_key: Option<String>,
+    /// Azure `api-version` query parameter (default `2024-02-01`).
+    #[arg(long = "azure-api-version", default_value = "2024-02-01", global = true)]
+    azure_api_version: String,
+    /// Use Amazon Bedrock (reads `AWS_*` credentials from the environment).
+    #[arg(long = "bedrock", global = true)]
+    bedrock: bool,
+    /// AWS region for Bedrock.
+    #[arg(long = "aws-region", env = "AWS_DEFAULT_REGION", default_value = "us-east-1", global = true)]
+    aws_region: String,
+    /// Custom OpenAI-compatible API base (no `/chat/completions` suffix).
+    #[arg(long = "openai-compatible-url", global = true)]
+    openai_compatible_url: Option<String>,
+    #[arg(long = "openai-compatible-key", hide_env_values = true, global = true)]
+    openai_compatible_key: Option<String>,
     /// Base URL for the Ollama HTTP API (ignored when using Anthropic).
     #[arg(long = "ollama-url", default_value = "http://localhost:11434", global = true)]
     ollama_url: String,
@@ -309,6 +348,15 @@ pub(crate) struct Cli {
     /// After each successful `edit` or `write_file`, run `git add` and `git commit` with an auto-generated message (requires a git repo).
     #[arg(long = "auto-commit", global = true)]
     auto_commit: bool,
+    /// Analyze the codebase and produce a written plan. The agent uses read-only tools only; the plan is saved under `.akmon/plans/`. Run again without `--plan` to implement.
+    #[arg(long = "plan", global = true)]
+    plan: bool,
+    /// Use architect mode: plan with `--planner-model` (or config), then implement with `--model`.
+    #[arg(long = "architect", global = true)]
+    architect: bool,
+    /// Model id for the planning phase when using `--architect`. Overrides `[architect] planner_model` in `~/.akmon/config.toml`; default `llama3.2`.
+    #[arg(long = "planner-model", value_name = "MODEL", global = true)]
+    planner_model: Option<String>,
     /// Resume or label a session (full resume is slice 4; value is shown in the TUI today).
     #[arg(long = "session", global = true)]
     session: Option<uuid::Uuid>,
@@ -325,24 +373,46 @@ enum Commands {
     New(cli_project::NewCmd),
     /// Manage `~/.akmon/config.toml` (models, keys, MCP).
     Config(config_cmd::ConfigArgs),
+    /// Structured spec workflow under `.akmon/specs/<feature>/`.
+    Spec(spec_cmd::SpecCmd),
 }
 
+#[cfg(feature = "semantic-index")]
 type SemanticIndexParts = (
     Arc<RwLock<Option<akmon_index::RepoIndex>>>,
     Arc<std::sync::Mutex<TextEmbedding>>,
 );
 
-/// Builds the tool registry; [`ShellTool`] is registered only when at least one `--shell-allow` pattern is set.
+/// Builds the tool registry; [`ShellTool`] is registered only when at least one `--shell-allow` pattern is set
+/// and `plan_mode` is `false`.
 ///
 /// [`WebFetchTool`] is registered only when `web_fetch` is true (`--web-fetch`).
 ///
-/// [`SemanticSearchTool`] is registered when `semantic` is [`Some`].
+/// When `plan_mode` is `true`, only read-oriented tools are registered (no write, shell, git, MCP added here).
+///
+/// [`SemanticSearchTool`] is included when built with `semantic-index` and `semantic` is [`Some`].
 fn build_tool_registry(
     shell_allow: &[String],
     web_fetch: bool,
-    semantic: Option<SemanticIndexParts>,
     has_git_root: bool,
+    plan_mode: bool,
+    #[cfg(feature = "semantic-index")] semantic: Option<SemanticIndexParts>,
 ) -> Vec<Box<dyn akmon_tools::Tool>> {
+    if plan_mode {
+        let mut tools: Vec<Box<dyn akmon_tools::Tool>> = vec![
+            Box::new(ReadFileTool::new()),
+            Box::new(ListDirectoryTool::new()),
+            Box::new(SearchTool::new()),
+        ];
+        if web_fetch {
+            tools.push(Box::new(WebFetchTool::new()));
+        }
+        #[cfg(feature = "semantic-index")]
+        if let Some((slot, emb)) = semantic {
+            tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
+        }
+        return tools;
+    }
     let mut tools: Vec<Box<dyn akmon_tools::Tool>> = vec![
         Box::new(ReadFileTool::new()),
         Box::new(WriteFileTool::new()),
@@ -357,6 +427,7 @@ fn build_tool_registry(
     if !shell_allow.is_empty() {
         tools.push(Box::new(ShellTool::new(shell_allow.to_vec())));
     }
+    #[cfg(feature = "semantic-index")]
     if let Some((slot, emb)) = semantic {
         tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
     }
@@ -364,6 +435,112 @@ fn build_tool_registry(
         tools.push(Box::new(GitTool::new()));
     }
     tools
+}
+
+fn load_user_global_config() -> AkmonGlobalConfig {
+    akmon_config::akmon_config_path()
+        .as_ref()
+        .and_then(|p| akmon_config::load_config_from(p).ok())
+        .unwrap_or_default()
+}
+
+fn coalesce_opt(a: Option<String>, b: Option<String>) -> Option<String> {
+    a.filter(|s| !s.trim().is_empty())
+        .or_else(|| b.filter(|s| !s.trim().is_empty()))
+}
+
+/// Builds [`LlmConnectConfig`] from CLI flags merged with `~/.akmon/config.toml`.
+pub(crate) fn llm_connect_from_cli(cli: &Cli, global: &AkmonGlobalConfig, model: String) -> LlmConnectConfig {
+    let azure_ver = if cli.azure_api_version.is_empty() {
+        global
+            .azure_api_version
+            .clone()
+            .unwrap_or_else(|| "2024-02-01".into())
+    } else {
+        cli.azure_api_version.clone()
+    };
+    LlmConnectConfig {
+        model,
+        ollama_url: cli.ollama_url.clone(),
+        anthropic_api_key: coalesce_opt(cli.anthropic_key.clone(), global.anthropic_api_key.clone()),
+        openrouter_api_key: coalesce_opt(cli.openrouter_key.clone(), global.openrouter_api_key.clone()),
+        openai_api_key: coalesce_opt(cli.openai_key.clone(), global.openai_api_key.clone()),
+        groq_api_key: coalesce_opt(cli.groq_key.clone(), global.groq_api_key.clone()),
+        azure_openai_endpoint: coalesce_opt(
+            cli.azure_endpoint.clone(),
+            global.azure_openai_endpoint.clone(),
+        ),
+        azure_openai_api_key: coalesce_opt(cli.azure_key.clone(), global.azure_openai_api_key.clone()),
+        azure_api_version: azure_ver,
+        bedrock_explicit: cli.bedrock,
+        aws_region: cli.aws_region.clone(),
+        openai_compatible_url: coalesce_opt(
+            cli.openai_compatible_url.clone(),
+            global.openai_compatible_url.clone(),
+        ),
+        openai_compatible_api_key: coalesce_opt(
+            cli.openai_compatible_key.clone(),
+            global.openai_compatible_api_key.clone(),
+        ),
+    }
+}
+
+fn resolve_llm(cli: &Cli, global: &AkmonGlobalConfig, model: String) -> Result<Arc<dyn LlmProvider>, String> {
+    llm_connect_from_cli(cli, global, model).resolve()
+}
+
+/// Resolves the planner model for architect mode: `--planner-model`, then `~/.akmon/config.toml` `[architect]`, then `llama3.2`.
+pub(crate) fn planner_model_for_tui(cli: &Cli) -> String {
+    let global = load_user_global_config();
+    cli.planner_model
+        .clone()
+        .or(global.architect.planner_model.clone())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "llama3.2".into())
+}
+
+/// Writes markdown `body` to `.akmon/plans/{unix_timestamp}-{slug}.md`.
+fn save_plan_under_dot_akmon(
+    project_root: &Path,
+    task: &str,
+    body: &str,
+) -> Result<PathBuf, std::io::Error> {
+    let plans_dir = project_root.join(".akmon").join("plans");
+    std::fs::create_dir_all(&plans_dir)?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let slug = task_slug_for_plan_filename(task);
+    let path = plans_dir.join(format!("{ts}-{slug}.md"));
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+fn task_slug_for_plan_filename(task: &str) -> String {
+    let folded: String = task
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = folded.trim_matches('-');
+    let parts: Vec<&str> = trimmed
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .take(12)
+        .collect();
+    let joined = parts.join("-");
+    let base = if joined.is_empty() {
+        "task".to_string()
+    } else {
+        joined
+    };
+    base.chars().take(80).collect()
 }
 
 /// Default JSONL audit path under `project_root`: `.akmon/audit/{session_id}.jsonl`.
@@ -515,10 +692,22 @@ async fn main() -> ExitCode {
         Some(Commands::Config(c)) => {
             return config_cmd::run_config(c.clone()).await;
         }
+        Some(Commands::Spec(sc)) => {
+            return spec_cmd::run_spec(&cli, &project_root, sc.clone()).await;
+        }
         Some(Commands::Chat) | None => {}
     }
 
-    let Some(task) = cli.task else {
+    let Some(task) = cli.task.clone() else {
+        let global = load_user_global_config();
+        let azure_ver = if cli.azure_api_version.is_empty() {
+            global
+                .azure_api_version
+                .clone()
+                .unwrap_or_else(|| "2024-02-01".into())
+        } else {
+            cli.azure_api_version.clone()
+        };
         let akmon_content = match load_akmon_md(&project_root) {
             Ok(c) => c,
             Err(e) => {
@@ -540,13 +729,17 @@ async fn main() -> ExitCode {
             cli.audit_log.clone(),
         );
 
-        let sandbox = Arc::new(Sandbox::with_git_root(
-            project_root.clone(),
-            has_git_root,
-        ));
+        #[cfg(feature = "semantic-index")]
         let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
+        #[cfg(not(feature = "semantic-index"))]
+        let index_thread: Option<std::thread::JoinHandle<()>> = None;
 
+        #[cfg(feature = "semantic-index")]
         let semantic_index: Option<akmon_tui::SemanticIndexSlot> = if cli.index {
+            let sandbox = Arc::new(Sandbox::with_git_root(
+                project_root.clone(),
+                has_git_root,
+            ));
             let index_path = project_root.join(".akmon").join("index.bin");
             if !index_path.is_file() {
                 eprintln!("akmon: downloading embedding model (~22MB) on first use...");
@@ -612,6 +805,15 @@ async fn main() -> ExitCode {
         } else {
             None
         };
+        #[cfg(not(feature = "semantic-index"))]
+        let semantic_index = {
+            if cli.index {
+                eprintln!(
+                    "akmon: --index is ignored (this binary was built without the `semantic-index` feature)."
+                );
+            }
+            None
+        };
 
         let tui_config = TuiLaunchConfig {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -621,7 +823,23 @@ async fn main() -> ExitCode {
             session_id,
             max_iterations: AgentConfig::default().max_iterations,
             index_enabled: cli.index,
-            anthropic_key: cli.anthropic_key.clone(),
+            anthropic_key: coalesce_opt(cli.anthropic_key.clone(), global.anthropic_api_key.clone()),
+            openrouter_key: coalesce_opt(cli.openrouter_key.clone(), global.openrouter_api_key.clone()),
+            openai_key: coalesce_opt(cli.openai_key.clone(), global.openai_api_key.clone()),
+            groq_key: coalesce_opt(cli.groq_key.clone(), global.groq_api_key.clone()),
+            azure_endpoint: coalesce_opt(cli.azure_endpoint.clone(), global.azure_openai_endpoint.clone()),
+            azure_key: coalesce_opt(cli.azure_key.clone(), global.azure_openai_api_key.clone()),
+            azure_api_version: azure_ver,
+            bedrock: cli.bedrock,
+            aws_region: cli.aws_region.clone(),
+            openai_compatible_url: coalesce_opt(
+                cli.openai_compatible_url.clone(),
+                global.openai_compatible_url.clone(),
+            ),
+            openai_compatible_key: coalesce_opt(
+                cli.openai_compatible_key.clone(),
+                global.openai_compatible_api_key.clone(),
+            ),
             ollama_url: cli.ollama_url.clone(),
             shell_allow: cli.shell_allow.clone(),
             web_fetch: cli.web_fetch,
@@ -634,6 +852,7 @@ async fn main() -> ExitCode {
             sandbox_has_git_root: has_git_root,
             semantic_index,
             auto_commit: cli.auto_commit,
+            planner_model: planner_model_for_tui(&cli),
         };
         let tui_outcome = akmon_tui::run_interactive(tui_config).await;
         if let Some(handle) = index_thread {
@@ -657,6 +876,11 @@ async fn main() -> ExitCode {
         }
     };
 
+    if cli.plan && cli.architect {
+        eprintln!("akmon: --plan cannot be combined with --architect");
+        return ExitCode::from(2);
+    }
+
     if cli.output == OutputFormat::Text {
         eprintln!("akmon: project root: {}", project_root.display());
         match &akmon_content {
@@ -665,25 +889,14 @@ async fn main() -> ExitCode {
         }
     }
 
+    let session_id = cli.session.unwrap_or_else(uuid::Uuid::new_v4);
     let agent_config = AgentConfig {
+        session_id,
         auto_commit: cli.auto_commit,
         ..Default::default()
     };
-    let audit_log_path = resolve_audit_log_path(
-        &project_root,
-        agent_config.session_id,
-        cli.audit_log.clone(),
-    );
-
-    let provider: Arc<dyn LlmProvider> = match &cli.anthropic_key {
-        Some(key) if cli.model.to_lowercase().starts_with("claude") => Arc::new(
-            AnthropicBackend::new(Secret::new(key.clone()), cli.model.clone()),
-        ),
-        _ => Arc::new(OllamaBackend::new(
-            cli.ollama_url.clone(),
-            cli.model.clone(),
-        )),
-    };
+    let audit_log_path = resolve_audit_log_path(&project_root, session_id, cli.audit_log.clone());
+    let global = load_user_global_config();
 
     let policy_mode = if cli.yes {
         if cli.web_fetch && cli.yes_web {
@@ -704,8 +917,12 @@ async fn main() -> ExitCode {
         has_git_root,
     ));
 
+    #[cfg(feature = "semantic-index")]
     let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
+    #[cfg(not(feature = "semantic-index"))]
+    let index_thread: Option<std::thread::JoinHandle<()>> = None;
 
+    #[cfg(feature = "semantic-index")]
     let semantic_parts: Option<SemanticIndexParts> = if cli.index {
         let index_path = project_root.join(".akmon").join("index.bin");
         if !index_path.is_file() {
@@ -773,11 +990,325 @@ async fn main() -> ExitCode {
         None
     };
 
+    #[cfg(not(feature = "semantic-index"))]
+    if cli.index {
+        eprintln!(
+            "akmon: --index is ignored (this binary was built without the `semantic-index` feature)."
+        );
+    }
+
+    if cli.plan {
+        let provider = match resolve_llm(&cli, &global, cli.model.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("akmon: {e}");
+                if let Some(handle) = index_thread {
+                    eprintln!("akmon: waiting for index to finish building...");
+                    let _ = handle.join();
+                }
+                return ExitCode::from(2);
+            }
+        };
+        let tools = build_tool_registry(
+            &cli.shell_allow,
+            cli.web_fetch,
+            has_git_root,
+            true,
+            #[cfg(feature = "semantic-index")]
+            semantic_parts.clone(),
+        );
+        let plan_agent_config = AgentConfig {
+            auto_commit: false,
+            ..agent_config
+        };
+        let mut session = AgentSession::new(
+            plan_agent_config,
+            Arc::clone(&policy),
+            provider,
+            tools,
+            Arc::clone(&sandbox),
+            akmon_content.clone(),
+            true,
+        );
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
+        let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
+        let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
+        let mut policy_opt = Some(policy_rx);
+        let run_outcome = session
+            .run(task.clone(), ev_tx, &mut policy_opt, None)
+            .await;
+        drop(policy_opt);
+        let _ = printer.await;
+        let plan_body = session.result_text().to_string();
+        let saved_path = match save_plan_under_dot_akmon(&project_root, &task, &plan_body) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("akmon: failed to save plan: {e}");
+                if let Some(handle) = index_thread {
+                    eprintln!("akmon: waiting for index to finish building...");
+                    let _ = handle.join();
+                }
+                return ExitCode::from(2);
+            }
+        };
+        if cli.output == OutputFormat::Text {
+            println!("{plan_body}");
+            println!(
+                "Plan saved to {}\nReview the plan and run without --plan to implement it.",
+                saved_path.display()
+            );
+        }
+        if let Err(e) = write_audit_jsonl(&audit_log_path, session.audit_events()) {
+            eprintln!(
+                "akmon: failed to write audit log {}: {e}",
+                audit_log_path.display()
+            );
+        }
+        if let Some(handle) = index_thread {
+            eprintln!("akmon: waiting for index to finish building...");
+            eprintln!(
+                "akmon: (CPU-bound embedding — more `akmon:` lines may appear until the index is saved)"
+            );
+            let _ = handle.join();
+        }
+        if cli.output == OutputFormat::Json {
+            let (status, error_opt): (&'static str, Option<String>) = match &run_outcome {
+                Ok(()) => ("success", None),
+                Err(e) => ("error", Some(e.to_string())),
+            };
+            let report = RunReport {
+                session_id: session.session_id().to_string(),
+                status,
+                result: plan_body,
+                tool_calls: session.tool_call_summaries().to_vec(),
+                error: error_opt,
+                audit_log_path: audit_log_path.to_string_lossy().into_owned(),
+                usage: RunUsageSummary {
+                    total_input_tokens: session.total_input_tokens(),
+                    total_cache_read_tokens: session.total_cache_read_tokens(),
+                    total_output_tokens: session.total_output_tokens(),
+                },
+            };
+            let json_line = match serde_json::to_string(&report) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("akmon: failed to serialize run report: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            println!("{json_line}");
+        }
+        return match run_outcome {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                if cli.output == OutputFormat::Text {
+                    eprintln!("akmon: {e}");
+                }
+                exit_code_for_agent_error(&e)
+            }
+        };
+    }
+
+    if cli.architect {
+        let planner_model = planner_model_for_tui(&cli);
+        let provider_planner = match resolve_llm(&cli, &global, planner_model.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("akmon: {e}");
+                if let Some(handle) = index_thread {
+                    eprintln!("akmon: waiting for index to finish building...");
+                    let _ = handle.join();
+                }
+                return ExitCode::from(2);
+            }
+        };
+        let tools_planner = build_tool_registry(
+            &cli.shell_allow,
+            cli.web_fetch,
+            has_git_root,
+            true,
+            #[cfg(feature = "semantic-index")]
+            semantic_parts.clone(),
+        );
+        let planner_agent_config = AgentConfig {
+            auto_commit: false,
+            ..agent_config
+        };
+        let mut planner_session = AgentSession::new(
+            planner_agent_config,
+            Arc::clone(&policy),
+            provider_planner,
+            tools_planner,
+            Arc::clone(&sandbox),
+            akmon_content.clone(),
+            true,
+        );
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
+        let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
+        let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
+        let mut policy_opt = Some(policy_rx);
+        let plan_run = planner_session
+            .run(task.clone(), ev_tx, &mut policy_opt, None)
+            .await;
+        drop(policy_opt);
+        let _ = printer.await;
+        if let Err(e) = plan_run {
+            if let Err(audit_err) = write_audit_jsonl(&audit_log_path, planner_session.audit_events())
+            {
+                eprintln!(
+                    "akmon: failed to write audit log {}: {audit_err}",
+                    audit_log_path.display()
+                );
+            }
+            if let Some(handle) = index_thread {
+                eprintln!("akmon: waiting for index to finish building...");
+                let _ = handle.join();
+            }
+            if cli.output == OutputFormat::Text {
+                eprintln!("akmon: {e}");
+            }
+            return exit_code_for_agent_error(&e);
+        }
+        let plan_text = planner_session.result_text().to_string();
+        eprintln!("akmon: architect — plan complete (planner: {planner_model})");
+        if let Err(e) = save_plan_under_dot_akmon(&project_root, &task, &plan_text) {
+            eprintln!("akmon: warning: failed to save plan file: {e}");
+        }
+        let provider_main = match resolve_llm(&cli, &global, cli.model.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("akmon: {e}");
+                if let Some(handle) = index_thread {
+                    eprintln!("akmon: waiting for index to finish building...");
+                    let _ = handle.join();
+                }
+                return ExitCode::from(2);
+            }
+        };
+        let mut tools = build_tool_registry(
+            &cli.shell_allow,
+            cli.web_fetch,
+            has_git_root,
+            false,
+            #[cfg(feature = "semantic-index")]
+            semantic_parts,
+        );
+        for url in &cli.mcp_server {
+            let server = McpServerConfig {
+                name: url.clone(),
+                url: url.clone(),
+                description: String::new(),
+            };
+            match discover_mcp_tools(&server).await {
+                Ok(mcp_tools) => {
+                    eprintln!(
+                        "akmon: MCP server {} — {} tools registered",
+                        url,
+                        mcp_tools.len()
+                    );
+                    for t in mcp_tools {
+                        tools.push(Box::new(t));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("akmon: MCP server {} unavailable: {e}", url);
+                }
+            }
+        }
+        let mut session = AgentSession::new(
+            agent_config,
+            Arc::clone(&policy),
+            provider_main,
+            tools,
+            Arc::clone(&sandbox),
+            akmon_content,
+            false,
+        );
+        let impl_task = format!(
+            "Implement this plan exactly:\n\n{plan_text}\n\nOriginal task: {task}\n\nFollow the plan step by step.\nDo not deviate from the plan without explaining why."
+        );
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
+        let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
+        let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
+        let mut policy_opt = Some(policy_rx);
+        let run_outcome = session
+            .run(impl_task, ev_tx, &mut policy_opt, None)
+            .await;
+        drop(policy_opt);
+        let _ = printer.await;
+        let mut combined_audit: Vec<AuditEvent> = Vec::new();
+        combined_audit.extend(planner_session.audit_events().iter().cloned());
+        combined_audit.extend(session.audit_events().iter().cloned());
+        if let Err(e) = write_audit_jsonl(&audit_log_path, &combined_audit) {
+            eprintln!(
+                "akmon: failed to write audit log {}: {e}",
+                audit_log_path.display()
+            );
+        }
+        if let Some(handle) = index_thread {
+            eprintln!("akmon: waiting for index to finish building...");
+            eprintln!(
+                "akmon: (CPU-bound embedding — more `akmon:` lines may appear until the index is saved)"
+            );
+            let _ = handle.join();
+        }
+        if cli.output == OutputFormat::Json {
+            let (status, error_opt): (&'static str, Option<String>) = match &run_outcome {
+                Ok(()) => ("success", None),
+                Err(e) => ("error", Some(e.to_string())),
+            };
+            let report = RunReport {
+                session_id: session.session_id().to_string(),
+                status,
+                result: session.result_text().to_string(),
+                tool_calls: session.tool_call_summaries().to_vec(),
+                error: error_opt,
+                audit_log_path: audit_log_path.to_string_lossy().into_owned(),
+                usage: RunUsageSummary {
+                    total_input_tokens: session.total_input_tokens(),
+                    total_cache_read_tokens: session.total_cache_read_tokens(),
+                    total_output_tokens: session.total_output_tokens(),
+                },
+            };
+            let json_line = match serde_json::to_string(&report) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("akmon: failed to serialize run report: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            println!("{json_line}");
+        }
+        return match run_outcome {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                if cli.output == OutputFormat::Text {
+                    eprintln!("akmon: {e}");
+                }
+                exit_code_for_agent_error(&e)
+            }
+        };
+    }
+
+    let provider = match resolve_llm(&cli, &global, cli.model.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("akmon: {e}");
+            if let Some(handle) = index_thread {
+                eprintln!("akmon: waiting for index to finish building...");
+                let _ = handle.join();
+            }
+            return ExitCode::from(2);
+        }
+    };
+
     let mut tools = build_tool_registry(
         &cli.shell_allow,
         cli.web_fetch,
-        semantic_parts,
         has_git_root,
+        false,
+        #[cfg(feature = "semantic-index")]
+        semantic_parts,
     );
     for url in &cli.mcp_server {
         let server = McpServerConfig {
@@ -809,6 +1340,7 @@ async fn main() -> ExitCode {
         tools,
         Arc::clone(&sandbox),
         akmon_content,
+        false,
     );
 
     let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
@@ -816,7 +1348,9 @@ async fn main() -> ExitCode {
     let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
 
     let mut policy_opt = Some(policy_rx);
-    let run_outcome = session.run(task, ev_tx, &mut policy_opt, None).await;
+    let run_outcome = session
+        .run(task, ev_tx, &mut policy_opt, None)
+        .await;
 
     drop(policy_opt);
 
@@ -896,36 +1430,64 @@ fn exit_code_for_agent_error(e: &AgentError) -> ExitCode {
 mod tests {
     use super::*;
 
+    fn reg(
+        shell_allow: &[String],
+        web_fetch: bool,
+        has_git_root: bool,
+        plan_mode: bool,
+    ) -> Vec<Box<dyn akmon_tools::Tool>> {
+        build_tool_registry(
+            shell_allow,
+            web_fetch,
+            has_git_root,
+            plan_mode,
+            #[cfg(feature = "semantic-index")]
+            None,
+        )
+    }
+
     #[test]
     fn shell_tool_omitted_without_allow_flags() {
-        let t = build_tool_registry(&[], false, None, false);
+        let t = reg(&[], false, false, false);
         assert!(!t.iter().any(|x| x.name() == "shell"));
     }
 
     #[test]
     fn shell_tool_registered_when_allow_patterns_present() {
-        let t = build_tool_registry(&["echo *".into()], false, None, false);
+        let t = reg(&["echo *".into()], false, false, false);
         assert!(t.iter().any(|x| x.name() == "shell"));
     }
 
     #[test]
     fn web_fetch_tool_omitted_without_flag() {
-        let t = build_tool_registry(&[], false, None, false);
+        let t = reg(&[], false, false, false);
         assert!(!t.iter().any(|x| x.name() == "web_fetch"));
     }
 
     #[test]
     fn web_fetch_tool_registered_when_flag_set() {
-        let t = build_tool_registry(&[], true, None, false);
+        let t = reg(&[], true, false, false);
         assert!(t.iter().any(|x| x.name() == "web_fetch"));
     }
 
     #[test]
     fn git_tool_registered_when_has_git_root() {
-        let t = build_tool_registry(&[], false, None, true);
+        let t = reg(&[], false, true, false);
         assert!(t.iter().any(|x| x.name() == "git"));
-        let t2 = build_tool_registry(&[], false, None, false);
+        let t2 = reg(&[], false, false, false);
         assert!(!t2.iter().any(|x| x.name() == "git"));
+    }
+
+    #[test]
+    fn plan_mode_registry_has_reads_only() {
+        let t = reg(&["echo *".into()], true, true, true);
+        assert!(t.iter().any(|x| x.name() == "read_file"));
+        assert!(t.iter().any(|x| x.name() == "list_directory"));
+        assert!(t.iter().any(|x| x.name() == "search"));
+        assert!(t.iter().any(|x| x.name() == "web_fetch"));
+        assert!(!t.iter().any(|x| x.name() == "write_file"));
+        assert!(!t.iter().any(|x| x.name() == "shell"));
+        assert!(!t.iter().any(|x| x.name() == "git"));
     }
 
     #[test]

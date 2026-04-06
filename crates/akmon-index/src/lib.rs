@@ -7,11 +7,17 @@
 
 #![warn(missing_docs)]
 
-mod indexer;
+mod error;
+mod persist;
 mod search;
+#[cfg(feature = "semantic-index")]
+mod indexer;
 
-pub use indexer::{load_index, save_index, IndexError, Indexer};
+pub use error::IndexError;
+pub use persist::{load_index, save_index};
 pub use search::{cosine_similarity, semantic_search};
+#[cfg(feature = "semantic-index")]
+pub use indexer::Indexer;
 
 use std::path::PathBuf;
 

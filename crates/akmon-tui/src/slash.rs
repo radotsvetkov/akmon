@@ -82,6 +82,36 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "plan",
+        aliases: &[],
+        description: "Next message: read-only plan (no writes)",
+        takes_arg: false,
+    },
+    SlashCommand {
+        name: "implement",
+        aliases: &[],
+        description: "Run implementation for the last /plan output",
+        takes_arg: false,
+    },
+    SlashCommand {
+        name: "architect",
+        aliases: &[],
+        description: "Next message: planner model then main model",
+        takes_arg: false,
+    },
+    SlashCommand {
+        name: "spec",
+        aliases: &[],
+        description: "List feature specs under .akmon/specs",
+        takes_arg: false,
+    },
+    SlashCommand {
+        name: "update-context",
+        aliases: &[],
+        description: "Edit AKMON.md in $EDITOR and reload",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "exit",
         aliases: &["quit", "q"],
         description: "Save and exit",

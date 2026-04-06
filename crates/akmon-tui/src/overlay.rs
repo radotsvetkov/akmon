@@ -291,6 +291,70 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
                 r,
             );
         }
+        Overlay::ModelPicker {
+            rows,
+            selectable,
+            selected,
+            scroll,
+        } => {
+            let inner_h = msg_area.height.saturating_sub(2).max(8);
+            let w = msg_area.width.saturating_sub(2).max(10);
+            let r = centered_rect(msg_area, w, inner_h);
+            f.render_widget(Clear, r);
+            let body_rows = (r.height.saturating_sub(4)) as usize;
+            let max_rows = body_rows.max(1);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            if rows.is_empty() {
+                lines.push(Line::from("No models."));
+            } else {
+                let view_start = if rows.len() <= max_rows {
+                    0
+                } else {
+                    (*scroll).min(rows.len().saturating_sub(max_rows))
+                };
+                let sel_row = selectable.get(*selected).copied();
+                for row_idx in view_start..(view_start + max_rows).min(rows.len()) {
+                    let Some(row) = rows.get(row_idx) else {
+                        break;
+                    };
+                    let style = if Some(row_idx) == sel_row {
+                        Style::default()
+                            .bg(SELECT_BG)
+                            .fg(FG_PRIMARY)
+                            .add_modifier(Modifier::BOLD)
+                    } else if row.section_header {
+                        Style::default()
+                            .fg(ACCENT_DIM)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(FG_MUTED)
+                    };
+                    let txt = if row.section_header {
+                        format!("── {} ──", row.label)
+                    } else {
+                        format!("  {}", row.label)
+                    };
+                    lines.push(Line::from(Span::styled(txt, style)));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Enter select · Esc cancel · ↑↓",
+                Style::default().fg(FG_MUTED),
+            )));
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(BORDER))
+                        .title(Span::styled(
+                            " model ",
+                            Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
+                        )),
+                ),
+                r,
+            );
+        }
         Overlay::CostSummary => {
             let h = 10u16.min(msg_area.height.saturating_sub(2));
             let w = (msg_area.width.saturating_sub(4)).min(48);

@@ -17,6 +17,15 @@ use crate::message::TuiMessage;
 use crate::session_persist::SessionSummary;
 use crate::slash::SlashCommand;
 
+/// One line in [`Overlay::ModelPicker`]: either a section title or a selectable model id.
+#[derive(Debug, Clone)]
+pub struct ModelPickerRow {
+    /// When `true`, `label` is a section heading (not selectable).
+    pub section_header: bool,
+    /// Section title or model id.
+    pub label: String,
+}
+
 /// Modal overlay drawn over the transcript or above the input (slash UI).
 #[derive(Debug)]
 pub enum Overlay {
@@ -42,6 +51,17 @@ pub enum Overlay {
     },
     /// `/cost` — token table and cost hint (any key closes).
     CostSummary,
+    /// `/model` with no argument — pick a model from configured providers.
+    ModelPicker {
+        /// All rows (headers + models).
+        rows: Vec<ModelPickerRow>,
+        /// Indices into `rows` for selectable model lines.
+        selectable: Vec<usize>,
+        /// Index into `selectable`.
+        selected: usize,
+        /// First row index shown when the list scrolls.
+        scroll: usize,
+    },
     /// Command-name completion while the input starts with `/`.
     SlashAutocomplete {
         /// Filtered commands (at most six visible; rest scroll).
@@ -119,6 +139,12 @@ pub struct TuiApp {
     pub welcome_spark_phase: bool,
     /// Mirrors [`TuiLaunchConfig::has_akmon_md`] for empty-state hints.
     pub has_akmon_md: bool,
+    /// Next message uses read-only plan mode (`/plan`).
+    pub plan_only_next_turn: bool,
+    /// Next message runs architect (planner + main model).
+    pub architect_next_turn: bool,
+    /// Last plan output for `/implement`.
+    pub pending_plan: Option<String>,
 }
 
 impl TuiApp {
@@ -166,7 +192,20 @@ impl TuiApp {
             input_body_inner: None,
             welcome_spark_phase: false,
             has_akmon_md: config.has_akmon_md,
+            plan_only_next_turn: false,
+            architect_next_turn: false,
+            pending_plan: None,
         }
+    }
+
+    /// Consumes the `/plan` flag for the next submitted user message.
+    pub fn take_plan_only_next_turn(&mut self) -> bool {
+        std::mem::replace(&mut self.plan_only_next_turn, false)
+    }
+
+    /// Consumes the `/architect` flag for the next submitted user message.
+    pub fn take_architect_next_turn(&mut self) -> bool {
+        std::mem::replace(&mut self.architect_next_turn, false)
     }
 
     /// Installs the sender used for [`UiCommand`] delivery while the agent task is running.
@@ -508,6 +547,16 @@ mod tests {
             max_iterations: 25,
             index_enabled: false,
             anthropic_key: None,
+            openrouter_key: None,
+            openai_key: None,
+            groq_key: None,
+            azure_endpoint: None,
+            azure_key: None,
+            azure_api_version: "2024-02-01".into(),
+            bedrock: false,
+            aws_region: "us-east-1".into(),
+            openai_compatible_url: None,
+            openai_compatible_key: None,
             ollama_url: "http://localhost:11434".into(),
             shell_allow: Vec::new(),
             web_fetch: false,
@@ -520,6 +569,7 @@ mod tests {
             sandbox_has_git_root: true,
             semantic_index: None,
             auto_commit: false,
+            planner_model: "llama3.2".into(),
         }
     }
 
@@ -540,6 +590,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use tokio::sync::Notify;
 
+        use crate::agent::AgentTurn;
         use crate::slash_exec::{handle_slash_line, SlashEnv, SlashHandled};
         use crate::tui_project::ProjectUiJob;
         use tokio::sync::mpsc;
@@ -549,12 +600,14 @@ mod tests {
         let shared = Arc::new(Mutex::new(c));
         app.attach_runtime_handles(Arc::clone(&shared), Arc::new(Notify::new()));
         let (project_tx, _rx) = mpsc::unbounded_channel::<ProjectUiJob>();
+        let (agent_tx, _arx) = mpsc::unbounded_channel::<AgentTurn>();
         let env = SlashEnv {
             shared_config: Arc::clone(&shared),
             reload_notify: app.reload_notify.clone().expect("notify"),
             index_enabled_flag: false,
             index_bin_path: app.project_root.join(".akmon").join("index.bin"),
             project_job_tx: project_tx,
+            agent_task_tx: agent_tx,
         };
         assert_eq!(
             handle_slash_line(&mut app, "/help", &env),
@@ -568,6 +621,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use tokio::sync::Notify;
 
+        use crate::agent::AgentTurn;
         use crate::slash_exec::{handle_slash_line, SlashEnv, SlashHandled};
         use crate::tui_project::ProjectUiJob;
         use tokio::sync::mpsc;
@@ -579,12 +633,14 @@ mod tests {
         let shared = Arc::new(Mutex::new(c));
         app.attach_runtime_handles(Arc::clone(&shared), Arc::new(Notify::new()));
         let (project_tx, _rx) = mpsc::unbounded_channel::<ProjectUiJob>();
+        let (agent_tx, _arx) = mpsc::unbounded_channel::<AgentTurn>();
         let env = SlashEnv {
             shared_config: shared.clone(),
             reload_notify: app.reload_notify.clone().expect("notify"),
             index_enabled_flag: false,
             index_bin_path: app.project_root.join(".akmon").join("index.bin"),
             project_job_tx: project_tx,
+            agent_task_tx: agent_tx,
         };
         assert_eq!(
             handle_slash_line(&mut app, "/clear", &env),
@@ -602,6 +658,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use tokio::sync::Notify;
 
+        use crate::agent::AgentTurn;
         use crate::slash_exec::{handle_slash_line, SlashEnv, SlashHandled};
         use crate::tui_project::ProjectUiJob;
         use tokio::sync::mpsc;
@@ -611,12 +668,14 @@ mod tests {
         let shared = Arc::new(Mutex::new(c));
         app.attach_runtime_handles(Arc::clone(&shared), Arc::new(Notify::new()));
         let (project_tx, _rx) = mpsc::unbounded_channel::<ProjectUiJob>();
+        let (agent_tx, _arx) = mpsc::unbounded_channel::<AgentTurn>();
         let env = SlashEnv {
             shared_config: shared,
             reload_notify: app.reload_notify.clone().expect("notify"),
             index_enabled_flag: false,
             index_bin_path: app.project_root.join(".akmon").join("index.bin"),
             project_job_tx: project_tx,
+            agent_task_tx: agent_tx,
         };
         assert_eq!(
             handle_slash_line(&mut app, "/exit", &env),

@@ -35,6 +35,14 @@ fn default_true() -> bool {
     true
 }
 
+/// Defaults for `--architect` / `/architect` (planning model).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchitectConfig {
+    /// Ollama tag or Claude id used only for the planning phase.
+    #[serde(default)]
+    pub planner_model: Option<String>,
+}
+
 /// Serializable contents of `~/.akmon/config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AkmonGlobalConfig {
@@ -47,9 +55,33 @@ pub struct AkmonGlobalConfig {
     /// Stored Anthropic API key (treat as secret on disk).
     #[serde(default)]
     pub anthropic_api_key: Option<String>,
+    /// OpenRouter (`https://openrouter.ai`).
+    #[serde(default)]
+    pub openrouter_api_key: Option<String>,
+    /// OpenAI (`api.openai.com`).
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+    /// Groq.
+    #[serde(default)]
+    pub groq_api_key: Option<String>,
+    /// Azure OpenAI HTTPS endpoint ending in `/deployments/.../chat/completions`.
+    #[serde(default)]
+    pub azure_openai_endpoint: Option<String>,
+    #[serde(default)]
+    pub azure_openai_api_key: Option<String>,
+    #[serde(default)]
+    pub azure_api_version: Option<String>,
+    /// Any OpenAI-compatible server base (no `/chat/completions` suffix).
+    #[serde(default)]
+    pub openai_compatible_url: Option<String>,
+    #[serde(default)]
+    pub openai_compatible_api_key: Option<String>,
     /// Registered MCP HTTP servers.
     #[serde(default)]
     pub mcp: Vec<McpServerEntry>,
+    /// Architect / two-phase planning defaults.
+    #[serde(default)]
+    pub architect: ArchitectConfig,
 }
 
 impl AkmonGlobalConfig {
@@ -59,7 +91,49 @@ impl AkmonGlobalConfig {
         if let Some(ref k) = c.anthropic_api_key {
             c.anthropic_api_key = Some(mask_api_key(k));
         }
+        if let Some(ref k) = c.openrouter_api_key {
+            c.openrouter_api_key = Some(mask_api_key(k));
+        }
+        if let Some(ref k) = c.openai_api_key {
+            c.openai_api_key = Some(mask_api_key(k));
+        }
+        if let Some(ref k) = c.groq_api_key {
+            c.groq_api_key = Some(mask_api_key(k));
+        }
+        if let Some(ref k) = c.azure_openai_api_key {
+            c.azure_openai_api_key = Some(mask_api_key(k));
+        }
+        if let Some(ref k) = c.openai_compatible_api_key {
+            c.openai_compatible_api_key = Some(mask_api_key(k));
+        }
         toml::to_string_pretty(&c).unwrap_or_else(|_| "# (invalid config)\n".into())
+    }
+
+    /// Commented starter TOML documenting optional provider keys (for docs / wizard output).
+    pub fn annotated_template() -> &'static str {
+        r#"# Akmon user config (~/.akmon/config.toml)
+# default_model = "llama3.2"
+# ollama_url = "http://localhost:11434"
+
+# anthropic_api_key = "sk-ant-..."
+# openrouter_api_key = "sk-or-..."
+# openai_api_key = "sk-..."
+# groq_api_key = "gsk_..."
+
+# Azure: full deployment URL + api-version is appended if missing from the URL
+# azure_openai_endpoint = "https://MYRESOURCE.openai.azure.com/openai/deployments/MYDEPLOYMENT/chat/completions"
+# azure_openai_api_key = "..."
+# azure_api_version = "2024-02-01"
+
+# LM Studio / local OpenAI-compatible
+# openai_compatible_url = "http://127.0.0.1:1234/v1"
+# openai_compatible_api_key = "lm-studio"  # if required
+
+# Amazon Bedrock: use CLI --bedrock and AWS_* env vars (see README)
+
+# [architect]
+# planner_model = "llama3.2"
+"#
     }
 }
 

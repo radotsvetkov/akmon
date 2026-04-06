@@ -106,6 +106,8 @@ pub struct AgentSession {
     total_cache_read_tokens: u32,
     /// Sum of `output_tokens` from each [`StreamEvent::UsageReport`] in this run.
     total_output_tokens: u32,
+    /// When `true`, project system prompts are read-only (plan mode); tools should match.
+    plan_mode: bool,
 }
 
 impl AgentSession {
@@ -117,6 +119,7 @@ impl AgentSession {
         tools: Vec<Box<dyn Tool>>,
         sandbox: Arc<Sandbox>,
         akmon_md: Option<String>,
+        plan_mode: bool,
     ) -> Self {
         let max_tokens = provider.context_window_tokens().clamp(1, 100_000);
         let fixed_system_messages = if akmon_md.is_some() { 2 } else { 1 };
@@ -146,7 +149,23 @@ impl AgentSession {
             total_input_tokens: 0,
             total_cache_read_tokens: 0,
             total_output_tokens: 0,
+            plan_mode,
         }
+    }
+
+    /// Returns whether this session uses read-only plan-mode system prompts.
+    pub fn plan_mode(&self) -> bool {
+        self.plan_mode
+    }
+
+    /// Swaps the tool registry (e.g. between plan-only and full implementation turns).
+    pub fn replace_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
+        self.tools = tools.into_iter().map(Arc::from).collect();
+    }
+
+    /// Enables or disables plan-mode system prompts for subsequent model calls.
+    pub fn set_plan_mode(&mut self, plan_mode: bool) {
+        self.plan_mode = plan_mode;
     }
 
     /// Returns the stable session id from [`AgentConfig`].
@@ -290,6 +309,7 @@ impl AgentSession {
                     &self.context,
                     project_root.as_str(),
                     &tool_names,
+                    self.plan_mode,
                 )
             } else {
                 build_messages(
@@ -298,6 +318,7 @@ impl AgentSession {
                     task.as_str(),
                     project_root.as_str(),
                     &tool_names,
+                    self.plan_mode,
                 )
             };
 
@@ -324,6 +345,7 @@ impl AgentSession {
                         &self.context,
                         project_root.as_str(),
                         &tool_names,
+                        self.plan_mode,
                     )
                 } else {
                     build_messages(
@@ -332,6 +354,7 @@ impl AgentSession {
                         task.as_str(),
                         project_root.as_str(),
                         &tool_names,
+                        self.plan_mode,
                     )
                 };
             }
@@ -1435,6 +1458,7 @@ mod tests {
             vec![],
             test_sandbox(tmp.path()),
             None,
+            false,
         );
         assert!(matches!(s.state(), AgentState::Idle));
     }
@@ -1560,6 +1584,7 @@ mod tests {
             vec![],
             sandbox,
             None,
+            false,
         );
 
         let (tx, mut rx) = mpsc::channel(64);
@@ -1621,6 +1646,7 @@ mod tests {
             vec![],
             sandbox,
             None,
+            false,
         );
 
         let (tx, _rx) = mpsc::channel(64);
@@ -1666,6 +1692,7 @@ mod tests {
             vec![],
             sandbox,
             None,
+            false,
         );
 
         let (tx, mut rx) = mpsc::channel(64);
@@ -1779,6 +1806,7 @@ mod tests {
             vec![Box::new(akmon_tools::ReadFileTool::new())],
             sandbox,
             None,
+            false,
         );
 
         let (ev_tx, _rx) = mpsc::channel(64);
@@ -1853,6 +1881,7 @@ mod tests {
             vec![Box::new(akmon_tools::ReadFileTool::new())],
             sandbox,
             None,
+            false,
         );
 
         let (ev_tx, _rx) = mpsc::channel(64);
@@ -1920,6 +1949,7 @@ mod tests {
             ],
             sandbox,
             None,
+            false,
         );
 
         let (ev_tx, _rx) = mpsc::channel(64);
@@ -1982,6 +2012,7 @@ mod tests {
             ],
             sandbox,
             None,
+            false,
         );
 
         let (ev_tx, _rx) = mpsc::channel(64);
@@ -2060,6 +2091,7 @@ mod tests {
             ],
             sandbox,
             None,
+            false,
         );
 
         let (ev_tx, _rx) = mpsc::channel(64);
@@ -2124,6 +2156,7 @@ mod tests {
             vec![Box::new(akmon_tools::ReadFileTool::new())],
             sandbox,
             None,
+            false,
         );
 
         let (ev_tx, _ev_rx) = mpsc::channel(64);
@@ -2172,6 +2205,7 @@ mod tests {
             vec![],
             sandbox,
             None,
+            false,
         );
 
         let (tx, _rx) = mpsc::channel(64);
@@ -2206,6 +2240,7 @@ mod tests {
             vec![],
             sandbox,
             None,
+            false,
         );
 
         let (tx, _rx) = mpsc::channel(64);

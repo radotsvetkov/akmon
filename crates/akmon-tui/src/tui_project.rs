@@ -6,8 +6,6 @@ use akmon_core::project::{
     detect_project, format_project_context_for_init, project_type_label, scaffold_project,
     suggested_akmon_title, ScaffoldKind, ScaffoldLanguage,
 };
-use akmon_core::Secret;
-use akmon_models::{AnthropicBackend, LlmProvider, OllamaBackend};
 use akmon_query::generate_akmon_md_markdown;
 
 use crate::config::TuiLaunchConfig;
@@ -40,21 +38,6 @@ pub async fn run_project_job(
     }
 }
 
-fn build_provider(cfg: &TuiLaunchConfig) -> std::sync::Arc<dyn LlmProvider> {
-    match &cfg.anthropic_key {
-        Some(key) if cfg.model_name.to_lowercase().starts_with("claude") => {
-            std::sync::Arc::new(AnthropicBackend::new(
-                Secret::new(key.clone()),
-                cfg.model_name.clone(),
-            ))
-        }
-        _ => std::sync::Arc::new(OllamaBackend::new(
-            cfg.ollama_url.clone(),
-            cfg.model_name.clone(),
-        )),
-    }
-}
-
 async fn run_init_job(cfg: &TuiLaunchConfig) -> (Vec<String>, bool) {
     let mut lines = Vec::new();
     let root = &cfg.project_root;
@@ -73,7 +56,13 @@ async fn run_init_job(cfg: &TuiLaunchConfig) -> (Vec<String>, bool) {
 
     let ctx = format_project_context_for_init(&summary);
     let title = suggested_akmon_title(&summary);
-    let provider = build_provider(cfg);
+    let provider = match cfg.llm_connect_for_model(cfg.model_name.clone()).resolve() {
+        Ok(p) => p,
+        Err(msg) => {
+            lines.push(format!("Model provider error: {msg}"));
+            return (lines, false);
+        }
+    };
     let body = match generate_akmon_md_markdown(&*provider, &ctx, None, &title).await {
         Ok(s) => s,
         Err(e) => {
@@ -144,7 +133,13 @@ async fn run_new_job(cfg: &TuiLaunchConfig, name: &str) -> (Vec<String>, bool) {
 
     let ctx = format_project_context_for_init(&summary);
     let title = suggested_akmon_title(&summary);
-    let provider = build_provider(cfg);
+    let provider = match cfg.llm_connect_for_model(cfg.model_name.clone()).resolve() {
+        Ok(p) => p,
+        Err(msg) => {
+            lines.push(format!("Model provider error: {msg}"));
+            return (lines, false);
+        }
+    };
     let body = match generate_akmon_md_markdown(&*provider, &ctx, None, &title).await {
         Ok(s) => s,
         Err(e) => {
