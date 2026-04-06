@@ -1,28 +1,30 @@
-<!-- HEADER -->
 <div align="center">
-✦    ✦  ✦
-████████████
-████████████████
-████████████████
-██████████████
-████████
-████████████
-████████████████
-████████████████████
+
+<pre>
+    ✦    ✦  ✦
+
+  ▓▓▓▓▓▓▓▓▓▓▓▓
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+      ▓▓▓▓▓▓▓▓
+    ▓▓▓▓▓▓▓▓▓▓▓▓
+  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+</pre>
 
 # Akmon
 
-**The AI coding agent built for developers 
+**The AI coding agent built for developers
 who take security seriously.**
 
-Local-first · Trust-first · Rust-native · 
-Single binary · No subscription
+`local-first` · `trust-first` · `rust-native` ·
+`single binary` · `no subscription`
 
 [![CI](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml/badge.svg)](https://github.com/radotsvetkov/akmon/actions)
-[![Crates.io](https://img.shields.io/crates/v/akmon.svg)](https://crates.io/crates/akmon)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-200%2B_passing-brightgreen.svg)](https://github.com/radotsvetkov/akmon/actions)
+[![Tests](https://img.shields.io/badge/tests-286%2B_passing-brightgreen.svg)](https://github.com/radotsvetkov/akmon/actions)
 
 </div>
 
@@ -40,6 +42,12 @@ Claude Code requires a subscription you
 do not control.
 
 Akmon is different by design:
+
+| | Akmon | Typical agents |
+| --- | :---: | :---: |
+| Audited tool calls | ✅ | ❌ |
+| Sandboxed repo | ✅ | ❌ |
+| No subscription | ✅ | ❌ |
 
 **Every action is audited.** Every tool call, 
 every permission decision, every model 
@@ -64,12 +72,14 @@ with Ollama. One binary. You own the tool.
 ## Install
 
 ### One-line install (macOS/Linux)
+
 ```bash
 curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) \
   -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon
 ```
 
 ### From source
+
 ```bash
 git clone https://github.com/radotsvetkov/akmon
 cd akmon
@@ -84,6 +94,7 @@ Requires Rust 1.88+ via [rustup](https://rustup.rs).
 ## Quick start
 
 ### Local models (free, offline, private)
+
 ```bash
 # Install Ollama: https://ollama.com
 ollama pull qwen2.5-coder:7b
@@ -92,6 +103,7 @@ akmon chat
 ```
 
 ### Anthropic API
+
 ```bash
 export ANTHROPIC_API_KEY=your-key
 
@@ -99,6 +111,7 @@ akmon chat --model claude-haiku-4-5-20251001
 ```
 
 ### OpenRouter (500+ models, one key)
+
 ```bash
 export OPENROUTER_API_KEY=your-key
 
@@ -109,6 +122,7 @@ akmon chat --model deepseek/deepseek-chat
 ```
 
 ### Set up once with the config wizard
+
 ```bash
 akmon config
 ```
@@ -116,29 +130,40 @@ akmon config
 ---
 
 ## Interactive TUI
-┌─ akmon v1.4.0 │ project: my-app │ claude-haiku │ INTERACTIVE ─────┐
-│                                                                      │
-│  You: find the authentication code and explain how tokens work       │
-│                                                                      │
-│  → semantic_search                                                   │
-│  ✓ semantic_search  [Tab to expand]                                  │
-│  → read_file                                                         │
-│  ✓ read_file                                                         │
-│                                                                      │
-│  Akmon: The authentication system uses JWT tokens stored in...       │
-│         ▊                                                            │
-│                                                                      │
-├─ a1b2c3d4 │ tokens:4821 │ cache:8779 │ step 2/25 │ Ctrl+? help ────┤
-│ > type a message or / for commands                                   │
-└──────────────────────────────────────────────────────────────────────┘
 
-The `cache: 8779` shown in green means 8,779 tokens were served from 
-Anthropic's prompt cache — approximately 90% cheaper than fresh tokens. 
-No other tool shows you this.
+<table>
+<tr>
+<td>
+akmon v1.4.0  │  project: my-app  │  claude-haiku  │  INTERACTIVE
+──────────────────────────────────────────────────────────────────
+You: find the auth code and explain how tokens work
+→ semantic_search
+✓ semantic_search                            [Tab to expand]
+→ read_file
+✓ read_file
+Akmon: The authentication system uses JWT tokens stored
+in Redis with a 24-hour TTL. Refresh tokens are persisted
+to PostgreSQL. The middleware in src/auth/jwt.rs validates
+incoming requests using the HS256 algorithm...  ▊
+──────────────────────────────────────────────────────────────────
+a1b2c3d4  │  tokens:4821  │  cache:8779  │  step 2/25
+──────────────────────────────────────────────────────────────────
+
+type a message or / for commands
+
+
+</td>
+</tr>
+</table>
+
+The `cache:8779` means 8,779 tokens were served from
+Anthropic's prompt cache — approximately 90% cheaper than
+fresh tokens. No other tool surfaces this information.
 
 ---
 
 ## Headless mode (CI and scripting)
+
 ```bash
 # Run a task
 akmon --yes --task "add error handling to the fetch function"
@@ -162,6 +187,7 @@ akmon --architect \
 ## Spec-driven development
 
 For building new features from scratch with structured planning:
+
 ```bash
 # Generate requirements → design → tasks
 akmon spec auth-system \
@@ -178,6 +204,7 @@ akmon spec auth-system implement
 ---
 
 ## Project initialization
+
 ```bash
 # Analyze an existing project and generate AKMON.md
 cd my-existing-project
@@ -193,9 +220,11 @@ akmon new my-api --lang rust --type cli \
 ## The audit trail
 
 Every session writes a JSONL audit log:
+
 ```bash
 cat .akmon/audit/$(ls .akmon/audit | tail -1) | jq .
 ```
+
 ```json
 {"event_kind":"policy_evaluation",
  "permission":{"permission":"write_file","path":"src/main.rs"},
@@ -213,22 +242,22 @@ and what no other tool provides.
 ## Provider support
 
 | Provider | How |
-|---|---|
+| --- | --- |
 | Ollama (local) | `akmon chat --model llama3.2` |
 | Anthropic | `ANTHROPIC_API_KEY=... akmon chat` |
 | OpenRouter | `OPENROUTER_API_KEY=... akmon chat --model anthropic/claude-haiku` |
 | OpenAI | `OPENAI_API_KEY=... akmon chat --model gpt-4o` |
 | Groq | `GROQ_API_KEY=... akmon chat --model llama-3.3-70b-versatile` |
-| Azure OpenAI | `--azure-endpoint ... --azure-key ...` |
-| Amazon Bedrock | `--bedrock` + AWS env vars |
-| Any OpenAI-compatible | `--openai-compatible-url ...` |
+| Azure OpenAI | `akmon chat --azure-endpoint ... --azure-key ...` |
+| Amazon Bedrock | `AWS_... akmon chat --bedrock` |
+| Any OpenAI-compatible | `akmon chat --openai-compatible-url ...` |
 
 ---
 
 ## Tools
 
 | Tool | What it does | Permission |
-|---|---|---|
+| --- | --- | --- |
 | `list_directory` | Explore project structure | read (--yes) |
 | `read_file` | Read any text file | read (--yes) |
 | `write_file` | Atomic file write | confirm always |
@@ -261,6 +290,7 @@ PatchFile, GitAdd, GitCommit, ShellTool, WebFetch.
 ---
 
 ## Configuration
+
 ```bash
 akmon config                    # interactive wizard
 akmon config show               # print current config
@@ -279,11 +309,13 @@ supports comments, no trailing comma issues.
 ## AKMON.md — project memory
 
 Create `AKMON.md` at your project root or generate it:
+
 ```bash
 akmon init  # analyzes project and generates AKMON.md
 ```
 
 Akmon reads this at session start. Structure it as:
+
 ```markdown
 # My Project
 
@@ -308,25 +340,29 @@ reduces context drift across sessions.
 ---
 
 ## Project structure
-akmon/
-├── crates/
-│   ├── akmon-cli/      binary, CLI args, subcommands
-│   ├── akmon-core/     sandbox, policy, FSM, audit, secrets
-│   ├── akmon-config/   config file, provider detection
-│   ├── akmon-models/   LLM backends (Ollama, Anthropic, OpenAI-compat, Bedrock)
-│   ├── akmon-tools/    tool implementations (file, git, shell, web, MCP)
-│   ├── akmon-query/    agent session, context, summarization
-│   ├── akmon-index/    semantic indexing with fastembed
-│   └── akmon-tui/      ratatui TUI, slash commands, session UI
-├── docs/
-│   ├── architecture.md
-│   ├── security.md
-│   └── data-flows.md
-└── AKMON.md            project memory for Akmon building itself
+
+| Crate | Responsibility |
+| --- | --- |
+| `akmon-cli` | Binary entry point, CLI args, subcommands |
+| `akmon-core` | Sandbox, policy engine, FSM, audit log, secrets |
+| `akmon-config` | Config file (`~/.akmon/config.toml`), provider detection |
+| `akmon-models` | LLM backends — Ollama, Anthropic, OpenAI-compatible, Bedrock |
+| `akmon-tools` | Tool implementations — file, git, shell, web fetch, MCP |
+| `akmon-query` | Agent session, context management, summarization |
+| `akmon-index` | Semantic indexing with fastembed (optional feature) |
+| `akmon-tui` | ratatui TUI, slash commands, session UI |
+
+Documentation in `docs/`:
+[architecture](docs/architecture.md) ·
+[security](docs/security.md) ·
+[data flows](docs/data-flows.md)
+
+Project memory: [`AKMON.md`](AKMON.md)
 
 ---
 
 ## Building from source
+
 ```bash
 # Standard build
 cargo build --release
@@ -350,9 +386,13 @@ the standard Rust ecosystem dual license.
 
 <div align="center">
 
-Built with [ratatui](https://ratatui.rs) · 
-Powered by [fastembed](https://github.com/Anush008/fastembed-rs) · 
-Named after the Greek anvil · 
-ἄκμων
+---
+
+Built with [ratatui](https://ratatui.rs) ·
+Powered by [fastembed](https://github.com/Anush008/fastembed-rs)
+
+*Named after* **ἄκμων** *— the anvil in ancient Greek.*
+*The forge surface where metal is shaped.*
+*Where code is hammered into form.*
 
 </div>
