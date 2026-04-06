@@ -29,22 +29,22 @@ use crate::app::{ExternalEditTarget, Overlay};
 use crate::command::UiCommand;
 use crate::config::TuiLaunchConfig;
 use crate::cost_estimate::estimate_cost_usd;
-use crate::message::TuiMessage;
 use crate::layout::{self, rect_contains};
+use crate::message::TuiMessage;
 use crate::overlay::{
     draw_message_overlays, draw_slash_autocomplete, draw_transcript_dim_layer,
     slash_autocomplete_row_count,
 };
 use crate::render::{
-    flatten_transcript, paint_message_viewport, paint_terminal_too_small,
-    render_confirmation_overlay, render_header_bar, render_status_bar, CostFrag, StatusParts,
+    CostFrag, StatusParts, flatten_transcript, paint_message_viewport, paint_terminal_too_small,
+    render_confirmation_overlay, render_header_bar, render_status_bar,
 };
-use crate::state::{AgentDisplayState, ConfirmChoice};
 use crate::session_persist::{save_session_snapshot, saved_sessions_directory_empty};
 use crate::slash::{matching_commands, slash_command_name_prefix};
 use crate::slash_exec::{
     SlashEnv, SlashHandled, handle_slash_line, model_picker_enter, session_list_enter,
 };
+use crate::state::{AgentDisplayState, ConfirmChoice};
 use crate::theme::{
     ACCENT, ACCENT_DIM, BORDER, ERR, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN,
 };
@@ -668,8 +668,7 @@ fn handle_key(
         return Ok(true);
     }
 
-    let is_ctrl_c =
-        key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+    let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
     if !is_ctrl_c {
         app.status_flash = None;
     }
@@ -781,8 +780,7 @@ fn handle_key(
             }
             app.mark_confirmation_answered(false);
             app.push_system_info(
-                "Permission prompt was missing — denied to unblock (retry the action)."
-                    .into(),
+                "Permission prompt was missing — denied to unblock (retry the action).".into(),
             );
             return Ok(true);
         }
@@ -938,9 +936,7 @@ fn handle_key(
                 if let Some(tx) = app.ui_command_tx.as_ref() {
                     let _ = tx.send(UiCommand::Interrupt);
                 }
-                app.push_system_info(
-                    "─ interrupted ───────────────────────────────────".into(),
-                );
+                app.push_system_info("─ interrupted ───────────────────────────────────".into());
                 app.agent_running = false;
                 app.agent_activity_line.clear();
                 app.recompute_scroll_after_append(msg_h, term_width);
@@ -1137,11 +1133,7 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
         "Ctrl+? help · Ctrl+↑↓ history".into()
     };
 
-    if app.stream_cursor_visible
-        && matches!(
-            app.agent_display,
-            AgentDisplayState::Streaming { .. }
-        )
+    if app.stream_cursor_visible && matches!(app.agent_display, AgentDisplayState::Streaming { .. })
     {
         hint.push_str(" ▊");
     }
@@ -1246,7 +1238,10 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     } else if app.agent_running {
         app.input_body_inner = None;
         let thinking = Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "> ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 SPINNER_FRAMES[app.spinner_frame as usize % SPINNER_FRAMES.len()].to_string(),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),

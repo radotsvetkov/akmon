@@ -755,9 +755,7 @@ impl TuiApp {
                 None
             }
         }) {
-            AgentDisplayState::Streaming {
-                chars_received: n,
-            }
+            AgentDisplayState::Streaming { chars_received: n }
         } else {
             AgentDisplayState::Thinking
         };

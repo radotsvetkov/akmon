@@ -1,10 +1,10 @@
 //! Single-line header: brand, cwd, model / provider.
 
-use std::path::Path;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use std::path::Path;
 
 use crate::paths::cwd_shortened;
 
@@ -56,8 +56,5 @@ pub fn render_header_bar(
     let left = format!("▓▓ AKMON v{version}");
     let right = format!("{model_name}  │  {provider}");
     let line = three_column_line(&left, &cwd_shortened(cwd), &right, inner_w);
-    f.render_widget(
-        Paragraph::new(line).style(Style::default().bg(BG)),
-        area,
-    );
+    f.render_widget(Paragraph::new(line).style(Style::default().bg(BG)), area);
 }

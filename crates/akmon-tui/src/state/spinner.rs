@@ -16,8 +16,7 @@ pub struct Spinner {
 
 impl Spinner {
     /// Braille sequence used in the TUI.
-    pub const FRAMES: &'static [&'static str] =
-        &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+    pub const FRAMES: &'static [&'static str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
     /// Default 80 ms tick (smooth animation while the agent runs).
     #[must_use]

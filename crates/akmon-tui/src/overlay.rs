@@ -396,7 +396,6 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
     }
 }
 
-
 /// Dims the transcript behind a permission dialog (Claude Code–style focus).
 pub fn draw_transcript_dim_layer(f: &mut Frame<'_>, msg_area: Rect) {
     f.render_widget(
@@ -413,4 +412,3 @@ pub fn draw_transcript_dim_layer(f: &mut Frame<'_>, msg_area: Rect) {
         msg_area,
     );
 }
-

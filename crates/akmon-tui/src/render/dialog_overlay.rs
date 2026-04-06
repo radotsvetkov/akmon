@@ -14,7 +14,11 @@ const GREY: ratatui::style::Color = ratatui::style::Color::Rgb(204, 204, 204);
 const AMBER: ratatui::style::Color = ratatui::style::Color::Rgb(245, 158, 11);
 
 /// Draws the centered permission window inside `viewport` bounds (choices + Enter to confirm).
-pub fn render_confirmation_overlay(f: &mut ratatui::Frame<'_>, viewport: Rect, dlg: &ConfirmationDialog) {
+pub fn render_confirmation_overlay(
+    f: &mut ratatui::Frame<'_>,
+    viewport: Rect,
+    dlg: &ConfirmationDialog,
+) {
     let modal_w = viewport.width.saturating_sub(4).max(44);
     let modal_h = viewport.height.saturating_sub(4).max(12);
     let r = centered_rect(viewport, modal_w, modal_h);
@@ -77,10 +81,7 @@ pub fn render_confirmation_overlay(f: &mut ratatui::Frame<'_>, viewport: Rect, d
         "  Enter / 1 / y — allow once · 2 / Y — remember session · Esc / 3 / n — deny",
         Style::default().fg(ratatui::style::Color::DarkGray),
     )));
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        inner,
-    );
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn operation_lines(op: &OperationType) -> Vec<Line<'static>> {
@@ -90,10 +91,7 @@ fn operation_lines(op: &OperationType) -> Vec<Line<'static>> {
                 "File change",
                 Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled(
-                path.clone(),
-                Style::default().fg(GREY),
-            )),
+            Line::from(Span::styled(path.clone(), Style::default().fg(GREY))),
         ],
         OperationType::RunShell { command } => vec![
             Line::from(Span::styled(
@@ -112,10 +110,9 @@ fn operation_lines(op: &OperationType) -> Vec<Line<'static>> {
             )),
             Line::from(Span::styled(url.clone(), Style::default().fg(GREY))),
         ],
-        OperationType::GitCommit { message, .. } => vec![
-            Line::from("GitCommit"),
-            Line::from(message.clone()),
-        ],
+        OperationType::GitCommit { message, .. } => {
+            vec![Line::from("GitCommit"), Line::from(message.clone())]
+        }
         OperationType::Generic { description } => {
             vec![Line::from(Span::raw(description.clone()))]
         }
@@ -125,9 +122,7 @@ fn operation_lines(op: &OperationType) -> Vec<Line<'static>> {
 fn choice_line(label: &str, me: ConfirmChoice, sel: ConfirmChoice) -> Line<'static> {
     let sym = if sel == me { "●" } else { "○" };
     let st = if sel == me {
-        Style::default()
-            .fg(AMBER)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(AMBER).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(GREY)
     };
@@ -169,8 +164,7 @@ pub fn dialog_from_confirmation(description: &str, diff: Option<&str>) -> Confir
             .to_string();
         OperationType::WebFetch { url }
     } else if description.contains("File change requires confirmation") {
-        let path = path_from_file_change_description(description)
-            .unwrap_or_else(|| "file".into());
+        let path = path_from_file_change_description(description).unwrap_or_else(|| "file".into());
         OperationType::WriteFile {
             path,
             diff: diff_owned.clone().unwrap_or_default(),

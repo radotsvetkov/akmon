@@ -99,7 +99,9 @@ impl ViewportState {
         if self.pinned_to_bottom {
             self.scroll_offset = self.max_offset(viewport_height);
         } else if new_total > prev_total && self.user_scrolled {
-            self.has_new_below = self.has_new_below.saturating_add(new_total.saturating_sub(prev_total));
+            self.has_new_below = self
+                .has_new_below
+                .saturating_add(new_total.saturating_sub(prev_total));
         }
         self.clamp_offset(viewport_height);
     }

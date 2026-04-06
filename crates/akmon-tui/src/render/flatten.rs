@@ -126,7 +126,10 @@ fn assistant_with_code(
                 for line in wrap_text(&text, w) {
                     let label = if out.is_empty() {
                         vec![
-                            Span::styled("Akmon ", Style::default().fg(AMBER).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                "Akmon ",
+                                Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(line, Style::default().fg(FG)),
                         ]
                     } else {
@@ -240,9 +243,7 @@ fn system_line(content: &str, w: u16) -> Vec<Line<'static>> {
     };
     vec![Line::from(Span::styled(
         line,
-        Style::default()
-            .fg(DIM)
-            .add_modifier(Modifier::ITALIC),
+        Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
     ))]
 }
 
@@ -276,7 +277,10 @@ fn tool_card(
             Span::styled("┌─ ", Style::default().fg(BORDER)),
             Span::styled(name.to_string(), Style::default().fg(AMBER)),
             Span::styled(
-                format!(" {}─", "─".repeat((w as usize).saturating_sub(name.len() + 6))),
+                format!(
+                    " {}─",
+                    "─".repeat((w as usize).saturating_sub(name.len() + 6))
+                ),
                 Style::default().fg(BORDER),
             ),
         ]));
@@ -372,7 +376,10 @@ mod tests {
             complete: true,
         };
         let lines = flatten_message(&m, 60, true);
-        let s: String = lines.iter().flat_map(|l| l.spans.iter().map(|sp| sp.content.to_string())).collect();
+        let s: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|sp| sp.content.to_string()))
+            .collect();
         assert!(s.contains("fn"));
     }
 

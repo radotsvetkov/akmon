@@ -30,9 +30,34 @@ const PY_KW: &[&str] = &[
 ];
 
 const JS_KW: &[&str] = &[
-    "function", "const", "let", "var", "return", "if", "else", "for", "while", "async", "await",
-    "try", "catch", "finally", "throw", "class", "extends", "import", "export", "default", "from",
-    "new", "typeof", "instanceof", "true", "false", "null", "undefined",
+    "function",
+    "const",
+    "let",
+    "var",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "async",
+    "await",
+    "try",
+    "catch",
+    "finally",
+    "throw",
+    "class",
+    "extends",
+    "import",
+    "export",
+    "default",
+    "from",
+    "new",
+    "typeof",
+    "instanceof",
+    "true",
+    "false",
+    "null",
+    "undefined",
 ];
 
 /// Applies a very small lexer to one line of code for the given `lang` hint.
@@ -44,7 +69,10 @@ pub fn highlight_line(line: &str, lang: &str) -> Vec<Span<'static>> {
         "python" | "py" => highlight_kw_line(line, PY_KW),
         "javascript" | "js" | "typescript" | "ts" | "tsx" | "jsx" => highlight_kw_line(line, JS_KW),
         "bash" | "sh" | "shell" | "zsh" => highlight_shell_line(line),
-        _ => vec![Span::styled(line.to_string(), Style::default().fg(palette::DEFAULT))],
+        _ => vec![Span::styled(
+            line.to_string(),
+            Style::default().fg(palette::DEFAULT),
+        )],
     }
 }
 
@@ -221,7 +249,10 @@ fn next_token(s: &str) -> &str {
 }
 
 fn is_number(tok: &str) -> bool {
-    !tok.is_empty() && tok.chars().all(|c| c.is_ascii_digit() || c == '_' || c == '.')
+    !tok.is_empty()
+        && tok
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '_' || c == '.')
 }
 
 #[cfg(test)]
