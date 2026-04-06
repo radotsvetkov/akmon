@@ -1,0 +1,1293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Akmon — AI Coding Agent</title>
+  <meta name="description" content="Local-first, trust-first AI coding agent. Single Rust binary. Full audit log. Works with Ollama, Anthropic, OpenRouter, and more.">
+  <meta property="og:title" content="Akmon — AI Coding Agent">
+  <meta property="og:description" content="The AI coding agent built for developers who take security seriously.">
+  <meta property="og:url" content="https://radotsvetkov.github.io/akmon">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Bebas+Neue&family=Crimson+Pro:ital,wght@0,300;0,400;1,300&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0c0c0e;
+      --bg2:       #111114;
+      --bg3:       #17171b;
+      --amber:     #f59e0b;
+      --amber-dim: #92610a;
+      --amber-glow:#fbbf24;
+      --red:       #ef4444;
+      --green:     #10b981;
+      --text:      #e2e0d8;
+      --text-dim:  #6b6a64;
+      --text-muted:#3a3933;
+      --border:    #2a2a2e;
+      --mono:      'IBM Plex Mono', monospace;
+      --display:   'Bebas Neue', sans-serif;
+      --serif:     'Crimson Pro', Georgia, serif;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ─── SCANLINE OVERLAY ─── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.03) 2px,
+        rgba(0,0,0,0.03) 4px
+      );
+      pointer-events: none;
+      z-index: 1000;
+    }
+
+    /* ─── NAV ─── */
+    nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 32px;
+      height: 56px;
+      background: rgba(12,12,14,0.92);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      color: var(--text);
+    }
+
+    .nav-anvil {
+      font-size: 11px;
+      line-height: 1;
+      color: var(--amber);
+      white-space: pre;
+      font-family: var(--mono);
+      opacity: 0.9;
+    }
+
+    .nav-name {
+      font-family: var(--display);
+      font-size: 22px;
+      letter-spacing: 0.08em;
+      color: var(--amber);
+    }
+
+    .nav-version {
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-left: 4px;
+      margin-top: 6px;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 28px;
+      list-style: none;
+    }
+
+    .nav-links a {
+      color: var(--text-dim);
+      text-decoration: none;
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      transition: color 0.15s;
+    }
+
+    .nav-links a:hover { color: var(--amber); }
+
+    .nav-cta {
+      background: var(--amber) !important;
+      color: var(--bg) !important;
+      padding: 6px 16px !important;
+      font-weight: 500 !important;
+      transition: background 0.15s !important;
+    }
+
+    .nav-cta:hover { background: var(--amber-glow) !important; }
+
+    /* ─── HERO ─── */
+    .hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 80px 24px 60px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-grid {
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(245,158,11,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(245,158,11,0.04) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(ellipse 80% 60% at 50% 50%, black 40%, transparent 100%);
+    }
+
+    .hero-glow {
+      position: absolute;
+      width: 600px;
+      height: 600px;
+      background: radial-gradient(circle, rgba(245,158,11,0.06) 0%, transparent 70%);
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -60%);
+      pointer-events: none;
+    }
+
+    .hero-anvil {
+      font-family: var(--mono);
+      font-size: clamp(10px, 1.8vw, 18px);
+      line-height: 1.15;
+      color: var(--amber);
+      text-align: center;
+      white-space: pre;
+      margin-bottom: 32px;
+      opacity: 0;
+      animation: fadeUp 0.8s ease 0.2s forwards;
+      text-shadow: 0 0 20px rgba(245,158,11,0.4);
+    }
+
+    .hero-title {
+      font-family: var(--display);
+      font-size: clamp(56px, 10vw, 120px);
+      letter-spacing: 0.06em;
+      color: var(--text);
+      text-align: center;
+      line-height: 1;
+      margin-bottom: 8px;
+      opacity: 0;
+      animation: fadeUp 0.8s ease 0.4s forwards;
+    }
+
+    .hero-title span { color: var(--amber); }
+
+    .hero-tagline {
+      font-family: var(--serif);
+      font-size: clamp(16px, 2.5vw, 22px);
+      font-weight: 300;
+      font-style: italic;
+      color: var(--text-dim);
+      text-align: center;
+      margin-bottom: 20px;
+      letter-spacing: 0.02em;
+      opacity: 0;
+      animation: fadeUp 0.8s ease 0.5s forwards;
+    }
+
+    .hero-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+      margin-bottom: 40px;
+      opacity: 0;
+      animation: fadeUp 0.8s ease 0.6s forwards;
+    }
+
+    .pill {
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      padding: 4px 12px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .pill-amber {
+      border-color: var(--amber-dim);
+      color: var(--amber);
+    }
+
+    .hero-actions {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-bottom: 60px;
+      opacity: 0;
+      animation: fadeUp 0.8s ease 0.7s forwards;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 500;
+      text-decoration: none;
+      letter-spacing: 0.04em;
+      transition: all 0.15s;
+      cursor: pointer;
+      border: none;
+    }
+
+    .btn-primary {
+      background: var(--amber);
+      color: var(--bg);
+    }
+
+    .btn-primary:hover {
+      background: var(--amber-glow);
+      transform: translateY(-1px);
+      box-shadow: 0 8px 24px rgba(245,158,11,0.25);
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      border-color: var(--amber-dim);
+      color: var(--amber);
+    }
+
+    /* ─── TERMINAL DEMO ─── */
+    .terminal-wrap {
+      width: 100%;
+      max-width: 780px;
+      opacity: 0;
+      animation: fadeUp 0.8s ease 0.9s forwards;
+    }
+
+    .terminal {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+
+    .terminal-bar {
+      background: var(--bg3);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .dot-red   { background: #ef4444; }
+    .dot-yellow{ background: #f59e0b; }
+    .dot-green { background: #10b981; }
+
+    .terminal-title {
+      margin-left: auto;
+      margin-right: auto;
+      font-size: 11px;
+      color: var(--text-dim);
+      letter-spacing: 0.1em;
+    }
+
+    .terminal-body {
+      padding: 20px 24px;
+      font-size: 13px;
+      line-height: 1.8;
+    }
+
+    .t-prompt { color: var(--amber); }
+    .t-cmd    { color: var(--text); }
+    .t-output { color: var(--text-dim); }
+    .t-green  { color: var(--green); }
+    .t-red    { color: var(--red); }
+    .t-amber  { color: var(--amber); }
+    .t-dim    { color: var(--text-muted); }
+
+    .t-bar {
+      display: inline-block;
+      width: 2px;
+      height: 14px;
+      background: var(--amber);
+      vertical-align: middle;
+      animation: blink 1s step-end infinite;
+    }
+
+    /* ─── SECTION BASE ─── */
+    section {
+      padding: 100px 24px;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .section-label {
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--amber);
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-family: var(--display);
+      font-size: clamp(36px, 5vw, 64px);
+      letter-spacing: 0.04em;
+      color: var(--text);
+      line-height: 1;
+      margin-bottom: 20px;
+    }
+
+    .section-body {
+      font-family: var(--serif);
+      font-size: 18px;
+      font-weight: 300;
+      color: var(--text-dim);
+      max-width: 560px;
+      line-height: 1.7;
+    }
+
+    /* ─── WHY SECTION ─── */
+    .why {
+      background: var(--bg2);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .why-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      margin-top: 60px;
+    }
+
+    .why-card {
+      background: var(--bg2);
+      padding: 32px;
+      position: relative;
+      overflow: hidden;
+      transition: background 0.2s;
+    }
+
+    .why-card:hover { background: var(--bg3); }
+
+    .why-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: var(--amber);
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 0.3s ease;
+    }
+
+    .why-card:hover::before { transform: scaleX(1); }
+
+    .why-icon {
+      font-size: 28px;
+      margin-bottom: 16px;
+      display: block;
+    }
+
+    .why-card h3 {
+      font-size: 13px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text);
+      margin-bottom: 10px;
+    }
+
+    .why-card p {
+      font-family: var(--serif);
+      font-size: 16px;
+      font-weight: 300;
+      color: var(--text-dim);
+      line-height: 1.65;
+    }
+
+    /* ─── COMPARISON TABLE ─── */
+    .compare { background: var(--bg); }
+
+    .compare-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 60px;
+      font-size: 13px;
+    }
+
+    .compare-table th {
+      padding: 12px 20px;
+      text-align: left;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .compare-table th.akmon-col {
+      color: var(--amber);
+      border-bottom-color: var(--amber-dim);
+    }
+
+    .compare-table td {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-dim);
+    }
+
+    .compare-table tr:last-child td { border-bottom: none; }
+
+    .compare-table tr:hover td { background: rgba(245,158,11,0.02); }
+
+    .compare-table td:first-child { color: var(--text); }
+
+    .check { color: var(--green); }
+    .cross { color: var(--text-muted); }
+    .akmon-val { color: var(--amber); font-weight: 500; }
+
+    /* ─── INSTALL SECTION ─── */
+    .install { background: var(--bg2); border-top: 1px solid var(--border); }
+
+    .install-tabs {
+      display: flex;
+      gap: 0;
+      margin-top: 48px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tab {
+      padding: 10px 24px;
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      color: var(--text-dim);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      background: none;
+      border-top: none;
+      border-left: none;
+      border-right: none;
+      transition: all 0.15s;
+    }
+
+    .tab.active {
+      color: var(--amber);
+      border-bottom-color: var(--amber);
+    }
+
+    .tab:hover { color: var(--text); }
+
+    .tab-panel { display: none; padding: 32px 0; }
+    .tab-panel.active { display: block; }
+
+    .code-block {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 20px 24px;
+      font-size: 13px;
+      line-height: 1.8;
+      position: relative;
+      overflow-x: auto;
+    }
+
+    .code-block .comment { color: var(--text-muted); }
+    .code-block .keyword { color: var(--amber); }
+    .code-block .string  { color: var(--green); }
+
+    .copy-btn {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      padding: 4px 10px;
+      font-family: var(--mono);
+      font-size: 10px;
+      cursor: pointer;
+      letter-spacing: 0.06em;
+      transition: all 0.15s;
+    }
+
+    .copy-btn:hover {
+      border-color: var(--amber-dim);
+      color: var(--amber);
+    }
+
+    /* ─── PROVIDERS ─── */
+    .providers { background: var(--bg); }
+
+    .provider-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      margin-top: 60px;
+    }
+
+    .provider-card {
+      background: var(--bg);
+      padding: 24px;
+      transition: background 0.2s;
+    }
+
+    .provider-card:hover { background: var(--bg2); }
+
+    .provider-name {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      margin-bottom: 6px;
+      letter-spacing: 0.04em;
+    }
+
+    .provider-detail {
+      font-family: var(--serif);
+      font-size: 14px;
+      font-weight: 300;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+
+    .provider-tag {
+      display: inline-block;
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-top: 8px;
+      padding: 2px 8px;
+    }
+
+    .tag-free  { color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
+    .tag-byok  { color: var(--amber); border: 1px solid rgba(245,158,11,0.3); }
+    .tag-enter { color: #818cf8; border: 1px solid rgba(129,140,248,0.3); }
+
+    /* ─── AUDIT SECTION ─── */
+    .audit {
+      background: var(--bg2);
+      border-top: 1px solid var(--border);
+    }
+
+    .audit-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 80px;
+      align-items: center;
+      margin-top: 60px;
+    }
+
+    @media (max-width: 768px) {
+      .audit-layout { grid-template-columns: 1fr; gap: 40px; }
+    }
+
+    .audit-points { list-style: none; display: flex; flex-direction: column; gap: 20px; }
+
+    .audit-points li {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    .audit-points .num {
+      font-size: 11px;
+      color: var(--amber-dim);
+      min-width: 24px;
+      padding-top: 2px;
+      letter-spacing: 0.06em;
+    }
+
+    .audit-points .txt h4 {
+      font-size: 13px;
+      color: var(--text);
+      margin-bottom: 4px;
+      letter-spacing: 0.04em;
+    }
+
+    .audit-points .txt p {
+      font-family: var(--serif);
+      font-size: 15px;
+      font-weight: 300;
+      color: var(--text-dim);
+      line-height: 1.6;
+    }
+
+    /* ─── CTA SECTION ─── */
+    .cta-section {
+      background: var(--bg);
+      text-align: center;
+      border-top: 1px solid var(--border);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .cta-section::before {
+      content: 'AKMON';
+      position: absolute;
+      font-family: var(--display);
+      font-size: clamp(120px, 25vw, 280px);
+      color: rgba(245,158,11,0.03);
+      letter-spacing: 0.1em;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    .cta-section .section-title { margin-bottom: 12px; }
+    .cta-section .section-body  { margin: 0 auto 40px; text-align: center; max-width: 480px; }
+    .cta-actions { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+
+    /* ─── FOOTER ─── */
+    footer {
+      background: var(--bg2);
+      border-top: 1px solid var(--border);
+      padding: 40px 24px;
+    }
+
+    .footer-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .footer-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .footer-brand {
+      font-family: var(--display);
+      font-size: 18px;
+      letter-spacing: 0.08em;
+      color: var(--amber);
+    }
+
+    .footer-sub {
+      font-family: var(--serif);
+      font-size: 14px;
+      font-weight: 300;
+      font-style: italic;
+      color: var(--text-muted);
+    }
+
+    .footer-right {
+      display: flex;
+      gap: 24px;
+    }
+
+    .footer-right a {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-decoration: none;
+      letter-spacing: 0.06em;
+      transition: color 0.15s;
+    }
+
+    .footer-right a:hover { color: var(--amber); }
+
+    /* ─── ANIMATIONS ─── */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0; }
+    }
+
+    /* ─── RESPONSIVE ─── */
+    @media (max-width: 640px) {
+      nav { padding: 0 16px; }
+      .nav-links { display: none; }
+      .hero { padding: 80px 16px 40px; }
+      .compare-table { font-size: 11px; }
+      .compare-table th, .compare-table td { padding: 10px 12px; }
+      .footer-inner { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a class="nav-logo" href="#">
+    <span class="nav-anvil">▓▓▓▓
+▓▓▓▓▓
+ ▓▓▓
+▓▓▓▓▓</span>
+    <span class="nav-name">AKMON</span>
+    <span class="nav-version">v1.5</span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="#why">Why Akmon</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="#providers">Providers</a></li>
+    <li><a href="./docs/">Documentation</a></li>
+    <li><a href="https://github.com/radotsvetkov/akmon" class="nav-cta">GitHub →</a></li>
+  </ul>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-grid"></div>
+  <div class="hero-glow"></div>
+
+  <pre class="hero-anvil">    ✦    ✦  ✦
+
+  ▓▓▓▓▓▓▓▓▓▓▓▓
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+      ▓▓▓▓▓▓▓▓
+    ▓▓▓▓▓▓▓▓▓▓▓▓
+  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓</pre>
+
+  <h1 class="hero-title"><span>AK</span>MON</h1>
+
+  <p class="hero-tagline">The AI coding agent built for developers who take security seriously.</p>
+
+  <div class="hero-pills">
+    <span class="pill pill-amber">local-first</span>
+    <span class="pill pill-amber">trust-first</span>
+    <span class="pill pill-amber">rust-native</span>
+    <span class="pill">single binary</span>
+    <span class="pill">full audit log</span>
+    <span class="pill">no subscription</span>
+  </div>
+
+  <div class="hero-actions">
+    <a href="#install" class="btn btn-primary">
+      ↓ Install
+    </a>
+    <a href="./docs/" class="btn btn-secondary">
+      Read the docs →
+    </a>
+    <a href="https://github.com/radotsvetkov/akmon" class="btn btn-secondary">
+      GitHub
+    </a>
+  </div>
+
+  <div class="terminal-wrap">
+    <div class="terminal">
+      <div class="terminal-bar">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+        <span class="terminal-title">akmon — ~/my-project — claude-haiku — Anthropic</span>
+      </div>
+      <div class="terminal-body">
+        <div><span class="t-prompt">~/my-project</span> <span class="t-dim">$</span> <span class="t-cmd">akmon chat</span></div>
+        <div class="t-dim">  ▓▓▓▓ akmon v1.5.0 · ~/my-project · claude-haiku · Anthropic</div>
+        <br>
+        <div><span class="t-amber">You:</span> <span class="t-cmd">find all places where authentication tokens are validated</span></div>
+        <br>
+        <div><span class="t-dim">  → semantic_search  "token validation"</span></div>
+        <div><span class="t-green">  ✓ semantic_search</span>  <span class="t-dim">3 results                    [Tab to expand]</span></div>
+        <div><span class="t-dim">  → read_file  src/auth/middleware.rs</span></div>
+        <div><span class="t-green">  ✓ read_file</span>  <span class="t-dim">287 lines</span></div>
+        <br>
+        <div><span class="t-amber">Akmon:</span> <span class="t-cmd">Token validation happens in <span class="t-amber">src/auth/middleware.rs</span>.</span></div>
+        <div><span class="t-cmd">The <span class="t-amber">validate_jwt</span> function at line 47 decodes Bearer</span></div>
+        <div><span class="t-cmd">tokens using HS256 and checks expiry against Redis...</span> <span class="t-bar"></span></div>
+        <br>
+        <div class="t-dim">  a1b2c3d4 · tokens:4,821 · <span style="color:var(--green)">cache:8,779</span> · ~$0.004 · step 3</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- WHY -->
+<section class="why" id="why">
+  <div class="container">
+    <div class="section-label">// why akmon</div>
+    <h2 class="section-title">Built different<br>by design</h2>
+    <p class="section-body">
+      Every AI coding tool asks you to trust a vendor with your code.
+      Anthropic blocked third-party tool access overnight in April 2026.
+      Akmon does not depend on anyone's permission.
+    </p>
+
+    <div class="why-grid">
+      <div class="why-card">
+        <span class="why-icon">📋</span>
+        <h3>Full audit trail</h3>
+        <p>Every tool call, permission decision, and model response is logged to a JSONL file. No other terminal agent does this. Required for compliance environments.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">🔒</span>
+        <h3>Sandbox + SSRF protection</h3>
+        <p>Files are constrained to your git root. Web requests block RFC1918 ranges and cloud metadata endpoints. API keys are zeroized in memory on drop.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">⚙️</span>
+        <h3>Single Rust binary</h3>
+        <p>3.4MB with no runtime dependencies. Drop it in /usr/local/bin. Works over SSH. Works in Docker. Works in CI. No Node.js, no Python, no VS Code required.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">🔑</span>
+        <h3>BYOK — any provider</h3>
+        <p>Ollama for free local inference. Anthropic, OpenRouter (500+ models), Groq, OpenAI, Azure, or Amazon Bedrock. You own the keys and the tool.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">💰</span>
+        <h3>Real cost transparency</h3>
+        <p>Cache hits shown in green. Session cost in USD always visible. Exit summary shows exactly what was spent. No surprise bills, no opaque credit systems.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">🔍</span>
+        <h3>Diff before every write</h3>
+        <p>Colored diff shown before any file is written. You see exactly what changes before approving. Never a file modified without your explicit confirmation.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- COMPARISON -->
+<section class="compare" id="compare">
+  <div class="container">
+    <div class="section-label">// comparison</div>
+    <h2 class="section-title">How it compares</h2>
+
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>Feature</th>
+          <th>Claude Code</th>
+          <th>Cline</th>
+          <th>Aider</th>
+          <th class="akmon-col">Akmon</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Single binary</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="akmon-val">✓ 3.4MB</span></td>
+        </tr>
+        <tr>
+          <td>Full audit log (JSONL)</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="akmon-val">✓ unique</span></td>
+        </tr>
+        <tr>
+          <td>Typed permission system</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="akmon-val">✓ unique</span></td>
+        </tr>
+        <tr>
+          <td>SSRF protection</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="akmon-val">✓ unique</span></td>
+        </tr>
+        <tr>
+          <td>Diff preview before writes</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="akmon-val">✓</span></td>
+        </tr>
+        <tr>
+          <td>Secret zeroization</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="akmon-val">✓ unique</span></td>
+        </tr>
+        <tr>
+          <td>Prompt cache display</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="akmon-val">✓ unique</span></td>
+        </tr>
+        <tr>
+          <td>No subscription required</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="akmon-val">✓</span></td>
+        </tr>
+        <tr>
+          <td>Works fully offline</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="akmon-val">✓</span></td>
+        </tr>
+        <tr>
+          <td>Amazon Bedrock support</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="akmon-val">✓ unique</span></td>
+        </tr>
+        <tr>
+          <td>Context import/export</td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="akmon-val">✓ unique</span></td>
+        </tr>
+        <tr>
+          <td>Works over SSH</td>
+          <td><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="akmon-val">✓</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- INSTALL -->
+<section class="install" id="install">
+  <div class="container">
+    <div class="section-label">// get started</div>
+    <h2 class="section-title">Install in seconds</h2>
+
+    <div class="install-tabs">
+      <button class="tab active" onclick="showTab('mac-arm')">macOS ARM</button>
+      <button class="tab" onclick="showTab('mac-x64')">macOS Intel</button>
+      <button class="tab" onclick="showTab('linux')">Linux</button>
+      <button class="tab" onclick="showTab('source')">From source</button>
+      <button class="tab" onclick="showTab('ollama')">With Ollama</button>
+    </div>
+
+    <div id="mac-arm" class="tab-panel active">
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this, 'curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \\\n  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon')">copy</button>
+        <span class="comment"># Apple Silicon — M1, M2, M3, M4</span><br>
+        curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \<br>
+        &nbsp;&nbsp;-o /usr/local/bin/akmon &amp;&amp; chmod +x /usr/local/bin/akmon<br>
+        <br>
+        akmon <span class="keyword">--version</span>
+        <span class="comment">  # akmon 1.5.0</span><br>
+        akmon <span class="keyword">config</span>
+        <span class="comment">  # run setup wizard</span>
+      </div>
+    </div>
+
+    <div id="mac-x64" class="tab-panel">
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this, 'curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 \\\n  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon')">copy</button>
+        curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 \<br>
+        &nbsp;&nbsp;-o /usr/local/bin/akmon &amp;&amp; chmod +x /usr/local/bin/akmon<br>
+        <br>
+        akmon <span class="keyword">--version</span>
+      </div>
+    </div>
+
+    <div id="linux" class="tab-panel">
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this, 'curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \\\n  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon')">copy</button>
+        curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \<br>
+        &nbsp;&nbsp;-o /usr/local/bin/akmon &amp;&amp; chmod +x /usr/local/bin/akmon<br>
+        <br>
+        akmon <span class="keyword">--version</span>
+      </div>
+    </div>
+
+    <div id="source" class="tab-panel">
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this, 'git clone https://github.com/radotsvetkov/akmon\ncd akmon\ncargo build --release --no-default-features\ncp target/release/akmon /usr/local/bin/')">copy</button>
+        git clone https://github.com/radotsvetkov/akmon<br>
+        cd akmon<br>
+        <br>
+        <span class="comment"># Slim build — 3.4MB, no semantic indexing</span><br>
+        cargo build <span class="keyword">--release</span> <span class="keyword">--no-default-features</span><br>
+        <br>
+        <span class="comment"># Full build — 20MB, with semantic indexing</span><br>
+        cargo build <span class="keyword">--release</span><br>
+        <br>
+        cp target/release/akmon /usr/local/bin/
+      </div>
+    </div>
+
+    <div id="ollama" class="tab-panel">
+      <div class="code-block">
+        <span class="comment"># 1. Install Ollama from https://ollama.com</span><br>
+        ollama pull qwen2.5-coder:7b<br>
+        <br>
+        <span class="comment"># 2. Install Akmon</span><br>
+        curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \<br>
+        &nbsp;&nbsp;-o /usr/local/bin/akmon &amp;&amp; chmod +x /usr/local/bin/akmon<br>
+        <br>
+        <span class="comment"># 3. Open any project</span><br>
+        cd my-project<br>
+        akmon chat
+        <span class="comment">  # free, offline, private</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PROVIDERS -->
+<section class="providers" id="providers">
+  <div class="container">
+    <div class="section-label">// providers</div>
+    <h2 class="section-title">Works with<br>every provider</h2>
+    <p class="section-body">
+      One tool, any model. Set an environment variable and it works.
+      No config files required to get started.
+    </p>
+
+    <div class="provider-grid">
+      <div class="provider-card">
+        <div class="provider-name">Ollama</div>
+        <div class="provider-detail">Any local model. Llama, Qwen, DeepSeek, Mistral. Fully offline.</div>
+        <span class="provider-tag tag-free">free</span>
+      </div>
+      <div class="provider-card">
+        <div class="provider-name">Anthropic</div>
+        <div class="provider-detail">Claude Haiku, Sonnet, Opus. Direct API access with prompt caching.</div>
+        <span class="provider-tag tag-byok">BYOK</span>
+      </div>
+      <div class="provider-card">
+        <div class="provider-name">OpenRouter</div>
+        <div class="provider-detail">500+ models. One key. Automatic provider failover. 5.5% platform fee.</div>
+        <span class="provider-tag tag-byok">BYOK</span>
+      </div>
+      <div class="provider-card">
+        <div class="provider-name">Groq</div>
+        <div class="provider-detail">800+ tokens/second. Llama 3.3 70B. Fastest inference available.</div>
+        <span class="provider-tag tag-byok">BYOK</span>
+      </div>
+      <div class="provider-card">
+        <div class="provider-name">OpenAI</div>
+        <div class="provider-detail">GPT-4o, GPT-4o-mini. Full tool use support.</div>
+        <span class="provider-tag tag-byok">BYOK</span>
+      </div>
+      <div class="provider-card">
+        <div class="provider-name">Azure OpenAI</div>
+        <div class="provider-detail">Enterprise GPT-4o via Azure. Private networking, compliance support.</div>
+        <span class="provider-tag tag-enter">enterprise</span>
+      </div>
+      <div class="provider-card">
+        <div class="provider-name">Amazon Bedrock</div>
+        <div class="provider-detail">Claude and Llama via AWS. Stays inside your VPC. SigV4 auth.</div>
+        <span class="provider-tag tag-enter">enterprise</span>
+      </div>
+      <div class="provider-card">
+        <div class="provider-name">Any OpenAI-compatible</div>
+        <div class="provider-detail">LM Studio, Together AI, Mistral, DeepSeek, or your own endpoint.</div>
+        <span class="provider-tag tag-byok">BYOK</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- AUDIT -->
+<section class="audit" id="audit">
+  <div class="container">
+    <div class="audit-layout">
+      <div>
+        <div class="section-label">// trust model</div>
+        <h2 class="section-title">You see<br>everything</h2>
+        <p class="section-body" style="margin-bottom: 40px;">
+          Akmon logs every action to a JSONL audit file.
+          Every session ends with a full summary.
+          No other terminal coding agent provides this.
+        </p>
+        <ul class="audit-points">
+          <li>
+            <span class="num">01</span>
+            <div class="txt">
+              <h4>Colored diff before every write</h4>
+              <p>See exactly what changes before approving. Green for additions, red for removals.</p>
+            </div>
+          </li>
+          <li>
+            <span class="num">02</span>
+            <div class="txt">
+              <h4>Per-session JSONL audit log</h4>
+              <p>Every tool call, permission verdict, and token usage logged with timestamps.</p>
+            </div>
+          </li>
+          <li>
+            <span class="num">03</span>
+            <div class="txt">
+              <h4>Exit summary with cost breakdown</h4>
+              <p>Sessions end with tool calls, files touched, cache savings, and USD cost.</p>
+            </div>
+          </li>
+          <li>
+            <span class="num">04</span>
+            <div class="txt">
+              <h4>Real-time cost in status bar</h4>
+              <p>Cache hit tokens shown in green. Session cost always visible.</p>
+            </div>
+          </li>
+        </ul>
+      </div>
+      <div>
+        <div class="terminal">
+          <div class="terminal-bar">
+            <div class="dot dot-red"></div>
+            <div class="dot dot-yellow"></div>
+            <div class="dot dot-green"></div>
+            <span class="terminal-title">session summary</span>
+          </div>
+          <div class="terminal-body" style="font-size:12px; line-height:1.9">
+            <div class="t-amber">  Akmon session complete</div>
+            <br>
+            <div class="t-output">  Session</div>
+            <div class="t-dim">  ──────────────────────────────</div>
+            <div class="t-output">  ID         <span class="t-cmd">a1b2c3d4</span></div>
+            <div class="t-output">  Duration   <span class="t-cmd">12m 34s</span></div>
+            <div class="t-output">  Model      <span class="t-cmd">claude-haiku-4-5</span></div>
+            <br>
+            <div class="t-output">  Activity</div>
+            <div class="t-dim">  ──────────────────────────────</div>
+            <div class="t-output">  Messages   <span class="t-cmd">14</span></div>
+            <div class="t-output">  Tool calls <span class="t-cmd">23</span></div>
+            <div class="t-output">    <span class="t-green">✓ Succeeded</span>  <span class="t-cmd">22</span></div>
+            <div class="t-output">    <span class="t-red">✗ Failed</span>      <span class="t-cmd">1</span></div>
+            <div class="t-output">  Files written <span class="t-cmd">3</span></div>
+            <br>
+            <div class="t-output">  Tokens</div>
+            <div class="t-dim">  ──────────────────────────────</div>
+            <div class="t-output">  Input      <span class="t-cmd">48,291</span></div>
+            <div class="t-output">  Output     <span class="t-cmd"> 6,847</span></div>
+            <div class="t-output">  <span class="t-green">Cache hit  41,203 (85% savings)</span></div>
+            <div class="t-output">  Est. cost  <span class="t-amber">~$0.047</span></div>
+            <br>
+            <div class="t-dim">  .akmon/audit/a1b2c3d4.jsonl</div>
+            <br>
+            <div class="t-amber">  Agent powering down. Goodbye!</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section" id="cta">
+  <div class="container">
+    <div class="section-label">// get started</div>
+    <h2 class="section-title">Ship with confidence.</h2>
+    <p class="section-body">
+      The AI agent that respects your security, your budget,
+      and your workflow. Single binary. No subscription.
+      Every action audited.
+    </p>
+    <div class="cta-actions">
+      <a href="#install" class="btn btn-primary">↓ Install Akmon</a>
+      <a href="./docs/" class="btn btn-secondary">Read the docs →</a>
+      <a href="https://github.com/radotsvetkov/akmon" class="btn btn-secondary">View on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-left">
+      <span class="footer-brand">AKMON</span>
+      <span class="footer-sub">ἄκμων · the anvil</span>
+    </div>
+    <div class="footer-right">
+      <a href="./docs/">Documentation</a>
+      <a href="https://github.com/radotsvetkov/akmon">GitHub</a>
+      <a href="https://github.com/radotsvetkov/akmon/releases">Releases</a>
+      <a href="./docs/security.html">Security</a>
+      <a href="./docs/license.html">MIT / Apache-2.0</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  function showTab(id) {
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    event.target.classList.add('active');
+  }
+
+  function copy(btn, text) {
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = btn.textContent;
+      btn.textContent = 'copied!';
+      btn.style.color = 'var(--green)';
+      btn.style.borderColor = 'rgba(16,185,129,0.4)';
+      setTimeout(() => {
+        btn.textContent = orig;
+        btn.style.color = '';
+        btn.style.borderColor = '';
+      }, 1800);
+    });
+  }
+
+  // Animate sections into view
+  const observer = new IntersectionObserver(
+    entries => entries.forEach(e => {
+      if (e.isIntersecting) {
+        e.target.style.opacity = '1';
+        e.target.style.transform = 'translateY(0)';
+      }
+    }),
+    { threshold: 0.1, rootMargin: '0px 0px -40px 0px' }
+  );
+
+  document.querySelectorAll('.why-card, .provider-card').forEach(el => {
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(16px)';
+    el.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+    observer.observe(el);
+  });
+</script>
+</body>
+</html>

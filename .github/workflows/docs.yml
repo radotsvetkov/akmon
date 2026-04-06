@@ -1,9 +1,10 @@
-name: Deploy Docs
+name: Deploy Site
 
 on:
   push:
     branches: [main]
     paths:
+      - 'landing/**'
       - 'docs/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
@@ -30,15 +31,22 @@ jobs:
             | tar -xz
           mv mdbook /usr/local/bin/
 
-      - name: Build documentation
+      - name: Build docs
         run: |
           cd docs
           mdbook build
+          cd ..
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp -r landing/. _site/
+          cp -r docs/book _site/docs
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/book
+          path: _site
 
   deploy:
     environment:

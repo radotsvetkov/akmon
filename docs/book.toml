@@ -6,6 +6,7 @@ language = "en"
 src = "src"
 
 [output.html]
+site-url = "/akmon/docs/"
 # Use the default mdBook theme so builds work across mdBook 0.4.x and 0.5.x.
 # `custom.css` still applies Akmon accent styling.
 git-repository-url = "https://github.com/radotsvetkov/akmon"
