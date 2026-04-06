@@ -31,10 +31,16 @@ static LP_RUST: LangProfile = LangProfile {
     testing_approach: "#[cfg(test)] inline modules for unit tests. tests/ directory for integration. proptest for property-based testing. criterion for benchmarks.",
     error_handling: "Result<T, E> for all fallible ops. ? for propagation. thiserror for typed library errors. anyhow for application code. Never panic in library code.",
     toolchain: "rustup, cargo, clippy, rustfmt, cargo-audit, cargo-deny, cargo-expand, cargo-bloat",
+    verify_command: "cargo check 2>&1 | head -20",
+    skeleton_guidance: "After every file write or edit, run the verify command; if it fails, fix before moving on. Do not start the next file while the previous change still has compile errors.\n\
+New modules: declare `pub mod` in the parent first (one line).\n\
+New file skeleton: use statements at top; pub struct / enum / trait definitions with empty bodies; impl blocks with fn signatures only and `todo!()` bodies; tests module stub at bottom if applicable.\n\
+Then use `edit` to implement each function one at a time.",
+    file_size_note: "models.rs: 30–80 lines is normal; handlers.rs: 40–100 lines per handler group; main.rs: keep under 80 lines (delegate to modules); anything over 200 lines: split into submodules.",
 };
 
 macro_rules! lp {
-    ($lang:ident, $dn:literal, $c:expr, $m:expr, $test:literal, $err:literal, $tool:literal) => {
+    ($lang:ident, $dn:literal, $c:expr, $m:expr, $test:literal, $err:literal, $tool:literal, $verify:expr, $skel:expr, $fs:expr) => {
         LangProfile {
             language: Language::$lang,
             display_name: $dn,
@@ -43,6 +49,9 @@ macro_rules! lp {
             testing_approach: $test,
             error_handling: $err,
             toolchain: $tool,
+            verify_command: $verify,
+            skeleton_guidance: $skel,
+            file_size_note: $fs,
         }
     };
 }
@@ -72,7 +81,12 @@ static LP_PYTHON: LangProfile = lp!(
     PY_M,
     "pytest with fixtures; parametrize; mock at boundaries; hypothesis for properties.",
     "Custom exception hierarchies; never suppress silently.",
-    "uv, ruff, mypy, pytest, pre-commit, pyright"
+    "uv, ruff, mypy, pytest, pre-commit, pyright",
+    "python -m py_compile {file} && echo OK",
+    "New module skeleton: module docstring; from __future__ import annotations; imports grouped (stdlib, third-party, local); type aliases; class/function stubs with pass bodies and type hints; if __name__ == \"__main__\": when a script.\n\
+Then `edit` to implement each class or function. In verify_command, replace {file} with the path you just changed.\n\
+After adding dependencies: pip install -r requirements.txt (or uv sync / poetry install per project).",
+    "models.py: 30–80 lines per model group; routes.py: 20–40 lines per route group — split by domain; never one routes file over 200 lines."
 );
 
 static TS_C: &[&str] = &[
@@ -98,7 +112,13 @@ static LP_TYPESCRIPT: LangProfile = lp!(
     TS_M,
     "Vitest; Playwright; vi.mock; MSW for HTTP.",
     "Result-style domain errors; typed catch; custom Error subclasses.",
-    "tsx, tsc, eslint, prettier, vitest, tsup"
+    "tsx, tsc, eslint, prettier, vitest, tsup",
+    "tsc --noEmit 2>&1 | head -20",
+    "React component: imports; interface Props { ... }; export default function ComponentName() { return <div /> }; then `edit` for state, effects, handlers, JSX.\n\
+Next.js App Router page: import type { Metadata } from 'next'; export const metadata: Metadata = { title: '...' }; export default function Page() { return <main /> }; then `edit` for components and data fetching.\n\
+API route / server file: imports; type definitions; handler stubs; exports.\n\
+Never use any — find the correct type. After new packages: npm install (or pnpm/yarn).",
+    "React component: 50–120 lines is normal; Next.js page: 40–100 (delegate to components); utility modules: keep under ~80 lines; CSS module: 50–150 lines per component."
 );
 
 static JS_C: &[&str] = &[
@@ -121,7 +141,10 @@ static LP_JAVASCRIPT: LangProfile = lp!(
     JS_M,
     "Vitest or Jest; Testing Library; Playwright.",
     "try/catch; global rejection handlers; never swallow errors.",
-    "node, pnpm/npm, eslint, prettier, vite"
+    "node, pnpm/npm, eslint, prettier, vite",
+    "node --check {file} 2>&1 (when applicable for the file you changed); otherwise npm run build or npm test if defined.",
+    "Same structural skeletons as TypeScript but with JSDoc where types are needed. After new packages: npm install (or pnpm/yarn). Prefer small modules; split files before they exceed ~200 lines.",
+    "Keep modules focused; utility files under ~80 lines when possible; split large route or component files by feature."
 );
 
 static GO_C: &[&str] = &[
@@ -146,7 +169,11 @@ static LP_GO: LangProfile = lp!(
     GO_M,
     "testing + testify; httptest for handlers.",
     "(T, error) returns; errors.Is/As; sentinel errors when appropriate.",
-    "go, golangci-lint, govulncheck, air, wire"
+    "go, golangci-lint, govulncheck, air, wire",
+    "go build ./... 2>&1 | head -20",
+    "package declaration; import block (blank imports for side effects here); type declarations; function signatures with // TODO: implement bodies.\n\
+Then `edit` each function. After new modules: go mod tidy.",
+    "handler file: 60–150 lines per domain; model file: 20–60 lines; main.go: under 80 lines (wiring only, not business logic)."
 );
 
 static JV_C: &[&str] = &[
@@ -172,7 +199,10 @@ static LP_JAVA: LangProfile = lp!(
     JV_M,
     "JUnit 5, AssertJ, Mockito, Testcontainers, ArchUnit.",
     "Unchecked for programming bugs; Optional/Result types for expected domain failures.",
-    "Maven/Gradle, SpotBugs, Checkstyle, JaCoCo"
+    "Maven/Gradle, SpotBugs, Checkstyle, JaCoCo",
+    "./mvnw compile -q 2>&1 | tail -5 OR ./gradlew compileJava -q 2>&1 | tail -5 (use the build tool present in the repo)",
+    "@RestController + @RequestMapping skeleton class; then `edit` to add constructor injection and endpoint methods one at a time.",
+    "Controllers stay thin; split by resource; service layer for logic — avoid single classes over ~200 lines."
 );
 
 static CS_C: &[&str] = &[
@@ -196,7 +226,10 @@ static LP_CSHARP: LangProfile = lp!(
     CS_M,
     "xUnit, FluentAssertions, Moq/NSubstitute, WebApplicationFactory.",
     "Result pattern / ProblemDetails; exceptions only for exceptional paths.",
-    "dotnet, analyzers, StyleCop, dotnet-format, BenchmarkDotNet"
+    "dotnet, analyzers, StyleCop, dotnet-format, BenchmarkDotNet",
+    "dotnet build -q --no-restore 2>&1 | tail -15",
+    "Program.cs / minimal API or controller skeleton first; expand with `edit` method by method.",
+    "Split large Program/Startup or controllers by feature; keep files under ~200 lines where practical."
 );
 
 static EX_C: &[&str] = &[
@@ -220,7 +253,10 @@ static LP_ELIXIR: LangProfile = lp!(
     EX_M,
     "ExUnit, Mox, Bypass, DocTests.",
     "{:ok,_} / {:error,_}; supervisors; rescue at boundaries.",
-    "mix, credo, dialyxir, excoveralls, ex_doc"
+    "mix, credo, dialyxir, excoveralls, ex_doc",
+    "mix compile 2>&1 | head -20",
+    "defmodule MyApp.ModuleName do — imports/aliases; function stubs returning :ok or placeholder; then `edit` each function.",
+    "Contexts and small modules; prefer compilation checks after each file; split modules before they grow past ~200 lines."
 );
 
 static RB_C: &[&str] = &[
@@ -243,7 +279,10 @@ static LP_RUBY: LangProfile = lp!(
     RB_M,
     "RSpec, FactoryBot, Capybara, VCR, SimpleCov.",
     "raise/rescue specific exceptions.",
-    "bundler, rubocop, brakeman, sorbet"
+    "bundler, rubocop, brakeman, sorbet",
+    "bundle exec ruby -c {file} 2>&1 (syntax check) or bin/rubocop {file} if configured",
+    "Class/module skeleton with empty methods and `end`; fill with `edit` incrementally. After Gemfile changes: bundle install.",
+    "Keep concerns and service objects small; split fat models/controllers before ~200 lines."
 );
 
 static SW_C: &[&str] = &[
@@ -267,7 +306,11 @@ static LP_SWIFT: LangProfile = lp!(
     SW_M,
     "XCTest, XCUITest, Swift Testing, snapshot tests.",
     "throws/try; Result; LocalizedError — no try! in prod.",
-    "xcodebuild, swift-format, SwiftLint, SPM, Instruments"
+    "xcodebuild, swift-format, SwiftLint, SPM, Instruments",
+    "swift build 2>&1 | head -20",
+    "SwiftUI: import SwiftUI; struct ViewName: View { var body: some View { EmptyView() } }; #Preview { ViewName() }; then `edit` for @State and body.\n\
+(Without Package.swift, use xcodebuild or the workflow from README.)",
+    "SwiftUI View: 60–150 lines; ViewModel: 80–180; Model: 30–80 — extract subviews when larger."
 );
 
 static KT_C: &[&str] = &[
@@ -290,7 +333,10 @@ static LP_KOTLIN: LangProfile = lp!(
     KT_M,
     "JUnit 5 + Kotest, MockK, Turbine, Compose UI tests.",
     "Result types; sealed errors; coroutine exception handlers.",
-    "Gradle Kotlin DSL, ktlint, detekt, kover"
+    "Gradle Kotlin DSL, ktlint, detekt, kover",
+    "./gradlew compileDebugKotlin 2>&1 | tail -10",
+    "Composable: @Composable fun ScreenName(/* params */) { } then `edit` for UI tree and state.",
+    "Split large Composables; keep files cohesive — extract when approaching ~200 lines of UI logic."
 );
 
 static DA_C: &[&str] = &[
@@ -313,7 +359,11 @@ static LP_DART: LangProfile = lp!(
     DA_M,
     "flutter_test, bloc_test, integration_test, golden tests.",
     "Typed failures; FlutterError hooks for framework errors.",
-    "flutter, dart analyze, dart format, melos"
+    "flutter, dart analyze, dart format, melos",
+    "flutter analyze 2>&1 | head -20",
+    "StatefulWidget: StatefulWidget + State class with build returning Placeholder(); StatelessWidget: build => Placeholder(); then `edit` for real UI.\n\
+Fix analyzer issues before adding more code.",
+    "StatefulWidget file: 80–200 lines is normal; screen: 100–250; service/repository: 50–150; over 250: extract sub-widgets."
 );
 
 static CPP_C: &[&str] = &[
@@ -333,7 +383,10 @@ static LP_CPP: LangProfile = lp!(
     CPP_M,
     "GoogleTest/Catch2; sanitizers in CI.",
     "Project error model: exceptions or expected-like types — be consistent.",
-    "cmake, ninja, clang-tidy"
+    "cmake, ninja, clang-tidy",
+    "cmake --build build 2>&1 | head -20 (adjust build dir to match the project)",
+    "Headers with declarations; .cpp with empty or stub implementations; compile after each file.",
+    "Split translation units before files exceed ~300 lines; keep public headers minimal."
 );
 
 static ZG_C: &[&str] = &[
@@ -352,7 +405,10 @@ static LP_ZIG: LangProfile = lp!(
     ZG_M,
     "zig test; fuzz where valuable.",
     "errdefer; handle error unions at boundaries.",
-    "zig, zig fmt"
+    "zig, zig fmt",
+    "zig build 2>&1 | head -20",
+    "pub fn declarations with unimplemented or TODO bodies; compile; then `edit` each function.",
+    "Keep files focused; split when a file grows past ~200–300 lines."
 );
 
 static UN_C: &[&str] = &[
@@ -370,7 +426,10 @@ static LP_UNKNOWN: LangProfile = lp!(
     UN_M,
     "Use the project's native test commands (see README).",
     "Match the dominant language's idiomatic error model once detected.",
-    "Read README, CI, and config files before refactoring."
+    "Read README, CI, and config files before refactoring.",
+    "Run the check command documented in README or CI after each edit (no generic command detected).",
+    "Start from the smallest skeleton the repo already uses (mirror an adjacent file); expand with small edits.",
+    "Keep new files small until the stack is confirmed; prefer splitting early."
 );
 
 /// Returns the static [`LangProfile`] for a [`Language`].

@@ -94,6 +94,17 @@ Arguments:
 Errors: patch_failed, not_found, path_escape.
 
 ---
+TOOL: apply_patch
+-----------------
+Purpose: Apply a unified diff to exactly one file; pass the path and the diff (optionally without ---/+++ headers).
+
+Arguments:
+  file_path (string, required): Relative path in the sandbox.
+  patch (string, required): Unified diff body (full or hunks-only).
+
+Errors: invalid_args (multi-file), patch_failed, not_found, path_escape.
+
+---
 TOOL: web_fetch (only if registered)
 ------------------------------------
 Purpose: HTTPS GET public URL; SSRF-blocked for private IPs and metadata hosts.

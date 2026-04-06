@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-cli"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "akmon-config",
  "akmon-core",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-config"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-core"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "chrono",
  "dunce",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-index"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "akmon-core",
  "bincode",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-models"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "akmon-core",
  "async-trait",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-query"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "akmon-core",
  "akmon-models",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-tools"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "akmon-core",
  "akmon-index",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-tui"
-version = "1.5.3"
+version = "1.5.4"
 dependencies = [
  "akmon-core",
  "akmon-index",
@@ -984,9 +984,9 @@ dependencies = [
 
 [[package]]
 name = "fastembed"
-version = "5.13.0"
+version = "5.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3688aa7e02113db24e0f83aba1edee912f36f515b52cffc9b3c550bbfc3eab87"
+checksum = "fd2550fcfa232fb98d38fc19110f41e4903bc79f352026458da927f51f9168e5"
 dependencies = [
  "anyhow",
  "hf-hub",

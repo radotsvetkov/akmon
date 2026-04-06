@@ -69,6 +69,12 @@ pub struct LangProfile {
     pub error_handling: &'static str,
     /// Typical tools.
     pub toolchain: &'static str,
+    /// Command the agent should run after each file write or edit (may contain `{file}` — replace with changed path).
+    pub verify_command: &'static str,
+    /// How to structure new files before incremental `edit`-style fills.
+    pub skeleton_guidance: &'static str,
+    /// Typical file sizes and when to split modules.
+    pub file_size_note: &'static str,
 }
 
 // ——— Section 2: Frameworks ———
@@ -850,6 +856,139 @@ pub fn detect_frameworks(root: &Path, language: &Language) -> Vec<Framework> {
 
 include!("lang_profile_data.inc");
 
+/// Incremental writing and verify commands for the detected stack (runtime strings for prompt injection).
+#[derive(Debug, Clone)]
+pub struct LanguageProfile {
+    /// Display name of the primary language (e.g. `"Rust"`).
+    pub language: String,
+    /// Detected framework display names.
+    pub frameworks: Vec<String>,
+    /// Shell-oriented check to run after edits (may contain `{file}`).
+    pub verify_command: String,
+    /// How to structure new files before filling with `edit`.
+    pub skeleton_guidance: String,
+    /// Typical file sizes and split guidance.
+    pub file_size_note: String,
+}
+
+/// Formats [`LanguageProfile`] as plain text for the system prompt.
+pub fn format_language_rules(profile: &LanguageProfile) -> String {
+    let fw = if profile.frameworks.is_empty() {
+        "(none detected)".to_string()
+    } else {
+        profile.frameworks.join(", ")
+    };
+    format!(
+        "Stack: {} · Frameworks: {}\n\n\
+         Verify command after each file: {}\n\n\
+         Skeleton pattern:\n{}\n\n\
+         File size note: {}",
+        profile.language,
+        fw,
+        profile.verify_command,
+        profile.skeleton_guidance,
+        profile.file_size_note
+    )
+}
+
+fn java_verify_command_for_root(root: &Path) -> String {
+    let gradle = root.join("gradlew").is_file()
+        || root.join("build.gradle").is_file()
+        || root.join("build.gradle.kts").is_file();
+    let mvn = root.join("mvnw").is_file() || root.join("pom.xml").is_file();
+    if gradle && !mvn {
+        "./gradlew compileJava -q 2>&1 | tail -5".to_string()
+    } else if mvn && !gradle {
+        "./mvnw compile -q 2>&1 | tail -5".to_string()
+    } else {
+        "./mvnw compile -q 2>&1 | tail -5 OR ./gradlew compileJava -q 2>&1 | tail -5 (use the tool present)"
+            .to_string()
+    }
+}
+
+fn framework_incremental_extra(fw: Framework) -> Option<&'static str> {
+    match fw {
+        Framework::FastAPI => Some(
+            "FastAPI: router skeleton with empty routes (decorators only), then request/response schemas, then one handler at a time. Verify with: uvicorn app.main:app --reload.",
+        ),
+        Framework::Gin => Some(
+            "Gin: keep router setup in main.go small; handlers/ one file per domain — types + empty handler funcs, then implement each with `edit`.",
+        ),
+        Framework::NextJs => Some(
+            "Next.js App Router: page shell (metadata + minimal `Page`) first, then components and data fetching.",
+        ),
+        Framework::React | Framework::ReactNative => Some(
+            "React: prop/types first, minimal component shell, then state, effects, handlers, and JSX incrementally.",
+        ),
+        Framework::Phoenix | Framework::LiveView => Some(
+            "Phoenix: lean contexts and controllers; run `mix compile` often; grow LiveViews with small assigns.",
+        ),
+        _ => None,
+    }
+}
+
+/// Builds incremental-writing guidance when the primary language is known ([`Language::Unknown`] → `None`).
+pub fn language_incremental_profile(root: &Path, project: &ProjectProfile) -> Option<LanguageProfile> {
+    if project.language == Language::Unknown {
+        return None;
+    }
+    let lp = project.lang_profile;
+    let mut verify = lp.verify_command.to_string();
+    let mut skeleton = lp.skeleton_guidance.to_string();
+    let file_size = lp.file_size_note.to_string();
+
+    match project.language {
+        Language::TypeScript => {
+            if !root.join("tsconfig.json").is_file() {
+                verify = "No tsconfig.json at repo root — skip `tsc --noEmit`; use `npm run build`, `npm run lint`, or tests per package.json."
+                    .to_string();
+            }
+        }
+        Language::Java => {
+            verify = java_verify_command_for_root(root);
+        }
+        Language::Swift => {
+            if !root.join("Package.swift").is_file() {
+                verify = "No Package.swift — use xcodebuild or the scheme from README; with SwiftPM use: swift build 2>&1 | head -20"
+                    .to_string();
+            }
+        }
+        _ => {}
+    }
+
+    let mut fw_extra = String::new();
+    for fw in &project.frameworks {
+        if let Some(block) = framework_incremental_extra(*fw) {
+            let name = framework_profile(*fw).display_name;
+            fw_extra.push_str("\n\n");
+            fw_extra.push_str(name);
+            fw_extra.push_str(": ");
+            fw_extra.push_str(block);
+        }
+    }
+    if !fw_extra.is_empty() {
+        skeleton.push_str(&fw_extra);
+    }
+
+    Some(LanguageProfile {
+        language: lp.display_name.to_string(),
+        frameworks: project
+            .framework_profiles
+            .iter()
+            .map(|f| f.display_name.to_string())
+            .collect(),
+        verify_command: verify,
+        skeleton_guidance: skeleton,
+        file_size_note: file_size,
+    })
+}
+
+/// [`build_project_profile`] plus [`language_incremental_profile`] in one call.
+pub fn language_incremental_profile_for_root(root: &Path) -> Option<LanguageProfile> {
+    let p = build_project_profile(root);
+    language_incremental_profile(root, &p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,6 +1127,30 @@ mod tests {
             let p = lang_profile(lang);
             assert!(!p.display_name.is_empty());
             assert!(!p.conventions.is_empty());
+            assert!(!p.verify_command.is_empty());
+            assert!(!p.skeleton_guidance.is_empty());
+            assert!(!p.file_size_note.is_empty());
         }
+    }
+
+    #[test]
+    fn language_incremental_profile_rust_workspace() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+        let p = build_project_profile(repo);
+        let inc = language_incremental_profile(repo, &p).expect("rust project");
+        assert!(inc.verify_command.contains("cargo"));
+        assert!(inc.skeleton_guidance.contains("edit"));
+        let text = format_language_rules(&inc);
+        assert!(text.contains("Verify command"));
+    }
+
+    #[test]
+    fn language_incremental_none_for_unknown_project() {
+        let tmp = tempdir().expect("tmp");
+        let p = build_project_profile(tmp.path());
+        assert!(language_incremental_profile(tmp.path(), &p).is_none());
     }
 }

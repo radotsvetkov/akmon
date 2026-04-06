@@ -10,6 +10,7 @@ use tokio::fs;
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::diff_render::unified_diff_text;
 use crate::output::{ToolErrorCode, ToolOutput};
 use crate::write_file::atomic_write_utf8;
 
@@ -52,6 +53,34 @@ fn relative_path_display(file: &Path, sandbox_root: &Path) -> Option<String> {
 /// Counts non-overlapping occurrences of `needle` in `haystack`.
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
+}
+
+fn find_closest_line_hint(content: &str, search: &str) -> String {
+    let first_line = search.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return "Tip: use read_file to see current content.".into();
+    }
+    for (i, line) in content.lines().enumerate() {
+        let t = line.trim();
+        if t.contains(first_line) || first_line.contains(t) {
+            return format!("Closest match found at line {}:\n{}", i + 1, line);
+        }
+    }
+    "The first line of old_str was not found. The file may have changed; use read_file first.".into()
+}
+
+fn diff_stats_from_unified(diff: &str) -> (usize, usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            added += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            removed += 1;
+        }
+    }
+    let lines_changed = added.max(removed);
+    (added, removed, lines_changed)
 }
 
 /// Registers the `edit` tool: single exact substring replacement with an atomic file write.
@@ -201,9 +230,26 @@ impl Tool for EditTool {
 
         let n = count_occurrences(content, old_str);
         if n == 0 {
+            let preview_len = old_str.len().min(200);
+            let searched = &old_str[..preview_len];
+            let hint = find_closest_line_hint(content, old_str);
             return ToolOutput::Error {
                 code: ToolErrorCode::NotFound,
-                message: format!("old_str not found in file: {path_str}"),
+                message: format!(
+                    "The text to replace was not found in {path_str}.\n\
+                     \n\
+                     You searched for:\n\
+                     {searched}\n\
+                     \n\
+                     {hint}\n\
+                     \n\
+                     Common causes:\n\
+                     - The file was already modified by a previous edit\n\
+                     - Whitespace or indentation differs from the file\n\
+                     - The function or variable was renamed\n\
+                     \n\
+                     Use read_file to see the current content, then retry with the exact text as it appears now.",
+                ),
             };
         }
         if n >= 2 {
@@ -224,10 +270,18 @@ impl Tool for EditTool {
             None => path_str.to_string(),
         };
 
+        let unified = unified_diff_text(content, &updated, rel.as_str());
+        let (lines_added, lines_removed, lines_changed) = diff_stats_from_unified(&unified);
+
         match atomic_write_utf8(&resolved, updated.as_bytes()).await {
             Ok(_) => {
                 let payload = json!({
+                    "type": "file_edit_diff",
                     "path": rel,
+                    "diff": unified,
+                    "lines_added": lines_added,
+                    "lines_removed": lines_removed,
+                    "lines_changed": lines_changed,
                     "replaced": true,
                     "bytes_before": bytes_before,
                     "bytes_after": bytes_after,
@@ -296,7 +350,9 @@ mod tests {
             panic!("expected success: {out:?}");
         };
         let v: JsonValue = serde_json::from_str(&content).expect("json");
+        assert_eq!(v["type"], "file_edit_diff");
         assert_eq!(v["replaced"], true);
+        assert!(v["diff"].as_str().is_some_and(|d| d.contains("-BETA") && d.contains("+delta")));
         let disk = std::fs::read_to_string(dir.path().join("f.txt")).expect("read");
         assert_eq!(disk, "alpha\ndelta\ngamma\n");
     }
@@ -340,7 +396,10 @@ mod tests {
             panic!("expected error");
         };
         assert_eq!(code, ToolErrorCode::NotFound);
-        assert!(message.contains("old_str not found"), "message={message:?}");
+        assert!(
+            message.contains("not found") && message.contains("searched for"),
+            "message={message:?}"
+        );
     }
 
     #[tokio::test]

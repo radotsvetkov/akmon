@@ -15,6 +15,9 @@ use crate::output::{ToolErrorCode, ToolOutput};
 
 static WRITE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Beyond this line count, the success message includes a note nudging incremental writes.
+const LARGE_FILE_LINE_THRESHOLD: usize = 200;
+
 fn write_file_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
     CELL.get_or_init(|| {
@@ -157,6 +160,7 @@ impl Tool for WriteFileTool {
         };
 
         let bytes = content.as_bytes();
+        let line_count = content.lines().count();
 
         let (parent_str, file_name) = match split_write_path(path_str) {
             Ok(pair) => pair,
@@ -188,9 +192,27 @@ impl Tool for WriteFileTool {
         let resolved = resolved_parent.join(file_name);
 
         match atomic_write_utf8(&resolved, bytes).await {
-            Ok(n) => ToolOutput::Success {
-                content: format!("wrote {n} bytes to {}", resolved.display()),
-            },
+            Ok(n) => {
+                let msg = if line_count > LARGE_FILE_LINE_THRESHOLD {
+                    format!(
+                        "File written: {} ({} lines; wrote {n} bytes). \
+                         Note: this was a large single write ({} lines). \
+                         For files this size, prefer: \
+                         (1) write a short skeleton, then `edit` for each section, \
+                         or (2) split into smaller focused files.",
+                        resolved.display(),
+                        line_count,
+                        line_count,
+                    )
+                } else {
+                    format!(
+                        "wrote {n} bytes to {} ({} lines)",
+                        resolved.display(),
+                        line_count
+                    )
+                };
+                ToolOutput::Success { content: msg }
+            }
             Err(e) => ToolOutput::Error {
                 code: ToolErrorCode::PermissionDenied,
                 message: format!("write failed: {e}"),

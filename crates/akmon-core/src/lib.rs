@@ -40,10 +40,11 @@ pub use fsm::{
 };
 pub use lang_profile::{
     ArchitecturePattern, DataTool, Database, DatabaseAbstraction, Framework, FrameworkProfile,
-    LangProfile, Language, ProjectProfile, build_project_profile, detect_architecture_hints,
-    detect_data_tools, detect_databases, detect_frameworks, detect_language,
-    format_project_intelligence_for_root, format_project_profile_capped, framework_profile,
-    lang_profile,
+    LangProfile, Language, LanguageProfile, ProjectProfile, build_project_profile,
+    detect_architecture_hints, detect_data_tools, detect_databases, detect_frameworks,
+    detect_language, format_language_rules, format_project_intelligence_for_root,
+    format_project_profile_capped, framework_profile, lang_profile,
+    language_incremental_profile, language_incremental_profile_for_root,
 };
 pub use mcp::McpServerConfig;
 pub use permission::Permission;

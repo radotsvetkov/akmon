@@ -3,6 +3,7 @@
 
 #![warn(missing_docs)]
 
+mod apply_patch;
 mod context;
 mod diff_render;
 mod edit;
@@ -19,6 +20,7 @@ mod shell;
 mod web_fetch;
 mod write_file;
 
+pub use apply_patch::ApplyPatchTool;
 pub use context::ToolContext;
 pub use diff_render::{colorize_unified_diff, render_diff, unified_diff_text};
 pub use edit::EditTool;

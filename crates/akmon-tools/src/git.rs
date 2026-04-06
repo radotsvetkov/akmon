@@ -143,10 +143,14 @@ pub fn try_auto_commit_after_file_tool(
     tool_name: &str,
     args: &JsonValue,
 ) -> Option<AuditEvent> {
-    if !matches!(tool_name, "edit" | "write_file") {
+    if !matches!(tool_name, "edit" | "write_file" | "apply_patch") {
         return None;
     }
-    let path = args.get("path")?.as_str()?;
+    let path = if tool_name == "apply_patch" {
+        args.get("file_path")?.as_str()?
+    } else {
+        args.get("path")?.as_str()?
+    };
     let old_str = args.get("old_str").and_then(|v| v.as_str());
     let snippet = old_str.map(collapse_for_message).unwrap_or_default();
     let file_part = Path::new(path)

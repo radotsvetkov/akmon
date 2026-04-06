@@ -655,6 +655,7 @@ Resume from the mid-sentence or mid-block point where the response was cut."
             tool_idx: usize,
         }
         let mut approved: Vec<ApprovedSlot> = Vec::new();
+        let mut write_file_calls_this_message: u32 = 0;
 
         for (idx, call) in tool_calls.iter().enumerate() {
             let id = call.id.clone();
@@ -686,6 +687,37 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                 });
                 continue;
             };
+
+            const MAX_WRITE_FILE_CALLS_PER_ASSISTANT_MESSAGE: u32 = 2;
+            if name == "write_file" {
+                write_file_calls_this_message += 1;
+                if write_file_calls_this_message > MAX_WRITE_FILE_CALLS_PER_ASSISTANT_MESSAGE {
+                    let msg = "Only two write_file calls per assistant message, please. \
+Complete and verify the current file(s), then continue in the next turn.";
+                    self.apply_event(
+                        event_tx,
+                        AgentEvent::ToolCallCompleted {
+                            id: id.clone(),
+                            name: name.clone(),
+                            success: false,
+                            message: msg.to_string(),
+                        },
+                        task,
+                    )
+                    .await?;
+                    slots[idx] = Some(ToolCallResult {
+                        call_id: id.clone(),
+                        tool_name: name.clone(),
+                        output: ToolOutput::Error {
+                            code: akmon_tools::ToolErrorCode::InvalidArgs,
+                            message: msg.to_string(),
+                        },
+                        success: false,
+                        arguments: args.clone(),
+                    });
+                    continue;
+                }
+            }
 
             // Resolve policy before dispatch so confirmations stay in Thinking and parallel
             // batches do not emit completions while `parallel_tool_batch_remaining` is unset.
@@ -1537,6 +1569,15 @@ fn concrete_permissions(
                 tool.required_permissions().to_vec()
             }
         }
+        "apply_patch" => {
+            if let Some(p) = args.get("file_path").and_then(|v| v.as_str()) {
+                vec![Permission::WriteFile {
+                    path: PathBuf::from(p),
+                }]
+            } else {
+                tool.required_permissions().to_vec()
+            }
+        }
         "list_directory" => {
             if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
                 vec![Permission::ListDirectory {
@@ -2362,6 +2403,90 @@ mod tests {
             "second slot must be fast tool, got {}",
             tool_msgs[1].content
         );
+    }
+
+    #[tokio::test]
+    async fn third_write_file_in_same_assistant_message_is_rejected() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![
+                    ModelToolCall {
+                        id: "w1".into(),
+                        name: "write_file".into(),
+                        arguments: json!({"path": "a.txt", "content": "a"}),
+                    },
+                    ModelToolCall {
+                        id: "w2".into(),
+                        name: "write_file".into(),
+                        arguments: json!({"path": "b.txt", "content": "b"}),
+                    },
+                    ModelToolCall {
+                        id: "w3".into(),
+                        name: "write_file".into(),
+                        arguments: json!({"path": "c.txt", "content": "c"}),
+                    },
+                ],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+
+        let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(8);
+        policy_tx
+            .send(InteractivePolicyReply::allow_once())
+            .await
+            .expect("policy sender");
+        policy_tx
+            .send(InteractivePolicyReply::allow_once())
+            .await
+            .expect("policy sender");
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
+            Arc::new(seq),
+            vec![Box::new(akmon_tools::WriteFileTool::new())],
+            sandbox,
+            None,
+            false,
+        );
+
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut policy_opt = Some(policy_rx);
+        session
+            .run("x".into(), ev_tx, &mut policy_opt, None)
+            .await
+            .expect("run");
+
+        let tool_msgs: Vec<_> = session
+            .context
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 3, "one tool result per call");
+        let third: serde_json::Value = serde_json::from_str(&tool_msgs[2].content).expect("json");
+        assert_eq!(third["output"]["status"], "error");
+        assert!(
+            third["output"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Only two write_file")),
+            "expected cap message, got {:?}",
+            third["output"]["message"]
+        );
+        assert!(dir.path().join("a.txt").is_file());
+        assert!(dir.path().join("b.txt").is_file());
+        assert!(!dir.path().join("c.txt").exists());
     }
 
     #[tokio::test]

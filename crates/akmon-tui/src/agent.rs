@@ -12,7 +12,8 @@ use akmon_query::AgentSession;
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
 use akmon_tools::{
-    EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool, ShellTool,
+    ApplyPatchTool, EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
+    ShellTool,
     WebFetchTool, WriteFileTool, discover_mcp_tools,
 };
 use tokio::sync::Notify;
@@ -86,6 +87,7 @@ fn build_tool_registry(
         Box::new(SearchTool::new()),
         Box::new(EditTool::new()),
         Box::new(PatchTool::new()),
+        Box::new(ApplyPatchTool::new()),
     ];
     if web_fetch {
         tools.push(Box::new(WebFetchTool::new()));

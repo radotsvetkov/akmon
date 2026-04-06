@@ -2,6 +2,7 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use serde_json::Value as JsonValue;
 
 use super::code::{code_block_bg, highlight_line};
 use super::wrap::wrap_text;
@@ -12,7 +13,8 @@ const BORDER: ratatui::style::Color = ratatui::style::Color::Rgb(42, 42, 46);
 const FG: ratatui::style::Color = ratatui::style::Color::Rgb(226, 224, 216);
 const DIM: ratatui::style::Color = ratatui::style::Color::Rgb(100, 108, 118);
 const GREEN: ratatui::style::Color = ratatui::style::Color::Rgb(78, 201, 176);
-const RED: ratatui::style::Color = ratatui::style::Color::Rgb(244, 71, 71);
+const RED: ratatui::style::Color = ratatui::style::Color::Rgb(239, 68, 68);
+const DIFF_HEADER: ratatui::style::Color = ratatui::style::Color::Rgb(100, 100, 120);
 const ERR: ratatui::style::Color = ratatui::style::Color::Rgb(248, 113, 113);
 
 /// Total lines one message occupies at `width`.
@@ -301,11 +303,18 @@ fn tool_card(
             ),
         ]));
         if let Some(r) = result {
-            for line in wrap_text(r, w.saturating_sub(4)) {
-                v.push(Line::from(vec![
-                    Span::styled("│ Output:   ", Style::default().fg(DIM)),
-                    Span::styled(line, Style::default().fg(FG)),
-                ]));
+            if let Ok(val) = serde_json::from_str::<JsonValue>(r) {
+                if val.get("type").and_then(|x| x.as_str()) == Some("file_edit_diff") {
+                    if let Some(diff) = val.get("diff").and_then(|x| x.as_str()) {
+                        append_colored_unified_diff_lines(&mut v, diff, w);
+                    } else {
+                        append_wrapped_output_lines(&mut v, r, w);
+                    }
+                } else {
+                    append_wrapped_output_lines(&mut v, r, w);
+                }
+            } else {
+                append_wrapped_output_lines(&mut v, r, w);
             }
         }
         v.push(Line::from(Span::styled(
@@ -316,10 +325,45 @@ fn tool_card(
     v
 }
 
+fn append_wrapped_output_lines(v: &mut Vec<Line<'static>>, text: &str, w: u16) {
+    for line in wrap_text(text, w.saturating_sub(4)) {
+        v.push(Line::from(vec![
+            Span::styled("│ Output:   ", Style::default().fg(DIM)),
+            Span::styled(line, Style::default().fg(FG)),
+        ]));
+    }
+}
+
+fn append_colored_unified_diff_lines(v: &mut Vec<Line<'static>>, diff: &str, w: u16) {
+    let col_w = w.saturating_sub(4);
+    for raw in diff.lines() {
+        let style = if raw.starts_with('+') && !raw.starts_with("+++") {
+            Style::default().fg(GREEN)
+        } else if raw.starts_with('-') && !raw.starts_with("---") {
+            Style::default().fg(RED)
+        } else if raw.starts_with('@') {
+            Style::default().fg(DIFF_HEADER)
+        } else {
+            Style::default().fg(FG)
+        };
+        for line in wrap_text(raw, col_w) {
+            v.push(Line::from(vec![
+                Span::styled("│ Output:   ", Style::default().fg(DIM)),
+                Span::styled(line, style),
+            ]));
+        }
+    }
+}
+
 fn args_summary(name: &str, args: &serde_json::Value) -> String {
     match name {
         "read_file" | "write_file" | "edit" => args
             .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "apply_patch" => args
+            .get("file_path")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),

@@ -28,28 +28,71 @@ const TOOL_REFERENCE: &str = include_str!("tool_reference.txt");
 ///
 /// Encourages incremental tool use so single completions stay within output limits.
 pub const FILE_WRITING_STRATEGY: &str = "\
-FILE WRITING STRATEGY — FOLLOW EXACTLY:\n\
+FILE WRITING STRATEGY — THIS IS HOW YOU MUST WORK:\n\
 \n\
-For new projects or new files:\n\
-- Write files in logical sections, not all at once.\n\
-- For a webpage: first the HTML structure, then the\n\
-  CSS in a separate <style> block, then the JavaScript.\n\
-  Each as a focused, complete section.\n\
-- For a backend: write one module at a time.\n\
-  main.rs first (small), then each module separately.\n\
-- Never write a file longer than 200 lines in one response.\n\
-  If it would be longer, split it into multiple focused writes.\n\
+You are a developer making targeted changes, not a code\n\
+generator dumping everything at once. Follow this exactly:\n\
 \n\
-For existing files:\n\
-- ALWAYS use the `edit` tool instead of write_file.\n\
-  (`edit` replaces one exact substring per call — not “edit_file”, the tool name is `edit`.)\n\
-- `edit` sends only the changed section, not the whole file.\n\
-- A function that changes 10 lines in a 500-line file\n\
-  should produce a 10-line response, not a 500-line response.\n\
-- Only use write_file for brand new files that don't exist yet.\n\
+FOR EXISTING FILES — always use `edit`, never write_file:\n\
+  `edit` sends only the changed section.\n\
+  A 10-line change to a 500-line file = a small tool payload.\n\
+  Never rewrite an entire file you can surgically edit.\n\
+  read_file first, identify the exact section to change,\n\
+  then edit with old_str/new_str.\n\
 \n\
-This is not a limitation — this is how professional development\n\
-works. Small focused changes. One thing at a time.\n";
+FOR NEW FILES — write incrementally, not monolithically:\n\
+  Step 1: Write the skeleton (imports, empty functions, types).\n\
+          This is always small — about 20–40 lines.\n\
+  Step 2: Implement each function or section with `edit`.\n\
+          One function at a time. Each change stays small.\n\
+\n\
+  Never write a new file longer than 150 lines in one shot.\n\
+  If a file would be 300 lines, use write_file for a short\n\
+  skeleton, then fill with `edit` (or a second small write_file).\n\
+\n\
+FOR NEW PROJECTS — plan before writing a single file:\n\
+  In your reply, list every file you will create (bullet list).\n\
+  Then create files one at a time, starting with the smallest.\n\
+  Prefer at most one write_file per assistant turn (two max).\n\
+\n\
+FOR HTML/CSS/JS:\n\
+  Write HTML structure first (skeleton, no inline styles).\n\
+  Then add CSS as a <style> block or separate .css file.\n\
+  Then add JavaScript separately.\n\
+  Each is its own turn. Prefer each write under ~150 lines.\n\
+\n\
+WHY: Completion output is limited (~8192 tokens per response).\n\
+A very long file risks truncation mid-way.\n\
+Small targeted writes stay within limits.\n\
+\n\
+NEW PROJECT WORKFLOW — FOLLOW THIS SEQUENCE EXACTLY:\n\
+\n\
+When asked to create a project from scratch:\n\
+\n\
+Step 1: Plan (small reply, ~20 lines)\n\
+  List every file you will create (bullets).\n\
+\n\
+Step 2: Create the smallest files first\n\
+  requirements.txt, package.json, Cargo.toml — a few lines each.\n\
+\n\
+Step 3: Skeleton files (empty structures)\n\
+  e.g. app entry: imports and empty function bodies.\n\
+  e.g. index.html: full structure with empty sections; no inline CSS yet.\n\
+\n\
+Step 4: Fill in with `edit` (or apply_patch/patch for larger hunks)\n\
+  One function or section at a time.\n\
+\n\
+Step 5: Verify with shell\n\
+  Run the project, fix errors.\n\
+\n\
+CONCRETE EXAMPLE for “create a landing page”:\n\
+  Turn 1: write_file index.html skeleton (~30 lines HTML only)\n\
+  Turn 2: edit to add <style> block (CSS)\n\
+  Turn 3: edit to add JavaScript if needed\n\
+  Turn 4: open or verify with shell\n\
+\n\
+  NOT: one giant index.html with HTML+CSS+JS (300+ lines)\n\
+  — that risks truncation and is harder to debug.\n";
 
 /// Markdown-style instructions injected when the session is in read-only plan mode (`--plan`, `/plan`).
 pub const PLAN_MODE_SYSTEM_ADDON: &str = "\n\
@@ -82,6 +125,20 @@ fn project_intelligence_for_prompt(project_root: &str) -> String {
     } else {
         String::new()
     }
+}
+
+/// Language-specific incremental writing rules (after AKMON.md and main project context).
+fn language_rules_system_block(project_root: &str) -> Option<String> {
+    let root = Path::new(project_root);
+    if !root.is_dir() {
+        return None;
+    }
+    akmon_core::language_incremental_profile_for_root(root).map(|p| {
+        format!(
+            "=== Language-specific rules ===\n{}\n=== end ===",
+            akmon_core::format_language_rules(&p)
+        )
+    })
 }
 
 fn format_project_context_plan_mode(
@@ -317,7 +374,8 @@ To work on this project:\n\
     entire file.\n\
 \n\
   STEP 6 — Apply diffs:\n\
-    patch patch=\"...\"\n\
+    patch patch=\"...\" (multi-file or one big diff)\n\
+    apply_patch file_path=\"...\" patch=\"...\" (one file; path + hunks)\n\
     Use for multi-location changes.\n\
 \n\
   STEP 7 — New files only:\n\
@@ -334,7 +392,7 @@ RULES:\n\
     relevant code\n\
   - NEVER guess file paths\n\
   - NEVER rewrite entire existing files\n\
-  - Before each write_file, edit, patch, shell, git, or web_fetch tool call, write one short plain sentence stating what you are about to do and why. The user sees tool cards and approval prompts in the UI.\n\
+  - Before each write_file, edit, patch, apply_patch, shell, git, or web_fetch tool call, write one short plain sentence stating what you are about to do and why. The user sees tool cards and approval prompts in the UI.\n\
 \n\
 {semantic_block}\
 All paths must be relative to the \n\
@@ -377,6 +435,13 @@ pub fn build_messages(
         content: format_project_context(project_root, tool_names, plan_mode),
     });
 
+    if let Some(block) = language_rules_system_block(project_root) {
+        out.push(Message {
+            role: MessageRole::System,
+            content: block,
+        });
+    }
+
     out.extend(history.iter().cloned());
 
     out.push(Message {
@@ -414,6 +479,13 @@ pub fn build_followup_messages(
         content: format_project_context(project_root, tool_names, plan_mode),
     });
 
+    if let Some(block) = language_rules_system_block(project_root) {
+        out.push(Message {
+            role: MessageRole::System,
+            content: block,
+        });
+    }
+
     out.extend(history.iter().cloned());
     out
 }
@@ -421,6 +493,29 @@ pub fn build_followup_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_messages_includes_language_rules_after_project_context_for_rust_repo() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .to_str()
+            .expect("utf8");
+        let msgs = build_messages(None, &[], "task", repo, &["read_file"], false);
+        assert!(
+            msgs.iter().any(|m| {
+                m.role == MessageRole::System && m.content.contains("=== Language-specific rules ===")
+            }),
+            "expected language rules system block"
+        );
+        assert!(
+            msgs.iter().any(|m| {
+                m.role == MessageRole::System && m.content.contains("cargo check")
+            }),
+            "expected Rust verify hint"
+        );
+    }
 
     #[test]
     fn build_messages_with_akmon_md_starts_with_delimited_system() {
@@ -442,6 +537,7 @@ mod tests {
         assert!(msgs[1].content.contains("To work on this project:"));
         assert!(msgs[1].content.contains("edit path"));
         assert!(msgs[1].content.contains("patch patch"));
+        assert!(msgs[1].content.contains("apply_patch"));
         assert!(msgs[1].content.contains(PROJECT_CONTEXT_END));
         assert!(msgs[1].content.contains("<<<TOOL_REFERENCE_START>>>"));
     }

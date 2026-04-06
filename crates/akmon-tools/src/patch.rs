@@ -65,7 +65,7 @@ fn is_dev_null(s: &str) -> bool {
 }
 
 /// Splits a multi-file unified diff into single-file segments (diffy rejects multiple `---` in one string).
-fn split_unified_patches(raw: &str) -> Vec<String> {
+pub(crate) fn split_unified_patches(raw: &str) -> Vec<String> {
     let normalized = raw.replace('\r', "");
     let lines: Vec<&str> = normalized.split('\n').collect();
     let mut starts: Vec<usize> = Vec::new();
