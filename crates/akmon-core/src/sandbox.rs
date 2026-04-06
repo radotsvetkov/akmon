@@ -35,15 +35,30 @@ pub struct Sandbox {
     primary_root: PathBuf,
     /// Extra roots explicitly allowed by configuration; never auto-expanded.
     additional_roots: Vec<PathBuf>,
+    /// `true` when the sandbox root was found via a `.git` work tree; `false` when using a raw directory (e.g. no repo within search depth).
+    #[serde(default = "default_has_git_root")]
+    pub has_git_root: bool,
+}
+
+fn default_has_git_root() -> bool {
+    true
 }
 
 impl Sandbox {
     /// Creates a sandbox anchored at `primary_root` (should exist for
     /// canonicalization to succeed on first resolve; callers may create dirs first).
+    ///
+    /// [`Self::has_git_root`] is set to `true` (typical Git-backed project).
     pub fn new(primary_root: impl Into<PathBuf>) -> Self {
+        Self::with_git_root(primary_root, true)
+    }
+
+    /// Like [`Sandbox::new`] but records whether the root came from Git discovery.
+    pub fn with_git_root(primary_root: impl Into<PathBuf>, has_git_root: bool) -> Self {
         Self {
             primary_root: primary_root.into(),
             additional_roots: Vec::new(),
+            has_git_root,
         }
     }
 
@@ -56,6 +71,7 @@ impl Sandbox {
         Self {
             primary_root: primary_root.into(),
             additional_roots,
+            has_git_root: true,
         }
     }
 
@@ -115,13 +131,22 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn sandbox_without_git_root_resolves_existing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("note.txt"), "x").unwrap();
+        let sandbox = Sandbox::with_git_root(tmp.path(), false);
+        assert!(!sandbox.has_git_root);
+        sandbox.resolve("note.txt").expect("inside sandbox");
+    }
+
+    #[test]
     fn traversal_outside_sandbox_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let inner = tmp.path().join("repo");
         let outside = tmp.path().join("outside");
         fs::create_dir_all(&inner).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        let sandbox = Sandbox::new(&inner);
+        let sandbox = Sandbox::with_git_root(&inner, false);
 
         let err = sandbox.resolve("../outside").unwrap_err();
         match err {

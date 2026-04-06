@@ -24,18 +24,112 @@ const TOOL_REFERENCE: &str = include_str!("tool_reference.txt");
 
 fn format_project_context(project_root: &str, tool_names: &[&str]) -> String {
     let tools_line = tool_names.join(", ");
-    let web_fetch_line = if tool_names.contains(&"web_fetch") {
-        "  7. web_fetch url=\"https://...\" \
-     to fetch public documentation\n"
+    let has_semantic = tool_names.contains(&"semantic_search");
+    let has_git = tool_names.contains(&"git");
+    let has_shell = tool_names.contains(&"shell");
+    let has_web_fetch = tool_names.contains(&"web_fetch");
+
+    let step1 = if has_semantic {
+        "  STEP 1 — Understand the codebase:\n\
+    If --index is available, ALWAYS\n\
+    start with semantic_search for \n\
+    any conceptual or exploratory query:\n\
+      semantic_search query=\"error handling\"\n\
+      semantic_search query=\"authentication\"\n\
+      semantic_search query=\"policy evaluation\"\n\
+    semantic_search finds relevant code\n\
+    across the entire project by meaning,\n\
+    not just by string matching.\n\
+    Use it BEFORE search or list_directory\n\
+    for any task involving understanding\n\
+    or finding code.\n"
+    } else {
+        "  STEP 1 — Understand the codebase:\n\
+    The semantic_search tool is NOT available\n\
+    (enable with CLI --index). For exploration,\n\
+    use search with focused patterns and read_file\n\
+    on likely files; avoid list_directory-only loops.\n"
+    };
+
+    let step4b = if has_git {
+        "\n\
+  STEP 4b — Check git state:\n\
+    git subcommand=\"status\"\n\
+      before editing to see what\n\
+      is already changed.\n\
+    git subcommand=\"diff\"\n\
+      after editing to verify \n\
+      your changes look correct.\n\
+    git subcommand=\"commit\" \n\
+      message=\"feat: ...\" \n\
+      after staging with git add.\n\
+    ALWAYS commit working changes \n\
+    before starting a new task.\n\
+    ALWAYS check git status at the \n\
+    start of any editing task.\n"
     } else {
         ""
     };
-    let semantic_line = if tool_names.contains(&"semantic_search") {
-        "  8. semantic_search query=\"...\" top_k=5 \
-     for natural-language codebase search (requires --index)\n"
+
+    let step8_shell = if has_shell {
+        "\n\
+  STEP 8 — Run commands:\n\
+    shell command=\"...\"\n\
+    Only commands in the allowlist.\n"
     } else {
         ""
     };
+
+    let step9_web = if has_web_fetch {
+        "\n\
+  STEP 9 — Fetch documentation:\n\
+    web_fetch url=\"https://...\"\n\
+    Only when --web-fetch is enabled.\n"
+    } else {
+        ""
+    };
+
+    let rule_semantic_priority = if has_semantic {
+        "  - semantic_search before search \n\
+    for ANY conceptual query\n"
+    } else {
+        "  - Without --index, use search plus \n\
+    read_file for exploration\n"
+    };
+
+    let step4_discover_tools = if has_semantic {
+        "semantic_search or list_directory.\n"
+    } else {
+        "search or list_directory.\n"
+    };
+
+    let step3_tail = if has_semantic {
+        "    Do NOT use search for conceptual \n\
+    queries — use semantic_search instead.\n"
+    } else {
+        "    Without semantic_search, combine \n\
+    search hits with read_file; avoid \n\
+    list_directory-only discovery.\n"
+    };
+
+    let semantic_block = if has_semantic {
+        "\n\
+SEMANTIC SEARCH IS AVAILABLE.\n\
+Use it as your primary exploration tool.\n\
+Examples of good semantic_search queries:\n\
+  \"policy permission evaluation\"\n\
+  \"error handling for file operations\"\n\
+  \"agent FSM state transitions\"\n\
+  \"MCP tool discovery\"\n\
+Examples of bad semantic_search queries\n\
+(use search instead):\n\
+  \"fn validate_url\" ← use search\n\
+  \"TODO\" ← use search\n\
+  \"use akmon_core\" ← use search\n\n"
+    } else {
+        ""
+    };
+
     format!(
         "{PROJECT_CONTEXT_START}\n\
 You are an AI coding assistant \n\
@@ -45,28 +139,55 @@ Working directory: {project_root}\n\
 Available tools: {tools_line}\n\
 \n\
 To work on this project:\n\
-  1. list_directory path=\".\" \n\
-     to explore structure\n\
-  2. search pattern=\"...\" \n\
-     to find relevant code\n\
-  3. read_file path=\"...\" \n\
-     to read specific files\n\
-  4. edit path=\"...\" old_str=\"...\" \n\
-     new_str=\"...\" for surgical \n\
-     single-location changes\n\
-  5. patch patch=\"...\" for changes \n\
-     across multiple locations\n\
-  6. write_file path=\"...\" \n\
-     content=\"...\" only for \n\
-     completely new files\n\
-{web_fetch_line}\
-{semantic_line}\
-  NEVER rewrite an entire existing \n\
-  file — use edit or patch instead.\n\
-  NEVER call read_file on a directory.\n\
-  NEVER guess paths — always \n\
-  list or search first.\n\
+{step1}\
 \n\
+  STEP 2 — Navigate structure:\n\
+    list_directory path=\".\" to explore\n\
+    Only use list_directory when you need\n\
+    to know what files exist, not to \n\
+    find relevant code.\n\
+\n\
+  STEP 3 — Find exact strings:\n\
+    search pattern=\"exact_string\"\n\
+    Use search for exact identifier names,\n\
+    function names, or literal strings.\n\
+{step3_tail}\
+\n\
+  STEP 4 — Read specific files:\n\
+    read_file path=\"...\"\n\
+    Only read a file after you know it\n\
+    is relevant. Never read files to \n\
+    discover structure — use \n\
+    {step4_discover_tools}\
+{step4b}\
+\n\
+  STEP 5 — Edit existing files:\n\
+    edit path=\"...\" old_str=\"...\" \n\
+      new_str=\"...\"\n\
+    ALWAYS use edit for changes to \n\
+    existing files. Never rewrite an \n\
+    entire file.\n\
+\n\
+  STEP 6 — Apply diffs:\n\
+    patch patch=\"...\"\n\
+    Use for multi-location changes.\n\
+\n\
+  STEP 7 — New files only:\n\
+    write_file path=\"...\" content=\"...\"\n\
+    Only for files that do not exist yet.\n\
+{step8_shell}\
+{step9_web}\
+RULES:\n\
+{rule_semantic_priority}\
+  - read_file only after locating \n\
+    the file via semantic_search \n\
+    or search\n\
+  - NEVER list_directory to find \n\
+    relevant code\n\
+  - NEVER guess file paths\n\
+  - NEVER rewrite entire existing files\n\
+\n\
+{semantic_block}\
 All paths must be relative to the \n\
 working directory shown above.\n\
 Absolute paths and paths with ../ \n\
@@ -258,8 +379,8 @@ mod tests {
             .iter()
             .find(|m| m.role == MessageRole::System && m.content.contains("web_fetch url="))
             .expect("project context should document web_fetch when listed");
-        assert!(ctx.content.contains("7. web_fetch url=\"https://...\""));
-        assert!(ctx.content.contains("fetch public documentation"));
+        assert!(ctx.content.contains("STEP 9 — Fetch documentation"));
+        assert!(ctx.content.contains("web_fetch url=\"https://...\""));
     }
 
     #[test]
@@ -269,7 +390,36 @@ mod tests {
             .iter()
             .find(|m| m.role == MessageRole::System && m.content.contains("semantic_search query="))
             .expect("project context should document semantic_search when listed");
-        assert!(ctx.content.contains("semantic_search query=\"...\""));
-        assert!(ctx.content.contains("requires --index"));
+        assert!(ctx.content.contains("STEP 1 — Understand the codebase"));
+        assert!(ctx.content.contains("semantic_search query=\"error handling\""));
+        assert!(ctx.content.contains("SEMANTIC SEARCH IS AVAILABLE."));
+        assert!(ctx.content.contains("Examples of good semantic_search queries"));
+        assert!(ctx.content.contains("Examples of bad semantic_search queries"));
+    }
+
+    #[test]
+    fn semantic_search_listed_before_search_in_context() {
+        let msgs = build_messages(
+            None,
+            &[],
+            "t",
+            "/repo",
+            &["read_file", "search", "semantic_search"],
+        );
+        let ctx = msgs
+            .iter()
+            .find(|m| m.role == MessageRole::System)
+            .expect("system");
+        let body = &ctx.content;
+        let i_sem = body
+            .find("semantic_search query=\"error handling\"")
+            .expect("semantic_search examples");
+        let i_search = body
+            .find("search pattern=\"exact_string\"")
+            .expect("search step");
+        assert!(
+            i_sem < i_search,
+            "semantic_search guidance must appear before exact-string search step"
+        );
     }
 }

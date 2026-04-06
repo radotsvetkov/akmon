@@ -1,6 +1,7 @@
 //! Agent session: owns FSM state, provider, tools, and the main query loop.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use akmon_core::{
@@ -55,6 +56,8 @@ pub struct ToolCallResult {
     pub output: ToolOutput,
     /// Whether the tool reported success.
     pub success: bool,
+    /// Arguments the model supplied (for post-hooks such as auto-commit).
+    pub arguments: Value,
 }
 
 /// Builds [`CompletionConfig`] with `tools` populated from registered [`Tool`] instances.
@@ -191,6 +194,31 @@ impl AgentSession {
         self.total_output_tokens
     }
 
+    /// Allows a follow-up [`run`] after [`AgentState::Complete`] or [`AgentState::Failed`] by
+    /// returning to [`AgentState::Idle`] and clearing per-turn text/tool summaries.
+    ///
+    /// Returns an error when the session is busy (planning, thinking, tools, etc.).
+    pub fn prepare_for_new_user_turn(&mut self) -> Result<(), AgentError> {
+        match self.state {
+            AgentState::Complete | AgentState::Failed { .. } => {
+                self.state = AgentState::Idle;
+                self.parallel_tool_batch_remaining = 0;
+            }
+            AgentState::Idle => {}
+            _ => {
+                return Err(AgentError::SessionFailed {
+                    message: format!(
+                        "cannot start a new turn from state {:?}",
+                        self.state
+                    ),
+                });
+            }
+        }
+        self.result_text.clear();
+        self.tool_call_summaries.clear();
+        Ok(())
+    }
+
     /// Runs one user task: planning, one or more model completions, real tool dispatch, and
     /// streaming events until [`StopReason::EndTurn`] or an error.
     ///
@@ -207,15 +235,21 @@ impl AgentSession {
     /// write confirmations can be answered; the UI must send one verdict after each
     /// [`AgentEvent::ConfirmationRequired`]. Use `&mut None` only when no interactive confirmations are
     /// possible (reads-only sessions may still use `Some` harmlessly).
+    ///
+    /// When `interrupt_after_current_tools` is [`Some`] and the flag is set after a tool batch
+    /// finishes, the session emits [`AgentEvent::Done`] and returns [`Ok(())`] without another model call.
     pub async fn run(
         &mut self,
         task: String,
         event_tx: mpsc::Sender<AgentEvent>,
         interactive_policy_rx: &mut Option<mpsc::Receiver<PolicyVerdict>>,
+        interrupt_after_current_tools: Option<Arc<AtomicBool>>,
     ) -> Result<(), AgentError> {
+        self.prepare_for_new_user_turn()?;
+
         if !matches!(self.state, AgentState::Idle) {
             return Err(AgentError::SessionFailed {
-                message: "AgentSession::run expected Idle state".into(),
+                message: "AgentSession::run expected Idle state after prepare".into(),
             });
         }
 
@@ -467,16 +501,25 @@ impl AgentSession {
                                     content: assistant_record.to_string(),
                                 });
 
-                                self.dispatch_tool_calls_batch(
-                                    tool_calls,
-                                    &event_tx,
-                                    &task,
-                                    interactive_policy_rx,
-                                )
-                                .await?;
+                self.dispatch_tool_calls_batch(
+                    tool_calls,
+                    &event_tx,
+                    &task,
+                    interactive_policy_rx,
+                )
+                .await?;
 
-                                iteration = iteration.saturating_add(1);
-                                continue 'session;
+                if interrupt_after_current_tools
+                    .as_ref()
+                    .is_some_and(|f| f.load(Ordering::SeqCst))
+                {
+                    self.apply_event(&event_tx, AgentEvent::Done, &task)
+                        .await?;
+                    return Ok(());
+                }
+
+                iteration = iteration.saturating_add(1);
+                continue 'session;
                             }
                         }
                     }
@@ -551,6 +594,7 @@ impl AgentSession {
                         message: msg,
                     },
                     success: false,
+                    arguments: args.clone(),
                 });
                 continue;
             };
@@ -689,6 +733,7 @@ impl AgentSession {
                         message: msg,
                     },
                     success: false,
+                    arguments: args.clone(),
                 });
                 continue;
             }
@@ -712,6 +757,7 @@ impl AgentSession {
                     AgentEvent::ToolCallDispatched {
                         id: a.id.clone(),
                         name: a.name.clone(),
+                        arguments: a.arguments.clone(),
                     },
                     task,
                 )
@@ -757,6 +803,19 @@ impl AgentSession {
                     task,
                 )
                 .await?;
+                if self.config.auto_commit
+                    && self.sandbox.has_git_root
+                    && tool_result.success
+                {
+                    if let Some(ev) = akmon_tools::try_auto_commit_after_file_tool(
+                        self.sandbox.primary_root(),
+                        &self.config.session_id.to_string(),
+                        &tool_result.tool_name,
+                        &tool_result.arguments,
+                    ) {
+                        self.audit_log.push(ev);
+                    }
+                }
                 slots[orig_idx] = Some(tool_result);
             }
         }
@@ -1199,6 +1258,7 @@ pub async fn execute_single_tool_call(
     tool: &dyn Tool,
     ctx: &ToolContext,
 ) -> ToolCallResult {
+    let arguments = call.arguments.clone();
     let output = tool.execute(call.arguments.clone(), ctx).await;
     let (success, _) = summarize_tool_output(&output);
     ToolCallResult {
@@ -1206,12 +1266,46 @@ pub async fn execute_single_tool_call(
         tool_name: call.name.clone(),
         output,
         success,
+        arguments,
     }
 }
 
 fn map_model_error(e: ModelError) -> AgentError {
     AgentError::ModelError {
         message: e.to_string(),
+    }
+}
+
+fn git_concrete_permissions(args: &Value) -> Vec<Permission> {
+    let sub = args.get("subcommand").and_then(|v| v.as_str()).unwrap_or("");
+    let argv: Vec<String> = args
+        .get("args")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let repo = PathBuf::from(".");
+    match sub {
+        "status" | "diff" | "log" | "show" => vec![Permission::ReadFile { path: repo }],
+        "stash" => {
+            if argv.first().map(|s| s.as_str()) == Some("list") {
+                vec![Permission::ReadFile { path: repo }]
+            } else {
+                vec![Permission::WriteFile { path: repo }]
+            }
+        }
+        "branch" => {
+            if argv.is_empty() {
+                vec![Permission::ReadFile { path: repo }]
+            } else {
+                vec![Permission::WriteFile { path: repo }]
+            }
+        }
+        "add" | "commit" | "restore" => vec![Permission::WriteFile { path: repo }],
+        _ => vec![Permission::ReadFile { path: repo }],
     }
 }
 
@@ -1306,6 +1400,7 @@ fn concrete_permissions(
                 path: PathBuf::from("."),
             }]
         }
+        "git" => git_concrete_permissions(args),
         _ => tool.required_permissions().to_vec(),
     }
 }
@@ -1333,6 +1428,7 @@ mod tests {
                 max_iterations: 25,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(StubProvider::empty_end_turn()),
@@ -1349,6 +1445,7 @@ mod tests {
             max_iterations: 1,
             confirmation_timeout_secs: 30,
             session_id: Uuid::nil(),
+            auto_commit: false,
         };
         assert!(check_iteration_limit(0, &config).is_ok());
         assert_eq!(
@@ -1456,6 +1553,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -1467,7 +1565,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
         let r = session
-            .run("task".into(), tx, &mut no_policy)
+            .run("task".into(), tx, &mut no_policy, None)
             .await;
         assert!(r.is_ok());
 
@@ -1516,6 +1614,7 @@ mod tests {
                 max_iterations: 2,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -1527,7 +1626,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         let err = session
-            .run("t".into(), tx, &mut no_policy)
+            .run("t".into(), tx, &mut no_policy, None)
             .await
             .expect_err("expected iteration error");
         assert!(
@@ -1560,6 +1659,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -1571,7 +1671,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("hi".into(), tx, &mut no_policy)
+            .run("hi".into(), tx, &mut no_policy, None)
             .await
             .expect("run");
 
@@ -1670,6 +1770,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -1683,7 +1784,7 @@ mod tests {
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("x".into(), ev_tx, &mut no_policy)
+            .run("x".into(), ev_tx, &mut no_policy, None)
             .await
             .expect("run");
 
@@ -1743,6 +1844,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -1756,7 +1858,7 @@ mod tests {
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("task".into(), ev_tx, &mut no_policy)
+            .run("task".into(), ev_tx, &mut no_policy, None)
             .await
             .expect("run");
 
@@ -1800,6 +1902,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -1823,7 +1926,7 @@ mod tests {
         let mut no_policy = None;
         let t0 = Instant::now();
         session
-            .run("x".into(), ev_tx, &mut no_policy)
+            .run("x".into(), ev_tx, &mut no_policy, None)
             .await
             .expect("run");
         let elapsed = t0.elapsed();
@@ -1867,6 +1970,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: false,
@@ -1883,7 +1987,7 @@ mod tests {
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("x".into(), ev_tx, &mut no_policy)
+            .run("x".into(), ev_tx, &mut no_policy, None)
             .await
             .expect("run");
 
@@ -1938,6 +2042,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -1960,7 +2065,7 @@ mod tests {
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("x".into(), ev_tx, &mut no_policy)
+            .run("x".into(), ev_tx, &mut no_policy, None)
             .await
             .expect("run");
 
@@ -2012,6 +2117,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
             Arc::new(seq),
@@ -2023,7 +2129,7 @@ mod tests {
         let (ev_tx, _ev_rx) = mpsc::channel(64);
         let mut policy_opt = Some(policy_rx);
         session
-            .run("read".into(), ev_tx, &mut policy_opt)
+            .run("read".into(), ev_tx, &mut policy_opt, None)
             .await
             .expect("run");
 
@@ -2059,6 +2165,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2070,7 +2177,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("t".into(), tx, &mut no_policy)
+            .run("t".into(), tx, &mut no_policy, None)
             .await
             .expect("run");
         assert_eq!(session.result_text(), "hello");
@@ -2092,6 +2199,7 @@ mod tests {
                 max_iterations: 5,
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
+                auto_commit: false,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2103,7 +2211,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("t".into(), tx, &mut no_policy)
+            .run("t".into(), tx, &mut no_policy, None)
             .await
             .expect("run");
 

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use serde_json::Value;
+
 use super::error::AgentError;
 
 /// Observable occurrence processed by the agent loop when deciding the next state.
@@ -20,6 +22,8 @@ pub enum AgentEvent {
         id: String,
         /// Registered tool name.
         name: String,
+        /// JSON arguments object from the model (empty object when unknown).
+        arguments: Value,
     },
     /// A tool invocation finished (success or failure).
     ToolCallCompleted {
@@ -118,6 +122,7 @@ mod tests {
         let e = AgentEvent::ToolCallDispatched {
             id: "1".into(),
             name: "read".into(),
+            arguments: serde_json::json!({}),
         };
         assert!(e.to_string().contains("read"));
     }

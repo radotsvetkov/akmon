@@ -1,5 +1,8 @@
 //! Akmon CLI — project discovery, optional `AKMON.md`, and headless `--task` runs.
 
+mod cli_project;
+mod config_cmd;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -13,10 +16,11 @@ use akmon_core::{
 use akmon_models::{AnthropicBackend, LlmProvider, OllamaBackend};
 use akmon_query::{AgentSession, ToolCallSummary};
 use akmon_tools::{
-    discover_mcp_tools, EditTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
+    discover_mcp_tools, EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
     SemanticSearchTool, ShellTool, WebFetchTool, WriteFileTool,
 };
-use clap::{Parser, ValueEnum};
+use akmon_tui::TuiLaunchConfig;
+use clap::{Parser, Subcommand, ValueEnum};
 use fastembed::{TextEmbedding, TextInitOptions};
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -129,13 +133,16 @@ fn git_working_tree_marker_present(git_path: &Path) -> bool {
     }
 }
 
-/// Walks upward from `root` until a `.git` file or directory is found.
+/// At most this many directories are checked when walking upward for `.git` (current dir first).
+const GIT_ROOT_MAX_DIR_CHECKS: usize = 5;
+
+/// Walks upward from `root` for at most [`GIT_ROOT_MAX_DIR_CHECKS`] directories.
 ///
 /// If the environment variable `AKMON_DEBUG_GIT` is set (any value), prints each directory checked
 /// and whether a `.git` marker was found to stderr (for troubleshooting discovery).
-fn walk_up_for_git(mut root: PathBuf) -> Option<PathBuf> {
+fn walk_up_for_git_limited(mut root: PathBuf, max_dir_checks: usize) -> Option<PathBuf> {
     let debug_git = std::env::var_os("AKMON_DEBUG_GIT").is_some();
-    loop {
+    for _ in 0..max_dir_checks {
         let git_path = root.join(".git");
         let found = git_working_tree_marker_present(&git_path);
         if debug_git {
@@ -151,6 +158,7 @@ fn walk_up_for_git(mut root: PathBuf) -> Option<PathBuf> {
         }
         root = root.parent()?.to_path_buf();
     }
+    None
 }
 
 fn push_git_walk_start(candidates: &mut Vec<PathBuf>, p: PathBuf) {
@@ -159,13 +167,14 @@ fn push_git_walk_start(candidates: &mut Vec<PathBuf>, p: PathBuf) {
     }
 }
 
-/// Walks upward from `start` looking for a `.git` file or directory. Returns
-/// the directory that contains `.git`, or [`None`] if none is found.
+/// Walks upward from `start` looking for a `.git` file or directory, at most
+/// [`GIT_ROOT_MAX_DIR_CHECKS`] levels per candidate start path. Returns the directory that
+/// contains `.git`, or [`None`] if none is found within that depth.
 ///
 /// Tries several starting paths (`dunce::canonicalize`, [`Path::canonicalize`], and the logical
 /// absolute path from [`std::env::current_dir`]) so a repo is found when only one representation
 /// resolves correctly.
-fn find_git_project_root(start: &Path) -> Option<PathBuf> {
+pub(crate) fn find_git_project_root(start: &Path) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Ok(c) = dunce::canonicalize(start) {
@@ -187,7 +196,7 @@ fn find_git_project_root(start: &Path) -> Option<PathBuf> {
     push_git_walk_start(&mut candidates, logical);
 
     for root in candidates {
-        if let Some(found) = walk_up_for_git(root) {
+        if let Some(found) = walk_up_for_git_limited(root, GIT_ROOT_MAX_DIR_CHECKS) {
             return Some(found);
         }
     }
@@ -251,26 +260,30 @@ struct RunReport {
     version,
     about = "Local-first AI coding agent. Runs with Ollama (local) or Anthropic API. All actions are audited."
 )]
-struct Cli {
-    /// Task string for one headless agent run (interactive TUI is not implemented yet).
-    #[arg(short = 't', long = "task")]
+pub(crate) struct Cli {
+    /// Optional subcommand (`chat` is equivalent to omitting `--task`).
+    #[command(subcommand)]
+    command: Option<Commands>,
+    /// Task string for a headless agent run. When omitted, Akmon opens the interactive TUI.
+    #[arg(short = 't', long = "task", global = true)]
     task: Option<String>,
     /// Model name: Ollama tag (e.g. llama3.2), or a Claude id if `ANTHROPIC_API_KEY` / `--anthropic-key` is set.
-    #[arg(long = "model", default_value = "llama3.2")]
+    #[arg(long = "model", default_value = "llama3.2", global = true)]
     model: String,
     /// Anthropic API key; defaults to the `ANTHROPIC_API_KEY` environment variable when unset.
     #[arg(
         long = "anthropic-key",
         env = "ANTHROPIC_API_KEY",
         hide_env_values = true,
+        global = true,
         help = "Anthropic API key (falls back to ANTHROPIC_API_KEY env var)"
     )]
     anthropic_key: Option<String>,
     /// Base URL for the Ollama HTTP API (ignored when using Anthropic).
-    #[arg(long = "ollama-url", default_value = "http://localhost:11434")]
+    #[arg(long = "ollama-url", default_value = "http://localhost:11434", global = true)]
     ollama_url: String,
     /// Auto-approve read-only tools only; writes and `shell` still require confirmation.
-    #[arg(short = 'y', long = "yes")]
+    #[arg(short = 'y', long = "yes", global = true)]
     yes: bool,
     /// `text`: stream tokens to the terminal; `json`: print one session summary object at the end.
     #[arg(long = "output", value_name = "FORMAT", default_value = "text", value_enum)]
@@ -291,8 +304,27 @@ struct Cli {
     #[arg(long = "mcp-server", value_name = "URL")]
     mcp_server: Vec<String>,
     /// Build or load a semantic index of the project; registers the `semantic_search` tool. Cache: `.akmon/index.bin`.
-    #[arg(long = "index")]
+    #[arg(long = "index", global = true)]
     index: bool,
+    /// After each successful `edit` or `write_file`, run `git add` and `git commit` with an auto-generated message (requires a git repo).
+    #[arg(long = "auto-commit", global = true)]
+    auto_commit: bool,
+    /// Resume or label a session (full resume is slice 4; value is shown in the TUI today).
+    #[arg(long = "session", global = true)]
+    session: Option<uuid::Uuid>,
+}
+
+/// Top-level `akmon` subcommands.
+#[derive(Subcommand, Debug, Clone)]
+enum Commands {
+    /// Interactive full-screen terminal UI (same as `akmon` without `--task`).
+    Chat,
+    /// Analyze the current project and generate `AKMON.md` using the configured model.
+    Init,
+    /// Create a new project directory with starter files and `AKMON.md`.
+    New(cli_project::NewCmd),
+    /// Manage `~/.akmon/config.toml` (models, keys, MCP).
+    Config(config_cmd::ConfigArgs),
 }
 
 type SemanticIndexParts = (
@@ -309,6 +341,7 @@ fn build_tool_registry(
     shell_allow: &[String],
     web_fetch: bool,
     semantic: Option<SemanticIndexParts>,
+    has_git_root: bool,
 ) -> Vec<Box<dyn akmon_tools::Tool>> {
     let mut tools: Vec<Box<dyn akmon_tools::Tool>> = vec![
         Box::new(ReadFileTool::new()),
@@ -326,6 +359,9 @@ fn build_tool_registry(
     }
     if let Some((slot, emb)) = semantic {
         tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
+    }
+    if has_git_root {
+        tools.push(Box::new(GitTool::new()));
     }
     tools
 }
@@ -457,20 +493,161 @@ async fn main() -> ExitCode {
         }
     };
 
-    let (project_root, git_warning) = match find_git_project_root(&cwd) {
-        Some(root) => (root, None),
-        None => (
-            cwd.clone(),
-            Some(
-                "no git repository detected — using current directory as project root; \
-                 sandbox boundary is weaker without a repo root",
-            ),
-        ),
-    };
-
-    if let Some(msg) = git_warning {
-        eprintln!("akmon: warning: {msg}");
+    let (project_root, has_git_root) = cli_project::resolve_sandbox_root(&cwd);
+    if !has_git_root {
+        eprintln!("akmon: no git repository found.");
+        eprintln!(
+            "Using cwd as sandbox: {}",
+            dunce::canonicalize(&project_root)
+                .unwrap_or_else(|_| project_root.clone())
+                .display()
+        );
+        eprintln!("Run git init to enable git features.");
     }
+
+    match &cli.command {
+        Some(Commands::Init) => {
+            return cli_project::run_init(&cli, &project_root).await;
+        }
+        Some(Commands::New(args)) => {
+            return cli_project::run_new(&cli, args, &cwd).await;
+        }
+        Some(Commands::Config(c)) => {
+            return config_cmd::run_config(c.clone()).await;
+        }
+        Some(Commands::Chat) | None => {}
+    }
+
+    let Some(task) = cli.task else {
+        let akmon_content = match load_akmon_md(&project_root) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("akmon: warning: failed to read AKMON.md: {e}");
+                None
+            }
+        };
+        let has_akmon_md = project_root.join("AKMON.md").is_file();
+
+        let mode_label = if cli.yes {
+            "AUTO"
+        } else {
+            "INTERACTIVE"
+        };
+        let session_id = cli.session.unwrap_or_else(uuid::Uuid::new_v4);
+        let audit_log_path = resolve_audit_log_path(
+            &project_root,
+            session_id,
+            cli.audit_log.clone(),
+        );
+
+        let sandbox = Arc::new(Sandbox::with_git_root(
+            project_root.clone(),
+            has_git_root,
+        ));
+        let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
+
+        let semantic_index: Option<akmon_tui::SemanticIndexSlot> = if cli.index {
+            let index_path = project_root.join(".akmon").join("index.bin");
+            if !index_path.is_file() {
+                eprintln!("akmon: downloading embedding model (~22MB) on first use...");
+            }
+            match TextEmbedding::try_new(
+                TextInitOptions::default().with_show_download_progress(true),
+            ) {
+                Ok(m) => {
+                    let emb = Arc::new(std::sync::Mutex::new(m));
+                    let slot = Arc::new(RwLock::new(None));
+
+                    if index_path.is_file() {
+                        match akmon_index::load_index(&index_path) {
+                            Ok(idx) => {
+                                eprintln!(
+                                    "akmon: semantic index loaded ({} files, {} chunks)",
+                                    idx.file_count, idx.chunk_count
+                                );
+                                *slot.write().await = Some(idx);
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "akmon: warning: could not load semantic index, rebuilding: {e}"
+                                );
+                                let slot_bg = Arc::clone(&slot);
+                                let root_bg = project_root.clone();
+                                let sandbox_bg = Arc::clone(&sandbox);
+                                let emb_bg = Arc::clone(&emb);
+                                let path_bg = index_path.clone();
+                                index_thread = spawn_semantic_index_os_thread(
+                                    root_bg,
+                                    emb_bg,
+                                    sandbox_bg,
+                                    path_bg,
+                                    slot_bg,
+                                );
+                                poll_index_ready_up_to_3s(&slot).await;
+                            }
+                        }
+                    } else {
+                        let slot_bg = Arc::clone(&slot);
+                        let root_bg = project_root.clone();
+                        let sandbox_bg = Arc::clone(&sandbox);
+                        let emb_bg = Arc::clone(&emb);
+                        let path_bg = index_path.clone();
+                        index_thread = spawn_semantic_index_os_thread(
+                            root_bg,
+                            emb_bg,
+                            sandbox_bg,
+                            path_bg,
+                            slot_bg,
+                        );
+                        poll_index_ready_up_to_3s(&slot).await;
+                    }
+
+                    Some((slot, emb))
+                }
+                Err(e) => {
+                    eprintln!("akmon: warning: semantic index disabled (embedding model): {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let tui_config = TuiLaunchConfig {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            project_root: project_root.clone(),
+            model_name: cli.model.clone(),
+            mode_label: mode_label.to_string(),
+            session_id,
+            max_iterations: AgentConfig::default().max_iterations,
+            index_enabled: cli.index,
+            anthropic_key: cli.anthropic_key.clone(),
+            ollama_url: cli.ollama_url.clone(),
+            shell_allow: cli.shell_allow.clone(),
+            web_fetch: cli.web_fetch,
+            yes_web: cli.yes_web,
+            auto_yes: cli.yes,
+            mcp_servers: cli.mcp_server.clone(),
+            audit_log_path,
+            akmon_md: akmon_content,
+            has_akmon_md,
+            sandbox_has_git_root: has_git_root,
+            semantic_index,
+            auto_commit: cli.auto_commit,
+        };
+        let tui_outcome = akmon_tui::run_interactive(tui_config).await;
+        if let Some(handle) = index_thread {
+            eprintln!("akmon: waiting for index to finish building...");
+            let _ = handle.join();
+        }
+        return match tui_outcome {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("akmon: TUI error: {e}");
+                ExitCode::from(1)
+            }
+        };
+    };
 
     let akmon_content = match load_akmon_md(&project_root) {
         Ok(c) => c,
@@ -478,11 +655,6 @@ async fn main() -> ExitCode {
             eprintln!("akmon: failed to read AKMON.md: {e}");
             return ExitCode::from(2);
         }
-    };
-
-    let Some(task) = cli.task else {
-        println!("Interactive mode not yet implemented. Use --task to run a task.");
-        return ExitCode::SUCCESS;
     };
 
     if cli.output == OutputFormat::Text {
@@ -493,7 +665,10 @@ async fn main() -> ExitCode {
         }
     }
 
-    let agent_config = AgentConfig::default();
+    let agent_config = AgentConfig {
+        auto_commit: cli.auto_commit,
+        ..Default::default()
+    };
     let audit_log_path = resolve_audit_log_path(
         &project_root,
         agent_config.session_id,
@@ -524,7 +699,10 @@ async fn main() -> ExitCode {
         PolicyEngineMode::Interactive
     };
     let policy = Arc::new(PolicyEngine::new(policy_mode));
-    let sandbox = Arc::new(Sandbox::new(project_root.clone()));
+    let sandbox = Arc::new(Sandbox::with_git_root(
+        project_root.clone(),
+        has_git_root,
+    ));
 
     let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
 
@@ -595,7 +773,12 @@ async fn main() -> ExitCode {
         None
     };
 
-    let mut tools = build_tool_registry(&cli.shell_allow, cli.web_fetch, semantic_parts);
+    let mut tools = build_tool_registry(
+        &cli.shell_allow,
+        cli.web_fetch,
+        semantic_parts,
+        has_git_root,
+    );
     for url in &cli.mcp_server {
         let server = McpServerConfig {
             name: url.clone(),
@@ -633,7 +816,7 @@ async fn main() -> ExitCode {
     let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
 
     let mut policy_opt = Some(policy_rx);
-    let run_outcome = session.run(task, ev_tx, &mut policy_opt).await;
+    let run_outcome = session.run(task, ev_tx, &mut policy_opt, None).await;
 
     drop(policy_opt);
 
@@ -715,26 +898,34 @@ mod tests {
 
     #[test]
     fn shell_tool_omitted_without_allow_flags() {
-        let t = build_tool_registry(&[], false, None);
+        let t = build_tool_registry(&[], false, None, false);
         assert!(!t.iter().any(|x| x.name() == "shell"));
     }
 
     #[test]
     fn shell_tool_registered_when_allow_patterns_present() {
-        let t = build_tool_registry(&["echo *".into()], false, None);
+        let t = build_tool_registry(&["echo *".into()], false, None, false);
         assert!(t.iter().any(|x| x.name() == "shell"));
     }
 
     #[test]
     fn web_fetch_tool_omitted_without_flag() {
-        let t = build_tool_registry(&[], false, None);
+        let t = build_tool_registry(&[], false, None, false);
         assert!(!t.iter().any(|x| x.name() == "web_fetch"));
     }
 
     #[test]
     fn web_fetch_tool_registered_when_flag_set() {
-        let t = build_tool_registry(&[], true, None);
+        let t = build_tool_registry(&[], true, None, false);
         assert!(t.iter().any(|x| x.name() == "web_fetch"));
+    }
+
+    #[test]
+    fn git_tool_registered_when_has_git_root() {
+        let t = build_tool_registry(&[], false, None, true);
+        assert!(t.iter().any(|x| x.name() == "git"));
+        let t2 = build_tool_registry(&[], false, None, false);
+        assert!(!t2.iter().any(|x| x.name() == "git"));
     }
 
     #[test]

@@ -2,15 +2,24 @@
 resolver = "2"
 members = [
     "crates/akmon-core",
+    "crates/akmon-config",
     "crates/akmon-cli",
     "crates/akmon-models",
     "crates/akmon-tools",
     "crates/akmon-query",
     "crates/akmon-index",
+    "crates/akmon-tui",
 ]
 
+[workspace.dependencies]
+crossterm = "0.27"
+ratatui = "0.26"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"

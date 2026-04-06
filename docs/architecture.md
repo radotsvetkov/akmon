@@ -4,6 +4,9 @@
 
 ```
 akmon-cli
+  ├── akmon-config   (user ~/.akmon/config.toml)
+  ├── akmon-tui      (interactive terminal UI)
+  ├── akmon-index    (optional semantic index)
   └── akmon-query
         ├── akmon-models
         ├── akmon-tools
@@ -83,12 +86,12 @@ Akmon can connect to any MCP (Model Context Protocol) server and automatically r
 
 **Policy enforcement** requires that **every permission-bearing operation** go through the policy engine, which emits an **AuditEvent::PolicyEvaluation** (verdict plus reason) for each decision. Tools do not “skip” policy for convenience; denials surface as structured errors, and the audit log provides a complete trace with **no silent bypass path**.
 
-## Known limitations (v1)
+## Known limitations (v1.3.0)
 
 - Shell tool output is passed as raw text to the model. Numeric results (test counts, line counts) may be interpreted approximately rather than exactly. For precise counts use `--output json` and parse the `tool_calls` field.
 
 - Candle local inference backend is not yet implemented. Local model support requires Ollama.
 
-- TUI interactive mode is not yet implemented. All sessions use the headless loop with terminal output.
+- Headless `akmon chat` / `akmon run` remain available; interactive sessions use **`akmon`** (TUI) or the same agent loop with streamed terminal output.
 
-- The Anthropic backend does not yet implement prompt caching. Long `AKMON.md` files will consume tokens on every turn.
+- Anthropic prompt caching applies to eligible system content; very large or frequently changing prompts may still incur higher token use—see release notes in `CHANGELOG.md`.

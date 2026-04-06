@@ -21,6 +21,7 @@ pub mod fsm;
 pub mod mcp;
 pub mod permission;
 pub mod policy;
+pub mod project;
 pub mod sandbox;
 pub mod secret;
 

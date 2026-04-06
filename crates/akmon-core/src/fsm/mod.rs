@@ -43,6 +43,7 @@ mod tests {
             max_iterations: 25,
             confirmation_timeout_secs: 30,
             session_id: Uuid::nil(),
+            auto_commit: false,
         };
         assert!(check_iteration_limit(0, &config).is_ok());
         assert!(check_iteration_limit(24, &config).is_ok());
@@ -54,6 +55,7 @@ mod tests {
             max_iterations: 25,
             confirmation_timeout_secs: 30,
             session_id: Uuid::nil(),
+            auto_commit: false,
         };
         assert_eq!(
             check_iteration_limit(25, &config),
@@ -67,6 +69,7 @@ mod tests {
             max_iterations: 10,
             confirmation_timeout_secs: 30,
             session_id: Uuid::nil(),
+            auto_commit: false,
         };
         assert!(check_iteration_limit(100, &config).is_err());
     }

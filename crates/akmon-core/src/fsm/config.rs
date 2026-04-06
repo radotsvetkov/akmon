@@ -21,6 +21,8 @@ pub struct AgentConfig {
     pub confirmation_timeout_secs: u64,
     /// Stable id for audit records and telemetry correlation for this session.
     pub session_id: Uuid,
+    /// When `true`, after each successful `edit` or `write_file`, run `git add` + `git commit` in the sandbox root.
+    pub auto_commit: bool,
 }
 
 impl Default for AgentConfig {
@@ -31,6 +33,7 @@ impl Default for AgentConfig {
             max_iterations: 25,
             confirmation_timeout_secs: 30,
             session_id: Uuid::new_v4(),
+            auto_commit: false,
         }
     }
 }

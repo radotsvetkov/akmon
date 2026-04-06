@@ -137,6 +137,7 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn thinking(i: u32) -> AgentState {
         AgentState::Thinking { iteration: i }
@@ -253,6 +254,7 @@ mod tests {
             &AgentEvent::ToolCallDispatched {
                 id: "1".into(),
                 name: "read".into(),
+                arguments: json!({}),
             }
         )
         .is_ok());
@@ -307,6 +309,7 @@ mod tests {
             &AgentEvent::ToolCallDispatched {
                 id: "2".into(),
                 name: "read".into(),
+                arguments: json!({}),
             }
         )
         .is_ok());
@@ -418,6 +421,7 @@ mod tests {
             &AgentEvent::ToolCallDispatched {
                 id: "1".into(),
                 name: "x".into(),
+                arguments: json!({}),
             }
         )
         .is_err());

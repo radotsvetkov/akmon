@@ -5,6 +5,7 @@
 
 mod context;
 mod edit;
+mod git;
 mod list_directory;
 mod mcp_client;
 mod output;
@@ -18,6 +19,7 @@ mod write_file;
 
 pub use context::ToolContext;
 pub use edit::EditTool;
+pub use git::{try_auto_commit_after_file_tool, GitTool};
 pub use list_directory::ListDirectoryTool;
 pub use mcp_client::{discover_mcp_tools, McpTool};
 pub use output::{ToolErrorCode, ToolOutput};

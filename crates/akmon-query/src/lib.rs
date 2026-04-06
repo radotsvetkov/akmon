@@ -2,10 +2,13 @@
 
 #![warn(missing_docs)]
 
+mod akmon_md_gen;
 mod context;
 mod context_manager;
 mod error;
 mod session;
+
+pub use akmon_md_gen::{generate_akmon_md_markdown, AKMON_MD_SYSTEM_PROMPT};
 
 pub use context::{
     build_followup_messages, build_messages, AKMON_MD_END, AKMON_MD_START, PROJECT_CONTEXT_END,

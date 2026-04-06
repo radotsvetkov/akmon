@@ -4,7 +4,55 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] - 2026-04-06
+
+### Added
+
+**TUI interactive mode**
+
+- Full terminal UI with ratatui
+- Streaming tokens rendered in place
+- Tool call cards with expand/collapse
+- Slash commands: `/help` `/clear` `/new` `/sessions` `/resume` `/model` `/mcp` `/index` `/audit` `/cost` `/exit`
+- Session persistence and resume
+- Syntax highlighted code blocks
+- Pixel art Akmon anvil welcome screen
+- Mouse click cursor positioning in input field
+- `/model` picker showing installed Ollama models and Anthropic models
+- `/mcp` panel with connection health
+- Interrupt with Ctrl+C
+
+**Project initialization**
+
+- `akmon init`: detect project type and generate AKMON.md
+- `akmon new`: scaffold new projects (Rust, Node, Python, Go)
+- Sandbox works in non-git directories
+- `/init` and `/new` slash commands in TUI
+
+**GitTool**
+
+- Native git status, diff, log, add, commit, branch, stash, show, restore as typed JSON outputs
+- Auto-registered in git repos
+- `--auto-commit` flag: each file edit becomes a reversible commit
+
+**Config CLI**
+
+- `~/.akmon/config.toml`: single TOML config file for all settings
+- `akmon config model`: get/set/list/test
+- `akmon config key`: manage API keys
+- `akmon config mcp`: add/remove/enable/disable/test MCP servers
+- `akmon config show`/`edit`/`reset`/`path`
+- `--json` flag on all config commands
+
+### Changed
+
+- Project context now prioritizes `semantic_search` before `search` and `list_directory` for conceptual queries — dramatically reduces token usage per task
+- Default Anthropic model: `claude-haiku-4-5-20251001`
+- Sandbox allows cwd as root when no git repository found
+
+### Performance
+
+- `semantic_search` called first for conceptual queries: ~60% fewer tool calls per exploration task
 
 ## [1.2.0] - 2026-04-06
 

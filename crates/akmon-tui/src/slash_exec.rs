@@ -1,0 +1,462 @@
+//! Execute parsed slash commands against [`TuiApp`] and shared launch configuration.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use chrono::{DateTime, Utc};
+use tokio::sync::{mpsc, Notify};
+use uuid::Uuid;
+
+use crate::config::TuiLaunchConfig;
+use crate::session_persist::{
+    default_audit_log_path, load_session_file, load_session_summaries, resolve_session_id,
+    save_session_snapshot, sessions_directory, SessionSummary,
+};
+use crate::app::{Overlay, TuiApp};
+use crate::slash::{parse_slash_input, SlashCommand};
+use crate::tui_project::ProjectUiJob;
+
+/// Environment handles required to run slash commands that touch disk or the agent.
+pub struct SlashEnv {
+    /// Shared config kept in sync with the Tokio agent task.
+    pub shared_config: Arc<Mutex<TuiLaunchConfig>>,
+    /// Wakes the agent loop to rebuild [`AgentSession`] after `/reset`, `/model`, or `/resume`.
+    pub reload_notify: Arc<Notify>,
+    /// When `true`, `semantic_search` was enabled at startup (`--index`).
+    pub index_enabled_flag: bool,
+    /// Path to `.akmon/index.bin` under the active project root.
+    pub index_bin_path: PathBuf,
+    /// Queues `/init` and `/new` work on the async runtime.
+    pub project_job_tx: mpsc::UnboundedSender<ProjectUiJob>,
+}
+
+/// Outcome of handling one slash line (buffer already consumed by caller).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlashHandled {
+    /// Continue the TUI loop.
+    Continue,
+    /// Save (if possible) and exit the TUI.
+    Quit,
+}
+
+/// Runs a single slash command line (including the leading `/`).
+///
+/// Returns [`None`] when `line` does not start with `/`.
+pub fn handle_slash_line(app: &mut TuiApp, line: &str, env: &SlashEnv) -> Option<SlashHandled> {
+    let s = line.trim();
+    if !s.starts_with('/') {
+        return None;
+    }
+    let parsed = parse_slash_input(s);
+    let Some((cmd, arg)) = parsed else {
+        app.push_system_info("Unknown or invalid slash command.".into());
+        app.overlay = Overlay::None;
+        return Some(SlashHandled::Continue);
+    };
+    Some(dispatch(app, cmd, arg, env))
+}
+
+fn dispatch(
+    app: &mut TuiApp,
+    cmd: &'static SlashCommand,
+    arg: Option<&str>,
+    env: &SlashEnv,
+) -> SlashHandled {
+    match cmd.name {
+        "help" => {
+            app.overlay = Overlay::Help;
+            SlashHandled::Continue
+        }
+        "clear" => {
+            app.messages.clear();
+            app.scroll_offset = 0;
+            app.push_system_info(
+                "Session cleared. History hidden but context preserved.".into(),
+            );
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "reset" => {
+            if app.agent_running {
+                app.push_system_info(
+                    "Finish or interrupt the current turn before starting a new session.".into(),
+                );
+                return SlashHandled::Continue;
+            }
+            let cfg_snapshot = match env.shared_config.lock() {
+                Ok(g) => g.clone(),
+                Err(e) => e.into_inner().clone(),
+            };
+            if let Err(e) = save_session_snapshot(app, &cfg_snapshot, app.session_started_at, None) {
+                app.push_system_info(format!("Could not save session before /reset: {e}"));
+            }
+            let new_id = Uuid::new_v4();
+            let audit = default_audit_log_path(&app.project_root, new_id);
+            {
+                let mut g = match env.shared_config.lock() {
+                    Ok(g) => g,
+                    Err(e) => e.into_inner(),
+                };
+                g.session_id = new_id;
+                g.audit_log_path = audit.clone();
+            }
+            app.session_id = new_id;
+            app.audit_log_path = audit;
+            app.messages.clear();
+            app.total_input_tokens = 0;
+            app.total_cache_read_tokens = 0;
+            app.total_cache_write_tokens = 0;
+            app.total_output_tokens = 0;
+            app.current_iteration = 0;
+            app.session_started_at = Utc::now();
+            app.scroll_offset = 0;
+            app.overlay = Overlay::None;
+            env.reload_notify.notify_one();
+            app.push_system_info("New session started.".into());
+            SlashHandled::Continue
+        }
+        "init" => {
+            if app.agent_running {
+                app.push_system_info(
+                    "Finish or interrupt the current turn before running /init.".into(),
+                );
+                return SlashHandled::Continue;
+            }
+            if env
+                .project_job_tx
+                .send(ProjectUiJob::Init)
+                .is_err()
+            {
+                app.push_system_info("Project job channel closed.".into());
+            } else {
+                app.push_system_info("Analyzing project and generating AKMON.md…".into());
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "new" => {
+            if app.agent_running {
+                app.push_system_info(
+                    "Finish or interrupt the current turn before running /new.".into(),
+                );
+                return SlashHandled::Continue;
+            }
+            let Some(name) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+                app.push_system_info("Usage: /new <project-name>".into());
+                return SlashHandled::Continue;
+            };
+            if env
+                .project_job_tx
+                .send(ProjectUiJob::New {
+                    name: name.to_string(),
+                })
+                .is_err()
+            {
+                app.push_system_info("Project job channel closed.".into());
+            } else {
+                app.push_system_info(format!("Scaffolding {name}/ …"));
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "sessions" => {
+            open_sessions_overlay(app);
+            SlashHandled::Continue
+        }
+        "resume" => {
+            let arg = match arg.map(str::trim) {
+                Some(a) if !a.is_empty() => a,
+                _ => {
+                    open_sessions_overlay(app);
+                    return SlashHandled::Continue;
+                }
+            };
+            if app.agent_running {
+                app.push_system_info(
+                    "Finish or interrupt the current turn before resuming a session.".into(),
+                );
+                return SlashHandled::Continue;
+            }
+            let dir = match sessions_directory() {
+                Some(d) => d,
+                None => {
+                    app.push_system_info("HOME not set; cannot locate sessions.".into());
+                    return SlashHandled::Continue;
+                }
+            };
+            let summaries = load_session_summaries(&dir);
+            let Some(full_id) = resolve_session_id(arg, &summaries) else {
+                app.push_system_info(format!("Session not found: {arg}"));
+                return SlashHandled::Continue;
+            };
+            let path = dir.join(format!("{full_id}.json"));
+            match load_session_file(&path) {
+                Ok(loaded) => apply_loaded_session(app, env, loaded),
+                Err(e) => {
+                    app.push_system_info(format!("Session not found: {arg} ({e})"));
+                }
+            }
+            SlashHandled::Continue
+        }
+        "model" => {
+            if let Some(name) = arg.filter(|a| !a.is_empty()) {
+                {
+                    let mut g = match env.shared_config.lock() {
+                        Ok(g) => g,
+                        Err(e) => e.into_inner(),
+                    };
+                    g.model_name = name.to_string();
+                }
+                app.model_name = name.to_string();
+                env.reload_notify.notify_one();
+                app.push_system_info(format!("Model changed to {name}"));
+            } else {
+                app.push_system_info(format!("Current model: {}", app.model_name));
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "index" => {
+            if !env.index_enabled_flag {
+                app.push_system_info(
+                    "Semantic index not loaded. Restart with --index to enable.".into(),
+                );
+            } else {
+                match akmon_index::load_index(&env.index_bin_path) {
+                    Ok(idx) => {
+                        let ago = format_index_age(idx.indexed_at);
+                        app.push_system_info(format!(
+                            "Semantic index: {} files, {} chunks, built {ago}",
+                            idx.file_count, idx.chunk_count
+                        ));
+                    }
+                    Err(_) => {
+                        app.push_system_info(
+                            "Semantic index not loaded. Restart with --index to enable.".into(),
+                        );
+                    }
+                }
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "audit" => {
+            let path = app.audit_log_path.clone();
+            let lines = read_audit_overlay_lines(&path);
+            app.overlay = Overlay::AuditLog { lines, scroll: 0 };
+            SlashHandled::Continue
+        }
+        "cost" => {
+            app.overlay = Overlay::CostSummary;
+            SlashHandled::Continue
+        }
+        "exit" => SlashHandled::Quit,
+        _ => {
+            app.push_system_info("Unknown slash command.".into());
+            SlashHandled::Continue
+        }
+    }
+}
+
+fn open_sessions_overlay(app: &mut TuiApp) {
+    let list = sessions_directory()
+        .as_ref()
+        .map(|d| load_session_summaries(d))
+        .unwrap_or_default();
+    app.overlay = Overlay::SessionList {
+        sessions: list,
+        selected: 0,
+        scroll: 0,
+    };
+}
+
+fn apply_loaded_session(app: &mut TuiApp, env: &SlashEnv, loaded: crate::session_persist::LoadedSession) {
+    let audit = default_audit_log_path(&loaded.project_root, loaded.session_id);
+    let ak_path = loaded.project_root.join("AKMON.md");
+    let (has_akmon_md, akmon_md) = match std::fs::read_to_string(&ak_path) {
+        Ok(s) => (true, Some(s)),
+        Err(_) => (false, None),
+    };
+    {
+        let mut g = match env.shared_config.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        g.session_id = loaded.session_id;
+        g.project_root = loaded.project_root.clone();
+        g.model_name = loaded.model_name.clone();
+        g.audit_log_path = audit.clone();
+        g.akmon_md = akmon_md;
+        g.has_akmon_md = has_akmon_md;
+    }
+    app.session_id = loaded.session_id;
+    app.project_root = loaded.project_root;
+    app.project_name = app
+        .project_root
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(".")
+        .to_string();
+    app.model_name = loaded.model_name;
+    app.audit_log_path = audit;
+    app.has_akmon_md = has_akmon_md;
+    app.messages = loaded.messages;
+    app.total_input_tokens = 0;
+    app.total_cache_read_tokens = 0;
+    app.total_cache_write_tokens = 0;
+    app.total_output_tokens = 0;
+    app.current_iteration = 0;
+    app.session_started_at = loaded.started_at;
+    app.scroll_offset = 0;
+    app.overlay = Overlay::None;
+    env.reload_notify.notify_one();
+    let short: String = app.session_id.to_string().chars().take(8).collect();
+    app.push_system_info(format!("Resumed session {short}"));
+}
+
+fn format_index_age(dt: DateTime<Utc>) -> String {
+    let d = Utc::now().signed_duration_since(dt);
+    if d.num_seconds() < 60 {
+        format!("{}s ago", d.num_seconds().max(0))
+    } else if d.num_minutes() < 60 {
+        format!("{}m ago", d.num_minutes())
+    } else if d.num_hours() < 48 {
+        format!("{}h ago", d.num_hours())
+    } else {
+        format!("{}d ago", d.num_days())
+    }
+}
+
+fn read_audit_overlay_lines(path: &std::path::Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(ev) = serde_json::from_str::<akmon_core::AuditEvent>(line) else {
+            continue;
+        };
+        let (ts, kind, desc) = audit_event_parts(&ev);
+        let mut d = desc;
+        if d.chars().count() > 80 {
+            d = d.chars().take(80).collect::<String>();
+        }
+        out.push(format!("{ts} {kind} {d}"));
+    }
+    out
+}
+
+fn audit_event_parts(ev: &akmon_core::AuditEvent) -> (String, &'static str, String) {
+    use akmon_core::AuditEvent::*;
+    match ev {
+        PolicyEvaluation {
+            timestamp,
+            permission,
+            verdict,
+            reason,
+            ..
+        } => (
+            timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            "policy_evaluation",
+            format!("{permission:?} -> {verdict:?}: {reason}"),
+        ),
+        ToolDispatch {
+            timestamp,
+            tool_name,
+            input_summary,
+            ..
+        } => (
+            timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            "tool_dispatch",
+            format!("{tool_name}: {input_summary}"),
+        ),
+        ToolOutcome {
+            timestamp,
+            tool_name,
+            outcome,
+            summary,
+            ..
+        } => (
+            timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            "tool_outcome",
+            format!("{tool_name} {outcome:?}: {summary}"),
+        ),
+        AgentStep {
+            timestamp,
+            description,
+            ..
+        } => (
+            timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            "agent_step",
+            description.clone(),
+        ),
+    }
+}
+
+/// Formats the `/cost` overlay body (excluding footer).
+pub fn cost_summary_lines(app: &TuiApp) -> Vec<String> {
+    let mut lines = vec![
+        format!("Input tokens:       {}", app.total_input_tokens),
+        format!("Cache hits:         {}", app.total_cache_read_tokens),
+        format!("Cache writes:       {}", app.total_cache_write_tokens),
+        format!("Output tokens:      {}", app.total_output_tokens),
+        "─────────────────────────".to_string(),
+    ];
+    let est = estimate_cost_usd(app);
+    lines.push(format!("Estimated cost:     {est}"));
+    lines
+}
+
+fn estimate_cost_usd(app: &TuiApp) -> String {
+    let m = app.model_name.to_lowercase();
+    if m.contains("haiku") && m.contains("4-5") {
+        let in_cost = app.total_input_tokens as f64 * 0.80 / 1_000_000.0;
+        let cache_r = app.total_cache_read_tokens as f64 * 0.08 / 1_000_000.0;
+        let out_cost = app.total_output_tokens as f64 * 4.00 / 1_000_000.0;
+        let total = in_cost + cache_r + out_cost;
+        format!("~${total:.4}")
+    } else {
+        "rate unknown".to_string()
+    }
+}
+
+/// Resumes the highlighted session from [`Overlay::SessionList`] when Enter is pressed.
+pub fn session_list_enter(app: &mut TuiApp, env: &SlashEnv) {
+    let Overlay::SessionList {
+        sessions,
+        selected,
+        ..
+    } = &app.overlay
+    else {
+        return;
+    };
+    if sessions.is_empty() {
+        return;
+    }
+    let row = sessions.get(*selected);
+    let Some(row) = row else {
+        return;
+    };
+    let dir = match sessions_directory() {
+        Some(d) => d,
+        None => return,
+    };
+    let path = dir.join(format!("{}.json", row.session_id));
+    if let Ok(loaded) = load_session_file(&path) {
+        apply_loaded_session(app, env, loaded);
+    }
+    app.overlay = Overlay::None;
+}
+
+/// Formats one line for the session picker: `{date} {id8} {preview}`.
+pub fn format_session_list_row(s: &SessionSummary) -> String {
+    let date = DateTime::parse_from_rfc3339(&s.started_at)
+        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|_| s.started_at.chars().take(16).collect());
+    let id8: String = s.session_id.chars().take(8).collect();
+    format!("{} {} {}", date, id8, s.first_message)
+}
