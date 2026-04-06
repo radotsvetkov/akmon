@@ -30,7 +30,12 @@ akmon-models = { path = "../akmon-models" }
 akmon-query = { path = "../akmon-query" }
 akmon-tools = { path = "../akmon-tools" }
 akmon-tui = { path = "../akmon-tui" }
+anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = [
+    "std",
+    "async-await",
+] }
 fastembed = { version = "5", default-features = true, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 dunce = "1"

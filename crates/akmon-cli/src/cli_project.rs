@@ -8,12 +8,14 @@ use akmon_core::project::{
     ProjectSummary, ProjectType, ScaffoldKind, ScaffoldLanguage, count_source_files_for_summary,
     detect_project, format_project_context_for_init, scaffold_project, suggested_akmon_title,
 };
+use akmon_core::scan_context_files;
 use akmon_models::LlmProvider;
 use akmon_query::generate_akmon_md_markdown;
 use clap::Args;
 use clap::ValueEnum;
 
 use crate::Cli;
+use crate::import_cmd::{ImportArgs, run_import};
 
 /// Arguments for `akmon new`.
 #[derive(Args, Debug, Clone)]
@@ -87,7 +89,7 @@ fn load_global_config() -> akmon_config::AkmonGlobalConfig {
         .unwrap_or_default()
 }
 
-fn resolve_provider(cli: &Cli) -> Result<Arc<dyn LlmProvider>, String> {
+pub(crate) fn resolve_provider(cli: &Cli) -> Result<Arc<dyn LlmProvider>, String> {
     let global = load_global_config();
     crate::llm_connect_from_cli(cli, &global, cli.model.clone()).resolve()
 }
@@ -123,6 +125,20 @@ fn prompt_yes_no(question: &str) -> bool {
     }
 }
 
+fn prompt_import_default_yes(question: &str) -> bool {
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    eprint!("{question}");
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(_) => {
+            let t = line.trim();
+            !t.eq_ignore_ascii_case("n")
+        }
+        Err(_) => true,
+    }
+}
+
 /// Runs `akmon init` in `project_root` (typically the Git root or cwd).
 pub async fn run_init(cli: &Cli, project_root: &Path) -> ExitCode {
     println!("Detecting project...");
@@ -148,6 +164,55 @@ pub async fn run_init(cli: &Cli, project_root: &Path) -> ExitCode {
     }
 
     let dest = project_root.join("AKMON.md");
+    let scan = scan_context_files(project_root);
+    if !scan.files.is_empty() {
+        let mut labels: Vec<String> = scan
+            .files
+            .iter()
+            .map(|f| f.tool.display_name().to_string())
+            .collect();
+        labels.sort();
+        labels.dedup();
+        let list = labels.join(", ");
+        println!("Found context from: {list}");
+        if prompt_import_default_yes("Import these? [Y/n] ") {
+            if dest.is_file() && !cli.yes {
+                let ok = prompt_yes_no("AKMON.md already exists. Overwrite? [y/N] ");
+                if !ok {
+                    eprintln!("akmon: cancelled.");
+                    return ExitCode::from(3);
+                }
+            }
+            let provider = match resolve_provider(cli) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("akmon: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            return match run_import(
+                ImportArgs {
+                    force: true,
+                    dry_run: false,
+                    from: None,
+                },
+                project_root.to_path_buf(),
+                provider,
+            )
+            .await
+            {
+                Ok(()) => {
+                    println!("\nRun akmon chat to start coding.");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("akmon: import: {e:#}");
+                    ExitCode::from(1)
+                }
+            };
+        }
+    }
+
     if dest.is_file() && !cli.yes {
         let ok = prompt_yes_no("AKMON.md already exists. Overwrite? [y/N] ");
         if !ok {

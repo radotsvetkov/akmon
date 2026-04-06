@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use ratatui::layout::Rect;
 
-use akmon_core::AgentEvent;
+use akmon_core::{AgentEvent, ContextScan, scan_context_files};
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
@@ -139,6 +139,8 @@ pub struct TuiApp {
     pub welcome_spark_phase: bool,
     /// Mirrors [`TuiLaunchConfig::has_akmon_md`] for empty-state hints.
     pub has_akmon_md: bool,
+    /// Other tools' context files detected at startup ([`scan_context_files`]).
+    pub context_scan: ContextScan,
     /// Next message uses read-only plan mode (`/plan`).
     pub plan_only_next_turn: bool,
     /// Next message runs architect (planner + main model).
@@ -158,6 +160,7 @@ impl TuiApp {
             .and_then(|s| s.to_str())
             .unwrap_or(".")
             .to_string();
+        let context_scan = scan_context_files(&config.project_root);
         Self {
             messages: Vec::new(),
             input_buffer: String::new(),
@@ -192,6 +195,7 @@ impl TuiApp {
             input_body_inner: None,
             welcome_spark_phase: false,
             has_akmon_md: config.has_akmon_md,
+            context_scan,
             plan_only_next_turn: false,
             architect_next_turn: false,
             pending_plan: None,

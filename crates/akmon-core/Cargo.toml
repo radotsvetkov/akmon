@@ -11,6 +11,7 @@ description = "Internal Akmon primitives: policy, sandbox, secrets, audit (unsta
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 dunce = "1"
+glob = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

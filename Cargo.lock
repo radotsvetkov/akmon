@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-cli"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "akmon-config",
  "akmon-core",
@@ -42,9 +42,11 @@ dependencies = [
  "akmon-query",
  "akmon-tools",
  "akmon-tui",
+ "anyhow",
  "clap",
  "dunce",
  "fastembed",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",
@@ -55,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-config"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -66,10 +68,11 @@ dependencies = [
 
 [[package]]
 name = "akmon-core"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "chrono",
  "dunce",
+ "glob",
  "serde",
  "serde_json",
  "static_assertions",
@@ -82,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-index"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "akmon-core",
  "bincode",
@@ -99,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-models"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "akmon-core",
  "async-trait",
@@ -123,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-query"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "akmon-core",
  "akmon-models",
@@ -141,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-tools"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "akmon-core",
  "akmon-index",
@@ -163,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-tui"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "akmon-core",
  "akmon-index",

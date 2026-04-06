@@ -40,6 +40,18 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "import",
+        aliases: &[],
+        description: "Run akmon import (other tools' context → AKMON.md)",
+        takes_arg: false,
+    },
+    SlashCommand {
+        name: "export",
+        aliases: &[],
+        description: "Run akmon export --all (AKMON.md → tool formats)",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "new",
         aliases: &[],
         description: "Scaffold a new project in this directory (requires a name)",
@@ -268,6 +280,8 @@ mod tests {
     #[test]
     fn match_empty_all() {
         assert_eq!(matching_commands("").len(), COMMANDS.len());
+        assert!(COMMANDS.iter().any(|c| c.name == "import"));
+        assert!(COMMANDS.iter().any(|c| c.name == "export"));
     }
 
     #[test]

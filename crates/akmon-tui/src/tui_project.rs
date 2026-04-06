@@ -2,6 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use tokio::process::Command;
+
 use akmon_core::project::{
     ScaffoldKind, ScaffoldLanguage, detect_project, format_project_context_for_init,
     project_type_label, scaffold_project, suggested_akmon_title,
@@ -20,6 +22,10 @@ pub enum ProjectUiJob {
         /// Single path segment directory name.
         name: String,
     },
+    /// Run `akmon import` in a subprocess with forwarded CLI flags.
+    Import,
+    /// Run `akmon export --all` in a subprocess with forwarded CLI flags.
+    Export,
 }
 
 /// Runs one job; returns UI lines and whether to reload `AKMON.md` into session config.
@@ -35,6 +41,110 @@ pub async fn run_project_job(
     match job {
         ProjectUiJob::Init => run_init_job(&cfg).await,
         ProjectUiJob::New { name } => run_new_job(&cfg, &name).await,
+        ProjectUiJob::Import => run_import_export_subprocess(&cfg, &["import"]).await,
+        ProjectUiJob::Export => run_import_export_subprocess(&cfg, &["export", "--all"]).await,
+    }
+}
+
+fn forward_tui_launch_to_child(cmd: &mut Command, cfg: &TuiLaunchConfig) {
+    cmd.arg("--model").arg(&cfg.model_name);
+    if let Some(ref k) = cfg.anthropic_key {
+        cmd.arg("--anthropic-key").arg(k);
+    }
+    if let Some(ref k) = cfg.openrouter_key {
+        cmd.arg("--openrouter-key").arg(k);
+    }
+    if let Some(ref k) = cfg.openai_key {
+        cmd.arg("--openai-key").arg(k);
+    }
+    if let Some(ref k) = cfg.groq_key {
+        cmd.arg("--groq-key").arg(k);
+    }
+    if let Some(ref e) = cfg.azure_endpoint {
+        cmd.arg("--azure-endpoint").arg(e);
+    }
+    if let Some(ref k) = cfg.azure_key {
+        cmd.arg("--azure-key").arg(k);
+    }
+    cmd.arg("--azure-api-version").arg(&cfg.azure_api_version);
+    if cfg.bedrock {
+        cmd.arg("--bedrock");
+    }
+    cmd.arg("--aws-region").arg(&cfg.aws_region);
+    if let Some(ref u) = cfg.openai_compatible_url {
+        cmd.arg("--openai-compatible-url").arg(u);
+    }
+    if let Some(ref k) = cfg.openai_compatible_key {
+        cmd.arg("--openai-compatible-key").arg(k);
+    }
+    cmd.arg("--ollama-url").arg(&cfg.ollama_url);
+    cmd.arg("--yes");
+    if cfg.web_fetch {
+        cmd.arg("--web-fetch");
+    }
+    if cfg.yes_web {
+        cmd.arg("--yes-web");
+    }
+    for p in &cfg.shell_allow {
+        cmd.arg("--shell-allow").arg(p);
+    }
+    for u in &cfg.mcp_servers {
+        cmd.arg("--mcp-server").arg(u);
+    }
+    if cfg.index_enabled {
+        cmd.arg("--index");
+    }
+    if cfg.auto_commit {
+        cmd.arg("--auto-commit");
+    }
+    cmd.arg("--output").arg("text");
+    cmd.arg("--audit-log").arg(&cfg.audit_log_path);
+    cmd.arg("--session").arg(cfg.session_id.to_string());
+}
+
+async fn run_import_export_subprocess(
+    cfg: &TuiLaunchConfig,
+    subargs: &[&str],
+) -> (Vec<String>, bool) {
+    let mut lines = Vec::new();
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            lines.push(format!("Cannot resolve current executable: {e}"));
+            return (lines, false);
+        }
+    };
+    let mut cmd = Command::new(exe);
+    cmd.current_dir(&cfg.project_root);
+    forward_tui_launch_to_child(&mut cmd, cfg);
+    for a in subargs {
+        cmd.arg(a);
+    }
+    match cmd.output().await {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            for line in stdout.lines() {
+                lines.push(line.to_string());
+            }
+            for line in stderr.lines() {
+                if !line.is_empty() {
+                    lines.push(line.to_string());
+                }
+            }
+            if !out.status.success() {
+                lines.push(format!(
+                    "Process exited with status {:?}",
+                    out.status.code()
+                ));
+            }
+            let reload_akmon = out.status.success() && subargs.first().copied() == Some("import");
+            (lines, reload_akmon)
+        }
+        Err(e) => {
+            lines.push(format!("Failed to spawn akmon subprocess: {e}"));
+            (lines, false)
+        }
     }
 }
 

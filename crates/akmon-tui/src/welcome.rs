@@ -1,5 +1,6 @@
 //! Branded empty-state welcome screen (pixel anvil + quick-start hints).
 
+use akmon_core::ContextScan;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -113,8 +114,10 @@ fn truncate_line_to_chars(line: Line<'static>, max_chars: usize) -> Line<'static
 /// Safe for very small or narrow terminals: returns immediately below 10×5; lines longer than
 /// `area.width` are truncated by character count so layout never panics.
 /// `spark_use_alt` swaps spark glyphs (✦ ↔ ✧) on the UI’s ~500 ms tick.
-/// When `show_missing_akmon_hint` is true, shows dim amber `/init` and `/new` hints before the
-/// quick-start lines.
+/// When `show_missing_akmon_hint` is true, shows dim amber quick-start hints before the divider.
+///
+/// If other-tool context files exist ([`ContextScan::files`]) and `AKMON.md` is absent, suggests
+/// `/import`; otherwise `/init` and `/new`.
 pub fn render_welcome(
     area: Rect,
     buf: &mut Buffer,
@@ -122,6 +125,7 @@ pub fn render_welcome(
     project_name: &str,
     spark_use_alt: bool,
     show_missing_akmon_hint: bool,
+    context_scan: &ContextScan,
 ) {
     if area.width < 10 || area.height < 5 {
         return;
@@ -142,16 +146,28 @@ pub fn render_welcome(
     let bottom = "type a message or / for commands";
     let proj = format!("· {project_name} ·");
 
-    // Spark + blank + README anvil rows + title + subtitle + version + project + [optional 3 nudge] + divider + 3 hints + divider + bottom.
+    // Spark + blank + README anvil rows + title + subtitle + version + project + [optional nudge block] + divider + 3 hints + divider + bottom.
     // spark row + blank + anvil rows
     let art_h = 2u16.saturating_add(ANVIL_BODY.len() as u16);
-    // title, subtitle, version, project + divider + 3 hints + divider + bottom
-    let tail_h = 4u16 + 6u16;
-    let total_h = if show_missing_akmon_hint {
-        art_h.saturating_add(tail_h).saturating_add(3)
+    let mut unique_tools: Vec<&'static str> = context_scan
+        .files
+        .iter()
+        .map(|f| f.tool.display_name())
+        .collect();
+    unique_tools.sort_unstable();
+    unique_tools.dedup();
+    let nudge_lines: u16 = if show_missing_akmon_hint {
+        if context_scan.files.is_empty() {
+            3
+        } else {
+            2u16.saturating_add(unique_tools.len() as u16).saturating_add(3)
+        }
     } else {
-        art_h.saturating_add(tail_h)
+        0
     };
+    // title, subtitle, version, project + divider + 3 hints + divider + bottom
+    let tail_h = 4u16 + 6u16 + nudge_lines;
+    let total_h = art_h.saturating_add(tail_h);
     let mut y = area
         .y
         .saturating_add(area.height.saturating_sub(total_h) / 2);
@@ -200,14 +216,49 @@ pub fn render_welcome(
         .add_modifier(Modifier::DIM);
     if show_missing_akmon_hint {
         y = draw_centered_line_truncated(buf, area, y, "no AKMON.md found", nudge_style);
-        y = draw_centered_line_truncated(buf, area, y, "/init  analyze this project", nudge_style);
-        y = draw_centered_line_truncated(
-            buf,
-            area,
-            y,
-            "/new   scaffold a new project",
-            nudge_style,
-        );
+        if context_scan.files.is_empty() {
+            y = draw_centered_line_truncated(
+                buf,
+                area,
+                y,
+                "/init  analyze this project",
+                nudge_style,
+            );
+            y = draw_centered_line_truncated(
+                buf,
+                area,
+                y,
+                "/new   scaffold a new project",
+                nudge_style,
+            );
+        } else {
+            y = draw_centered_line_truncated(
+                buf,
+                area,
+                y,
+                "context detected from other tools:",
+                nudge_style,
+            );
+            for name in unique_tools {
+                let line = format!("  ✓ {name}");
+                y = draw_centered_line_truncated(buf, area, y, line.as_str(), nudge_style);
+            }
+            y = draw_centered_line_truncated(buf, area, y, "", nudge_style);
+            y = draw_centered_line_truncated(
+                buf,
+                area,
+                y,
+                "/import  convert to AKMON.md",
+                nudge_style,
+            );
+            y = draw_centered_line_truncated(
+                buf,
+                area,
+                y,
+                "/init    analyze project fresh",
+                nudge_style,
+            );
+        }
     }
 
     let divider_style = Style::default().fg(Color::DarkGray);
@@ -259,12 +310,30 @@ mod tests {
     #[test]
     fn render_welcome_tiny_area_no_panic() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 5));
-        render_welcome(Rect::new(0, 0, 10, 5), &mut buf, "1.3.0", "p", false, false);
+        let scan = ContextScan {
+            files: vec![],
+            has_akmon_md: false,
+            primary_tool: None,
+        };
+        render_welcome(
+            Rect::new(0, 0, 10, 5),
+            &mut buf,
+            "1.3.0",
+            "p",
+            false,
+            false,
+            &scan,
+        );
     }
 
     #[test]
     fn render_welcome_narrow_area_no_panic() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 8, 40));
+        let scan = ContextScan {
+            files: vec![],
+            has_akmon_md: false,
+            primary_tool: None,
+        };
         render_welcome(
             Rect::new(0, 0, 8, 40),
             &mut buf,
@@ -272,6 +341,7 @@ mod tests {
             "proj",
             true,
             true,
+            &scan,
         );
     }
 
@@ -279,9 +349,22 @@ mod tests {
     fn render_welcome_via_terminal_smoke() {
         let backend = TestBackend::new(80, 40);
         let mut term = Terminal::new(backend).expect("terminal");
+        let scan = ContextScan {
+            files: vec![],
+            has_akmon_md: false,
+            primary_tool: None,
+        };
         let _ = term.draw(|f| {
             let area = f.size();
-            render_welcome(area, f.buffer_mut(), "1.3.0", "Akmon", false, false);
+            render_welcome(
+                area,
+                f.buffer_mut(),
+                "1.3.0",
+                "Akmon",
+                false,
+                false,
+                &scan,
+            );
         });
     }
 }

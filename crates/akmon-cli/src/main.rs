@@ -3,6 +3,8 @@
 mod cli_forward;
 mod cli_project;
 mod config_cmd;
+mod export_cmd;
+mod import_cmd;
 mod spec_cmd;
 
 use std::io::Write;
@@ -407,6 +409,10 @@ enum Commands {
     Config(config_cmd::ConfigArgs),
     /// Structured spec workflow under `.akmon/specs/<feature>/`.
     Spec(spec_cmd::SpecCmd),
+    /// Synthesize `AKMON.md` from other tools' context files (Claude, Cursor, …).
+    Import(import_cmd::ImportArgs),
+    /// Write `AKMON.md` into another tool's expected paths (`--all` or `--tool`).
+    Export(export_cmd::ExportArgs),
 }
 
 #[cfg(feature = "semantic-index")]
@@ -734,6 +740,31 @@ async fn main() -> ExitCode {
     match &cli.command {
         Some(Commands::Init) => {
             return cli_project::run_init(&cli, &project_root).await;
+        }
+        Some(Commands::Import(args)) => {
+            let provider = match cli_project::resolve_provider(&cli) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("akmon: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            return match import_cmd::run_import(args.clone(), project_root.clone(), provider).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("akmon: import: {e:#}");
+                    ExitCode::from(1)
+                }
+            };
+        }
+        Some(Commands::Export(args)) => {
+            return match export_cmd::run_export(args.clone(), &project_root) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("akmon: export: {e:#}");
+                    ExitCode::from(1)
+                }
+            };
         }
         Some(Commands::New(args)) => {
             return cli_project::run_new(&cli, args, &cwd).await;

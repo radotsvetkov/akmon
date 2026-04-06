@@ -1,5 +1,6 @@
 //! Layout helpers: convert [`TuiMessage`](crate::message::TuiMessage) rows into ratatui [`Line`]s.
 
+use akmon_core::ContextScan;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -20,6 +21,7 @@ pub fn paint_message_viewport(
     version: &str,
     project_name: &str,
     welcome_spark_phase: bool,
+    context_scan: &ContextScan,
     visible: Vec<Line<'static>>,
 ) {
     if show_welcome {
@@ -31,6 +33,7 @@ pub fn paint_message_viewport(
             project_name,
             welcome_spark_phase,
             show_missing_akmon_hint,
+            context_scan,
         );
     } else {
         f.render_widget(

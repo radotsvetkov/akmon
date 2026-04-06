@@ -4,6 +4,16 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-04-06
+
+### Added
+
+- `akmon import`: read context files from Claude Code (`CLAUDE.md`), Cursor, Codex (`AGENTS.md`), Gemini CLI, Kiro, Windsurf, GitHub Copilot, Cline, Aider, and synthesize into `AKMON.md` using the configured model.
+- `akmon export`: write `AKMON.md` content to any tool format — `claude-code`, `codex`, `cursor`, `gemini`, `kiro`, `copilot`, `windsurf`, `cline` (`--all` or `--tool <name>`).
+- `/import` and `/export` TUI slash commands.
+- Welcome screen detects existing tool context files and suggests `/import`.
+- `akmon init` detects and offers to import existing context files.
+
 ## [1.4.0] - 2026-04-06
 
 ### Added

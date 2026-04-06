@@ -133,6 +133,36 @@ fn dispatch(
             app.overlay = Overlay::None;
             SlashHandled::Continue
         }
+        "import" => {
+            if app.agent_running {
+                app.push_system_info(
+                    "Finish or interrupt the current turn before running /import.".into(),
+                );
+                return SlashHandled::Continue;
+            }
+            if env.project_job_tx.send(ProjectUiJob::Import).is_err() {
+                app.push_system_info("Project job channel closed.".into());
+            } else {
+                app.push_system_info("Running akmon import…".into());
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "export" => {
+            if app.agent_running {
+                app.push_system_info(
+                    "Finish or interrupt the current turn before running /export.".into(),
+                );
+                return SlashHandled::Continue;
+            }
+            if env.project_job_tx.send(ProjectUiJob::Export).is_err() {
+                app.push_system_info("Project job channel closed.".into());
+            } else {
+                app.push_system_info("Running akmon export --all…".into());
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
         "new" => {
             if app.agent_running {
                 app.push_system_info(

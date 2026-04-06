@@ -17,6 +17,7 @@
 #![warn(missing_docs)]
 
 pub mod audit;
+pub mod context_import;
 pub mod fsm;
 pub mod mcp;
 pub mod permission;
@@ -26,6 +27,10 @@ pub mod sandbox;
 pub mod secret;
 
 pub use audit::{AuditEvent, PolicyVerdict, ToolOutcomeKind, write_audit_jsonl};
+pub use context_import::{
+    ContextFile, ContextScan, ToolOrigin, primary_tool_from_files, scan_context_files,
+    strip_mdc_style_frontmatter, CONTEXT_FILE_MAX_BYTES,
+};
 pub use fsm::{
     AgentConfig, AgentError, AgentEvent, AgentState, check_iteration_limit, validate_transition,
 };

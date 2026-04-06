@@ -329,6 +329,7 @@ fn drain_bridge_messages(
                             g.has_akmon_md = true;
                         }
                         app.has_akmon_md = true;
+                        app.context_scan = akmon_core::scan_context_files(&root);
                         reload_notify.notify_one();
                     }
                 }
@@ -904,6 +905,7 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
         app.version.as_str(),
         app.project_name.as_str(),
         app.welcome_spark_phase,
+        &app.context_scan,
         visible,
     );
     draw_message_overlays(f, app, msg_area);
