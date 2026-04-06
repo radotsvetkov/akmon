@@ -30,9 +30,17 @@ who take security seriously.**
 [![CI](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml/badge.svg)](https://github.com/radotsvetkov/akmon/actions)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-286%2B_passing-brightgreen.svg)](https://github.com/radotsvetkov/akmon/actions)
+[![Tests](https://img.shields.io/badge/tests-345%2B_passing-brightgreen.svg)](https://github.com/radotsvetkov/akmon/actions)
 
 </div>
+
+---
+
+## What’s new in 1.5
+
+- **Incremental writing** — system guidance and a per-turn cap on `write_file` bursts; large writes get an in-tool reminder; successful `edit` results include a colored unified diff in the TUI.
+- **`apply_patch` tool** — single-file unified diff application (alongside multi-file `patch`).
+- **Language-specific rules** — when the project language is detected, a separate system block adds verify commands (e.g. `cargo check`) and skeleton patterns for that stack.
 
 ---
 
@@ -139,7 +147,7 @@ akmon config
 <table>
 <tr>
 <td>
-akmon v1.4.0  │  project: my-app  │  your-model  │  INTERACTIVE
+akmon v1.5.4  │  project: my-app  │  your-model  │  INTERACTIVE
 ──────────────────────────────────────────────────────────────────
 You: find the auth code and explain how tokens work
 → semantic_search
@@ -267,7 +275,8 @@ and what no other tool provides.
 | `read_file` | Read any text file | read (--yes) |
 | `write_file` | Atomic file write | confirm always |
 | `edit` | Surgical string replace | confirm always |
-| `patch` | Apply unified diff | confirm always |
+| `patch` | Apply unified diff (multi-file) | confirm always |
+| `apply_patch` | Apply unified diff to one file (`file_path` + patch) | confirm always |
 | `search` | Regex search with context | read (--yes) |
 | `semantic_search` | Natural language code search | read (--yes) |
 | `git` | Status, diff, log, add, commit | read/confirm |
@@ -282,8 +291,8 @@ and what no other tool provides.
 **What `--yes` approves:** ReadFile, ListDirectory, SemanticSearch, 
 Search, GitStatus, GitDiff, GitLog — read-only operations only.
 
-**What requires confirmation regardless:** WriteFile, EditFile, 
-PatchFile, GitAdd, GitCommit, ShellTool, WebFetch.
+**What requires confirmation regardless:** `write_file`, `edit`, 
+`patch`, `apply_patch`, git mutating commands, `shell`, `web_fetch`.
 
 **What is structurally prevented:**
 - Path traversal: all paths canonicalized against git root before any operation

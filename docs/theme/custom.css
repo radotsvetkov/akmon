@@ -1,14 +1,46 @@
 :root {
+  /* Align with landing + TUI (theme.rs ACCENT / amber) */
   --akmon-amber: #f59e0b;
   --akmon-green: #10b981;
+  --akmon-accent: #7dd3fc;
+  --akmon-accent-dim: #58a6cd;
+  --akmon-accent-deep: #569cd6;
 }
 
 .sidebar .sidebar-scrollbox {
-  border-right: 2px solid var(--akmon-amber);
+  border-right: 2px solid var(--akmon-accent);
+  box-shadow: 1px 0 0 0 rgba(245, 158, 11, 0.45);
 }
 
+/* Blue → amber bar on code blocks (replaces flat amber border) */
 pre {
-  border-left: 3px solid var(--akmon-amber) !important;
+  position: relative;
+  border-left: none !important;
+}
+
+pre::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(
+    180deg,
+    var(--akmon-accent) 0%,
+    var(--akmon-amber) 100%
+  );
+  border-radius: 2px 0 0 2px;
+  pointer-events: none;
+}
+
+.chapter li a.active {
+  color: var(--akmon-accent-deep);
+  font-weight: 600;
+}
+
+.chapter li a:hover {
+  color: var(--akmon-accent-dim);
 }
 
 .tip {

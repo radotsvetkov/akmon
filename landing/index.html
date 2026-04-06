@@ -14,21 +14,25 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg:        #0c0c0e;
-      --bg2:       #111114;
-      --bg3:       #17171b;
-      --amber:     #f59e0b;
-      --amber-dim: #92610a;
-      --amber-glow:#fbbf24;
-      --red:       #ef4444;
-      --green:     #10b981;
-      --text:      #e2e0d8;
-      --text-dim:  #6b6a64;
-      --text-muted:#3a3933;
-      --border:    #2a2a2e;
-      --mono:      'IBM Plex Mono', monospace;
-      --display:   'Bebas Neue', sans-serif;
-      --serif:     'Crimson Pro', Georgia, serif;
+      --bg:         #0c0c0e;
+      --bg2:        #111114;
+      --bg3:        #17171b;
+      --amber:      #f59e0b;
+      --amber-dim:  #b45309;
+      --amber-glow: #fbbf24;
+      /* TUI-aligned blues (theme.rs ACCENT / ACCENT_DIM / code KEYWORD) */
+      --accent:      #7dd3fc;
+      --accent-dim:  #58a6cd;
+      --accent-deep: #569cd6;
+      --red:         #ef4444;
+      --green:       #4ade80;
+      --text:        #e2e0d8;
+      --text-dim:    #6b7280;
+      --text-muted:  #3f3f46;
+      --border:      #2d3748;
+      --mono:        'IBM Plex Mono', monospace;
+      --display:     'Bebas Neue', sans-serif;
+      --serif:       'Crimson Pro', Georgia, serif;
     }
 
     html { scroll-behavior: smooth; }
@@ -72,38 +76,35 @@
       height: 56px;
       background: rgba(12,12,14,0.92);
       backdrop-filter: blur(12px);
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid rgba(45,55,72,0.9);
+      box-shadow: 0 1px 0 rgba(125,211,252,0.06);
     }
 
     .nav-logo {
       display: flex;
-      align-items: center;
-      gap: 10px;
+      align-items: baseline;
+      gap: 8px;
       text-decoration: none;
       color: var(--text);
     }
 
-    .nav-anvil {
-      font-size: 11px;
-      line-height: 1;
-      color: var(--amber);
-      white-space: pre;
-      font-family: var(--mono);
-      opacity: 0.9;
-    }
-
     .nav-name {
       font-family: var(--display);
-      font-size: 22px;
-      letter-spacing: 0.08em;
-      color: var(--amber);
+      font-size: 24px;
+      letter-spacing: 0.12em;
+      color: var(--text);
+      font-weight: 400;
+    }
+
+    .nav-name:hover {
+      color: var(--accent);
     }
 
     .nav-version {
       font-size: 10px;
-      color: var(--text-dim);
-      margin-left: 4px;
-      margin-top: 6px;
+      font-family: var(--mono);
+      color: var(--accent-dim);
+      letter-spacing: 0.04em;
     }
 
     .nav-links {
@@ -121,17 +122,21 @@
       transition: color 0.15s;
     }
 
-    .nav-links a:hover { color: var(--amber); }
+    .nav-links a:hover { color: var(--accent); }
 
     .nav-cta {
-      background: var(--amber) !important;
+      background: linear-gradient(135deg, var(--accent-deep) 0%, var(--accent-dim) 100%) !important;
       color: var(--bg) !important;
       padding: 6px 16px !important;
       font-weight: 500 !important;
-      transition: background 0.15s !important;
+      transition: filter 0.15s, box-shadow 0.15s !important;
+      box-shadow: 0 0 0 1px rgba(125,211,252,0.25);
     }
 
-    .nav-cta:hover { background: var(--amber-glow) !important; }
+    .nav-cta:hover {
+      filter: brightness(1.08);
+      box-shadow: 0 0 12px rgba(125,211,252,0.35);
+    }
 
     /* ─── HERO ─── */
     .hero {
@@ -149,17 +154,19 @@
       position: absolute;
       inset: 0;
       background-image:
-        linear-gradient(rgba(245,158,11,0.04) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(245,158,11,0.04) 1px, transparent 1px);
+        linear-gradient(rgba(125,211,252,0.055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(245,158,11,0.045) 1px, transparent 1px);
       background-size: 48px 48px;
       mask-image: radial-gradient(ellipse 80% 60% at 50% 50%, black 40%, transparent 100%);
     }
 
     .hero-glow {
       position: absolute;
-      width: 600px;
-      height: 600px;
-      background: radial-gradient(circle, rgba(245,158,11,0.06) 0%, transparent 70%);
+      width: 720px;
+      height: 720px;
+      background:
+        radial-gradient(circle at 35% 40%, rgba(125,211,252,0.09) 0%, transparent 45%),
+        radial-gradient(circle at 65% 55%, rgba(245,158,11,0.07) 0%, transparent 50%);
       top: 50%;
       left: 50%;
       transform: translate(-50%, -60%);
@@ -168,16 +175,21 @@
 
     .hero-anvil {
       font-family: var(--mono);
-      font-size: clamp(10px, 1.8vw, 18px);
-      line-height: 1.15;
+      font-size: clamp(9px, 1.35vw, 15px);
+      line-height: 1.12;
       color: var(--amber);
       text-align: center;
       white-space: pre;
-      margin-bottom: 32px;
+      margin-bottom: 28px;
       opacity: 0;
       animation: fadeUp 0.8s ease 0.2s forwards;
-      text-shadow: 0 0 20px rgba(245,158,11,0.4);
+      text-shadow:
+        0 0 18px rgba(125,211,252,0.35),
+        0 0 32px rgba(245,158,11,0.25);
     }
+
+    .hero-anvil .anvil-spark { color: var(--accent); text-shadow: 0 0 12px rgba(125,211,252,0.6); }
+    .hero-anvil .anvil-shade { color: var(--accent-dim); opacity: 0.85; }
 
     .hero-title {
       font-family: var(--display);
@@ -191,7 +203,8 @@
       animation: fadeUp 0.8s ease 0.4s forwards;
     }
 
-    .hero-title span { color: var(--amber); }
+    .hero-title .hero-ak { color: var(--accent); text-shadow: 0 0 28px rgba(125,211,252,0.35); }
+    .hero-title .hero-mon { color: var(--amber); text-shadow: 0 0 20px rgba(245,158,11,0.3); }
 
     .hero-tagline {
       font-family: var(--serif);
@@ -273,8 +286,8 @@
     }
 
     .btn-secondary:hover {
-      border-color: var(--amber-dim);
-      color: var(--amber);
+      border-color: var(--accent-dim);
+      color: var(--accent);
     }
 
     /* ─── TERMINAL DEMO ─── */
@@ -324,19 +337,20 @@
       line-height: 1.8;
     }
 
-    .t-prompt { color: var(--amber); }
+    .t-prompt { color: var(--accent-dim); }
     .t-cmd    { color: var(--text); }
     .t-output { color: var(--text-dim); }
     .t-green  { color: var(--green); }
     .t-red    { color: var(--red); }
     .t-amber  { color: var(--amber); }
+    .t-blue   { color: var(--accent); }
     .t-dim    { color: var(--text-muted); }
 
     .t-bar {
       display: inline-block;
       width: 2px;
       height: 14px;
-      background: var(--amber);
+      background: var(--accent);
       vertical-align: middle;
       animation: blink 1s step-end infinite;
     }
@@ -355,7 +369,7 @@
       font-size: 11px;
       letter-spacing: 0.2em;
       text-transform: uppercase;
-      color: var(--amber);
+      color: var(--accent);
       margin-bottom: 16px;
     }
 
@@ -409,7 +423,7 @@
       left: 0;
       right: 0;
       height: 2px;
-      background: var(--amber);
+      background: linear-gradient(90deg, var(--accent) 0%, var(--amber) 100%);
       transform: scaleX(0);
       transform-origin: left;
       transition: transform 0.3s ease;
@@ -460,8 +474,8 @@
     }
 
     .compare-table th.akmon-col {
-      color: var(--amber);
-      border-bottom-color: var(--amber-dim);
+      color: var(--accent);
+      border-bottom-color: var(--accent-dim);
     }
 
     .compare-table td {
@@ -472,13 +486,13 @@
 
     .compare-table tr:last-child td { border-bottom: none; }
 
-    .compare-table tr:hover td { background: rgba(245,158,11,0.02); }
+    .compare-table tr:hover td { background: rgba(125,211,252,0.03); }
 
     .compare-table td:first-child { color: var(--text); }
 
     .check { color: var(--green); }
     .cross { color: var(--text-muted); }
-    .akmon-val { color: var(--amber); font-weight: 500; }
+    .akmon-val { color: var(--accent); font-weight: 500; }
 
     /* ─── INSTALL SECTION ─── */
     .install { background: var(--bg2); border-top: 1px solid var(--border); }
@@ -507,8 +521,8 @@
     }
 
     .tab.active {
-      color: var(--amber);
-      border-bottom-color: var(--amber);
+      color: var(--accent);
+      border-bottom-color: var(--accent);
     }
 
     .tab:hover { color: var(--text); }
@@ -527,7 +541,7 @@
     }
 
     .code-block .comment { color: var(--text-muted); }
-    .code-block .keyword { color: var(--amber); }
+    .code-block .keyword { color: var(--accent-deep); }
     .code-block .string  { color: var(--green); }
 
     .copy-btn {
@@ -626,7 +640,7 @@
 
     .audit-points .num {
       font-size: 11px;
-      color: var(--amber-dim);
+      color: var(--accent-dim);
       min-width: 24px;
       padding-top: 2px;
       letter-spacing: 0.06em;
@@ -661,7 +675,7 @@
       position: absolute;
       font-family: var(--display);
       font-size: clamp(120px, 25vw, 280px);
-      color: rgba(245,158,11,0.03);
+      color: rgba(125,211,252,0.04);
       letter-spacing: 0.1em;
       top: 50%;
       left: 50%;
@@ -701,8 +715,11 @@
       font-family: var(--display);
       font-size: 18px;
       letter-spacing: 0.08em;
-      color: var(--amber);
+      color: var(--text);
     }
+
+    .footer-brand .fb-ak { color: var(--accent); }
+    .footer-brand .fb-mon { color: var(--amber); }
 
     .footer-sub {
       font-family: var(--serif);
@@ -725,7 +742,7 @@
       transition: color 0.15s;
     }
 
-    .footer-right a:hover { color: var(--amber); }
+    .footer-right a:hover { color: var(--accent); }
 
     /* ─── ANIMATIONS ─── */
     @keyframes fadeUp {
@@ -754,12 +771,8 @@
 <!-- NAV -->
 <nav>
   <a class="nav-logo" href="#">
-    <span class="nav-anvil">▓▓▓▓
-▓▓▓▓▓
- ▓▓▓
-▓▓▓▓▓</span>
-    <span class="nav-name">AKMON</span>
-    <span class="nav-version">v1.5</span>
+    <span class="nav-name">Akmon</span>
+    <span class="nav-version">v1.5.4</span>
   </a>
   <ul class="nav-links">
     <li><a href="#why">Why Akmon</a></li>
@@ -775,18 +788,24 @@
   <div class="hero-grid"></div>
   <div class="hero-glow"></div>
 
-  <pre class="hero-anvil">    ✦    ✦  ✦
+  <pre class="hero-anvil"><span class="anvil-spark">            ✦        ✦        ✦</span>
 
-  ▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-      ▓▓▓▓▓▓▓▓
-    ▓▓▓▓▓▓▓▓▓▓▓▓
-  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓</pre>
+           ▓▓▓
+           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+<span class="anvil-shade">         ▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒</span>
+<span class="anvil-shade">         ▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒</span>
+           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+             ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+               ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+                   ▓▓▓▓▓▓▓▓▓▓▓▓
+                    ▓▓      ▓▓
+                    ▓▓      ▓▓
+                 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+               ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+             ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓</pre>
 
-  <h1 class="hero-title"><span>AK</span>MON</h1>
+  <h1 class="hero-title"><span class="hero-ak">AK</span><span class="hero-mon">MON</span></h1>
 
   <p class="hero-tagline">The AI coding agent built for developers who take security seriously.</p>
 
@@ -821,16 +840,16 @@
       </div>
       <div class="terminal-body">
         <div><span class="t-prompt">~/my-project</span> <span class="t-dim">$</span> <span class="t-cmd">akmon chat</span></div>
-        <div class="t-dim">  ▓▓▓▓ akmon v1.5.0 · ~/my-project · claude-haiku · Anthropic</div>
+        <div class="t-dim">  ▓▓▓▓ akmon v1.5.4 · ~/my-project · claude-haiku · Anthropic</div>
         <br>
         <div><span class="t-amber">You:</span> <span class="t-cmd">find all places where authentication tokens are validated</span></div>
         <br>
-        <div><span class="t-dim">  → semantic_search  "token validation"</span></div>
+        <div><span class="t-blue">  → semantic_search</span><span class="t-dim">  "token validation"</span></div>
         <div><span class="t-green">  ✓ semantic_search</span>  <span class="t-dim">3 results                    [Tab to expand]</span></div>
-        <div><span class="t-dim">  → read_file  src/auth/middleware.rs</span></div>
+        <div><span class="t-blue">  → read_file</span><span class="t-dim">  src/auth/middleware.rs</span></div>
         <div><span class="t-green">  ✓ read_file</span>  <span class="t-dim">287 lines</span></div>
         <br>
-        <div><span class="t-amber">Akmon:</span> <span class="t-cmd">Token validation happens in <span class="t-amber">src/auth/middleware.rs</span>.</span></div>
+        <div><span class="t-amber">Akmon:</span> <span class="t-cmd">Token validation happens in <span class="t-blue">src/auth/middleware.rs</span>.</span></div>
         <div><span class="t-cmd">The <span class="t-amber">validate_jwt</span> function at line 47 decodes Bearer</span></div>
         <div><span class="t-cmd">tokens using HS256 and checks expiry against Redis...</span> <span class="t-bar"></span></div>
         <br>
@@ -880,7 +899,7 @@
       <div class="why-card">
         <span class="why-icon">🔍</span>
         <h3>Diff before every write</h3>
-        <p>Colored diff shown before any file is written. You see exactly what changes before approving. Never a file modified without your explicit confirmation.</p>
+        <p>Colored diff in the TUI after edits and before writes. Incremental <code>edit</code> / <code>apply_patch</code> flows keep responses small so the model is less likely to truncate mid-file.</p>
       </div>
     </div>
   </div>
@@ -1021,7 +1040,7 @@
         <span class="comment"># Alternative: sudo curl … -o /usr/local/bin/akmon &amp;&amp; sudo chmod +x /usr/local/bin/akmon</span><br>
         <br>
         akmon <span class="keyword">--version</span>
-        <span class="comment">  # akmon 1.5.x</span><br>
+        <span class="comment">  # akmon 1.5.4</span><br>
         akmon <span class="keyword">config</span>
         <span class="comment">  # run setup wizard</span>
       </div>
@@ -1247,7 +1266,7 @@
 <footer>
   <div class="footer-inner">
     <div class="footer-left">
-      <span class="footer-brand">AKMON</span>
+      <span class="footer-brand"><span class="fb-ak">AK</span><span class="fb-mon">MON</span></span>
       <span class="footer-sub">ἄκμων · the anvil</span>
     </div>
     <div class="footer-right">
