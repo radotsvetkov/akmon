@@ -4,6 +4,41 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [1.2.0] - 2026-04-06
+
+### Added
+
+- Parallel tool execution: concurrent independent tool calls, results in original request order
+- Anthropic prompt caching: ~93% token reduction on system context after first call (requires dated snapshot ID)
+- Semantic repo indexing (`--index`): BGESmallENV15 embeddings, persisted to `.akmon/index.bin`
+- SemanticSearchTool: natural language code search across the project
+- `.gitignore`-aware indexer: respects existing ignore rules, skips `target/`, lock files, binaries automatically
+- `.akmonignore` support for project-specific exclusions
+- `max_files` cap (default 500) with clear warning message
+- Progress reporting during index build
+- `tool_reference.txt`: detailed tool documentation in system context
+- `--yes-web` flag and `AutoApproveReadsAndFetch` policy mode
+
+### Changed
+
+- Default Anthropic model: `claude-haiku-4-5-20251001`
+- fastembed upgraded to v5
+- Index loads synchronously when `.akmon/index.bin` exists
+- Indexer replaced walkdir with `ignore` crate for `.gitignore` support
+
+### Performance
+
+- Parallel tools: ~50% faster on multi-file tasks
+- Prompt caching: ~93% system context cost reduction
+- Index build: ~100x fewer files indexed due to `.gitignore` respect
+
+### Fixed
+
+- Index thread no longer dropped before save completes
+- Indexer no longer scans generated files, lock files, and binaries
+
 ## [1.1.0] - 2026-04-05
 
 ### Added
@@ -39,7 +74,7 @@ Akmon is a local-first, trust-first Rust AI coding agent. It runs as a single bi
 **Two model backends**
 
 - Ollama — local models, fully offline, no data leaves the machine
-- Anthropic — claude-haiku-4-5 and other Claude models via API
+- Anthropic — Claude models via API (use dated snapshot ids for stable caching)
 - Local backend preferred by default, explicit confirmation required before any remote API call
 
 **Three file tools**
@@ -115,7 +150,7 @@ akmon --yes --task "describe this codebase"
 # Anthropic
 export ANTHROPIC_API_KEY=your_key
 akmon --yes \
-  --model claude-haiku-4-5 \
+  --model claude-haiku-4-5-20251001 \
   --task "describe this codebase"
 
 # With shell tool

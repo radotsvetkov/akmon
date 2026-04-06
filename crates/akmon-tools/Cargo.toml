@@ -10,6 +10,9 @@ description = "Akmon tool trait and built-in tools (filesystem, …)."
 
 [dependencies]
 akmon-core = { path = "../akmon-core" }
+akmon-index = { path = "../akmon-index" }
+# v5: see `akmon-index` for rationale (ONNX download + TLS; `fastembed` 3.x is broken with current `ort`).
+fastembed = { version = "5", default-features = true }
 async-trait = "0.1"
 diffy = "0.4.2"
 glob = "0.3"
@@ -23,4 +26,5 @@ url = "2"
 walkdir = "2"
 
 [dev-dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"

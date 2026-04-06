@@ -16,11 +16,23 @@ pub const PROJECT_CONTEXT_START: &str = "<<<PROJECT_CONTEXT_START>>>";
 /// Closing delimiter paired with [`PROJECT_CONTEXT_START`].
 pub const PROJECT_CONTEXT_END: &str = "<<<PROJECT_CONTEXT_END>>>";
 
+/// Long static tool reference inlined at compile time. Dual purpose: (1) accurate parameter and
+/// output documentation for the model, and (2) enough text that the Anthropic system block meets
+/// the prompt-cache minimum for **`claude-haiku-4-5-20251001`** (4096+ tokens in the cached block
+/// per Anthropic documentation).
+const TOOL_REFERENCE: &str = include_str!("tool_reference.txt");
+
 fn format_project_context(project_root: &str, tool_names: &[&str]) -> String {
     let tools_line = tool_names.join(", ");
     let web_fetch_line = if tool_names.contains(&"web_fetch") {
         "  7. web_fetch url=\"https://...\" \
      to fetch public documentation\n"
+    } else {
+        ""
+    };
+    let semantic_line = if tool_names.contains(&"semantic_search") {
+        "  8. semantic_search query=\"...\" top_k=5 \
+     for natural-language codebase search (requires --index)\n"
     } else {
         ""
     };
@@ -48,6 +60,7 @@ To work on this project:\n\
      content=\"...\" only for \n\
      completely new files\n\
 {web_fetch_line}\
+{semantic_line}\
   NEVER rewrite an entire existing \n\
   file — use edit or patch instead.\n\
   NEVER call read_file on a directory.\n\
@@ -58,6 +71,10 @@ All paths must be relative to the \n\
 working directory shown above.\n\
 Absolute paths and paths with ../ \n\
 will be rejected by the sandbox.\n\
+\n\
+<<<TOOL_REFERENCE_START>>>\n\
+{TOOL_REFERENCE}\
+<<<TOOL_REFERENCE_END>>>\n\
 {PROJECT_CONTEXT_END}"
     )
 }
@@ -153,6 +170,59 @@ mod tests {
         assert!(msgs[1].content.contains("edit path"));
         assert!(msgs[1].content.contains("patch patch"));
         assert!(msgs[1].content.contains(PROJECT_CONTEXT_END));
+        assert!(msgs[1].content.contains("<<<TOOL_REFERENCE_START>>>"));
+    }
+
+    /// Anthropic Claude Haiku 4.5 requires a large cacheable prefix (4096+ tokens); this guards the
+    /// padded project-context block plus typical `AKMON.md` so caching can activate.
+    #[test]
+    fn combined_system_messages_meet_haiku_45_cache_char_threshold() {
+        let akmon = include_str!("../../../AKMON.md");
+        let msgs = build_messages(
+            Some(akmon),
+            &[],
+            "task",
+            "/repo",
+            &[
+                "read_file",
+                "write_file",
+                "list_directory",
+                "search",
+                "edit",
+                "patch",
+            ],
+        );
+        let mut joined_len = 0usize;
+        let mut n_sys = 0usize;
+        for m in &msgs {
+            if m.role == MessageRole::System {
+                joined_len += m.content.len();
+                n_sys += 1;
+            }
+        }
+        if n_sys > 1 {
+            joined_len += 2 * (n_sys - 1);
+        }
+        let approx_tokens = joined_len as f64 / 3.5;
+        assert!(
+            approx_tokens >= 4096.0,
+            "approx_tokens={approx_tokens} joined_chars={joined_len} (need >= 4096 for Haiku 4.5 cache minimum)"
+        );
+    }
+
+    #[test]
+    fn project_context_alone_meets_haiku_45_cache_char_threshold_without_akmon_md() {
+        let msgs = build_messages(None, &[], "t", "/wd", &["read_file"]);
+        let sys = msgs
+            .iter()
+            .find(|m| m.role == MessageRole::System)
+            .expect("project context");
+        let approx_tokens = sys.content.len() as f64 / 3.5;
+        assert!(
+            approx_tokens >= 4096.0,
+            "approx_tokens={approx_tokens} chars={} (no AKMON.md)",
+            sys.content.len()
+        );
     }
 
     #[test]
@@ -190,5 +260,16 @@ mod tests {
             .expect("project context should document web_fetch when listed");
         assert!(ctx.content.contains("7. web_fetch url=\"https://...\""));
         assert!(ctx.content.contains("fetch public documentation"));
+    }
+
+    #[test]
+    fn project_context_mentions_semantic_search_when_tool_enabled() {
+        let msgs = build_messages(None, &[], "t", "/repo", &["read_file", "semantic_search"]);
+        let ctx = msgs
+            .iter()
+            .find(|m| m.role == MessageRole::System && m.content.contains("semantic_search query="))
+            .expect("project context should document semantic_search when listed");
+        assert!(ctx.content.contains("semantic_search query=\"...\""));
+        assert!(ctx.content.contains("requires --index"));
     }
 }

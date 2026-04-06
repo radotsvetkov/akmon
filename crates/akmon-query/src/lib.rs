@@ -13,7 +13,10 @@ pub use context::{
 };
 pub use context_manager::ContextManager;
 pub use error::SessionError;
-pub use session::{AgentSession, ToolCallSummary};
+pub use akmon_models::UsageReport;
+pub use session::{
+    execute_single_tool_call, AgentSession, PendingToolCall, ToolCallResult, ToolCallSummary,
+};
 
 #[cfg(test)]
 mod tests {

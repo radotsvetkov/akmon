@@ -39,6 +39,11 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
         // Planning + model stream → Thinking
         (AgentState::Planning { .. }, AgentEvent::TextDelta { .. }) => Ok(()), // model responded
 
+        // Planning / Thinking / ToolExecution: token usage metadata (no state change)
+        (AgentState::Planning { .. }, AgentEvent::UsageReport { .. }) => Ok(()),
+        (AgentState::Thinking { .. }, AgentEvent::UsageReport { .. }) => Ok(()),
+        (AgentState::ToolExecution { .. }, AgentEvent::UsageReport { .. }) => Ok(()),
+
         // Planning / Thinking → Summarizing (context compaction)
         (AgentState::Planning { .. }, AgentEvent::SummarizationStarted) => Ok(()),
         (AgentState::Thinking { .. }, AgentEvent::SummarizationStarted) => Ok(()),
@@ -85,6 +90,9 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
         // ToolExecution → Thinking or Failed (tool finished or errored)
         (AgentState::ToolExecution { .. }, AgentEvent::ToolCallCompleted { .. }) => Ok(()), // success or failure both legal events
 
+        // Additional dispatches in the same parallel tool batch (session tracks outstanding completions)
+        (AgentState::ToolExecution { .. }, AgentEvent::ToolCallDispatched { .. }) => Ok(()),
+
         (
             AgentState::ToolExecution { .. },
             AgentEvent::Error {
@@ -110,6 +118,7 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
         (AgentState::AwaitingConfirmation { .. }, AgentEvent::Error { .. }) => Err(invalid()),
 
         // Summarizing → Thinking or Failed
+        (AgentState::Summarizing { .. }, AgentEvent::UsageReport { .. }) => Ok(()),
         (AgentState::Summarizing { .. }, AgentEvent::ContextSummarized { .. }) => Ok(()), // → Thinking
 
         (
@@ -292,6 +301,18 @@ mod tests {
     }
 
     #[test]
+    fn legal_tool_execution_second_dispatched_stays_in_tool_execution() {
+        assert!(validate_transition(
+            &AgentState::ToolExecution { iteration: 0 },
+            &AgentEvent::ToolCallDispatched {
+                id: "2".into(),
+                name: "read".into(),
+            }
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn legal_tool_execution_tool_error() {
         assert!(validate_transition(
             &AgentState::ToolExecution { iteration: 0 },
@@ -326,6 +347,20 @@ mod tests {
                     message: "confirmation timeout".into(),
                 },
                 recoverable: false,
+            }
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn legal_planning_usage_report() {
+        assert!(validate_transition(
+            &planning(),
+            &AgentEvent::UsageReport {
+                input_tokens: 1,
+                output_tokens: 2,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
             }
         )
         .is_ok());

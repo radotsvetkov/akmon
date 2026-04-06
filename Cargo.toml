@@ -6,10 +6,11 @@ members = [
     "crates/akmon-models",
     "crates/akmon-tools",
     "crates/akmon-query",
+    "crates/akmon-index",
 ]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"

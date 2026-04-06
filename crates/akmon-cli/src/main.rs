@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use akmon_core::{
     write_audit_jsonl, AgentConfig, AgentError, AgentEvent, McpServerConfig, PolicyEngine,
@@ -12,12 +13,113 @@ use akmon_core::{
 use akmon_models::{AnthropicBackend, LlmProvider, OllamaBackend};
 use akmon_query::{AgentSession, ToolCallSummary};
 use akmon_tools::{
-    discover_mcp_tools, EditTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool, ShellTool,
-    WebFetchTool, WriteFileTool,
+    discover_mcp_tools, EditTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
+    SemanticSearchTool, ShellTool, WebFetchTool, WriteFileTool,
 };
 use clap::{Parser, ValueEnum};
+use fastembed::{TextEmbedding, TextInitOptions};
 use serde::Serialize;
 use tokio::sync::mpsc;
+use tokio::sync::RwLock;
+
+/// Builds a semantic index in the background and writes `index_path`, then fills `slot`.
+async fn semantic_index_background_build(
+    project_root: PathBuf,
+    embedder: Arc<std::sync::Mutex<TextEmbedding>>,
+    sandbox: Arc<Sandbox>,
+    index_path: PathBuf,
+    slot: Arc<RwLock<Option<akmon_index::RepoIndex>>>,
+) {
+    let indexer = akmon_index::Indexer::default();
+    match indexer
+        .build_index(&project_root, embedder, sandbox.as_ref())
+        .await
+    {
+        Ok(idx) => {
+            match index_path.parent() {
+                Some(parent) => {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        eprintln!("akmon: failed to create .akmon dir: {e}");
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "akmon: index save path has no parent (unexpected): {}",
+                        index_path.display()
+                    );
+                }
+            }
+            match akmon_index::save_index(&idx, &index_path) {
+                Ok(()) => {
+                    eprintln!(
+                        "akmon: index saved to .akmon/index.bin ({} files, {} chunks)",
+                        idx.file_count, idx.chunk_count
+                    );
+                }
+                Err(e) => eprintln!("akmon: index save FAILED: {e}"),
+            }
+            *slot.write().await = Some(idx);
+        }
+        Err(e) => {
+            eprintln!("akmon: warning: semantic index build failed: {e}");
+        }
+    }
+}
+
+/// Runs [`semantic_index_background_build`] on a dedicated OS thread with its own current-thread
+/// Tokio runtime so index work is not cancelled when `#[tokio::main]` shuts down.
+///
+/// The caller should [`std::thread::JoinHandle::join`] the handle before process exit so
+/// `index.bin` can be written reliably.
+fn spawn_semantic_index_os_thread(
+    project_root: PathBuf,
+    embedder: Arc<std::sync::Mutex<TextEmbedding>>,
+    sandbox: Arc<Sandbox>,
+    index_path: PathBuf,
+    slot: Arc<RwLock<Option<akmon_index::RepoIndex>>>,
+) -> Option<std::thread::JoinHandle<()>> {
+    match std::thread::Builder::new()
+        .name("akmon-index-build".into())
+        .spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                eprintln!("akmon: failed to build index runtime");
+                return;
+            };
+            rt.block_on(async move {
+                semantic_index_background_build(
+                    project_root,
+                    embedder,
+                    sandbox,
+                    index_path,
+                    slot,
+                )
+                .await;
+            });
+        }) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            eprintln!("akmon: failed to spawn index thread: {e}");
+            None
+        }
+    }
+}
+
+/// Gives a short background build time to finish so the first model turn may see an index.
+async fn poll_index_ready_up_to_3s(slot: &Arc<RwLock<Option<akmon_index::RepoIndex>>>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if slot.read().await.is_some() {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 
 /// Returns true if `path` is an existing `.git` directory or gitdir file (worktrees).
 fn git_working_tree_marker_present(git_path: &Path) -> bool {
@@ -112,6 +214,17 @@ enum OutputFormat {
     Json,
 }
 
+/// Aggregated token counters for `--output json` (Anthropic cache fields are zero when unused).
+#[derive(Debug, Serialize)]
+struct RunUsageSummary {
+    /// Sum of provider `input_tokens` across completions in this run.
+    total_input_tokens: u32,
+    /// Sum of `cache_read_input_tokens` (prompt-cache hits) when the backend reports them.
+    total_cache_read_tokens: u32,
+    /// Sum of `output_tokens` across completions in this run.
+    total_output_tokens: u32,
+}
+
 /// Resolved run summary for `--output json` (stable field names for automation).
 #[derive(Debug, Serialize)]
 struct RunReport {
@@ -127,6 +240,8 @@ struct RunReport {
     error: Option<String>,
     /// Path passed to [`write_audit_jsonl`] for this run (default or `--audit-log`).
     audit_log_path: String,
+    /// Token totals for this run (Ollama typically leaves cache fields at zero).
+    usage: RunUsageSummary,
 }
 
 /// Command-line interface for the Akmon agent binary.
@@ -175,12 +290,26 @@ struct Cli {
     /// Connect to an MCP server at this URL and register all tools it lists (repeatable for multiple servers).
     #[arg(long = "mcp-server", value_name = "URL")]
     mcp_server: Vec<String>,
+    /// Build or load a semantic index of the project; registers the `semantic_search` tool. Cache: `.akmon/index.bin`.
+    #[arg(long = "index")]
+    index: bool,
 }
+
+type SemanticIndexParts = (
+    Arc<RwLock<Option<akmon_index::RepoIndex>>>,
+    Arc<std::sync::Mutex<TextEmbedding>>,
+);
 
 /// Builds the tool registry; [`ShellTool`] is registered only when at least one `--shell-allow` pattern is set.
 ///
 /// [`WebFetchTool`] is registered only when `web_fetch` is true (`--web-fetch`).
-fn build_tool_registry(shell_allow: &[String], web_fetch: bool) -> Vec<Box<dyn akmon_tools::Tool>> {
+///
+/// [`SemanticSearchTool`] is registered when `semantic` is [`Some`].
+fn build_tool_registry(
+    shell_allow: &[String],
+    web_fetch: bool,
+    semantic: Option<SemanticIndexParts>,
+) -> Vec<Box<dyn akmon_tools::Tool>> {
     let mut tools: Vec<Box<dyn akmon_tools::Tool>> = vec![
         Box::new(ReadFileTool::new()),
         Box::new(WriteFileTool::new()),
@@ -194,6 +323,9 @@ fn build_tool_registry(shell_allow: &[String], web_fetch: bool) -> Vec<Box<dyn a
     }
     if !shell_allow.is_empty() {
         tools.push(Box::new(ShellTool::new(shell_allow.to_vec())));
+    }
+    if let Some((slot, emb)) = semantic {
+        tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
     }
     tools
 }
@@ -283,6 +415,20 @@ async fn run_event_printer(
                     PolicyVerdict::Deny
                 };
                 let _ = policy_tx.send(verdict).await;
+            }
+            AgentEvent::UsageReport {
+                input_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                ..
+            } => {
+                if output == OutputFormat::Text
+                    && (cache_read_tokens > 0 || cache_creation_tokens > 0)
+                {
+                    eprintln!(
+                        "akmon: tokens — input:{input_tokens} cache_hit:{cache_read_tokens} cache_write:{cache_creation_tokens}"
+                    );
+                }
             }
             AgentEvent::Done => {
                 if output == OutputFormat::Text {
@@ -379,7 +525,77 @@ async fn main() -> ExitCode {
     };
     let policy = Arc::new(PolicyEngine::new(policy_mode));
     let sandbox = Arc::new(Sandbox::new(project_root.clone()));
-    let mut tools = build_tool_registry(&cli.shell_allow, cli.web_fetch);
+
+    let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
+
+    let semantic_parts: Option<SemanticIndexParts> = if cli.index {
+        let index_path = project_root.join(".akmon").join("index.bin");
+        if !index_path.is_file() {
+            eprintln!("akmon: downloading embedding model (~22MB) on first use...");
+        }
+        match TextEmbedding::try_new(
+            TextInitOptions::default().with_show_download_progress(true),
+        ) {
+            Ok(m) => {
+                let emb = Arc::new(std::sync::Mutex::new(m));
+                let slot = Arc::new(RwLock::new(None));
+
+                if index_path.is_file() {
+                    match akmon_index::load_index(&index_path) {
+                        Ok(idx) => {
+                            eprintln!(
+                                "akmon: semantic index loaded ({} files, {} chunks)",
+                                idx.file_count, idx.chunk_count
+                            );
+                            *slot.write().await = Some(idx);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "akmon: warning: could not load semantic index, rebuilding: {e}"
+                            );
+                            let slot_bg = Arc::clone(&slot);
+                            let root_bg = project_root.clone();
+                            let sandbox_bg = Arc::clone(&sandbox);
+                            let emb_bg = Arc::clone(&emb);
+                            let path_bg = index_path.clone();
+                            index_thread = spawn_semantic_index_os_thread(
+                                root_bg,
+                                emb_bg,
+                                sandbox_bg,
+                                path_bg,
+                                slot_bg,
+                            );
+                            poll_index_ready_up_to_3s(&slot).await;
+                        }
+                    }
+                } else {
+                    let slot_bg = Arc::clone(&slot);
+                    let root_bg = project_root.clone();
+                    let sandbox_bg = Arc::clone(&sandbox);
+                    let emb_bg = Arc::clone(&emb);
+                    let path_bg = index_path.clone();
+                    index_thread = spawn_semantic_index_os_thread(
+                        root_bg,
+                        emb_bg,
+                        sandbox_bg,
+                        path_bg,
+                        slot_bg,
+                    );
+                    poll_index_ready_up_to_3s(&slot).await;
+                }
+
+                Some((slot, emb))
+            }
+            Err(e) => {
+                eprintln!("akmon: warning: semantic index disabled (embedding model): {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut tools = build_tool_registry(&cli.shell_allow, cli.web_fetch, semantic_parts);
     for url in &cli.mcp_server {
         let server = McpServerConfig {
             name: url.clone(),
@@ -430,6 +646,14 @@ async fn main() -> ExitCode {
         );
     }
 
+    if let Some(handle) = index_thread {
+        eprintln!("akmon: waiting for index to finish building...");
+        eprintln!(
+            "akmon: (CPU-bound embedding — more `akmon:` lines may appear until the index is saved)"
+        );
+        let _ = handle.join();
+    }
+
     let audit_log_path_str = audit_log_path.to_string_lossy().into_owned();
 
     if cli.output == OutputFormat::Json {
@@ -444,6 +668,11 @@ async fn main() -> ExitCode {
             tool_calls: session.tool_call_summaries().to_vec(),
             error: error_opt,
             audit_log_path: audit_log_path_str,
+            usage: RunUsageSummary {
+                total_input_tokens: session.total_input_tokens(),
+                total_cache_read_tokens: session.total_cache_read_tokens(),
+                total_output_tokens: session.total_output_tokens(),
+            },
         };
         let json_line = match serde_json::to_string(&report) {
             Ok(s) => s,
@@ -486,25 +715,25 @@ mod tests {
 
     #[test]
     fn shell_tool_omitted_without_allow_flags() {
-        let t = build_tool_registry(&[], false);
+        let t = build_tool_registry(&[], false, None);
         assert!(!t.iter().any(|x| x.name() == "shell"));
     }
 
     #[test]
     fn shell_tool_registered_when_allow_patterns_present() {
-        let t = build_tool_registry(&["echo *".into()], false);
+        let t = build_tool_registry(&["echo *".into()], false, None);
         assert!(t.iter().any(|x| x.name() == "shell"));
     }
 
     #[test]
     fn web_fetch_tool_omitted_without_flag() {
-        let t = build_tool_registry(&[], false);
+        let t = build_tool_registry(&[], false, None);
         assert!(!t.iter().any(|x| x.name() == "web_fetch"));
     }
 
     #[test]
     fn web_fetch_tool_registered_when_flag_set() {
-        let t = build_tool_registry(&[], true);
+        let t = build_tool_registry(&[], true, None);
         assert!(t.iter().any(|x| x.name() == "web_fetch"));
     }
 
@@ -521,6 +750,11 @@ mod tests {
             }],
             error: None,
             audit_log_path: "/tmp/x.jsonl".into(),
+            usage: RunUsageSummary {
+                total_input_tokens: 10,
+                total_cache_read_tokens: 3,
+                total_output_tokens: 7,
+            },
         };
         let v = serde_json::to_value(&report).expect("serialize");
         assert_eq!(v["session_id"], "550e8400-e29b-41d4-a716-446655440000");
@@ -528,6 +762,9 @@ mod tests {
         assert_eq!(v["result"], "hello");
         assert!(v["error"].is_null());
         assert_eq!(v["audit_log_path"], "/tmp/x.jsonl");
+        assert_eq!(v["usage"]["total_input_tokens"], 10);
+        assert_eq!(v["usage"]["total_cache_read_tokens"], 3);
+        assert_eq!(v["usage"]["total_output_tokens"], 7);
         let tools = v["tool_calls"].as_array().expect("array");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "read_file");

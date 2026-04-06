@@ -55,6 +55,17 @@ pub enum AgentEvent {
     },
     /// The model signalled end-of-turn with no further tool work.
     Done,
+    /// One completion’s token usage (e.g. Anthropic input, output, and prompt-cache counters).
+    UsageReport {
+        /// Input tokens billed for this model request.
+        input_tokens: u32,
+        /// Output tokens generated in this completion.
+        output_tokens: u32,
+        /// Tokens charged for creating prompt-cache entries.
+        cache_creation_tokens: u32,
+        /// Tokens read from the prompt cache (non-zero when the cache was used).
+        cache_read_tokens: u32,
+    },
     /// A structured failure or policy outcome wrapped as an event.
     Error {
         /// Failure classification.
@@ -84,6 +95,15 @@ impl fmt::Display for AgentEvent {
                 write!(f, "IterationStarted(n={n}, max={max})")
             }
             AgentEvent::Done => write!(f, "Done"),
+            AgentEvent::UsageReport {
+                input_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                ..
+            } => write!(
+                f,
+                "UsageReport(input={input_tokens}, cache_read={cache_read_tokens}, cache_write={cache_creation_tokens})"
+            ),
             AgentEvent::Error { error, .. } => write!(f, "Error({error})"),
         }
     }

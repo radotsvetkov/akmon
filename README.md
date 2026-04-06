@@ -25,12 +25,16 @@ akmon --yes --task "describe this codebase"
 
 ### Quick start with Anthropic
 
+Use a **dated snapshot** model id (not only an alias) so behavior and [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) stay predictable. The binary default matches [`DEFAULT_ANTHROPIC_MODEL`](crates/akmon-models/src/anthropic.rs) (currently `claude-haiku-4-5-20251001`).
+
 ```bash
 export ANTHROPIC_API_KEY=your_key
 akmon --yes \
-  --model claude-haiku-4-5 \
+  --model claude-haiku-4-5-20251001 \
   --task "describe this codebase"
 ```
+
+To list ids your key can use: `curl https://api.anthropic.com/v1/models -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01"`.
 
 ## How it works
 

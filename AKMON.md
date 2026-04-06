@@ -15,6 +15,10 @@ developer use.
 - crates/akmon-tools — Tool trait, 
   ReadFileTool, WriteFileTool, 
   ListDirectoryTool
+- crates/akmon-index — semantic 
+  embedding index, BGESmallENV15 
+  embeddings, index persistence 
+  and search
 - crates/akmon-query — AgentSession, 
   agent loop, context builder
 - crates/akmon-cli — binary entry point, 

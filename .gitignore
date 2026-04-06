@@ -1,6 +1,12 @@
 /target/
 **/*.rs.bk
+
+# Akmon runtime data (audits, semantic index, etc.)
 .akmon/
+
+# FastEmbed / ONNX model cache (CLI or `cargo test` may create this under the repo or a crate dir)
+.fastembed_cache/
+
 .DS_Store
 
 # Local reference / vendor trees (not part of Akmon)

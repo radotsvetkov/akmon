@@ -14,9 +14,12 @@ path = "src/main.rs"
 
 [dependencies]
 akmon-core = { path = "../akmon-core" }
+akmon-index = { path = "../akmon-index" }
 akmon-models = { path = "../akmon-models" }
 akmon-query = { path = "../akmon-query" }
 akmon-tools = { path = "../akmon-tools" }
+# v5: see `akmon-index` for rationale (`--index` / semantic embeddings).
+fastembed = { version = "5", default-features = true }
 clap = { version = "4", features = ["derive", "env"] }
 dunce = "1"
 serde = { version = "1", features = ["derive"] }

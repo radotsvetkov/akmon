@@ -8,12 +8,13 @@ use akmon_core::{
     AuditEvent, Permission, PolicyEngineError, PolicyEngineMode, PolicyVerdict, Sandbox,
 };
 use akmon_models::{
-    approximate_tokens, CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole,
-    ModelError, ModelToolCall, StopReason, StreamEvent, ToolDefinition,
+    anthropic_system_block_text, approximate_tokens, CompletionConfig, CompletionStream,
+    LlmProvider, Message, MessageRole, ModelError, ModelToolCall, StopReason, StreamEvent,
+    ToolDefinition, UsageReport,
 };
 use akmon_tools::{Tool, ToolContext, ToolOutput};
 use chrono::Utc;
-use futures::StreamExt;
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -32,14 +33,38 @@ pub struct ToolCallSummary {
     pub message: String,
 }
 
+/// One model tool call after policy approval, ready for [`execute_single_tool_call`].
+#[derive(Debug, Clone)]
+pub struct PendingToolCall {
+    /// Tool call id from the model.
+    pub id: String,
+    /// Registered tool name.
+    pub name: String,
+    /// JSON arguments object.
+    pub arguments: Value,
+}
+
+/// Structured outcome from [`execute_single_tool_call`] (and policy-denied synthetic rows).
+#[derive(Debug, Clone)]
+pub struct ToolCallResult {
+    /// Same id as the model tool call.
+    pub call_id: String,
+    /// Tool name.
+    pub tool_name: String,
+    /// Raw tool output for the transcript.
+    pub output: ToolOutput,
+    /// Whether the tool reported success.
+    pub success: bool,
+}
+
 /// Builds [`CompletionConfig`] with `tools` populated from registered [`Tool`] instances.
-fn completion_config_for_tools(tools: &[Box<dyn Tool>]) -> CompletionConfig {
+fn completion_config_for_tools(tools: &[Arc<dyn Tool>]) -> CompletionConfig {
     let defs: Vec<ToolDefinition> = tools
         .iter()
         .map(|t| ToolDefinition {
-            name: t.name().to_string(),
-            description: t.description().to_string(),
-            parameters: t.parameters_schema(),
+            name: t.as_ref().name().to_string(),
+            description: t.as_ref().description().to_string(),
+            parameters: t.as_ref().parameters_schema(),
         })
         .collect();
     CompletionConfig {
@@ -55,11 +80,13 @@ pub struct AgentSession {
     state: AgentState,
     policy: Arc<akmon_core::PolicyEngine>,
     provider: Arc<dyn LlmProvider>,
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<Arc<dyn Tool>>,
     sandbox: Arc<Sandbox>,
     context: Vec<Message>,
     audit_log: Vec<AuditEvent>,
     akmon_md: Option<String>,
+    /// Decremented on each [`AgentEvent::ToolCallCompleted`] while in [`AgentState::ToolExecution`]; drives return to Thinking.
+    parallel_tool_batch_remaining: u32,
     /// Concatenation of all assistant [`StreamEvent::TextDelta`] chunks for this run.
     result_text: String,
     /// Completed tool calls in chronological order (for JSON run reports).
@@ -68,6 +95,14 @@ pub struct AgentSession {
     context_manager: ContextManager,
     /// FSM state to restore after a successful [`AgentEvent::ContextSummarized`].
     post_summary_resume: Option<AgentState>,
+    /// Most recent per-completion usage from the model provider (e.g. Anthropic), if any.
+    last_usage: Option<UsageReport>,
+    /// Sum of `input_tokens` from each [`StreamEvent::UsageReport`] in this run.
+    total_input_tokens: u32,
+    /// Sum of `cache_read_tokens` from each [`StreamEvent::UsageReport`] in this run.
+    total_cache_read_tokens: u32,
+    /// Sum of `output_tokens` from each [`StreamEvent::UsageReport`] in this run.
+    total_output_tokens: u32,
 }
 
 impl AgentSession {
@@ -88,6 +123,7 @@ impl AgentSession {
             keep_recent: ContextManager::default().keep_recent,
             fixed_system_messages,
         };
+        let tools: Vec<Arc<dyn Tool>> = tools.into_iter().map(Arc::from).collect();
         Self {
             config,
             state: AgentState::Idle,
@@ -98,10 +134,15 @@ impl AgentSession {
             context: Vec::new(),
             audit_log: Vec::new(),
             akmon_md,
+            parallel_tool_batch_remaining: 0,
             result_text: String::new(),
             tool_call_summaries: Vec::new(),
             context_manager,
             post_summary_resume: None,
+            last_usage: None,
+            total_input_tokens: 0,
+            total_cache_read_tokens: 0,
+            total_output_tokens: 0,
         }
     }
 
@@ -128,6 +169,26 @@ impl AgentSession {
     /// Returns the current FSM state (for tests and harnesses).
     pub fn state(&self) -> &AgentState {
         &self.state
+    }
+
+    /// Last [`UsageReport`] from the most recent model completion in this run, if the provider emitted one.
+    pub fn last_usage(&self) -> Option<&UsageReport> {
+        self.last_usage.as_ref()
+    }
+
+    /// Total billed input tokens accumulated from all [`StreamEvent::UsageReport`] events this run.
+    pub fn total_input_tokens(&self) -> u32 {
+        self.total_input_tokens
+    }
+
+    /// Total prompt-cache read tokens accumulated this run (non-zero when Anthropic cache hits occurred).
+    pub fn total_cache_read_tokens(&self) -> u32 {
+        self.total_cache_read_tokens
+    }
+
+    /// Total output tokens accumulated from all [`StreamEvent::UsageReport`] events this run.
+    pub fn total_output_tokens(&self) -> u32 {
+        self.total_output_tokens
     }
 
     /// Runs one user task: planning, one or more model completions, real tool dispatch, and
@@ -183,8 +244,11 @@ impl AgentSession {
             }
 
             let project_root = self.sandbox.primary_root().display().to_string();
-            let tool_name_strings: Vec<String> =
-                self.tools.iter().map(|t| t.name().to_string()).collect();
+            let tool_name_strings: Vec<String> = self
+                .tools
+                .iter()
+                .map(|t| t.as_ref().name().to_string())
+                .collect();
             let tool_names: Vec<&str> = tool_name_strings.iter().map(|s| s.as_str()).collect();
             let messages = if user_line_committed {
                 build_followup_messages(
@@ -238,6 +302,17 @@ impl AgentSession {
                 };
             }
 
+            if std::env::var_os("AKMON_DEBUG_CACHE").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            {
+                let sys = anthropic_system_block_text(&messages);
+                eprintln!(
+                    "akmon: debug cache model_call={} system_joined_len={}",
+                    iteration.saturating_add(1),
+                    sys.len()
+                );
+            }
+
             let completion_config = completion_config_for_tools(&self.tools);
             let mut stream: CompletionStream = match self
                 .provider
@@ -283,6 +358,19 @@ impl AgentSession {
                         self.apply_event(
                             &event_tx,
                             AgentEvent::TextDelta { text },
+                            &task,
+                        )
+                        .await?;
+                    }
+                    Ok(StreamEvent::UsageReport(r)) => {
+                        self.apply_event(
+                            &event_tx,
+                            AgentEvent::UsageReport {
+                                input_tokens: r.input_tokens,
+                                output_tokens: r.output_tokens,
+                                cache_creation_tokens: r.cache_creation_tokens,
+                                cache_read_tokens: r.cache_read_tokens,
+                            },
                             &task,
                         )
                         .await?;
@@ -379,15 +467,13 @@ impl AgentSession {
                                     content: assistant_record.to_string(),
                                 });
 
-                                for call in tool_calls {
-                                    self.dispatch_one_tool_call(
-                                        call,
-                                        &event_tx,
-                                        &task,
-                                        interactive_policy_rx,
-                                    )
-                                    .await?;
-                                }
+                                self.dispatch_tool_calls_batch(
+                                    tool_calls,
+                                    &event_tx,
+                                    &task,
+                                    interactive_policy_rx,
+                                )
+                                .await?;
 
                                 iteration = iteration.saturating_add(1);
                                 continue 'session;
@@ -419,146 +505,33 @@ impl AgentSession {
         }
     }
 
-    async fn dispatch_one_tool_call(
+    /// Policy + optional parallel execution for one model turn's tool calls.
+    async fn dispatch_tool_calls_batch(
         &mut self,
-        call: ModelToolCall,
+        tool_calls: Vec<ModelToolCall>,
         event_tx: &mpsc::Sender<AgentEvent>,
         task: &str,
         interactive_policy_rx: &mut Option<mpsc::Receiver<PolicyVerdict>>,
     ) -> Result<(), AgentError> {
-        let id = call.id.clone();
-        let name = call.name.clone();
-        let args = call.arguments.clone();
+        let n = tool_calls.len();
+        let mut slots: Vec<Option<ToolCallResult>> = vec![None; n];
 
-        let Some(tool_idx) = self.tools.iter().position(|t| t.name() == name) else {
-            let msg = format!("tool not found: {name}");
-            self.apply_event(
-                event_tx,
-                AgentEvent::ToolCallCompleted {
-                    id: id.clone(),
-                    name: name.clone(),
-                    success: false,
-                    message: msg.clone(),
-                },
-                task,
-            )
-            .await?;
-            self.append_tool_message(&id, &name, ToolOutput::Error {
-                code: akmon_tools::ToolErrorCode::InvalidArgs,
-                message: msg.clone(),
-            })?;
-            return Ok(());
-        };
+        struct ApprovedSlot {
+            original_index: usize,
+            id: String,
+            name: String,
+            arguments: Value,
+            tool_idx: usize,
+        }
+        let mut approved: Vec<ApprovedSlot> = Vec::new();
 
-        let perms = concrete_permissions(
-            self.tools[tool_idx].as_ref(),
-            &name,
-            &args,
-            self.sandbox.primary_root(),
-        );
-        let session_id = self.config.session_id.to_string();
+        for (idx, call) in tool_calls.iter().enumerate() {
+            let id = call.id.clone();
+            let name = call.name.clone();
+            let args = call.arguments.clone();
 
-        for perm in perms {
-            let allowed = match self.policy.mode() {
-                PolicyEngineMode::Interactive
-                | PolicyEngineMode::AutoApproveReads { .. }
-                | PolicyEngineMode::AutoApproveReadsAndFetch { .. } => {
-                    match self
-                        .policy
-                        .evaluate_automatic(session_id.as_str(), perm.clone())
-                    {
-                        Ok(decision) => {
-                            self.audit_log.push(decision.audit.clone());
-                            decision.allowed
-                        }
-                        Err(PolicyEngineError::InteractiveRequiresCaller) => {
-                            let desc = match &perm {
-                                Permission::ExecuteCommand { command, cwd } => {
-                                    format!(
-                                        "Shell command requires confirmation.\n  Command: {command}\n  Working directory: {}",
-                                        cwd.display()
-                                    )
-                                }
-                                Permission::NetworkFetch { url } => {
-                                    format!("Network fetch requires confirmation.\n  URL: {url}")
-                                }
-                                _ => format!("Permission required: {perm:?}"),
-                            };
-                            self.apply_event(
-                                event_tx,
-                                AgentEvent::ConfirmationRequired {
-                                    description: desc.clone(),
-                                },
-                                task,
-                            )
-                            .await?;
-                            let Some(rx) = interactive_policy_rx.as_mut() else {
-                                return Err(AgentError::SessionFailed {
-                                    message: "interactive policy requires a verdict channel"
-                                        .into(),
-                                });
-                            };
-                            let verdict = match rx.recv().await {
-                                Some(v) => v,
-                                None => {
-                                    return Err(AgentError::SessionFailed {
-                                        message: "policy verdict channel closed".into(),
-                                    });
-                                }
-                            };
-                            let reason: String = match verdict {
-                                PolicyVerdict::Allow => "user approved (stdin)".into(),
-                                PolicyVerdict::Deny => "user denied (stdin)".into(),
-                            };
-                            let decision = self.policy.resolve_interactive(
-                                session_id.as_str(),
-                                perm.clone(),
-                                verdict,
-                                reason,
-                            );
-                            let decision = match decision {
-                                Ok(d) => d,
-                                Err(e) => {
-                                    return Err(AgentError::SessionFailed {
-                                        message: e.to_string(),
-                                    });
-                                }
-                            };
-                            self.audit_log.push(decision.audit.clone());
-                            self.apply_event(
-                                event_tx,
-                                AgentEvent::TextDelta { text: String::new() },
-                                task,
-                            )
-                            .await?;
-                            decision.allowed
-                        }
-                        Err(e) => {
-                            return Err(AgentError::SessionFailed {
-                                message: e.to_string(),
-                            });
-                        }
-                    }
-                }
-                _ => {
-                    let decision = match self
-                        .policy
-                        .evaluate_automatic(session_id.as_str(), perm.clone())
-                    {
-                        Ok(d) => d,
-                        Err(e) => {
-                            return Err(AgentError::SessionFailed {
-                                message: e.to_string(),
-                            });
-                        }
-                    };
-                    self.audit_log.push(decision.audit.clone());
-                    decision.allowed
-                }
-            };
-
-            if !allowed {
-                let msg = format!("policy denied: {perm:?}");
+            let Some(tool_idx) = self.tools.iter().position(|t| t.as_ref().name() == name) else {
+                let msg = format!("tool not found: {name}");
                 self.apply_event(
                     event_tx,
                     AgentEvent::ToolCallCompleted {
@@ -570,45 +543,236 @@ impl AgentSession {
                     task,
                 )
                 .await?;
-                self.append_tool_message(
-                    &id,
-                    &name,
-                    ToolOutput::Error {
+                slots[idx] = Some(ToolCallResult {
+                    call_id: id.clone(),
+                    tool_name: name.clone(),
+                    output: ToolOutput::Error {
+                        code: akmon_tools::ToolErrorCode::InvalidArgs,
+                        message: msg,
+                    },
+                    success: false,
+                });
+                continue;
+            };
+
+            let perms = concrete_permissions(
+                self.tools[tool_idx].as_ref(),
+                &name,
+                &args,
+                self.sandbox.primary_root(),
+            );
+            let session_id = self.config.session_id.to_string();
+            let mut policy_denial_message: Option<String> = None;
+
+            for perm in perms {
+                let allowed = match self.policy.mode() {
+                    PolicyEngineMode::Interactive
+                    | PolicyEngineMode::AutoApproveReads { .. }
+                    | PolicyEngineMode::AutoApproveReadsAndFetch { .. } => {
+                        match self
+                            .policy
+                            .evaluate_automatic(session_id.as_str(), perm.clone())
+                        {
+                            Ok(decision) => {
+                                self.audit_log.push(decision.audit.clone());
+                                decision.allowed
+                            }
+                            Err(PolicyEngineError::InteractiveRequiresCaller) => {
+                                let desc = match &perm {
+                                    Permission::ExecuteCommand { command, cwd } => {
+                                        format!(
+                                            "Shell command requires confirmation.\n  Command: {command}\n  Working directory: {}",
+                                            cwd.display()
+                                        )
+                                    }
+                                    Permission::NetworkFetch { url } => {
+                                        format!("Network fetch requires confirmation.\n  URL: {url}")
+                                    }
+                                    _ => format!("Permission required: {perm:?}"),
+                                };
+                                self.apply_event(
+                                    event_tx,
+                                    AgentEvent::ConfirmationRequired {
+                                        description: desc.clone(),
+                                    },
+                                    task,
+                                )
+                                .await?;
+                                let Some(rx) = interactive_policy_rx.as_mut() else {
+                                    return Err(AgentError::SessionFailed {
+                                        message: "interactive policy requires a verdict channel"
+                                            .into(),
+                                    });
+                                };
+                                let verdict = match rx.recv().await {
+                                    Some(v) => v,
+                                    None => {
+                                        return Err(AgentError::SessionFailed {
+                                            message: "policy verdict channel closed".into(),
+                                        });
+                                    }
+                                };
+                                let reason: String = match verdict {
+                                    PolicyVerdict::Allow => "user approved (stdin)".into(),
+                                    PolicyVerdict::Deny => "user denied (stdin)".into(),
+                                };
+                                let decision = self.policy.resolve_interactive(
+                                    session_id.as_str(),
+                                    perm.clone(),
+                                    verdict,
+                                    reason,
+                                );
+                                let decision = match decision {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        return Err(AgentError::SessionFailed {
+                                            message: e.to_string(),
+                                        });
+                                    }
+                                };
+                                self.audit_log.push(decision.audit.clone());
+                                self.apply_event(
+                                    event_tx,
+                                    AgentEvent::TextDelta { text: String::new() },
+                                    task,
+                                )
+                                .await?;
+                                decision.allowed
+                            }
+                            Err(e) => {
+                                return Err(AgentError::SessionFailed {
+                                    message: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {
+                        let decision = match self
+                            .policy
+                            .evaluate_automatic(session_id.as_str(), perm.clone())
+                        {
+                            Ok(d) => d,
+                            Err(e) => {
+                                return Err(AgentError::SessionFailed {
+                                    message: e.to_string(),
+                                });
+                            }
+                        };
+                        self.audit_log.push(decision.audit.clone());
+                        decision.allowed
+                    }
+                };
+
+                if !allowed {
+                    policy_denial_message = Some(format!("policy denied: {perm:?}"));
+                    break;
+                }
+            }
+
+            if let Some(msg) = policy_denial_message {
+                self.apply_event(
+                    event_tx,
+                    AgentEvent::ToolCallCompleted {
+                        id: id.clone(),
+                        name: name.clone(),
+                        success: false,
+                        message: msg.clone(),
+                    },
+                    task,
+                )
+                .await?;
+                slots[idx] = Some(ToolCallResult {
+                    call_id: id.clone(),
+                    tool_name: name.clone(),
+                    output: ToolOutput::Error {
                         code: akmon_tools::ToolErrorCode::PermissionDenied,
                         message: msg,
                     },
-                )?;
-                return Ok(());
+                    success: false,
+                });
+                continue;
+            }
+
+            approved.push(ApprovedSlot {
+                original_index: idx,
+                id,
+                name,
+                arguments: args,
+                tool_idx,
+            });
+        }
+
+        if !approved.is_empty() {
+            let batch_n = approved.len() as u32;
+            self.parallel_tool_batch_remaining = batch_n;
+
+            for a in &approved {
+                self.apply_event(
+                    event_tx,
+                    AgentEvent::ToolCallDispatched {
+                        id: a.id.clone(),
+                        name: a.name.clone(),
+                    },
+                    task,
+                )
+                .await?;
+            }
+
+            let sandbox = Arc::clone(&self.sandbox);
+            let policy = Arc::clone(&self.policy);
+
+            let mut unordered: FuturesUnordered<_> = FuturesUnordered::new();
+            for a in approved {
+                let tool = Arc::clone(&self.tools[a.tool_idx]);
+                let args = a.arguments;
+                let orig = a.original_index;
+                let pending = PendingToolCall {
+                    id: a.id.clone(),
+                    name: a.name.clone(),
+                    arguments: args,
+                };
+                let sandbox_c = Arc::clone(&sandbox);
+                let policy_c = Arc::clone(&policy);
+                unordered.push(async move {
+                    let ctx = ToolContext::new((*sandbox_c).clone(), policy_c);
+                    let result =
+                        execute_single_tool_call(&pending, tool.as_ref(), &ctx).await;
+                    (orig, result)
+                });
+            }
+
+            while let Some((orig_idx, tool_result)) = unordered.next().await {
+                let message = match &tool_result.output {
+                    ToolOutput::Success { content } => content.clone(),
+                    ToolOutput::Error { message, .. } => message.clone(),
+                };
+                self.apply_event(
+                    event_tx,
+                    AgentEvent::ToolCallCompleted {
+                        id: tool_result.call_id.clone(),
+                        name: tool_result.tool_name.clone(),
+                        success: tool_result.success,
+                        message,
+                    },
+                    task,
+                )
+                .await?;
+                slots[orig_idx] = Some(tool_result);
             }
         }
 
-        self.apply_event(
-            event_tx,
-            AgentEvent::ToolCallDispatched {
-                id: id.clone(),
-                name: name.clone(),
-            },
-            task,
-        )
-        .await?;
+        for slot in slots.iter().take(n) {
+            let r = match slot {
+                Some(v) => v,
+                None => {
+                    return Err(AgentError::SessionFailed {
+                        message: "internal: missing tool result slot".into(),
+                    });
+                }
+            };
+            self.append_tool_message(&r.call_id, &r.tool_name, r.output.clone())?;
+        }
 
-        let ctx = ToolContext::new(self.sandbox.as_ref().clone(), Arc::clone(&self.policy));
-        let output = self.tools[tool_idx].execute(args, &ctx).await;
-        let (success, message) = summarize_tool_output(&output);
-
-        self.apply_event(
-            event_tx,
-            AgentEvent::ToolCallCompleted {
-                id: id.clone(),
-                name: name.clone(),
-                success,
-                message: message.clone(),
-            },
-            task,
-        )
-        .await?;
-
-        self.append_tool_message(&id, &name, output)?;
         Ok(())
     }
 
@@ -719,6 +883,7 @@ impl AgentSession {
                     return Ok(());
                 }
                 Ok(StreamEvent::TextDelta { text }) => summary_text.push_str(&text),
+                Ok(StreamEvent::UsageReport(_)) => {}
                 Ok(StreamEvent::Error { error }) => {
                     eprintln!("akmon: warning: context summarization stream error: {error}");
                     self.restore_state_after_summarization_abort();
@@ -857,16 +1022,50 @@ impl AgentSession {
                     iteration: *iteration,
                 })
             }
+            (AgentState::Planning { task, iteration }, AgentEvent::UsageReport { .. }) => {
+                Ok(AgentState::Planning {
+                    task: task.clone(),
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Thinking { iteration }, AgentEvent::UsageReport { .. }) => {
+                Ok(AgentState::Thinking {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::ToolExecution { iteration }, AgentEvent::UsageReport { .. }) => {
+                Ok(AgentState::ToolExecution {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Summarizing { iteration }, AgentEvent::UsageReport { .. }) => {
+                Ok(AgentState::Summarizing {
+                    iteration: *iteration,
+                })
+            }
             (AgentState::Thinking { .. }, AgentEvent::Done) => Ok(AgentState::Complete),
             (AgentState::Thinking { iteration }, AgentEvent::ToolCallDispatched { .. }) => {
                 Ok(AgentState::ToolExecution {
                     iteration: *iteration,
                 })
             }
-            (AgentState::ToolExecution { iteration }, AgentEvent::ToolCallCompleted { .. }) => {
-                Ok(AgentState::Thinking {
+            (AgentState::ToolExecution { iteration }, AgentEvent::ToolCallDispatched { .. }) => {
+                Ok(AgentState::ToolExecution {
                     iteration: *iteration,
                 })
+            }
+            (AgentState::ToolExecution { iteration }, AgentEvent::ToolCallCompleted { .. }) => {
+                if self.parallel_tool_batch_remaining <= 1 {
+                    self.parallel_tool_batch_remaining = 0;
+                    Ok(AgentState::Thinking {
+                        iteration: *iteration,
+                    })
+                } else {
+                    self.parallel_tool_batch_remaining -= 1;
+                    Ok(AgentState::ToolExecution {
+                        iteration: *iteration,
+                    })
+                }
             }
             (
                 AgentState::Thinking { iteration },
@@ -948,6 +1147,29 @@ impl AgentSession {
         };
 
         validate_transition(&self.state, &event)?;
+        if let AgentEvent::UsageReport {
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+        } = &event
+        {
+            self.last_usage = Some(UsageReport {
+                input_tokens: *input_tokens,
+                output_tokens: *output_tokens,
+                cache_creation_tokens: *cache_creation_tokens,
+                cache_read_tokens: *cache_read_tokens,
+            });
+            self.total_input_tokens = self
+                .total_input_tokens
+                .saturating_add(*input_tokens);
+            self.total_cache_read_tokens = self
+                .total_cache_read_tokens
+                .saturating_add(*cache_read_tokens);
+            self.total_output_tokens = self
+                .total_output_tokens
+                .saturating_add(*output_tokens);
+        }
         self.state = self.next_state_after(&event, task)?;
         self.audit_log.push(AuditEvent::AgentStep {
             session_id: self.config.session_id.to_string(),
@@ -968,6 +1190,22 @@ fn summarize_tool_output(output: &ToolOutput) -> (bool, String) {
     match output {
         ToolOutput::Success { content } => (true, content.clone()),
         ToolOutput::Error { message, .. } => (false, message.clone()),
+    }
+}
+
+/// Runs one tool after policy approval (no events; used for parallel [`Tool::execute`]).
+pub async fn execute_single_tool_call(
+    call: &PendingToolCall,
+    tool: &dyn Tool,
+    ctx: &ToolContext,
+) -> ToolCallResult {
+    let output = tool.execute(call.arguments.clone(), ctx).await;
+    let (success, _) = summarize_tool_output(&output);
+    ToolCallResult {
+        call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        output,
+        success,
     }
 }
 
@@ -1063,6 +1301,11 @@ fn concrete_permissions(
                 tool.required_permissions().to_vec()
             }
         }
+        "semantic_search" => {
+            vec![Permission::ReadFile {
+                path: PathBuf::from("."),
+            }]
+        }
         _ => tool.required_permissions().to_vec(),
     }
 }
@@ -1071,10 +1314,11 @@ fn concrete_permissions(
 mod tests {
     use super::*;
 
-    use akmon_core::PolicyEngine;
+    use akmon_core::{PolicyEngine, PolicyEngineMode};
     use async_trait::async_trait;
     use futures::stream;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
     use uuid::Uuid;
 
     fn test_sandbox(dir: &std::path::Path) -> Arc<Sandbox> {
@@ -1135,7 +1379,7 @@ mod tests {
         }
 
         fn context_window_tokens(&self) -> usize {
-            4096
+            200_000
         }
 
         async fn complete(
@@ -1170,7 +1414,7 @@ mod tests {
         }
 
         fn context_window_tokens(&self) -> usize {
-            4096
+            200_000
         }
 
         async fn complete(
@@ -1346,6 +1590,396 @@ mod tests {
             }
         }
         assert!(saw, "expected failed ToolCallCompleted for unknown tool");
+    }
+
+    /// Test-only tool that sleeps then returns a marker (for parallel timing / ordering tests).
+    struct DelayTool {
+        id: &'static str,
+        ms: u64,
+    }
+
+    fn delay_tool_perms() -> &'static [Permission] {
+        static CELL: std::sync::OnceLock<Vec<Permission>> = std::sync::OnceLock::new();
+        CELL.get_or_init(|| {
+            vec![Permission::ReadFile {
+                path: PathBuf::from("."),
+            }]
+        })
+        .as_slice()
+    }
+
+    #[async_trait]
+    impl Tool for DelayTool {
+        fn name(&self) -> &str {
+            self.id
+        }
+
+        fn description(&self) -> &str {
+            "delay test tool"
+        }
+
+        fn required_permissions(&self) -> &[Permission] {
+            delay_tool_perms()
+        }
+
+        async fn execute(
+            &self,
+            _args: Value,
+            _ctx: &ToolContext,
+        ) -> ToolOutput {
+            tokio::time::sleep(std::time::Duration::from_millis(self.ms)).await;
+            ToolOutput::Success {
+                content: format!("done-{}", self.id),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn two_parallel_reads_context_order_matches_request_order() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let p1 = dir.path().join("a.txt");
+        let p2 = dir.path().join("b.txt");
+        tokio::fs::write(&p1, b"alpha").await.expect("w");
+        tokio::fs::write(&p2, b"beta").await.expect("w");
+
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![
+                    ModelToolCall {
+                        id: "1".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path": "a.txt"}),
+                    },
+                    ModelToolCall {
+                        id: "2".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path": "b.txt"}),
+                    },
+                ],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![Box::new(akmon_tools::ReadFileTool::new())],
+            sandbox,
+            None,
+        );
+
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("x".into(), ev_tx, &mut no_policy)
+            .await
+            .expect("run");
+
+        let tool_msgs: Vec<_> = session
+            .context
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 2);
+        assert!(tool_msgs[0].content.contains("a.txt") || tool_msgs[0].content.contains("alpha"));
+        assert!(tool_msgs[1].content.contains("b.txt") || tool_msgs[1].content.contains("beta"));
+        assert!(tool_msgs[0].content.contains("\"tool_call_id\":\"1\""));
+        assert!(tool_msgs[1].content.contains("\"tool_call_id\":\"2\""));
+    }
+
+    #[tokio::test]
+    async fn session_accumulates_usage_totals_across_model_rounds() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        tokio::fs::write(dir.path().join("f.txt"), b"x")
+            .await
+            .expect("w");
+
+        let seq = SeqProvider::new(vec![
+            vec![
+                Ok(StreamEvent::UsageReport(UsageReport {
+                    input_tokens: 100,
+                    output_tokens: 5,
+                    cache_creation_tokens: 80,
+                    cache_read_tokens: 0,
+                })),
+                Ok(StreamEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    tool_calls: vec![ModelToolCall {
+                        id: "1".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path": "f.txt"}),
+                    }],
+                }),
+            ],
+            vec![
+                Ok(StreamEvent::UsageReport(UsageReport {
+                    input_tokens: 200,
+                    output_tokens: 12,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 150,
+                })),
+                Ok(StreamEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                }),
+            ],
+        ]);
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![Box::new(akmon_tools::ReadFileTool::new())],
+            sandbox,
+            None,
+        );
+
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy)
+            .await
+            .expect("run");
+
+        assert_eq!(session.total_input_tokens(), 300);
+        assert_eq!(session.total_cache_read_tokens(), 150);
+        assert_eq!(session.total_output_tokens(), 17);
+        let last = session.last_usage().expect("last usage");
+        assert_eq!(last.input_tokens, 200);
+        assert_eq!(last.cache_read_tokens, 150);
+    }
+
+    #[tokio::test]
+    async fn parallel_delay_tools_complete_in_wall_time_not_sum() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![
+                    ModelToolCall {
+                        id: "a".into(),
+                        name: "d100a".into(),
+                        arguments: json!({}),
+                    },
+                    ModelToolCall {
+                        id: "b".into(),
+                        name: "d100b".into(),
+                        arguments: json!({}),
+                    },
+                ],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![
+                Box::new(DelayTool {
+                    id: "d100a",
+                    ms: 100,
+                }),
+                Box::new(DelayTool {
+                    id: "d100b",
+                    ms: 100,
+                }),
+            ],
+            sandbox,
+            None,
+        );
+
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        let t0 = Instant::now();
+        session
+            .run("x".into(), ev_tx, &mut no_policy)
+            .await
+            .expect("run");
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed.as_millis() < 180,
+            "expected ~100ms parallel wall time, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_denies_one_parallel_call_other_still_executes() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let p = dir.path().join("r.txt");
+        tokio::fs::write(&p, b"ok").await.expect("w");
+
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![
+                    ModelToolCall {
+                        id: "r1".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path": "r.txt"}),
+                    },
+                    ModelToolCall {
+                        id: "w1".into(),
+                        name: "write_file".into(),
+                        arguments: json!({"path": "x.txt", "content": "n"}),
+                    },
+                ],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: false,
+            })),
+            Arc::new(seq),
+            vec![
+                Box::new(akmon_tools::ReadFileTool::new()),
+                Box::new(akmon_tools::WriteFileTool::new()),
+            ],
+            sandbox,
+            None,
+        );
+
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("x".into(), ev_tx, &mut no_policy)
+            .await
+            .expect("run");
+
+        let tool_msgs: Vec<_> = session
+            .context
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 2);
+        assert!(
+            tool_msgs[0].content.contains("ok"),
+            "first tool should be successful read, got {}",
+            tool_msgs[0].content
+        );
+        assert!(
+            tool_msgs[1].content.contains("policy denied")
+                || tool_msgs[1].content.contains("PermissionDenied"),
+            "second should be write denial, got {}",
+            tool_msgs[1].content
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_results_appended_in_request_order_not_completion_order() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![
+                    ModelToolCall {
+                        id: "slow".into(),
+                        name: "slow_z".into(),
+                        arguments: json!({}),
+                    },
+                    ModelToolCall {
+                        id: "fast".into(),
+                        name: "fast_a".into(),
+                        arguments: json!({}),
+                    },
+                ],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![
+                Box::new(DelayTool {
+                    id: "slow_z",
+                    ms: 120,
+                }),
+                Box::new(DelayTool {
+                    id: "fast_a",
+                    ms: 15,
+                }),
+            ],
+            sandbox,
+            None,
+        );
+
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("x".into(), ev_tx, &mut no_policy)
+            .await
+            .expect("run");
+
+        let tool_msgs: Vec<_> = session
+            .context
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 2);
+        assert!(
+            tool_msgs[0].content.contains("done-slow_z"),
+            "first slot must be slow tool (request order), got {}",
+            tool_msgs[0].content
+        );
+        assert!(
+            tool_msgs[1].content.contains("done-fast_a"),
+            "second slot must be fast tool, got {}",
+            tool_msgs[1].content
+        );
     }
 
     #[tokio::test]

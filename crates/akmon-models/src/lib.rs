@@ -11,14 +11,14 @@ mod stream;
 mod tool_def;
 
 pub use anthropic::{
-    AnthropicBackend, DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_CONTEXT_WINDOW,
-    DEFAULT_ANTHROPIC_MODEL,
+    anthropic_system_block_text, AnthropicBackend, DEFAULT_ANTHROPIC_BASE_URL,
+    DEFAULT_ANTHROPIC_CONTEXT_WINDOW, DEFAULT_ANTHROPIC_MODEL,
 };
 pub use config::CompletionConfig;
 pub use error::ModelError;
 pub use message::{Message, MessageRole};
 pub use ollama::OllamaBackend;
-pub use stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent};
+pub use stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 pub use tool_def::ToolDefinition;
 
 use async_trait::async_trait;

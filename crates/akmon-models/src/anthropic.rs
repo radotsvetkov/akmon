@@ -16,15 +16,15 @@ use tokio::sync::mpsc;
 use crate::config::CompletionConfig;
 use crate::error::ModelError;
 use crate::message::{Message, MessageRole};
-use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent};
+use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 use crate::tool_def::ToolDefinition;
 use crate::LlmProvider;
 
 /// Default Anthropic Messages API host (no trailing slash).
 pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
-/// Default model id for [`AnthropicBackend::new`] (Anthropic API alias for Claude Haiku 4.5).
-pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
+/// Default model id for [`AnthropicBackend::new`] (dated Claude Haiku 4.5 snapshot; required for stable behavior and prompt caching).
+pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// Default advertised context window for Claude 3.5 Haiku-class models.
 pub const DEFAULT_ANTHROPIC_CONTEXT_WINDOW: usize = 200_000;
@@ -98,6 +98,13 @@ fn build_anthropic_http_client() -> reqwest::Client {
         Ok(c) => c,
         Err(_) => reqwest::Client::new(),
     }
+}
+
+/// Joins all [`MessageRole::System`] bodies in order with `\n\n`.
+///
+/// Matches the `text` field of the cached `system` block sent by [`AnthropicBackend`].
+pub fn anthropic_system_block_text(messages: &[Message]) -> String {
+    anthropic_system_and_rest(messages).0
 }
 
 /// Concatenates all [`MessageRole::System`] bodies in order with `\n\n`; returns non-system
@@ -207,11 +214,17 @@ fn anthropic_tools_from_config(config: &CompletionConfig) -> Vec<Value> {
         .collect()
 }
 
+fn u32_from_json_token_field(v: Option<&Value>) -> u32 {
+    v.and_then(|x| x.as_u64())
+        .map(|n| (n.min(u64::from(u32::MAX))) as u32)
+        .unwrap_or(0)
+}
+
 fn build_request_json(
     model: &str,
     system: &str,
     messages: Vec<Value>,
-    tools: Vec<Value>,
+    mut tools: Vec<Value>,
     config: &CompletionConfig,
 ) -> Value {
     let mut map = serde_json::Map::new();
@@ -220,10 +233,25 @@ fn build_request_json(
     map.insert("stream".to_string(), json!(true));
     map.insert("temperature".to_string(), json!(config.temperature));
     if !system.is_empty() {
-        map.insert("system".to_string(), json!(system));
+        map.insert(
+            "system".to_string(),
+            json!([{
+                "type": "text",
+                "text": system,
+                "cache_control": { "type": "ephemeral" }
+            }]),
+        );
     }
     map.insert("messages".to_string(), Value::Array(messages));
     if !tools.is_empty() {
+        if let Some(last) = tools.last_mut() {
+            if let Some(obj) = last.as_object_mut() {
+                obj.insert(
+                    "cache_control".to_string(),
+                    json!({ "type": "ephemeral" }),
+                );
+            }
+        }
         map.insert("tools".to_string(), Value::Array(tools));
     }
     Value::Object(map)
@@ -341,10 +369,27 @@ fn apply_anthropic_sse_json(
     v: &Value,
     tool_builds: &mut BTreeMap<usize, ToolAccum>,
     finished_tools: &mut BTreeMap<usize, ModelToolCall>,
+    usage_acc: &mut Option<UsageReport>,
 ) -> Result<Vec<StreamEvent>, ModelError> {
     let mut out: Vec<StreamEvent> = Vec::new();
     let ty = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
     match ty {
+        "message_start" => {
+            if let Some(msg) = v.get("message") {
+                if let Some(u) = msg.get("usage") {
+                    *usage_acc = Some(UsageReport {
+                        input_tokens: u32_from_json_token_field(u.get("input_tokens")),
+                        output_tokens: u32_from_json_token_field(u.get("output_tokens")),
+                        cache_creation_tokens: u32_from_json_token_field(
+                            u.get("cache_creation_input_tokens"),
+                        ),
+                        cache_read_tokens: u32_from_json_token_field(
+                            u.get("cache_read_input_tokens"),
+                        ),
+                    });
+                }
+            }
+        }
         "error" => {
             let msg = v
                 .pointer("/error/message")
@@ -415,6 +460,25 @@ fn apply_anthropic_sse_json(
             }
         }
         "message_delta" => {
+            if let Some(u) = v.get("usage") {
+                if let Some(acc) = usage_acc.as_mut() {
+                    if u.get("input_tokens").is_some() {
+                        acc.input_tokens = u32_from_json_token_field(u.get("input_tokens"));
+                    }
+                    if u.get("output_tokens").is_some() {
+                        acc.output_tokens = u32_from_json_token_field(u.get("output_tokens"));
+                    }
+                    if u.get("cache_creation_input_tokens").is_some() {
+                        acc.cache_creation_tokens = u32_from_json_token_field(
+                            u.get("cache_creation_input_tokens"),
+                        );
+                    }
+                    if u.get("cache_read_input_tokens").is_some() {
+                        acc.cache_read_tokens =
+                            u32_from_json_token_field(u.get("cache_read_input_tokens"));
+                    }
+                }
+            }
             if let Some(delta) = v.get("delta") {
                 if let Some(sr) = delta.get("stop_reason").and_then(|x| x.as_str()) {
                     let stop = match sr {
@@ -424,6 +488,9 @@ fn apply_anthropic_sse_json(
                         _ => StopReason::EndTurn,
                     };
                     let tool_calls: Vec<ModelToolCall> = finished_tools.values().cloned().collect();
+                    if let Some(snap) = usage_acc.as_ref() {
+                        out.push(StreamEvent::UsageReport(snap.clone()));
+                    }
                     out.push(StreamEvent::Done {
                         stop_reason: stop,
                         tool_calls,
@@ -513,6 +580,7 @@ async fn run_anthropic_stream(
 
     let mut tool_builds: BTreeMap<usize, ToolAccum> = BTreeMap::new();
     let mut finished_tools: BTreeMap<usize, ModelToolCall> = BTreeMap::new();
+    let mut usage_acc: Option<UsageReport> = None;
     let mut done_sent = false;
 
     let mut pending_block: Option<String> = Some(first);
@@ -539,7 +607,12 @@ async fn run_anthropic_stream(
             }
         };
 
-        let events = match apply_anthropic_sse_json(&v, &mut tool_builds, &mut finished_tools) {
+        let events = match apply_anthropic_sse_json(
+            &v,
+            &mut tool_builds,
+            &mut finished_tools,
+            &mut usage_acc,
+        ) {
             Ok(evs) => evs,
             Err(e) => {
                 let _ = tx.send(Err(e)).await;
@@ -562,6 +635,9 @@ async fn run_anthropic_stream(
     }
 
     if !done_sent {
+        if let Some(ref snap) = usage_acc {
+            let _ = tx.send(Ok(StreamEvent::UsageReport(snap.clone()))).await;
+        }
         let _ = tx
             .send(Ok(StreamEvent::Done {
                 stop_reason: StopReason::EndTurn,
@@ -609,12 +685,13 @@ impl LlmProvider for AnthropicBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompletionConfig;
     use static_assertions::assert_not_impl_any;
 
     #[test]
     fn anthropic_backend_new_default_model_and_base_url() {
-        let b = AnthropicBackend::new(Secret::new("k".to_string()), "claude-haiku-4-5");
-        assert_eq!(b.model(), "claude-haiku-4-5");
+        let b = AnthropicBackend::new(Secret::new("k".to_string()), DEFAULT_ANTHROPIC_MODEL);
+        assert_eq!(b.model(), DEFAULT_ANTHROPIC_MODEL);
         assert_eq!(b.base_url(), DEFAULT_ANTHROPIC_BASE_URL);
     }
 
@@ -653,5 +730,99 @@ mod tests {
         assert_eq!(sys, "a\n\nb");
         assert_eq!(rest.len(), 1);
         assert_eq!(rest[0].content, "hi");
+        assert_eq!(anthropic_system_block_text(&msgs), "a\n\nb");
+    }
+
+    #[test]
+    fn message_delta_updates_cache_token_fields_from_usage() {
+        let mut tool_builds = BTreeMap::new();
+        let mut finished_tools = BTreeMap::new();
+        let mut usage_acc = Some(UsageReport {
+            input_tokens: 10,
+            output_tokens: 0,
+            cache_creation_tokens: 9999,
+            cache_read_tokens: 0,
+        });
+        let v = json!({
+            "type": "message_delta",
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 7,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 8779
+            },
+            "delta": { "stop_reason": "end_turn" }
+        });
+        let out = apply_anthropic_sse_json(
+            &v,
+            &mut tool_builds,
+            &mut finished_tools,
+            &mut usage_acc,
+        )
+        .expect("parse");
+        assert!(out.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
+        let snap = usage_acc.as_ref().expect("usage");
+        assert_eq!(snap.input_tokens, 50);
+        assert_eq!(snap.output_tokens, 7);
+        assert_eq!(snap.cache_creation_tokens, 0);
+        assert_eq!(snap.cache_read_tokens, 8779);
+    }
+
+    #[test]
+    fn request_json_system_is_cached_content_block_array_when_non_empty() {
+        let cfg = CompletionConfig::default();
+        let body = build_request_json(
+            "claude-test",
+            "system prompt body",
+            vec![],
+            vec![],
+            &cfg,
+        );
+        let sys = body.get("system").expect("system key");
+        let arr = sys.as_array().expect("system must be array");
+        assert_eq!(arr.len(), 1);
+        let block = &arr[0];
+        assert_eq!(block.get("type"), Some(&json!("text")));
+        assert_eq!(block.get("text"), Some(&json!("system prompt body")));
+        assert_eq!(
+            block.get("cache_control"),
+            Some(&json!({ "type": "ephemeral" }))
+        );
+    }
+
+    #[test]
+    fn request_json_omits_system_when_empty() {
+        let cfg = CompletionConfig::default();
+        let body = build_request_json("m", "", vec![], vec![], &cfg);
+        assert!(body.get("system").is_none());
+    }
+
+    #[test]
+    fn request_json_tools_have_cache_control_on_last_only() {
+        let cfg = CompletionConfig::default();
+        let tools = vec![
+            json!({
+                "name": "list_directory",
+                "description": "d0",
+                "input_schema": {},
+            }),
+            json!({
+                "name": "read_file",
+                "description": "d1",
+                "input_schema": {},
+            }),
+        ];
+        let body = build_request_json("m", "", vec![], tools, &cfg);
+        let arr = body
+            .get("tools")
+            .expect("tools")
+            .as_array()
+            .expect("tools array");
+        assert_eq!(arr.len(), 2);
+        assert!(arr[0].get("cache_control").is_none());
+        assert_eq!(
+            arr[1].get("cache_control"),
+            Some(&json!({ "type": "ephemeral" }))
+        );
     }
 }
