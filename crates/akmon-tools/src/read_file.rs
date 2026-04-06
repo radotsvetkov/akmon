@@ -9,9 +9,9 @@ use serde_json::Value as JsonValue;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::Tool;
 
 /// Default maximum bytes read to cap memory and token blow-up (1 MiB).
 pub const DEFAULT_MAX_READ_BYTES: usize = 1024 * 1024;
@@ -168,7 +168,11 @@ impl Tool for ReadFileTool {
         };
 
         let mut buf = Vec::new();
-        if let Err(e) = file.take(self.max_bytes as u64 + 1).read_to_end(&mut buf).await {
+        if let Err(e) = file
+            .take(self.max_bytes as u64 + 1)
+            .read_to_end(&mut buf)
+            .await
+        {
             return ToolOutput::Error {
                 code: ToolErrorCode::PermissionDenied,
                 message: format!("read failed: {e}"),
@@ -218,14 +222,14 @@ mod tests {
         tokio::fs::write(&p, b"hello").await.expect("write");
         let tool = ReadFileTool::new();
         let out = tool
-            .execute(
-                json!({ "path": "a.txt" }),
-                &ctx(dir.path()),
-            )
+            .execute(json!({ "path": "a.txt" }), &ctx(dir.path()))
             .await;
-        assert_eq!(out, ToolOutput::Success {
-            content: "hello".into(),
-        });
+        assert_eq!(
+            out,
+            ToolOutput::Success {
+                content: "hello".into(),
+            }
+        );
     }
 
     #[tokio::test]
@@ -237,10 +241,7 @@ mod tests {
         tokio::fs::create_dir_all(&outside).await.expect("mkdir");
         let tool = ReadFileTool::new();
         let out = tool
-            .execute(
-                json!({ "path": "../outside" }),
-                &ctx(&inside),
-            )
+            .execute(json!({ "path": "../outside" }), &ctx(&inside))
             .await;
         assert!(matches!(
             out,
@@ -256,10 +257,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let tool = ReadFileTool::new();
         let out = tool
-            .execute(
-                json!({ "path": "nope.txt" }),
-                &ctx(dir.path()),
-            )
+            .execute(json!({ "path": "nope.txt" }), &ctx(dir.path()))
             .await;
         assert!(matches!(
             out,
@@ -273,13 +271,12 @@ mod tests {
     #[tokio::test]
     async fn read_not_a_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        tokio::fs::create_dir_all(dir.path().join("sub")).await.expect("mkdir");
+        tokio::fs::create_dir_all(dir.path().join("sub"))
+            .await
+            .expect("mkdir");
         let tool = ReadFileTool::new();
         let out = tool
-            .execute(
-                json!({ "path": "sub" }),
-                &ctx(dir.path()),
-            )
+            .execute(json!({ "path": "sub" }), &ctx(dir.path()))
             .await;
         assert!(matches!(
             out,
@@ -294,13 +291,12 @@ mod tests {
     async fn read_binary_content() {
         let dir = tempfile::tempdir().expect("tempdir");
         let p = dir.path().join("b.bin");
-        tokio::fs::write(&p, &[0xFFu8, 0xFEu8]).await.expect("write");
+        tokio::fs::write(&p, &[0xFFu8, 0xFEu8])
+            .await
+            .expect("write");
         let tool = ReadFileTool::new();
         let out = tool
-            .execute(
-                json!({ "path": "b.bin" }),
-                &ctx(dir.path()),
-            )
+            .execute(json!({ "path": "b.bin" }), &ctx(dir.path()))
             .await;
         assert!(matches!(
             out,

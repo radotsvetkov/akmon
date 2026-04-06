@@ -8,9 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::TuiApp;
 use crate::config::TuiLaunchConfig;
 use crate::message::TuiMessage;
-use crate::TuiApp;
 
 #[derive(Debug, Serialize)]
 struct PersistedSession {
@@ -219,9 +219,8 @@ pub fn save_session_snapshot(
         total_cache_read_tokens: app.total_cache_read_tokens,
         total_output_tokens: app.total_output_tokens,
     };
-    let json = serde_json::to_string_pretty(&doc).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("session json: {e}"))
-    })?;
+    let json = serde_json::to_string_pretty(&doc)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("session json: {e}")))?;
     fs::write(&path, json)?;
     Ok(path)
 }

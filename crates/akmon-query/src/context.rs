@@ -121,7 +121,12 @@ fn format_project_context(project_root: &str, tool_names: &[&str], plan_mode: bo
     let has_semantic = tool_names.contains(&"semantic_search");
     let has_web_fetch = tool_names.contains(&"web_fetch");
     if plan_mode {
-        return format_project_context_plan_mode(project_root, tool_names, has_semantic, has_web_fetch);
+        return format_project_context_plan_mode(
+            project_root,
+            tool_names,
+            has_semantic,
+            has_web_fetch,
+        );
     }
     let tools_line = tool_names.join(", ");
     let has_git = tool_names.contains(&"git");
@@ -379,7 +384,11 @@ mod tests {
         let msgs = build_messages(Some("rules"), &[], "do it", "/repo", &["read_file"], false);
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, MessageRole::System);
-        assert!(msgs[0].content.contains("Project configuration (AKMON.md):"));
+        assert!(
+            msgs[0]
+                .content
+                .contains("Project configuration (AKMON.md):")
+        );
         assert!(msgs[0].content.contains(AKMON_MD_START));
         assert!(msgs[0].content.contains("rules"));
         assert!(msgs[0].content.contains(AKMON_MD_END));
@@ -486,16 +495,32 @@ mod tests {
 
     #[test]
     fn project_context_mentions_semantic_search_when_tool_enabled() {
-        let msgs = build_messages(None, &[], "t", "/repo", &["read_file", "semantic_search"], false);
+        let msgs = build_messages(
+            None,
+            &[],
+            "t",
+            "/repo",
+            &["read_file", "semantic_search"],
+            false,
+        );
         let ctx = msgs
             .iter()
             .find(|m| m.role == MessageRole::System && m.content.contains("semantic_search query="))
             .expect("project context should document semantic_search when listed");
         assert!(ctx.content.contains("STEP 1 — Understand the codebase"));
-        assert!(ctx.content.contains("semantic_search query=\"error handling\""));
+        assert!(
+            ctx.content
+                .contains("semantic_search query=\"error handling\"")
+        );
         assert!(ctx.content.contains("SEMANTIC SEARCH IS AVAILABLE."));
-        assert!(ctx.content.contains("Examples of good semantic_search queries"));
-        assert!(ctx.content.contains("Examples of bad semantic_search queries"));
+        assert!(
+            ctx.content
+                .contains("Examples of good semantic_search queries")
+        );
+        assert!(
+            ctx.content
+                .contains("Examples of bad semantic_search queries")
+        );
     }
 
     #[test]

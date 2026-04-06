@@ -1,15 +1,13 @@
 //! Layout helpers: convert [`TuiMessage`](crate::message::TuiMessage) rows into ratatui [`Line`]s.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use ratatui::Frame;
 
 use crate::message::TuiMessage;
-use crate::theme::{
-    ACCENT, ACCENT_DIM, ERR, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN,
-};
+use crate::theme::{ACCENT, ACCENT_DIM, ERR, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN};
 use crate::welcome::render_welcome;
 
 /// Paints the scrollable transcript area: branded welcome when `show_welcome`, otherwise `visible` lines.
@@ -93,7 +91,11 @@ pub fn message_line_count(msg: &TuiMessage, width: u16) -> usize {
 }
 
 /// Flattens one logical message into styled lines for the scroll buffer.
-pub fn message_to_lines(msg: &TuiMessage, width: u16, stream_cursor_visible: bool) -> Vec<Line<'static>> {
+pub fn message_to_lines(
+    msg: &TuiMessage,
+    width: u16,
+    stream_cursor_visible: bool,
+) -> Vec<Line<'static>> {
     let w = width.max(12) as usize;
     match msg {
         TuiMessage::User { content } => {
@@ -102,25 +104,18 @@ pub fn message_to_lines(msg: &TuiMessage, width: u16, stream_cursor_visible: boo
                 out.push(Line::from(vec![
                     Span::styled(
                         "You: ",
-                        Style::default()
-                            .fg(ACCENT_DIM)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(ACCENT_DIM).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(line, Style::default().fg(FG_PRIMARY)),
                 ]));
             }
             out
         }
-        TuiMessage::Assistant {
-            content,
-            complete,
-        } => {
+        TuiMessage::Assistant { content, complete } => {
             let mut out = Vec::new();
             out.push(Line::from(vec![Span::styled(
                 "Akmon: ",
-                Style::default()
-                    .fg(ACCENT)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )]));
             out.extend(assistant_body_lines(content, w));
             if !complete {
@@ -159,8 +154,8 @@ pub fn message_to_lines(msg: &TuiMessage, width: u16, stream_cursor_visible: boo
                 ),
             ]));
             if *expanded {
-                let args_s = serde_json::to_string_pretty(args)
-                    .unwrap_or_else(|_| args.to_string());
+                let args_s =
+                    serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
                 out.push(Line::from(vec![Span::styled(
                     "  args:",
                     Style::default().add_modifier(Modifier::BOLD),
@@ -180,7 +175,10 @@ pub fn message_to_lines(msg: &TuiMessage, width: u16, stream_cursor_visible: boo
                 }
             } else if let (Some(false), Some(r)) = (success, result) {
                 let short: String = r.chars().take(80).collect();
-                out.push(Line::from(vec![Span::styled(short, Style::default().fg(ERR))]));
+                out.push(Line::from(vec![Span::styled(
+                    short,
+                    Style::default().fg(ERR),
+                )]));
             }
             out
         }
@@ -194,7 +192,9 @@ pub fn message_to_lines(msg: &TuiMessage, width: u16, stream_cursor_visible: boo
                 Style::default().fg(WARN),
             )])];
             if *answered {
-                let a = answer.map(|b| if b { "allowed" } else { "denied" }).unwrap_or("?");
+                let a = answer
+                    .map(|b| if b { "allowed" } else { "denied" })
+                    .unwrap_or("?");
                 out.push(Line::from(vec![Span::styled(
                     format!("Answered: {a}"),
                     Style::default().fg(FG_MUTED),
@@ -212,15 +212,16 @@ pub fn message_to_lines(msg: &TuiMessage, width: u16, stream_cursor_visible: boo
             .map(|l| {
                 Line::from(vec![Span::styled(
                     l,
-                    Style::default()
-                        .fg(FG_MUTED)
-                        .add_modifier(Modifier::ITALIC),
+                    Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
                 )])
             })
             .collect(),
         TuiMessage::Error { content } => {
             let mut out = vec![Line::from(vec![
-                Span::styled("Error: ", Style::default().fg(ERR).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Error: ",
+                    Style::default().fg(ERR).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(content.clone(), Style::default().fg(ERR)),
             ])];
             if content.len() + 8 > w {
@@ -230,7 +231,10 @@ pub fn message_to_lines(msg: &TuiMessage, width: u16, stream_cursor_visible: boo
                     .map(|(i, l)| {
                         if i == 0 {
                             Line::from(vec![
-                                Span::styled("Error: ", Style::default().fg(ERR).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    "Error: ",
+                                    Style::default().fg(ERR).add_modifier(Modifier::BOLD),
+                                ),
                                 Span::styled(l, Style::default().fg(ERR)),
                             ])
                         } else {
@@ -358,7 +362,12 @@ mod tests {
         let lines = message_to_lines(&m, 80, true);
         let joined = lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("|");
         assert!(joined.contains("You:"));

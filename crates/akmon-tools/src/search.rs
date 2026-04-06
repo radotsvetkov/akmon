@@ -1,6 +1,6 @@
 //! Search for regex patterns in UTF-8 text files under the sandbox (read-only).
 
-use std::fs::{canonicalize, File};
+use std::fs::{File, canonicalize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -9,12 +9,12 @@ use akmon_core::{Permission, SandboxError};
 use async_trait::async_trait;
 use glob::Pattern as GlobPattern;
 use regex::RegexBuilder;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use walkdir::WalkDir;
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::Tool;
 
 /// Default maximum number of matching lines returned in one tool call.
 pub const DEFAULT_MAX_SEARCH_RESULTS: usize = 50;
@@ -149,10 +149,10 @@ fn run_search(
             continue;
         }
 
-        if let Some(ref g) = file_glob {
-            if !file_name_matches(g, path) {
-                continue;
-            }
+        if let Some(ref g) = file_glob
+            && !file_name_matches(g, path)
+        {
+            continue;
         }
 
         match file_looks_binary(path, meta.len()) {
@@ -388,10 +388,7 @@ mod tests {
         std::fs::write(&f, "hello\nworld\n").expect("write");
         let tool = SearchTool::new();
         let out = tool
-            .execute(
-                json!({"pattern": "world", "path": "."}),
-                &ctx(dir.path()),
-            )
+            .execute(json!({"pattern": "world", "path": "."}), &ctx(dir.path()))
             .await;
         let ToolOutput::Success { content } = out else {
             panic!("expected success: {out:?}");
@@ -432,10 +429,7 @@ mod tests {
         std::fs::write(dir.path().join("x.txt"), "abc\n").expect("w");
         let tool = SearchTool::new();
         let out = tool
-            .execute(
-                json!({"pattern": "zzz", "path": "."}),
-                &ctx(dir.path()),
-            )
+            .execute(json!({"pattern": "zzz", "path": "."}), &ctx(dir.path()))
             .await;
         let ToolOutput::Success { content } = out else {
             panic!("expected success");
@@ -496,10 +490,7 @@ mod tests {
         std::fs::write(dir.path().join("ok.txt"), "hi\n").expect("w");
         let tool = SearchTool::new();
         let out = tool
-            .execute(
-                json!({"pattern": "hi", "path": "."}),
-                &ctx(dir.path()),
-            )
+            .execute(json!({"pattern": "hi", "path": "."}), &ctx(dir.path()))
             .await;
         let ToolOutput::Success { content } = out else {
             panic!("expected success");

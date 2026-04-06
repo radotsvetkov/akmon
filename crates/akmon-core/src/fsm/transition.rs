@@ -68,7 +68,9 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
         (AgentState::Thinking { .. }, AgentEvent::ToolCallDispatched { .. }) => Ok(()), // → ToolExecution
 
         // Thinking + tool outcome without dispatch (unknown tool, policy block, etc.)
-        (AgentState::Thinking { .. }, AgentEvent::ToolCallCompleted { success: false, .. }) => Ok(()),
+        (AgentState::Thinking { .. }, AgentEvent::ToolCallCompleted { success: false, .. }) => {
+            Ok(())
+        }
 
         // Thinking + confirmation gate
         (AgentState::Thinking { .. }, AgentEvent::ConfirmationRequired { .. }) => {
@@ -85,7 +87,7 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
             } else {
                 Ok(())
             }
-        },
+        }
 
         // ToolExecution → Thinking or Failed (tool finished or errored)
         (AgentState::ToolExecution { .. }, AgentEvent::ToolCallCompleted { .. }) => Ok(()), // success or failure both legal events
@@ -152,123 +154,141 @@ mod tests {
 
     #[test]
     fn legal_idle_text_to_planning() {
-        assert!(validate_transition(
-            &AgentState::Idle,
-            &AgentEvent::TextDelta {
-                text: "hi".into(),
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &AgentState::Idle,
+                &AgentEvent::TextDelta { text: "hi".into() }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_idle_iteration_one() {
-        assert!(validate_transition(
-            &AgentState::Idle,
-            &AgentEvent::IterationStarted { n: 1, max: 25 }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &AgentState::Idle,
+                &AgentEvent::IterationStarted { n: 1, max: 25 }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_planning_text_to_thinking() {
-        assert!(validate_transition(
-            &planning(),
-            &AgentEvent::TextDelta {
-                text: "model".into(),
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &planning(),
+                &AgentEvent::TextDelta {
+                    text: "model".into(),
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_thinking_streaming_text_deltas() {
-        assert!(validate_transition(
-            &thinking(0),
-            &AgentEvent::TextDelta {
-                text: "chunk".into(),
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &thinking(0),
+                &AgentEvent::TextDelta {
+                    text: "chunk".into(),
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_thinking_tool_completed_without_dispatch() {
-        assert!(validate_transition(
-            &thinking(0),
-            &AgentEvent::ToolCallCompleted {
-                id: "1".into(),
-                name: "nope".into(),
-                success: false,
-                message: "tool not found".into(),
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &thinking(0),
+                &AgentEvent::ToolCallCompleted {
+                    id: "1".into(),
+                    name: "nope".into(),
+                    success: false,
+                    message: "tool not found".into(),
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_planning_model_error_to_failed() {
-        assert!(validate_transition(
-            &planning(),
-            &AgentEvent::Error {
-                error: AgentError::ModelError {
-                    message: "x".into(),
-                },
-                recoverable: false,
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &planning(),
+                &AgentEvent::Error {
+                    error: AgentError::ModelError {
+                        message: "x".into(),
+                    },
+                    recoverable: false,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_planning_policy_denied_to_failed() {
-        assert!(validate_transition(
-            &planning(),
-            &AgentEvent::Error {
-                error: AgentError::PolicyDenied {
-                    permission: "WriteFile".into(),
-                    reason: "sandbox".into(),
-                },
-                recoverable: false,
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &planning(),
+                &AgentEvent::Error {
+                    error: AgentError::PolicyDenied {
+                        permission: "WriteFile".into(),
+                        reason: "sandbox".into(),
+                    },
+                    recoverable: false,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_planning_iteration_limit_to_failed() {
-        assert!(validate_transition(
-            &planning(),
-            &AgentEvent::Error {
-                error: AgentError::IterationLimitReached { limit: 25 },
-                recoverable: false,
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &planning(),
+                &AgentEvent::Error {
+                    error: AgentError::IterationLimitReached { limit: 25 },
+                    recoverable: false,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_thinking_tool_dispatched() {
-        assert!(validate_transition(
-            &thinking(0),
-            &AgentEvent::ToolCallDispatched {
-                id: "1".into(),
-                name: "read".into(),
-                arguments: json!({}),
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &thinking(0),
+                &AgentEvent::ToolCallDispatched {
+                    id: "1".into(),
+                    name: "read".into(),
+                    arguments: json!({}),
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_thinking_confirmation_required() {
-        assert!(validate_transition(
-            &thinking(0),
-            &AgentEvent::ConfirmationRequired {
-                description: "rm".into(),
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &thinking(0),
+                &AgentEvent::ConfirmationRequired {
+                    description: "rm".into(),
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -278,169 +298,183 @@ mod tests {
 
     #[test]
     fn legal_thinking_truncated_failed() {
-        assert!(validate_transition(
-            &thinking(0),
-            &AgentEvent::Error {
-                error: AgentError::ResponseTruncated,
-                recoverable: false,
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &thinking(0),
+                &AgentEvent::Error {
+                    error: AgentError::ResponseTruncated,
+                    recoverable: false,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_tool_execution_completed() {
-        assert!(validate_transition(
-            &AgentState::ToolExecution { iteration: 0 },
-            &AgentEvent::ToolCallCompleted {
-                id: "1".into(),
-                name: "read".into(),
-                success: true,
-                message: String::new(),
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &AgentState::ToolExecution { iteration: 0 },
+                &AgentEvent::ToolCallCompleted {
+                    id: "1".into(),
+                    name: "read".into(),
+                    success: true,
+                    message: String::new(),
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_tool_execution_second_dispatched_stays_in_tool_execution() {
-        assert!(validate_transition(
-            &AgentState::ToolExecution { iteration: 0 },
-            &AgentEvent::ToolCallDispatched {
-                id: "2".into(),
-                name: "read".into(),
-                arguments: json!({}),
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &AgentState::ToolExecution { iteration: 0 },
+                &AgentEvent::ToolCallDispatched {
+                    id: "2".into(),
+                    name: "read".into(),
+                    arguments: json!({}),
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_tool_execution_tool_error() {
-        assert!(validate_transition(
-            &AgentState::ToolExecution { iteration: 0 },
-            &AgentEvent::Error {
-                error: AgentError::ToolError {
-                    tool: "bash".into(),
-                    message: "fail".into(),
-                },
-                recoverable: true,
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &AgentState::ToolExecution { iteration: 0 },
+                &AgentEvent::Error {
+                    error: AgentError::ToolError {
+                        tool: "bash".into(),
+                        message: "fail".into(),
+                    },
+                    recoverable: true,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_awaiting_confirmation_text() {
-        assert!(validate_transition(
-            &AgentState::AwaitingConfirmation { iteration: 0 },
-            &AgentEvent::TextDelta {
-                text: "yes".into(),
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &AgentState::AwaitingConfirmation { iteration: 0 },
+                &AgentEvent::TextDelta { text: "yes".into() }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_awaiting_confirmation_timeout_failed() {
-        assert!(validate_transition(
-            &AgentState::AwaitingConfirmation { iteration: 0 },
-            &AgentEvent::Error {
-                error: AgentError::SessionFailed {
-                    message: "confirmation timeout".into(),
-                },
-                recoverable: false,
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &AgentState::AwaitingConfirmation { iteration: 0 },
+                &AgentEvent::Error {
+                    error: AgentError::SessionFailed {
+                        message: "confirmation timeout".into(),
+                    },
+                    recoverable: false,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_planning_usage_report() {
-        assert!(validate_transition(
-            &planning(),
-            &AgentEvent::UsageReport {
-                input_tokens: 1,
-                output_tokens: 2,
-                cache_creation_tokens: 0,
-                cache_read_tokens: 0,
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &planning(),
+                &AgentEvent::UsageReport {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_planning_summarization_started_to_summarizing() {
-        assert!(validate_transition(
-            &planning(),
-            &AgentEvent::SummarizationStarted,
-        )
-        .is_ok());
+        assert!(validate_transition(&planning(), &AgentEvent::SummarizationStarted,).is_ok());
     }
 
     #[test]
     fn legal_thinking_summarization_started_to_summarizing() {
-        assert!(validate_transition(
-            &thinking(0),
-            &AgentEvent::SummarizationStarted,
-        )
-        .is_ok());
+        assert!(validate_transition(&thinking(0), &AgentEvent::SummarizationStarted,).is_ok());
     }
 
     #[test]
     fn legal_summarizing_done_to_thinking() {
-        assert!(validate_transition(
-            &AgentState::Summarizing { iteration: 1 },
-            &AgentEvent::ContextSummarized {
-                messages_replaced: 10,
-                tokens_freed: 1000,
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &AgentState::Summarizing { iteration: 1 },
+                &AgentEvent::ContextSummarized {
+                    messages_replaced: 10,
+                    tokens_freed: 1000,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn legal_summarizing_model_error_failed() {
-        assert!(validate_transition(
-            &AgentState::Summarizing { iteration: 1 },
-            &AgentEvent::Error {
-                error: AgentError::ModelError {
-                    message: "summary failed".into(),
-                },
-                recoverable: false,
-            }
-        )
-        .is_ok());
+        assert!(
+            validate_transition(
+                &AgentState::Summarizing { iteration: 1 },
+                &AgentEvent::Error {
+                    error: AgentError::ModelError {
+                        message: "summary failed".into(),
+                    },
+                    recoverable: false,
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn illegal_five_cases() {
         assert!(validate_transition(&AgentState::Complete, &AgentEvent::Done).is_err());
-        assert!(validate_transition(
-            &AgentState::Idle,
-            &AgentEvent::ToolCallDispatched {
-                id: "1".into(),
-                name: "x".into(),
-                arguments: json!({}),
-            }
-        )
-        .is_err());
+        assert!(
+            validate_transition(
+                &AgentState::Idle,
+                &AgentEvent::ToolCallDispatched {
+                    id: "1".into(),
+                    name: "x".into(),
+                    arguments: json!({}),
+                }
+            )
+            .is_err()
+        );
         assert!(validate_transition(&planning(), &AgentEvent::Done).is_err());
-        assert!(validate_transition(
-            &thinking(0),
-            &AgentEvent::ContextSummarized {
-                messages_replaced: 0,
-                tokens_freed: 0,
-            }
-        )
-        .is_err());
-        assert!(validate_transition(
-            &AgentState::ToolExecution { iteration: 0 },
-            &AgentEvent::ConfirmationRequired {
-                description: "x".into(),
-            }
-        )
-        .is_err());
+        assert!(
+            validate_transition(
+                &thinking(0),
+                &AgentEvent::ContextSummarized {
+                    messages_replaced: 0,
+                    tokens_freed: 0,
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            validate_transition(
+                &AgentState::ToolExecution { iteration: 0 },
+                &AgentEvent::ConfirmationRequired {
+                    description: "x".into(),
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -460,10 +494,12 @@ mod tests {
 
     #[test]
     fn illegal_idle_iteration_not_one() {
-        assert!(validate_transition(
-            &AgentState::Idle,
-            &AgentEvent::IterationStarted { n: 2, max: 25 }
-        )
-        .is_err());
+        assert!(
+            validate_transition(
+                &AgentState::Idle,
+                &AgentEvent::IterationStarted { n: 2, max: 25 }
+            )
+            .is_err()
+        );
     }
 }

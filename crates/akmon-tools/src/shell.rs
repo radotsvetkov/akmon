@@ -10,9 +10,9 @@ use glob::Pattern;
 use serde_json::Value as JsonValue;
 use tokio::task::JoinHandle;
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::Tool;
 
 /// Default wall-clock limit for a single subprocess (seconds).
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -314,10 +314,7 @@ mod tests {
             panic!("expected error");
         };
         assert_eq!(code, ToolErrorCode::InvalidArgs);
-        assert!(
-            message.contains("not in allowlist"),
-            "message={message}"
-        );
+        assert!(message.contains("not in allowlist"), "message={message}");
     }
 
     #[tokio::test]
@@ -363,7 +360,9 @@ mod tests {
             .expect("big.bin should have a file name")
             .to_string_lossy();
         let cmd = format!("cat {name}");
-        let out = tool.execute(json!({"command": cmd}), &ctx(dir.path())).await;
+        let out = tool
+            .execute(json!({"command": cmd}), &ctx(dir.path()))
+            .await;
         let ToolOutput::Success { content } = out else {
             panic!("expected success: {out:?}");
         };

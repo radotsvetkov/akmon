@@ -1,22 +1,22 @@
 //! Agent session: owns FSM state, provider, tools, and the main query loop.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use akmon_core::{
-    check_iteration_limit, validate_transition, AgentConfig, AgentError, AgentEvent, AgentState,
-    AuditEvent, Permission, PolicyEngineError, PolicyEngineMode, PolicyVerdict, Sandbox,
+    AgentConfig, AgentError, AgentEvent, AgentState, AuditEvent, Permission, PolicyEngineError,
+    PolicyEngineMode, PolicyVerdict, Sandbox, check_iteration_limit, validate_transition,
 };
 use akmon_models::{
-    anthropic_system_block_text, approximate_tokens, CompletionConfig, CompletionStream,
-    LlmProvider, Message, MessageRole, ModelError, ModelToolCall, StopReason, StreamEvent,
-    ToolDefinition, UsageReport,
+    CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
+    ModelToolCall, StopReason, StreamEvent, ToolDefinition, UsageReport,
+    anthropic_system_block_text, approximate_tokens,
 };
 use akmon_tools::{Tool, ToolContext, ToolOutput};
 use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -226,10 +226,7 @@ impl AgentSession {
             AgentState::Idle => {}
             _ => {
                 return Err(AgentError::SessionFailed {
-                    message: format!(
-                        "cannot start a new turn from state {:?}",
-                        self.state
-                    ),
+                    message: format!("cannot start a new turn from state {:?}", self.state),
                 });
             }
         }
@@ -337,8 +334,7 @@ impl AgentSession {
                     user_line_committed,
                 )
                 .await?;
-                let tool_names: Vec<&str> =
-                    tool_name_strings.iter().map(|s| s.as_str()).collect();
+                let tool_names: Vec<&str> = tool_name_strings.iter().map(|s| s.as_str()).collect();
                 messages = if user_line_committed {
                     build_followup_messages(
                         self.akmon_md.as_deref(),
@@ -359,9 +355,7 @@ impl AgentSession {
                 };
             }
 
-            if std::env::var_os("AKMON_DEBUG_CACHE").as_deref()
-                == Some(std::ffi::OsStr::new("1"))
-            {
+            if std::env::var_os("AKMON_DEBUG_CACHE").as_deref() == Some(std::ffi::OsStr::new("1")) {
                 let sys = anthropic_system_block_text(&messages);
                 eprintln!(
                     "akmon: debug cache model_call={} system_joined_len={}",
@@ -371,26 +365,23 @@ impl AgentSession {
             }
 
             let completion_config = completion_config_for_tools(&self.tools);
-            let mut stream: CompletionStream = match self
-                .provider
-                .complete(&messages, &completion_config)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    let ae = map_model_error(e);
-                    self.apply_event(
-                        &event_tx,
-                        AgentEvent::Error {
-                            error: ae.clone(),
-                            recoverable: true,
-                        },
-                        &task,
-                    )
-                    .await?;
-                    return Err(ae);
-                }
-            };
+            let mut stream: CompletionStream =
+                match self.provider.complete(&messages, &completion_config).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let ae = map_model_error(e);
+                        self.apply_event(
+                            &event_tx,
+                            AgentEvent::Error {
+                                error: ae.clone(),
+                                recoverable: true,
+                            },
+                            &task,
+                        )
+                        .await?;
+                        return Err(ae);
+                    }
+                };
 
             let mut accumulated = String::new();
 
@@ -412,12 +403,8 @@ impl AgentSession {
                     Ok(StreamEvent::TextDelta { text }) => {
                         accumulated.push_str(&text);
                         self.result_text.push_str(&text);
-                        self.apply_event(
-                            &event_tx,
-                            AgentEvent::TextDelta { text },
-                            &task,
-                        )
-                        .await?;
+                        self.apply_event(&event_tx, AgentEvent::TextDelta { text }, &task)
+                            .await?;
                     }
                     Ok(StreamEvent::UsageReport(r)) => {
                         self.apply_event(
@@ -452,7 +439,9 @@ impl AgentSession {
                         if matches!(self.state, AgentState::Planning { .. }) {
                             self.apply_event(
                                 &event_tx,
-                                AgentEvent::TextDelta { text: String::new() },
+                                AgentEvent::TextDelta {
+                                    text: String::new(),
+                                },
                                 &task,
                             )
                             .await?;
@@ -473,8 +462,7 @@ impl AgentSession {
                                 return Err(ae);
                             }
                             StopReason::EndTurn => {
-                                self.apply_event(&event_tx, AgentEvent::Done, &task)
-                                    .await?;
+                                self.apply_event(&event_tx, AgentEvent::Done, &task).await?;
                                 if !user_line_committed {
                                     self.context.push(Message {
                                         role: MessageRole::User,
@@ -490,8 +478,7 @@ impl AgentSession {
                             StopReason::ToolUse => {
                                 if tool_calls.is_empty() {
                                     let ae = AgentError::ModelError {
-                                        message: "model returned ToolUse with no tool_calls"
-                                            .into(),
+                                        message: "model returned ToolUse with no tool_calls".into(),
                                     };
                                     self.apply_event(
                                         &event_tx,
@@ -524,25 +511,24 @@ impl AgentSession {
                                     content: assistant_record.to_string(),
                                 });
 
-                self.dispatch_tool_calls_batch(
-                    tool_calls,
-                    &event_tx,
-                    &task,
-                    interactive_policy_rx,
-                )
-                .await?;
+                                self.dispatch_tool_calls_batch(
+                                    tool_calls,
+                                    &event_tx,
+                                    &task,
+                                    interactive_policy_rx,
+                                )
+                                .await?;
 
-                if interrupt_after_current_tools
-                    .as_ref()
-                    .is_some_and(|f| f.load(Ordering::SeqCst))
-                {
-                    self.apply_event(&event_tx, AgentEvent::Done, &task)
-                        .await?;
-                    return Ok(());
-                }
+                                if interrupt_after_current_tools
+                                    .as_ref()
+                                    .is_some_and(|f| f.load(Ordering::SeqCst))
+                                {
+                                    self.apply_event(&event_tx, AgentEvent::Done, &task).await?;
+                                    return Ok(());
+                                }
 
-                iteration = iteration.saturating_add(1);
-                continue 'session;
+                                iteration = iteration.saturating_add(1);
+                                continue 'session;
                             }
                         }
                     }
@@ -653,7 +639,9 @@ impl AgentSession {
                                         )
                                     }
                                     Permission::NetworkFetch { url } => {
-                                        format!("Network fetch requires confirmation.\n  URL: {url}")
+                                        format!(
+                                            "Network fetch requires confirmation.\n  URL: {url}"
+                                        )
                                     }
                                     _ => format!("Permission required: {perm:?}"),
                                 };
@@ -700,7 +688,9 @@ impl AgentSession {
                                 self.audit_log.push(decision.audit.clone());
                                 self.apply_event(
                                     event_tx,
-                                    AgentEvent::TextDelta { text: String::new() },
+                                    AgentEvent::TextDelta {
+                                        text: String::new(),
+                                    },
                                     task,
                                 )
                                 .await?;
@@ -804,8 +794,7 @@ impl AgentSession {
                 let policy_c = Arc::clone(&policy);
                 unordered.push(async move {
                     let ctx = ToolContext::new((*sandbox_c).clone(), policy_c);
-                    let result =
-                        execute_single_tool_call(&pending, tool.as_ref(), &ctx).await;
+                    let result = execute_single_tool_call(&pending, tool.as_ref(), &ctx).await;
                     (orig, result)
                 });
             }
@@ -829,15 +818,14 @@ impl AgentSession {
                 if self.config.auto_commit
                     && self.sandbox.has_git_root
                     && tool_result.success
-                {
-                    if let Some(ev) = akmon_tools::try_auto_commit_after_file_tool(
+                    && let Some(ev) = akmon_tools::try_auto_commit_after_file_tool(
                         self.sandbox.primary_root(),
                         &self.config.session_id.to_string(),
                         &tool_result.tool_name,
                         &tool_result.arguments,
-                    ) {
-                        self.audit_log.push(ev);
-                    }
+                    )
+                {
+                    self.audit_log.push(ev);
                 }
                 slots[orig_idx] = Some(tool_result);
             }
@@ -895,18 +883,13 @@ impl AgentSession {
         let head = &messages_full[..main_end];
         let (to_s, _to_k) = self.context_manager.messages_to_summarize(head);
         if to_s.is_empty() {
-            eprintln!(
-                "akmon: context summarization skipped: nothing to fold under keep_recent"
-            );
+            eprintln!("akmon: context summarization skipped: nothing to fold under keep_recent");
             self.trim_oldest_non_system_fraction_of_context(0.2);
             return Ok(());
         }
 
         let resume = match &self.state {
-            AgentState::Planning {
-                task: t,
-                iteration,
-            } => AgentState::Planning {
+            AgentState::Planning { task: t, iteration } => AgentState::Planning {
                 task: t.clone(),
                 iteration: *iteration,
             },
@@ -1028,10 +1011,7 @@ impl AgentSession {
         head: &[Message],
         summary: Message,
     ) -> Result<(), AgentError> {
-        let n_fixed = self
-            .context_manager
-            .fixed_system_messages
-            .min(head.len());
+        let n_fixed = self.context_manager.fixed_system_messages.min(head.len());
         let body = &head[n_fixed..];
         if body.len() != self.context.len() {
             return Err(AgentError::SessionFailed {
@@ -1078,8 +1058,7 @@ impl AgentSession {
         if n_drop == 0 {
             return;
         }
-        let drop: std::collections::HashSet<usize> =
-            non_sys.iter().take(n_drop).copied().collect();
+        let drop: std::collections::HashSet<usize> = non_sys.iter().take(n_drop).copied().collect();
         let mut idx = 0usize;
         self.context.retain(|_| {
             let this = idx;
@@ -1088,7 +1067,11 @@ impl AgentSession {
         });
     }
 
-    fn next_state_after(&mut self, event: &AgentEvent, task: &str) -> Result<AgentState, AgentError> {
+    fn next_state_after(
+        &mut self,
+        event: &AgentEvent,
+        task: &str,
+    ) -> Result<AgentState, AgentError> {
         match (&self.state, event) {
             (AgentState::Idle, AgentEvent::IterationStarted { .. }) => Ok(AgentState::Planning {
                 task: task.to_string(),
@@ -1151,9 +1134,7 @@ impl AgentSession {
             }
             (
                 AgentState::Thinking { iteration },
-                AgentEvent::ToolCallCompleted {
-                    success: false, ..
-                },
+                AgentEvent::ToolCallCompleted { success: false, .. },
             ) => Ok(AgentState::Thinking {
                 iteration: *iteration,
             }),
@@ -1242,15 +1223,11 @@ impl AgentSession {
                 cache_creation_tokens: *cache_creation_tokens,
                 cache_read_tokens: *cache_read_tokens,
             });
-            self.total_input_tokens = self
-                .total_input_tokens
-                .saturating_add(*input_tokens);
+            self.total_input_tokens = self.total_input_tokens.saturating_add(*input_tokens);
             self.total_cache_read_tokens = self
                 .total_cache_read_tokens
                 .saturating_add(*cache_read_tokens);
-            self.total_output_tokens = self
-                .total_output_tokens
-                .saturating_add(*output_tokens);
+            self.total_output_tokens = self.total_output_tokens.saturating_add(*output_tokens);
         }
         self.state = self.next_state_after(&event, task)?;
         self.audit_log.push(AuditEvent::AgentStep {
@@ -1261,9 +1238,11 @@ impl AgentSession {
         if let Some(t) = tool_done {
             self.tool_call_summaries.push(t);
         }
-        tx.send(event).await.map_err(|_| AgentError::SessionFailed {
-            message: "agent event receiver dropped".into(),
-        })?;
+        tx.send(event)
+            .await
+            .map_err(|_| AgentError::SessionFailed {
+                message: "agent event receiver dropped".into(),
+            })?;
         Ok(())
     }
 }
@@ -1300,7 +1279,10 @@ fn map_model_error(e: ModelError) -> AgentError {
 }
 
 fn git_concrete_permissions(args: &Value) -> Vec<Permission> {
-    let sub = args.get("subcommand").and_then(|v| v.as_str()).unwrap_or("");
+    let sub = args
+        .get("subcommand")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let argv: Vec<String> = args
         .get("args")
         .and_then(|a| a.as_array())
@@ -1411,9 +1393,7 @@ fn concrete_permissions(
         }
         "web_fetch" => {
             if let Some(u) = args.get("url").and_then(|v| v.as_str()) {
-                vec![Permission::NetworkFetch {
-                    url: u.to_string(),
-                }]
+                vec![Permission::NetworkFetch { url: u.to_string() }]
             } else {
                 tool.required_permissions().to_vec()
             }
@@ -1544,11 +1524,7 @@ mod tests {
             _config: &CompletionConfig,
         ) -> Result<CompletionStream, ModelError> {
             let i = self.call.fetch_add(1, Ordering::SeqCst);
-            let events = self
-                .sequences
-                .get(i)
-                .cloned()
-                .unwrap_or_default();
+            let events = self.sequences.get(i).cloned().unwrap_or_default();
             Ok(Box::pin(stream::iter(events)))
         }
     }
@@ -1589,9 +1565,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
-        let r = session
-            .run("task".into(), tx, &mut no_policy, None)
-            .await;
+        let r = session.run("task".into(), tx, &mut no_policy, None).await;
         assert!(r.is_ok());
 
         let mut names = Vec::new();
@@ -1613,7 +1587,10 @@ mod tests {
             names.iter().any(|s| s.contains("unknown_x")),
             "expected unknown tool completion, got {names:?}"
         );
-        assert!(names.iter().any(|s| s == "Done"), "expected Done, got {names:?}");
+        assert!(
+            names.iter().any(|s| s == "Done"),
+            "expected Done, got {names:?}"
+        );
     }
 
     #[tokio::test]
@@ -1628,11 +1605,7 @@ mod tests {
                 arguments: json!({}),
             }],
         })];
-        let seq = SeqProvider::new(vec![
-            tool_round.clone(),
-            tool_round.clone(),
-            tool_round,
-        ]);
+        let seq = SeqProvider::new(vec![tool_round.clone(), tool_round.clone(), tool_round]);
 
         let mut session = AgentSession::new(
             AgentConfig {
@@ -1749,11 +1722,7 @@ mod tests {
             delay_tool_perms()
         }
 
-        async fn execute(
-            &self,
-            _args: Value,
-            _ctx: &ToolContext,
-        ) -> ToolOutput {
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> ToolOutput {
             tokio::time::sleep(std::time::Duration::from_millis(self.ms)).await;
             ToolOutput::Success {
                 content: format!("done-{}", self.id),
@@ -2181,12 +2150,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tmp");
         let sandbox = test_sandbox(dir.path());
         let seq = SeqProvider::new(vec![vec![
-            Ok(StreamEvent::TextDelta {
-                text: "hel".into(),
-            }),
-            Ok(StreamEvent::TextDelta {
-                text: "lo".into(),
-            }),
+            Ok(StreamEvent::TextDelta { text: "hel".into() }),
+            Ok(StreamEvent::TextDelta { text: "lo".into() }),
             Ok(StreamEvent::Done {
                 stop_reason: StopReason::EndTurn,
                 tool_calls: vec![],
@@ -2219,7 +2184,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_events_roundtrip_as_jsonl_after_run() {
-        use akmon_core::{write_audit_jsonl, AuditEvent};
+        use akmon_core::{AuditEvent, write_audit_jsonl};
 
         let dir = tempfile::tempdir().expect("tmp");
         let sandbox = test_sandbox(dir.path());
@@ -2256,7 +2221,8 @@ mod tests {
         let contents = std::fs::read_to_string(&audit_file).expect("read audit");
         assert!(!contents.trim().is_empty());
         for line in contents.lines() {
-            let parsed: AuditEvent = serde_json::from_str(line).expect("valid AuditEvent JSONL line");
+            let parsed: AuditEvent =
+                serde_json::from_str(line).expect("valid AuditEvent JSONL line");
             assert!(parsed.to_json().is_ok());
         }
     }

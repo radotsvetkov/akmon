@@ -57,10 +57,14 @@ pub enum PolicyEngineMode {
 pub enum PolicyEngineError {
     /// [`PolicyEngineMode::Interactive`] (or write confirmation under [`PolicyEngineMode::AutoApproveReads`]
     /// or [`PolicyEngineMode::AutoApproveReadsAndFetch`]) does not support automatic resolution for this permission.
-    #[error("interactive confirmation required; use resolve_interactive after the user supplies a verdict")]
+    #[error(
+        "interactive confirmation required; use resolve_interactive after the user supplies a verdict"
+    )]
     InteractiveRequiresCaller,
     /// [`PolicyEngine::resolve_interactive`] was called while not in interactive or auto-read-approve mode.
-    #[error("resolve_interactive is only valid in Interactive, AutoApproveReads, or AutoApproveReadsAndFetch mode")]
+    #[error(
+        "resolve_interactive is only valid in Interactive, AutoApproveReads, or AutoApproveReadsAndFetch mode"
+    )]
     NotInteractive,
 }
 
@@ -116,56 +120,56 @@ impl PolicyEngine {
             PolicyEngineMode::Interactive => {
                 return Err(PolicyEngineError::InteractiveRequiresCaller);
             }
-            PolicyEngineMode::AutoApproveReads { confirm_writes } => {
-                match &permission {
-                    Permission::ReadFile { .. } | Permission::ListDirectory { .. } => {
-                        (true, "auto-approved read (--yes)".to_string(), PolicyVerdict::Allow)
+            PolicyEngineMode::AutoApproveReads { confirm_writes } => match &permission {
+                Permission::ReadFile { .. } | Permission::ListDirectory { .. } => (
+                    true,
+                    "auto-approved read (--yes)".to_string(),
+                    PolicyVerdict::Allow,
+                ),
+                Permission::NetworkFetch { .. } => (
+                    false,
+                    "denied: web fetch is never auto-approved (--yes)".to_string(),
+                    PolicyVerdict::Deny,
+                ),
+                Permission::WriteFile { .. } => {
+                    if *confirm_writes {
+                        return Err(PolicyEngineError::InteractiveRequiresCaller);
                     }
-                    Permission::NetworkFetch { .. } => (
+                    (
                         false,
-                        "denied: web fetch is never auto-approved (--yes)".to_string(),
+                        "requires confirmation".to_string(),
                         PolicyVerdict::Deny,
-                    ),
-                    Permission::WriteFile { .. } => {
-                        if *confirm_writes {
-                            return Err(PolicyEngineError::InteractiveRequiresCaller);
-                        }
-                        (
-                            false,
-                            "requires confirmation".to_string(),
-                            PolicyVerdict::Deny,
-                        )
-                    }
-                    Permission::ExecuteCommand { .. } => {
+                    )
+                }
+                Permission::ExecuteCommand { .. } => {
+                    return Err(PolicyEngineError::InteractiveRequiresCaller);
+                }
+            },
+            PolicyEngineMode::AutoApproveReadsAndFetch { confirm_writes } => match &permission {
+                Permission::ReadFile { .. } | Permission::ListDirectory { .. } => (
+                    true,
+                    "auto-approved read (--yes)".to_string(),
+                    PolicyVerdict::Allow,
+                ),
+                Permission::NetworkFetch { .. } => (
+                    true,
+                    "auto-approved web fetch (--yes-web)".to_string(),
+                    PolicyVerdict::Allow,
+                ),
+                Permission::WriteFile { .. } => {
+                    if *confirm_writes {
                         return Err(PolicyEngineError::InteractiveRequiresCaller);
                     }
+                    (
+                        false,
+                        "requires confirmation".to_string(),
+                        PolicyVerdict::Deny,
+                    )
                 }
-            }
-            PolicyEngineMode::AutoApproveReadsAndFetch { confirm_writes } => {
-                match &permission {
-                    Permission::ReadFile { .. } | Permission::ListDirectory { .. } => {
-                        (true, "auto-approved read (--yes)".to_string(), PolicyVerdict::Allow)
-                    }
-                    Permission::NetworkFetch { .. } => (
-                        true,
-                        "auto-approved web fetch (--yes-web)".to_string(),
-                        PolicyVerdict::Allow,
-                    ),
-                    Permission::WriteFile { .. } => {
-                        if *confirm_writes {
-                            return Err(PolicyEngineError::InteractiveRequiresCaller);
-                        }
-                        (
-                            false,
-                            "requires confirmation".to_string(),
-                            PolicyVerdict::Deny,
-                        )
-                    }
-                    Permission::ExecuteCommand { .. } => {
-                        return Err(PolicyEngineError::InteractiveRequiresCaller);
-                    }
+                Permission::ExecuteCommand { .. } => {
+                    return Err(PolicyEngineError::InteractiveRequiresCaller);
                 }
-            }
+            },
             PolicyEngineMode::Configured(cfg) => {
                 let (verdict, r) = cfg.evaluate_permission(&permission);
                 let allowed = matches!(verdict, PolicyVerdict::Allow);
@@ -174,12 +178,7 @@ impl PolicyEngine {
         };
 
         Ok(Self::decision_from_parts(
-            session_id,
-            timestamp,
-            permission,
-            verdict,
-            allowed,
-            reason,
+            session_id, timestamp, permission, verdict, allowed, reason,
         ))
     }
 
@@ -205,12 +204,7 @@ impl PolicyEngine {
         let allowed = matches!(verdict, PolicyVerdict::Allow);
         let timestamp = Utc::now();
         Ok(Self::decision_from_parts(
-            session_id,
-            timestamp,
-            permission,
-            verdict,
-            allowed,
-            reason,
+            session_id, timestamp, permission, verdict, allowed, reason,
         ))
     }
 
@@ -263,7 +257,13 @@ mod tests {
         };
         let decision = engine.evaluate_automatic("sess-c", perm).unwrap();
         assert!(!decision.allowed);
-        assert!(decision.audit.to_json().expect("audit json").contains("deny"));
+        assert!(
+            decision
+                .audit
+                .to_json()
+                .expect("audit json")
+                .contains("deny")
+        );
     }
 
     #[test]
@@ -285,15 +285,16 @@ mod tests {
             path: PathBuf::from("README.md"),
         };
         let decision = engine
-            .resolve_interactive(
-                "sess-i",
-                perm,
-                PolicyVerdict::Allow,
-                "user approved in TUI",
-            )
+            .resolve_interactive("sess-i", perm, PolicyVerdict::Allow, "user approved in TUI")
             .unwrap();
         assert!(decision.allowed);
-        assert!(decision.audit.to_json().expect("audit json").contains("allow"));
+        assert!(
+            decision
+                .audit
+                .to_json()
+                .expect("audit json")
+                .contains("allow")
+        );
     }
 
     #[test]

@@ -4,18 +4,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use uuid::Uuid;
 
 use crate::agent::AgentTurn;
-use crate::config::TuiLaunchConfig;
-use crate::session_persist::{
-    default_audit_log_path, load_session_file, load_session_summaries, resolve_session_id,
-    save_session_snapshot, sessions_directory, SessionSummary,
-};
 use crate::app::{Overlay, TuiApp};
+use crate::config::TuiLaunchConfig;
 use crate::model_picker::build_model_picker_rows;
-use crate::slash::{parse_slash_input, SlashCommand};
+use crate::session_persist::{
+    SessionSummary, default_audit_log_path, load_session_file, load_session_summaries,
+    resolve_session_id, save_session_snapshot, sessions_directory,
+};
+use crate::slash::{SlashCommand, parse_slash_input};
 use crate::tui_project::ProjectUiJob;
 
 /// Environment handles required to run slash commands that touch disk or the agent.
@@ -74,9 +74,7 @@ fn dispatch(
         "clear" => {
             app.messages.clear();
             app.scroll_offset = 0;
-            app.push_system_info(
-                "Session cleared. History hidden but context preserved.".into(),
-            );
+            app.push_system_info("Session cleared. History hidden but context preserved.".into());
             app.overlay = Overlay::None;
             SlashHandled::Continue
         }
@@ -91,7 +89,8 @@ fn dispatch(
                 Ok(g) => g.clone(),
                 Err(e) => e.into_inner().clone(),
             };
-            if let Err(e) = save_session_snapshot(app, &cfg_snapshot, app.session_started_at, None) {
+            if let Err(e) = save_session_snapshot(app, &cfg_snapshot, app.session_started_at, None)
+            {
                 app.push_system_info(format!("Could not save session before /reset: {e}"));
             }
             let new_id = Uuid::new_v4();
@@ -126,11 +125,7 @@ fn dispatch(
                 );
                 return SlashHandled::Continue;
             }
-            if env
-                .project_job_tx
-                .send(ProjectUiJob::Init)
-                .is_err()
-            {
+            if env.project_job_tx.send(ProjectUiJob::Init).is_err() {
                 app.push_system_info("Project job channel closed.".into());
             } else {
                 app.push_system_info("Analyzing project and generating AKMON.md…".into());
@@ -231,7 +226,10 @@ fn dispatch(
                     app.push_system_info(format!("Current model: {}", app.model_name));
                     app.overlay = Overlay::None;
                 } else {
-                    app.push_system_info(format!("Pick a model (↑↓ Enter) — current: {}", app.model_name));
+                    app.push_system_info(format!(
+                        "Pick a model (↑↓ Enter) — current: {}",
+                        app.model_name
+                    ));
                     app.overlay = Overlay::ModelPicker {
                         rows,
                         selectable,
@@ -305,7 +303,9 @@ fn dispatch(
         }
         "implement" => {
             if app.agent_running {
-                app.push_system_info("Finish or interrupt the current turn before /implement.".into());
+                app.push_system_info(
+                    "Finish or interrupt the current turn before /implement.".into(),
+                );
                 return SlashHandled::Continue;
             }
             let Some(plan) = app.pending_plan.clone() else {
@@ -407,7 +407,11 @@ fn open_sessions_overlay(app: &mut TuiApp) {
     };
 }
 
-fn apply_loaded_session(app: &mut TuiApp, env: &SlashEnv, loaded: crate::session_persist::LoadedSession) {
+fn apply_loaded_session(
+    app: &mut TuiApp,
+    env: &SlashEnv,
+    loaded: crate::session_persist::LoadedSession,
+) {
     let audit = default_audit_log_path(&loaded.project_root, loaded.session_id);
     let ak_path = loaded.project_root.join("AKMON.md");
     let (has_akmon_md, akmon_md) = match std::fs::read_to_string(&ak_path) {
@@ -600,9 +604,7 @@ pub fn model_picker_enter(app: &mut TuiApp, env: &SlashEnv) {
 /// Resumes the highlighted session from [`Overlay::SessionList`] when Enter is pressed.
 pub fn session_list_enter(app: &mut TuiApp, env: &SlashEnv) {
     let Overlay::SessionList {
-        sessions,
-        selected,
-        ..
+        sessions, selected, ..
     } = &app.overlay
     else {
         return;

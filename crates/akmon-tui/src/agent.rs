@@ -4,19 +4,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use akmon_core::{
-    write_audit_jsonl, AgentConfig, AgentEvent, McpServerConfig, PolicyEngine, PolicyEngineMode,
-    PolicyVerdict, Sandbox,
+    AgentConfig, AgentEvent, McpServerConfig, PolicyEngine, PolicyEngineMode, PolicyVerdict,
+    Sandbox, write_audit_jsonl,
 };
 use akmon_models::LlmProvider;
 use akmon_query::AgentSession;
-use akmon_tools::{
-    discover_mcp_tools, EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
-    ShellTool, WebFetchTool, WriteFileTool,
-};
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
-use tokio::sync::mpsc;
+use akmon_tools::{
+    EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool, ShellTool,
+    WebFetchTool, WriteFileTool, discover_mcp_tools,
+};
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
 use crate::command::UiCommand;
 use crate::config::TuiLaunchConfig;
@@ -167,11 +167,7 @@ async fn build_agent_session(
         max_iterations: config.max_iterations,
         confirmation_timeout_secs: 30,
         session_id: config.session_id,
-        auto_commit: if plan_mode {
-            false
-        } else {
-            config.auto_commit
-        },
+        auto_commit: if plan_mode { false } else { config.auto_commit },
     };
 
     let session = AgentSession::new(

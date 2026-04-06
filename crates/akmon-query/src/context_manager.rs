@@ -1,6 +1,6 @@
 //! Token budget and message splitting for long-running agent sessions.
 
-use akmon_models::{approximate_tokens, LlmProvider, Message, MessageRole};
+use akmon_models::{LlmProvider, Message, MessageRole, approximate_tokens};
 
 /// Decides when chat history should be compacted and how to split messages for summarization.
 pub struct ContextManager {
@@ -27,11 +27,7 @@ impl Default for ContextManager {
 
 impl ContextManager {
     /// Returns true when estimated tokens exceed `(max_tokens * threshold)` (strict `>`).
-    pub fn needs_summarization(
-        &self,
-        messages: &[Message],
-        provider: &dyn LlmProvider,
-    ) -> bool {
+    pub fn needs_summarization(&self, messages: &[Message], provider: &dyn LlmProvider) -> bool {
         let tokens = provider
             .estimate_tokens(messages)
             .unwrap_or_else(|| approximate_tokens(messages));
@@ -46,7 +42,10 @@ impl ContextManager {
     /// remaining tail is split so the last [`Self::keep_recent`] messages stay in `to_keep` and
     /// earlier messages go to `to_summarize`. Preamble and skipped body system rows are in neither
     /// slice; callers must retain them when rebuilding history.
-    pub fn messages_to_summarize<'a>(&self, messages: &'a [Message]) -> (&'a [Message], &'a [Message]) {
+    pub fn messages_to_summarize<'a>(
+        &self,
+        messages: &'a [Message],
+    ) -> (&'a [Message], &'a [Message]) {
         let n_fixed = self.fixed_system_messages.min(messages.len());
         let body = &messages[n_fixed..];
         let mut j = 0usize;
@@ -99,7 +98,12 @@ mod tests {
 
         fn estimate_tokens(&self, messages: &[Message]) -> Option<usize> {
             let c = self.n.fetch_add(1, Ordering::SeqCst);
-            Some(messages.len().saturating_mul(self.each).saturating_add(c % 7))
+            Some(
+                messages
+                    .len()
+                    .saturating_mul(self.each)
+                    .saturating_add(c % 7),
+            )
         }
 
         async fn complete(

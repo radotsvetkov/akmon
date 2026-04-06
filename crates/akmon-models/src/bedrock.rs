@@ -6,26 +6,24 @@ use std::time::Duration;
 
 use akmon_core::Secret;
 use async_trait::async_trait;
+use base64::Engine;
 use bytes::Bytes;
 use chrono::Utc;
 use futures::{Stream, StreamExt};
 use hmac::{Hmac, Mac};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
-use base64::Engine;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
-use crate::anthropic::{apply_anthropic_sse_json, build_bedrock_anthropic_invoke_json, ToolAccum};
+use crate::LlmProvider;
+use crate::anthropic::{ToolAccum, apply_anthropic_sse_json, build_bedrock_anthropic_invoke_json};
 use crate::config::CompletionConfig;
 use crate::error::ModelError;
 use crate::message::Message;
 use crate::openai_compat::infer_context_window_tokens;
-use crate::stream::{
-    CompletionStream, ModelToolCall, StreamEvent, UsageReport,
-};
-use crate::LlmProvider;
+use crate::stream::{CompletionStream, ModelToolCall, StreamEvent, UsageReport};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -79,12 +77,7 @@ fn authorization_header(
     date_stamp: &str,
 ) -> Result<HeaderMap, ModelError> {
     let payload_hash = sha256_hex(body);
-    let mut signed_set = vec![
-        "content-type",
-        "host",
-        "x-amz-content-sha256",
-        "x-amz-date",
-    ];
+    let mut signed_set = vec!["content-type", "host", "x-amz-content-sha256", "x-amz-date"];
     if session_token.is_some() {
         signed_set.push("x-amz-security-token");
     }
@@ -111,9 +104,8 @@ fn authorization_header(
 
     let canonical_hash = sha256_hex(canonical_request.as_bytes());
     let credential_scope = format!("{date_stamp}/{region}/bedrock/aws4_request");
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}"
-    );
+    let string_to_sign =
+        format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}");
 
     let key = signing_key(secret_key, date_stamp, region, "bedrock")?;
     let sig = hex::encode(hmac_sha256_bytes(&key, string_to_sign.as_bytes())?);
@@ -267,7 +259,10 @@ impl BedrockBackend {
     }
 }
 
-async fn read_next_frame<S>(acc: &mut Vec<u8>, stream: &mut S) -> Result<Option<Vec<u8>>, ModelError>
+async fn read_next_frame<S>(
+    acc: &mut Vec<u8>,
+    stream: &mut S,
+) -> Result<Option<Vec<u8>>, ModelError>
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
 {
@@ -306,7 +301,10 @@ async fn run_bedrock_response_stream(
     config: CompletionConfig,
     tx: mpsc::Sender<Result<StreamEvent, ModelError>>,
 ) {
-    let host = format!("bedrock-runtime.{region}.amazonaws.com", region = inner.region);
+    let host = format!(
+        "bedrock-runtime.{region}.amazonaws.com",
+        region = inner.region
+    );
     let canonical_uri = {
         let enc = urlencoding::encode(&inner.model_id);
         format!("/model/{enc}/invoke-with-response-stream")
@@ -365,7 +363,10 @@ async fn run_bedrock_response_stream(
             .send(Err(match status {
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ModelError::AuthError,
                 _ => ModelError::BackendUnavailable {
-                    message: format!("HTTP {status}: {}", &text[..text.len().min(512)]),
+                    message: format!(
+                        "HTTP {status}: {snippet}",
+                        snippet = &text[..text.len().min(512)]
+                    ),
                 },
             }))
             .await;
@@ -380,27 +381,26 @@ async fn run_bedrock_response_stream(
     let mut done_sent = false;
 
     let deadline = Duration::from_millis(config.first_token_deadline_ms);
-    let first = match tokio::time::timeout(deadline, read_next_frame(&mut acc, &mut bytes_stream))
-        .await
-    {
-        Err(_) => {
-            let _ = tx.send(Err(ModelError::FirstTokenTimeout)).await;
-            return;
-        }
-        Ok(Err(e)) => {
-            let _ = tx.send(Err(e)).await;
-            return;
-        }
-        Ok(Ok(None)) => {
-            let _ = tx
-                .send(Err(ModelError::StreamInterrupted {
-                    message: "empty Bedrock stream".into(),
-                }))
-                .await;
-            return;
-        }
-        Ok(Ok(Some(f))) => f,
-    };
+    let first =
+        match tokio::time::timeout(deadline, read_next_frame(&mut acc, &mut bytes_stream)).await {
+            Err(_) => {
+                let _ = tx.send(Err(ModelError::FirstTokenTimeout)).await;
+                return;
+            }
+            Ok(Err(e)) => {
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+            Ok(Ok(None)) => {
+                let _ = tx
+                    .send(Err(ModelError::StreamInterrupted {
+                        message: "empty Bedrock stream".into(),
+                    }))
+                    .await;
+                return;
+            }
+            Ok(Ok(Some(f))) => f,
+        };
 
     let mut pending_frame = Some(first);
 
@@ -531,7 +531,8 @@ mod tests {
 
     #[test]
     fn from_env_none_without_vars() {
-        if std::env::var("AWS_ACCESS_KEY_ID").is_ok() || std::env::var("AWS_SECRET_ACCESS_KEY").is_ok()
+        if std::env::var("AWS_ACCESS_KEY_ID").is_ok()
+            || std::env::var("AWS_SECRET_ACCESS_KEY").is_ok()
         {
             return;
         }

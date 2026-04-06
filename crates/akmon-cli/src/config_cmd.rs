@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
 use akmon_config::{
-    append_akmon_gitignore_line, load_user_config, save_config_to, save_user_config,
-    AkmonGlobalConfig, McpScope, McpServerEntry,
+    AkmonGlobalConfig, McpScope, McpServerEntry, append_akmon_gitignore_line, load_user_config,
+    save_config_to, save_user_config,
 };
 use akmon_core::McpServerConfig;
 use akmon_tools::discover_mcp_tools;
@@ -55,22 +55,16 @@ pub enum ModelCmd {
     /// Print current default model.
     Get,
     /// Set default model.
-    Set {
-        model: String,
-    },
+    Set { model: String },
     /// List models from Ollama and common Anthropic ids when a key is set.
     List,
     /// Send a minimal prompt to verify the model responds.
-    Test {
-        model: Option<String>,
-    },
+    Test { model: Option<String> },
 }
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum OllamaUrlCmd {
-    Set {
-        url: String,
-    },
+    Set { url: String },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -181,7 +175,10 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                     "architect": cfg.architect,
                     "mcp": cfg.mcp,
                 });
-                println!("{}", serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
+                );
             } else {
                 print!("{}", cfg.display_masked_toml());
             }
@@ -229,9 +226,7 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
         ConfigSubcommand::Model(m) => match m {
             ModelCmd::Get => {
                 let (_, cfg) = load_user_config().map_err(|e| e.to_string())?;
-                let d = cfg
-                    .default_model
-                    .unwrap_or_else(|| "llama3.2".into());
+                let d = cfg.default_model.unwrap_or_else(|| "llama3.2".into());
                 if args.json {
                     println!("{}", json!({ "default": d }));
                 } else {
@@ -277,7 +272,9 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                     eprintln!("✓ appended .akmon/ to .gitignore in {}", cwd.display());
                 }
                 if !args.json {
-                    eprintln!("Warning: ~/.akmon/config.toml may contain secrets — do not commit it.");
+                    eprintln!(
+                        "Warning: ~/.akmon/config.toml may contain secrets — do not commit it."
+                    );
                 }
                 if args.json {
                     println!("{}", json!({ "ok": true }));
@@ -319,7 +316,11 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                         })
                     );
                 } else {
-                    if cfg.anthropic_api_key.as_ref().is_some_and(|s| !s.is_empty()) {
+                    if cfg
+                        .anthropic_api_key
+                        .as_ref()
+                        .is_some_and(|s| !s.is_empty())
+                    {
                         println!("anthropic  ✓ key set");
                     } else {
                         println!("anthropic  ✗ no key");
@@ -354,10 +355,7 @@ async fn openrouter_models_top_display(api_key: &str) -> Result<String, String> 
         .map_err(|e| e.to_string())?;
     let r = client
         .get("https://openrouter.ai/api/v1/models")
-        .header(
-            "Authorization",
-            format!("Bearer {}", api_key.trim()),
-        )
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
         .header("HTTP-Referer", "https://akmon.dev")
         .header("X-Title", "Akmon")
         .send()
@@ -378,7 +376,11 @@ async fn openrouter_models_top_display(api_key: &str) -> Result<String, String> 
     }
     let mut rows: Vec<Row> = Vec::new();
     for m in arr {
-        let id = m.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let id = m
+            .get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         if id.is_empty() {
             continue;
         }
@@ -425,7 +427,11 @@ async fn model_list(args: &ConfigArgs) -> Result<(), String> {
             out.push_str("  (ollama not running — start with: ollama serve)\n");
         }
     }
-    if cfg.anthropic_api_key.as_ref().is_some_and(|k| !k.is_empty()) {
+    if cfg
+        .anthropic_api_key
+        .as_ref()
+        .is_some_and(|k| !k.is_empty())
+    {
         out.push_str("Anthropic (API):\n");
         for line in anthropic_model_lines() {
             out.push_str(&line);
@@ -508,10 +514,7 @@ async fn ollama_models_display(base: &str) -> Result<String, String> {
     let mut s = String::new();
     if let Some(arr) = v.get("models").and_then(|m| m.as_array()) {
         for m in arr {
-            let name = m
-                .get("name")
-                .and_then(|x| x.as_str())
-                .unwrap_or("?");
+            let name = m.get("name").and_then(|x| x.as_str()).unwrap_or("?");
             let size = m
                 .get("size")
                 .and_then(|x| x.as_u64())
@@ -533,7 +536,9 @@ async fn model_test(args: &ConfigArgs, model_override: Option<&str>) -> Result<(
     let model = model_override
         .map(|s| s.to_string())
         .or(cfg.default_model.clone())
-        .ok_or_else(|| "pass a model name or set default with akmon config model set".to_string())?;
+        .ok_or_else(|| {
+            "pass a model name or set default with akmon config model set".to_string()
+        })?;
     let url = cfg
         .ollama_url
         .clone()
@@ -559,7 +564,10 @@ async fn model_test(args: &ConfigArgs, model_override: Option<&str>) -> Result<(
     }
     let elapsed = start.elapsed().as_secs_f32();
     if args.json {
-        println!("{}", json!({ "ok": true, "model": model, "seconds": elapsed }));
+        println!(
+            "{}",
+            json!({ "ok": true, "model": model, "seconds": elapsed })
+        );
     } else {
         println!("Testing {model}…");
         println!("✓ responded in {elapsed:.1}s");
@@ -574,7 +582,8 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
             if args.json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&json!({ "mcp": cfg.mcp })).map_err(|e| e.to_string())?
+                    serde_json::to_string_pretty(&json!({ "mcp": cfg.mcp }))
+                        .map_err(|e| e.to_string())?
                 );
             } else {
                 println!("user scope:");
@@ -695,14 +704,20 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
                     }
                     Ok(r) => {
                         if args.json {
-                            println!("{}", json!({ "name": e.name, "ok": false, "status": r.status().as_u16() }));
+                            println!(
+                                "{}",
+                                json!({ "name": e.name, "ok": false, "status": r.status().as_u16() })
+                            );
                         } else {
                             println!("{}  {}  ✗ status {}", e.name, e.url, r.status());
                         }
                     }
                     Err(_) => {
                         if args.json {
-                            println!("{}", json!({ "name": e.name, "ok": false, "error": "timeout" }));
+                            println!(
+                                "{}",
+                                json!({ "name": e.name, "ok": false, "error": "timeout" })
+                            );
                         } else {
                             println!("{}  {}  ✗ timeout", e.name, e.url);
                         }
@@ -827,9 +842,7 @@ mod tests {
         .await;
         let code = run_config(ConfigArgs {
             json: true,
-            cmd: ConfigSubcommand::Mcp(McpCmd::Remove {
-                name: "x".into(),
-            }),
+            cmd: ConfigSubcommand::Mcp(McpCmd::Remove { name: "x".into() }),
         })
         .await;
         assert_eq!(code, ExitCode::SUCCESS);
@@ -856,9 +869,7 @@ mod tests {
         .await;
         let code = run_config(ConfigArgs {
             json: true,
-            cmd: ConfigSubcommand::Mcp(McpCmd::Disable {
-                name: "y".into(),
-            }),
+            cmd: ConfigSubcommand::Mcp(McpCmd::Disable { name: "y".into() }),
         })
         .await;
         assert_eq!(code, ExitCode::SUCCESS);

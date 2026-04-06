@@ -2,18 +2,18 @@
 
 use std::sync::{Arc, Mutex};
 
-use akmon_index::{semantic_search, RepoIndex};
+use akmon_index::{RepoIndex, semantic_search};
 use async_trait::async_trait;
 use fastembed::TextEmbedding;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use tokio::sync::RwLock;
 
 use akmon_core::Permission;
 use std::path::PathBuf;
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::Tool;
 
 fn read_permissions() -> &'static [Permission] {
     use std::sync::OnceLock;
@@ -120,12 +120,8 @@ impl Tool for SemanticSearchTool {
         let prefixed = format!("query: {query}");
         let emb = Arc::clone(emb);
         let vectors = match tokio::task::spawn_blocking(move || {
-            let mut guard = emb
-                .lock()
-                .map_err(|e| format!("embedder lock: {e}"))?;
-            guard
-                .embed(vec![prefixed], None)
-                .map_err(|e| e.to_string())
+            let mut guard = emb.lock().map_err(|e| format!("embedder lock: {e}"))?;
+            guard.embed(vec![prefixed], None).map_err(|e| e.to_string())
         })
         .await
         {

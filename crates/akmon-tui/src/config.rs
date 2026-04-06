@@ -4,9 +4,9 @@ use std::path::PathBuf;
 #[cfg(feature = "semantic-index")]
 use std::sync::{Arc, Mutex};
 
-use akmon_models::LlmConnectConfig;
 #[cfg(feature = "semantic-index")]
 use akmon_index::RepoIndex;
+use akmon_models::LlmConnectConfig;
 #[cfg(feature = "semantic-index")]
 use fastembed::TextEmbedding;
 #[cfg(feature = "semantic-index")]
@@ -15,10 +15,7 @@ use uuid::Uuid;
 
 /// Shared semantic index handle (optional `--index` mode).
 #[cfg(feature = "semantic-index")]
-pub type SemanticIndexSlot = (
-    Arc<RwLock<Option<RepoIndex>>>,
-    Arc<Mutex<TextEmbedding>>,
-);
+pub type SemanticIndexSlot = (Arc<RwLock<Option<RepoIndex>>>, Arc<Mutex<TextEmbedding>>);
 
 /// Inputs required to open the interactive TUI and run the agent (header, tools, provider, audit).
 #[derive(Clone)]

@@ -175,11 +175,7 @@ pub fn matching_commands(prefix: &str) -> Vec<&'static SlashCommand> {
         .iter()
         .filter(|c| {
             let n = c.name.to_lowercase();
-            n.starts_with(&p)
-                || c
-                    .aliases
-                    .iter()
-                    .any(|a| a.to_lowercase().starts_with(&p))
+            n.starts_with(&p) || c.aliases.iter().any(|a| a.to_lowercase().starts_with(&p))
         })
         .collect();
     if v.is_empty() && p.len() >= 2 {
@@ -187,11 +183,7 @@ pub fn matching_commands(prefix: &str) -> Vec<&'static SlashCommand> {
             .iter()
             .filter(|c| {
                 let n = c.name.to_lowercase();
-                n.contains(&p)
-                    || c
-                        .aliases
-                        .iter()
-                        .any(|a| a.to_lowercase().contains(&p))
+                n.contains(&p) || c.aliases.iter().any(|a| a.to_lowercase().contains(&p))
             })
             .collect();
     }
@@ -228,9 +220,7 @@ pub fn slash_command_name_prefix(input_buffer: &str) -> Option<&str> {
         }
     }
     let line1 = &rest[..first_line_end];
-    let end = line1
-        .find(char::is_whitespace)
-        .unwrap_or(line1.len());
+    let end = line1.find(char::is_whitespace).unwrap_or(line1.len());
     let word = &line1[..end];
     let after_word = line1[end..].trim_start();
     if !after_word.is_empty() {

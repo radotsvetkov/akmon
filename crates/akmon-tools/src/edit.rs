@@ -5,13 +5,13 @@ use std::sync::OnceLock;
 
 use akmon_core::{Permission, SandboxError};
 use async_trait::async_trait;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use tokio::fs;
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
 use crate::write_file::atomic_write_utf8;
-use crate::Tool;
 
 fn edit_file_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
@@ -122,7 +122,8 @@ impl Tool for EditTool {
             None => {
                 return ToolOutput::Error {
                     code: ToolErrorCode::InvalidArgs,
-                    message: "missing \"new_str\" string (use empty string to delete old_str)".into(),
+                    message: "missing \"new_str\" string (use empty string to delete old_str)"
+                        .into(),
                 };
             }
         };
@@ -208,7 +209,9 @@ impl Tool for EditTool {
         if n >= 2 {
             return ToolOutput::Error {
                 code: ToolErrorCode::AmbiguousMatch,
-                message: format!("old_str matches {n} times in {path_str} — add more context to make it unique"),
+                message: format!(
+                    "old_str matches {n} times in {path_str} — add more context to make it unique"
+                ),
             };
         }
 
@@ -249,7 +252,7 @@ impl Tool for EditTool {
 mod tests {
     use super::*;
     use akmon_core::{PolicyEngine, PolicyEngineMode, Sandbox};
-    use serde_json::{json, Value as JsonValue};
+    use serde_json::{Value as JsonValue, json};
     use std::sync::Arc;
 
     use crate::read_file::ReadFileTool;
@@ -337,10 +340,7 @@ mod tests {
             panic!("expected error");
         };
         assert_eq!(code, ToolErrorCode::NotFound);
-        assert!(
-            message.contains("old_str not found"),
-            "message={message:?}"
-        );
+        assert!(message.contains("old_str not found"), "message={message:?}");
     }
 
     #[tokio::test]

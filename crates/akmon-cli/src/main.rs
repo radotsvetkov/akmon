@@ -14,25 +14,25 @@ use std::time::Duration;
 
 use akmon_config::AkmonGlobalConfig;
 use akmon_core::{
-    write_audit_jsonl, AgentConfig, AgentError, AgentEvent, AuditEvent, McpServerConfig,
-    PolicyEngine, PolicyEngineMode, PolicyVerdict, Sandbox,
+    AgentConfig, AgentError, AgentEvent, AuditEvent, McpServerConfig, PolicyEngine,
+    PolicyEngineMode, PolicyVerdict, Sandbox, write_audit_jsonl,
 };
 use akmon_models::{LlmConnectConfig, LlmProvider};
 use akmon_query::{AgentSession, ToolCallSummary};
-use akmon_tools::{
-    discover_mcp_tools, EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
-    ShellTool, WebFetchTool, WriteFileTool,
-};
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
+use akmon_tools::{
+    EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool, ShellTool,
+    WebFetchTool, WriteFileTool, discover_mcp_tools,
+};
 use akmon_tui::TuiLaunchConfig;
 use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(feature = "semantic-index")]
 use fastembed::{TextEmbedding, TextInitOptions};
 use serde::Serialize;
-use tokio::sync::mpsc;
 #[cfg(feature = "semantic-index")]
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 /// Builds a semantic index in the background and writes `index_path`, then fills `slot`.
 #[cfg(feature = "semantic-index")]
@@ -103,14 +103,8 @@ fn spawn_semantic_index_os_thread(
                 return;
             };
             rt.block_on(async move {
-                semantic_index_background_build(
-                    project_root,
-                    embedder,
-                    sandbox,
-                    index_path,
-                    slot,
-                )
-                .await;
+                semantic_index_background_build(project_root, embedder, sandbox, index_path, slot)
+                    .await;
             });
         }) {
         Ok(h) => Some(h),
@@ -291,27 +285,56 @@ pub(crate) struct Cli {
     )]
     anthropic_key: Option<String>,
     /// OpenRouter API key (`OPENROUTER_API_KEY`).
-    #[arg(long = "openrouter-key", env = "OPENROUTER_API_KEY", hide_env_values = true, global = true)]
+    #[arg(
+        long = "openrouter-key",
+        env = "OPENROUTER_API_KEY",
+        hide_env_values = true,
+        global = true
+    )]
     openrouter_key: Option<String>,
     /// OpenAI API key (`OPENAI_API_KEY`).
-    #[arg(long = "openai-key", env = "OPENAI_API_KEY", hide_env_values = true, global = true)]
+    #[arg(
+        long = "openai-key",
+        env = "OPENAI_API_KEY",
+        hide_env_values = true,
+        global = true
+    )]
     openai_key: Option<String>,
     /// Groq API key (`GROQ_API_KEY`).
-    #[arg(long = "groq-key", env = "GROQ_API_KEY", hide_env_values = true, global = true)]
+    #[arg(
+        long = "groq-key",
+        env = "GROQ_API_KEY",
+        hide_env_values = true,
+        global = true
+    )]
     groq_key: Option<String>,
     /// Azure OpenAI deployment URL (…/deployments/NAME/chat/completions).
     #[arg(long = "azure-endpoint", env = "AZURE_OPENAI_ENDPOINT", global = true)]
     azure_endpoint: Option<String>,
-    #[arg(long = "azure-key", env = "AZURE_OPENAI_API_KEY", hide_env_values = true, global = true)]
+    #[arg(
+        long = "azure-key",
+        env = "AZURE_OPENAI_API_KEY",
+        hide_env_values = true,
+        global = true
+    )]
     azure_key: Option<String>,
     /// Azure `api-version` query parameter (default `2024-02-01`).
-    #[arg(long = "azure-api-version", default_value = "2024-02-01", global = true)]
+    #[arg(
+        long = "azure-api-version",
+        default_value = "2024-02-01",
+        global = true
+    )]
     azure_api_version: String,
     /// Use Amazon Bedrock (reads `AWS_*` credentials from the environment).
     #[arg(long = "bedrock", global = true)]
     bedrock: bool,
     /// AWS region for Bedrock.
-    #[arg(long = "aws-region", env = "AWS_DEFAULT_REGION", default_value = "us-east-1", global = true)]
+    #[arg(
+        long = "aws-region",
+        env = "AWS_DEFAULT_REGION",
+        default_value = "us-east-1",
+        global = true
+    )]
     aws_region: String,
     /// Custom OpenAI-compatible API base (no `/chat/completions` suffix).
     #[arg(long = "openai-compatible-url", global = true)]
@@ -319,13 +342,22 @@ pub(crate) struct Cli {
     #[arg(long = "openai-compatible-key", hide_env_values = true, global = true)]
     openai_compatible_key: Option<String>,
     /// Base URL for the Ollama HTTP API (ignored when using Anthropic).
-    #[arg(long = "ollama-url", default_value = "http://localhost:11434", global = true)]
+    #[arg(
+        long = "ollama-url",
+        default_value = "http://localhost:11434",
+        global = true
+    )]
     ollama_url: String,
     /// Auto-approve read-only tools only; writes and `shell` still require confirmation.
     #[arg(short = 'y', long = "yes", global = true)]
     yes: bool,
     /// `text`: stream tokens to the terminal; `json`: print one session summary object at the end.
-    #[arg(long = "output", value_name = "FORMAT", default_value = "text", value_enum)]
+    #[arg(
+        long = "output",
+        value_name = "FORMAT",
+        default_value = "text",
+        value_enum
+    )]
     output: OutputFormat,
     /// JSON Lines audit file path (default: `<project>/.akmon/audit/<session_id>.jsonl`).
     #[arg(long = "audit-log", value_name = "PATH")]
@@ -450,7 +482,11 @@ fn coalesce_opt(a: Option<String>, b: Option<String>) -> Option<String> {
 }
 
 /// Builds [`LlmConnectConfig`] from CLI flags merged with `~/.akmon/config.toml`.
-pub(crate) fn llm_connect_from_cli(cli: &Cli, global: &AkmonGlobalConfig, model: String) -> LlmConnectConfig {
+pub(crate) fn llm_connect_from_cli(
+    cli: &Cli,
+    global: &AkmonGlobalConfig,
+    model: String,
+) -> LlmConnectConfig {
     let azure_ver = if cli.azure_api_version.is_empty() {
         global
             .azure_api_version
@@ -462,15 +498,24 @@ pub(crate) fn llm_connect_from_cli(cli: &Cli, global: &AkmonGlobalConfig, model:
     LlmConnectConfig {
         model,
         ollama_url: cli.ollama_url.clone(),
-        anthropic_api_key: coalesce_opt(cli.anthropic_key.clone(), global.anthropic_api_key.clone()),
-        openrouter_api_key: coalesce_opt(cli.openrouter_key.clone(), global.openrouter_api_key.clone()),
+        anthropic_api_key: coalesce_opt(
+            cli.anthropic_key.clone(),
+            global.anthropic_api_key.clone(),
+        ),
+        openrouter_api_key: coalesce_opt(
+            cli.openrouter_key.clone(),
+            global.openrouter_api_key.clone(),
+        ),
         openai_api_key: coalesce_opt(cli.openai_key.clone(), global.openai_api_key.clone()),
         groq_api_key: coalesce_opt(cli.groq_key.clone(), global.groq_api_key.clone()),
         azure_openai_endpoint: coalesce_opt(
             cli.azure_endpoint.clone(),
             global.azure_openai_endpoint.clone(),
         ),
-        azure_openai_api_key: coalesce_opt(cli.azure_key.clone(), global.azure_openai_api_key.clone()),
+        azure_openai_api_key: coalesce_opt(
+            cli.azure_key.clone(),
+            global.azure_openai_api_key.clone(),
+        ),
         azure_api_version: azure_ver,
         bedrock_explicit: cli.bedrock,
         aws_region: cli.aws_region.clone(),
@@ -485,7 +530,11 @@ pub(crate) fn llm_connect_from_cli(cli: &Cli, global: &AkmonGlobalConfig, model:
     }
 }
 
-fn resolve_llm(cli: &Cli, global: &AkmonGlobalConfig, model: String) -> Result<Arc<dyn LlmProvider>, String> {
+fn resolve_llm(
+    cli: &Cli,
+    global: &AkmonGlobalConfig,
+    model: String,
+) -> Result<Arc<dyn LlmProvider>, String> {
     llm_connect_from_cli(cli, global, model).resolve()
 }
 
@@ -717,17 +766,10 @@ async fn main() -> ExitCode {
         };
         let has_akmon_md = project_root.join("AKMON.md").is_file();
 
-        let mode_label = if cli.yes {
-            "AUTO"
-        } else {
-            "INTERACTIVE"
-        };
+        let mode_label = if cli.yes { "AUTO" } else { "INTERACTIVE" };
         let session_id = cli.session.unwrap_or_else(uuid::Uuid::new_v4);
-        let audit_log_path = resolve_audit_log_path(
-            &project_root,
-            session_id,
-            cli.audit_log.clone(),
-        );
+        let audit_log_path =
+            resolve_audit_log_path(&project_root, session_id, cli.audit_log.clone());
 
         #[cfg(feature = "semantic-index")]
         let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
@@ -736,10 +778,7 @@ async fn main() -> ExitCode {
 
         #[cfg(feature = "semantic-index")]
         let semantic_index: Option<akmon_tui::SemanticIndexSlot> = if cli.index {
-            let sandbox = Arc::new(Sandbox::with_git_root(
-                project_root.clone(),
-                has_git_root,
-            ));
+            let sandbox = Arc::new(Sandbox::with_git_root(project_root.clone(), has_git_root));
             let index_path = project_root.join(".akmon").join("index.bin");
             if !index_path.is_file() {
                 eprintln!("akmon: downloading embedding model (~22MB) on first use...");
@@ -770,11 +809,7 @@ async fn main() -> ExitCode {
                                 let emb_bg = Arc::clone(&emb);
                                 let path_bg = index_path.clone();
                                 index_thread = spawn_semantic_index_os_thread(
-                                    root_bg,
-                                    emb_bg,
-                                    sandbox_bg,
-                                    path_bg,
-                                    slot_bg,
+                                    root_bg, emb_bg, sandbox_bg, path_bg, slot_bg,
                                 );
                                 poll_index_ready_up_to_3s(&slot).await;
                             }
@@ -786,11 +821,7 @@ async fn main() -> ExitCode {
                         let emb_bg = Arc::clone(&emb);
                         let path_bg = index_path.clone();
                         index_thread = spawn_semantic_index_os_thread(
-                            root_bg,
-                            emb_bg,
-                            sandbox_bg,
-                            path_bg,
-                            slot_bg,
+                            root_bg, emb_bg, sandbox_bg, path_bg, slot_bg,
                         );
                         poll_index_ready_up_to_3s(&slot).await;
                     }
@@ -823,11 +854,20 @@ async fn main() -> ExitCode {
             session_id,
             max_iterations: AgentConfig::default().max_iterations,
             index_enabled: cli.index,
-            anthropic_key: coalesce_opt(cli.anthropic_key.clone(), global.anthropic_api_key.clone()),
-            openrouter_key: coalesce_opt(cli.openrouter_key.clone(), global.openrouter_api_key.clone()),
+            anthropic_key: coalesce_opt(
+                cli.anthropic_key.clone(),
+                global.anthropic_api_key.clone(),
+            ),
+            openrouter_key: coalesce_opt(
+                cli.openrouter_key.clone(),
+                global.openrouter_api_key.clone(),
+            ),
             openai_key: coalesce_opt(cli.openai_key.clone(), global.openai_api_key.clone()),
             groq_key: coalesce_opt(cli.groq_key.clone(), global.groq_api_key.clone()),
-            azure_endpoint: coalesce_opt(cli.azure_endpoint.clone(), global.azure_openai_endpoint.clone()),
+            azure_endpoint: coalesce_opt(
+                cli.azure_endpoint.clone(),
+                global.azure_openai_endpoint.clone(),
+            ),
             azure_key: coalesce_opt(cli.azure_key.clone(), global.azure_openai_api_key.clone()),
             azure_api_version: azure_ver,
             bedrock: cli.bedrock,
@@ -912,10 +952,7 @@ async fn main() -> ExitCode {
         PolicyEngineMode::Interactive
     };
     let policy = Arc::new(PolicyEngine::new(policy_mode));
-    let sandbox = Arc::new(Sandbox::with_git_root(
-        project_root.clone(),
-        has_git_root,
-    ));
+    let sandbox = Arc::new(Sandbox::with_git_root(project_root.clone(), has_git_root));
 
     #[cfg(feature = "semantic-index")]
     let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
@@ -928,9 +965,7 @@ async fn main() -> ExitCode {
         if !index_path.is_file() {
             eprintln!("akmon: downloading embedding model (~22MB) on first use...");
         }
-        match TextEmbedding::try_new(
-            TextInitOptions::default().with_show_download_progress(true),
-        ) {
+        match TextEmbedding::try_new(TextInitOptions::default().with_show_download_progress(true)) {
             Ok(m) => {
                 let emb = Arc::new(std::sync::Mutex::new(m));
                 let slot = Arc::new(RwLock::new(None));
@@ -954,11 +989,7 @@ async fn main() -> ExitCode {
                             let emb_bg = Arc::clone(&emb);
                             let path_bg = index_path.clone();
                             index_thread = spawn_semantic_index_os_thread(
-                                root_bg,
-                                emb_bg,
-                                sandbox_bg,
-                                path_bg,
-                                slot_bg,
+                                root_bg, emb_bg, sandbox_bg, path_bg, slot_bg,
                             );
                             poll_index_ready_up_to_3s(&slot).await;
                         }
@@ -970,11 +1001,7 @@ async fn main() -> ExitCode {
                     let emb_bg = Arc::clone(&emb);
                     let path_bg = index_path.clone();
                     index_thread = spawn_semantic_index_os_thread(
-                        root_bg,
-                        emb_bg,
-                        sandbox_bg,
-                        path_bg,
-                        slot_bg,
+                        root_bg, emb_bg, sandbox_bg, path_bg, slot_bg,
                     );
                     poll_index_ready_up_to_3s(&slot).await;
                 }
@@ -1153,7 +1180,8 @@ async fn main() -> ExitCode {
         drop(policy_opt);
         let _ = printer.await;
         if let Err(e) = plan_run {
-            if let Err(audit_err) = write_audit_jsonl(&audit_log_path, planner_session.audit_events())
+            if let Err(audit_err) =
+                write_audit_jsonl(&audit_log_path, planner_session.audit_events())
             {
                 eprintln!(
                     "akmon: failed to write audit log {}: {audit_err}",
@@ -1231,9 +1259,7 @@ async fn main() -> ExitCode {
         let (policy_tx, policy_rx) = mpsc::channel::<PolicyVerdict>(32);
         let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
         let mut policy_opt = Some(policy_rx);
-        let run_outcome = session
-            .run(impl_task, ev_tx, &mut policy_opt, None)
-            .await;
+        let run_outcome = session.run(impl_task, ev_tx, &mut policy_opt, None).await;
         drop(policy_opt);
         let _ = printer.await;
         let mut combined_audit: Vec<AuditEvent> = Vec::new();
@@ -1348,9 +1374,7 @@ async fn main() -> ExitCode {
     let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
 
     let mut policy_opt = Some(policy_rx);
-    let run_outcome = session
-        .run(task, ev_tx, &mut policy_opt, None)
-        .await;
+    let run_outcome = session.run(task, ev_tx, &mut policy_opt, None).await;
 
     drop(policy_opt);
 

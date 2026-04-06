@@ -6,19 +6,19 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{ready, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready};
 use pin_project_lite::pin_project;
-use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
+use crate::LlmProvider;
 use crate::config::CompletionConfig;
-use crate::tool_def::ToolDefinition;
 use crate::error::ModelError;
 use crate::message::{Message, MessageRole};
 use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent};
-use crate::LlmProvider;
+use crate::tool_def::ToolDefinition;
 
 /// JSON line from Ollama's NDJSON chat stream (or the single JSON body when `stream: false`).
 #[derive(Debug, serde::Deserialize)]
@@ -202,7 +202,7 @@ impl OllamaBackend {
     }
 
     fn chat_url(&self) -> String {
-        format!("{}/api/chat", self.base_url)
+        format!("{base}/api/chat", base = self.base_url)
     }
 
     fn map_messages(messages: &[Message]) -> Vec<OllamaApiMessage<'_>> {
@@ -330,10 +330,10 @@ fn extract_tool_calls_from_line(line: &OllamaChatLine) -> Vec<ModelToolCall> {
     if let Some(list) = line.tool_calls.as_deref() {
         push_list(list);
     }
-    if let Some(msg) = &line.message {
-        if let Some(list) = msg.tool_calls.as_deref() {
-            push_list(list);
-        }
+    if let Some(msg) = &line.message
+        && let Some(list) = msg.tool_calls.as_deref()
+    {
+        push_list(list);
     }
     out
 }
@@ -397,18 +397,19 @@ async fn process_json_line(
     done_sent: &mut bool,
     pending_tool_calls: &mut Vec<ModelToolCall>,
 ) -> Result<(), ModelError> {
-    let parsed: OllamaChatLine = serde_json::from_str(line).map_err(|e| ModelError::StreamInterrupted {
-        message: format!("invalid JSON line: {e}"),
-    })?;
+    let parsed: OllamaChatLine =
+        serde_json::from_str(line).map_err(|e| ModelError::StreamInterrupted {
+            message: format!("invalid JSON line: {e}"),
+        })?;
 
-    if let Some(msg) = &parsed.message {
-        if !msg.content.is_empty() {
-            let _ = tx
-                .send(Ok(StreamEvent::TextDelta {
-                    text: msg.content.clone(),
-                }))
-                .await;
-        }
+    if let Some(msg) = &parsed.message
+        && !msg.content.is_empty()
+    {
+        let _ = tx
+            .send(Ok(StreamEvent::TextDelta {
+                text: msg.content.clone(),
+            }))
+            .await;
     }
 
     let from_line = extract_tool_calls_from_line(&parsed);
@@ -492,13 +493,8 @@ async fn run_streaming(
 
     let mut done_sent = false;
     let mut pending_tool_calls: Vec<ModelToolCall> = Vec::new();
-    if let Err(e) = process_json_line(
-        &first_line,
-        &tx,
-        &mut done_sent,
-        &mut pending_tool_calls,
-    )
-    .await
+    if let Err(e) =
+        process_json_line(&first_line, &tx, &mut done_sent, &mut pending_tool_calls).await
     {
         let _ = tx.send(Err(e)).await;
         return;
@@ -511,13 +507,8 @@ async fn run_streaming(
                 return;
             }
             Ok(line) => {
-                if let Err(e) = process_json_line(
-                    &line,
-                    &tx,
-                    &mut done_sent,
-                    &mut pending_tool_calls,
-                )
-                .await
+                if let Err(e) =
+                    process_json_line(&line, &tx, &mut done_sent, &mut pending_tool_calls).await
                 {
                     let _ = tx.send(Err(e)).await;
                     return;
@@ -608,14 +599,14 @@ async fn run_buffered(
         }
     };
 
-    if let Some(ref msg) = parsed.message {
-        if !msg.content.is_empty() {
-            let _ = tx
-                .send(Ok(StreamEvent::TextDelta {
-                    text: msg.content.clone(),
-                }))
-                .await;
-        }
+    if let Some(ref msg) = parsed.message
+        && !msg.content.is_empty()
+    {
+        let _ = tx
+            .send(Ok(StreamEvent::TextDelta {
+                text: msg.content.clone(),
+            }))
+            .await;
     }
 
     let reason = stop_reason_from_line(&parsed);

@@ -77,8 +77,7 @@ pub enum StreamEvent {
 }
 
 /// Boxed, pinned, [`Send`] stream of completion results suitable for async executors.
-pub type CompletionStream =
-    Pin<Box<dyn Stream<Item = Result<StreamEvent, ModelError>> + Send>>;
+pub type CompletionStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, ModelError>> + Send>>;
 
 #[cfg(test)]
 mod usage_report_tests {

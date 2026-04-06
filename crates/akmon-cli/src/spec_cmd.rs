@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use clap::Args;
 use tokio::process::Command;
 
-use crate::cli_forward::forward_cli_for_child_process;
 use crate::Cli;
+use crate::cli_forward::forward_cli_for_child_process;
 
 /// One phase of the spec workflow (parsed from trailing CLI words).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,10 +62,7 @@ fn validate_feature_name(name: &str) -> Result<(), String> {
 }
 
 fn spec_root(project_root: &Path, feature: &str) -> PathBuf {
-    project_root
-        .join(".akmon")
-        .join("specs")
-        .join(feature)
+    project_root.join(".akmon").join("specs").join(feature)
 }
 
 /// Locates the first unchecked task line (`- [ ]` … `T-`).
@@ -94,11 +91,7 @@ pub(crate) fn check_off_first_unchecked_task(tasks_md: &str) -> Option<String> {
             out.push(line.to_string());
         }
     }
-    if done {
-        Some(out.join("\n"))
-    } else {
-        None
-    }
+    if done { Some(out.join("\n")) } else { None }
 }
 
 fn requirements_prompt(
@@ -226,7 +219,12 @@ fn implement_prompt(
     )
 }
 
-async fn run_akmon_child(project_root: &Path, cli: &Cli, task: String, auto_commit: bool) -> ExitCode {
+async fn run_akmon_child(
+    project_root: &Path,
+    cli: &Cli,
+    task: String,
+    auto_commit: bool,
+) -> ExitCode {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -287,10 +285,7 @@ pub async fn run_spec(cli: &Cli, project_root: &Path, cmd: SpecCmd) -> ExitCode 
                 cmd.design_first,
                 cmd.from_scratch,
             );
-            eprintln!(
-                "akmon: spec: generating requirements → {}",
-                req.display()
-            );
+            eprintln!("akmon: spec: generating requirements → {}", req.display());
             let code = run_akmon_child(project_root, cli, prompt, false).await;
             if code == ExitCode::SUCCESS {
                 eprintln!(
@@ -308,12 +303,7 @@ pub async fn run_spec(cli: &Cli, project_root: &Path, cmd: SpecCmd) -> ExitCode 
                 );
                 return ExitCode::from(2);
             }
-            let prompt = design_prompt(
-                &cmd.feature_name,
-                &req,
-                &design,
-                cmd.from_scratch,
-            );
+            let prompt = design_prompt(&cmd.feature_name, &req, &design, cmd.from_scratch);
             eprintln!("akmon: spec: generating design → {}", design.display());
             let code = run_akmon_child(project_root, cli, prompt, false).await;
             if code == ExitCode::SUCCESS {
@@ -363,13 +353,8 @@ pub async fn run_spec(cli: &Cli, project_root: &Path, cmd: SpecCmd) -> ExitCode 
                 eprintln!("akmon: spec: no unchecked tasks (`- [ ]` with `T-`) in tasks.md.");
                 return ExitCode::SUCCESS;
             };
-            let prompt = implement_prompt(
-                &cmd.feature_name,
-                &task_line_before,
-                &req,
-                &design,
-                &tasks,
-            );
+            let prompt =
+                implement_prompt(&cmd.feature_name, &task_line_before, &req, &design, &tasks);
             eprintln!("akmon: spec: implementing: {}", task_line_before.trim());
             let code = run_akmon_child(project_root, cli, prompt, cli.auto_commit).await;
             if code == ExitCode::SUCCESS {
@@ -382,13 +367,12 @@ pub async fn run_spec(cli: &Cli, project_root: &Path, cmd: SpecCmd) -> ExitCode 
                 };
                 let next_first = first_unchecked_task_line(&updated).map(|s| s.trim().to_string());
                 let still_same = next_first.as_deref() == Some(task_line_before.trim());
-                if still_same {
-                    if let Some(new_body) = check_off_first_unchecked_task(&updated) {
-                        if let Err(e) = std::fs::write(&tasks, new_body) {
-                            eprintln!("akmon: spec: could not update tasks.md: {e}");
-                            return ExitCode::from(2);
-                        }
-                    }
+                if still_same
+                    && let Some(new_body) = check_off_first_unchecked_task(&updated)
+                    && let Err(e) = std::fs::write(&tasks, new_body)
+                {
+                    eprintln!("akmon: spec: could not update tasks.md: {e}");
+                    return ExitCode::from(2);
                 }
                 eprintln!(
                     "Review changes and run again for the next task:\n  akmon spec {} implement",

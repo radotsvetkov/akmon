@@ -29,11 +29,11 @@ pub use config::SemanticIndexSlot;
 pub use config::TuiLaunchConfig;
 pub use message::TuiMessage;
 pub use render::{message_line_count, message_to_lines, paint_message_viewport};
-pub use runner::{run_blocking, run_interactive, TuiRunError};
+pub use runner::{TuiRunError, run_blocking, run_interactive};
 pub use session_persist::{
-    default_audit_log_path, load_session_file, load_session_summaries, save_session_snapshot,
-    session_file_path_for, sessions_directory, sessions_directory_under_home, LoadedSession,
-    SessionSummary,
+    LoadedSession, SessionSummary, default_audit_log_path, load_session_file,
+    load_session_summaries, save_session_snapshot, session_file_path_for, sessions_directory,
+    sessions_directory_under_home,
 };
-pub use slash::{matching_commands, parse_slash_input, SlashCommand, COMMANDS};
-pub use slash_exec::{handle_slash_line, SlashEnv, SlashHandled};
+pub use slash::{COMMANDS, SlashCommand, matching_commands, parse_slash_input};
+pub use slash_exec::{SlashEnv, SlashHandled, handle_slash_line};

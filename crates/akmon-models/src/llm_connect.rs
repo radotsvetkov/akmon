@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use akmon_core::Secret;
 
-use crate::{
-    AnthropicBackend, BedrockBackend, LlmProvider, OllamaBackend, OpenAiCompatBackend,
-};
+use crate::{AnthropicBackend, BedrockBackend, LlmProvider, OllamaBackend, OpenAiCompatBackend};
 
 fn nonempty(opt: Option<String>) -> Option<String> {
     opt.filter(|s| !s.trim().is_empty())
@@ -89,10 +87,10 @@ impl LlmConnectConfig {
             return Ok(Arc::new(OpenAiCompatBackend::openrouter(key, model)));
         }
 
-        if model.to_lowercase().starts_with("claude") {
-            if let Some(key) = nonempty(self.anthropic_api_key) {
-                return Ok(Arc::new(AnthropicBackend::new(Secret::new(key), model)));
-            }
+        if model.to_lowercase().starts_with("claude")
+            && let Some(key) = nonempty(self.anthropic_api_key)
+        {
+            return Ok(Arc::new(AnthropicBackend::new(Secret::new(key), model)));
         }
 
         if let (Some(ep), Some(k)) = (

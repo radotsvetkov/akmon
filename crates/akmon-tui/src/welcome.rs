@@ -105,20 +105,8 @@ pub fn render_welcome(
         .fg(Color::Rgb(181, 131, 55))
         .add_modifier(Modifier::DIM);
     if show_missing_akmon_hint {
-        y = draw_centered_line_truncated(
-            buf,
-            area,
-            y,
-            "no AKMON.md found",
-            nudge_style,
-        );
-        y = draw_centered_line_truncated(
-            buf,
-            area,
-            y,
-            "/init  analyze this project",
-            nudge_style,
-        );
+        y = draw_centered_line_truncated(buf, area, y, "no AKMON.md found", nudge_style);
+        y = draw_centered_line_truncated(buf, area, y, "/init  analyze this project", nudge_style);
         y = draw_centered_line_truncated(
             buf,
             area,
@@ -161,7 +149,9 @@ fn draw_centered_line_truncated(
     let line = Line::from(Span::styled(truncated.as_str(), style));
     let w = line.width().min(max_w) as u16;
     let x = area.x + area.width.saturating_sub(w) / 2;
-    let rw = w.max(1).min(area.width.saturating_sub(x.saturating_sub(area.x)));
+    let rw = w
+        .max(1)
+        .min(area.width.saturating_sub(x.saturating_sub(area.x)));
     Paragraph::new(line).render(Rect::new(x, y, rw, 1), buf);
     y.saturating_add(1)
 }
@@ -169,8 +159,8 @@ fn draw_centered_line_truncated(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn render_welcome_tiny_area_no_panic() {
@@ -181,7 +171,14 @@ mod tests {
     #[test]
     fn render_welcome_narrow_area_no_panic() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 8, 40));
-        render_welcome(Rect::new(0, 0, 8, 40), &mut buf, "1.3.0", "proj", true, true);
+        render_welcome(
+            Rect::new(0, 0, 8, 40),
+            &mut buf,
+            "1.3.0",
+            "proj",
+            true,
+            true,
+        );
     }
 
     #[test]

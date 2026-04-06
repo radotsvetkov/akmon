@@ -7,8 +7,8 @@ use ratatui::layout::Rect;
 
 use akmon_core::AgentEvent;
 use chrono::{DateTime, Utc};
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Notify;
+use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::command::UiCommand;
@@ -376,9 +376,7 @@ impl TuiApp {
     pub fn mark_confirmation_answered(&mut self, allowed: bool) {
         self.awaiting_confirmation = false;
         if let Some(TuiMessage::Confirmation {
-            answered,
-            answer,
-            ..
+            answered, answer, ..
         }) = self
             .messages
             .iter_mut()
@@ -591,7 +589,7 @@ mod tests {
         use tokio::sync::Notify;
 
         use crate::agent::AgentTurn;
-        use crate::slash_exec::{handle_slash_line, SlashEnv, SlashHandled};
+        use crate::slash_exec::{SlashEnv, SlashHandled, handle_slash_line};
         use crate::tui_project::ProjectUiJob;
         use tokio::sync::mpsc;
 
@@ -622,7 +620,7 @@ mod tests {
         use tokio::sync::Notify;
 
         use crate::agent::AgentTurn;
-        use crate::slash_exec::{handle_slash_line, SlashEnv, SlashHandled};
+        use crate::slash_exec::{SlashEnv, SlashHandled, handle_slash_line};
         use crate::tui_project::ProjectUiJob;
         use tokio::sync::mpsc;
 
@@ -659,7 +657,7 @@ mod tests {
         use tokio::sync::Notify;
 
         use crate::agent::AgentTurn;
-        use crate::slash_exec::{handle_slash_line, SlashEnv, SlashHandled};
+        use crate::slash_exec::{SlashEnv, SlashHandled, handle_slash_line};
         use crate::tui_project::ProjectUiJob;
         use tokio::sync::mpsc;
 
@@ -748,9 +746,7 @@ mod tests {
     #[test]
     fn text_delta_appends_open_assistant() {
         let mut app = TuiApp::new(sample_config());
-        app.apply_agent_event(AgentEvent::TextDelta {
-            text: "hi".into(),
-        });
+        app.apply_agent_event(AgentEvent::TextDelta { text: "hi".into() });
         app.apply_agent_event(AgentEvent::TextDelta {
             text: " there".into(),
         });
@@ -795,9 +791,7 @@ mod tests {
         });
         match app.messages.last() {
             Some(TuiMessage::ToolCall {
-                result,
-                success,
-                ..
+                result, success, ..
             }) => {
                 assert_eq!(result.as_deref(), Some("ok"));
                 assert_eq!(*success, Some(true));
@@ -841,9 +835,7 @@ mod tests {
         assert!(!app.awaiting_confirmation);
         match app.messages.last() {
             Some(TuiMessage::Confirmation {
-                answered,
-                answer,
-                ..
+                answered, answer, ..
             }) => {
                 assert!(*answered);
                 assert_eq!(*answer, Some(true));

@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use akmon_core::project::{
-    detect_project, format_project_context_for_init, project_type_label, scaffold_project,
-    suggested_akmon_title, ScaffoldKind, ScaffoldLanguage,
+    ScaffoldKind, ScaffoldLanguage, detect_project, format_project_context_for_init,
+    project_type_label, scaffold_project, suggested_akmon_title,
 };
 use akmon_query::generate_akmon_md_markdown;
 
@@ -100,8 +100,12 @@ async fn run_new_job(cfg: &TuiLaunchConfig, name: &str) -> (Vec<String>, bool) {
         return (lines, false);
     }
 
-    let report = match scaffold_project(&dest, name, ScaffoldLanguage::Generic, ScaffoldKind::Generic)
-    {
+    let report = match scaffold_project(
+        &dest,
+        name,
+        ScaffoldLanguage::Generic,
+        ScaffoldKind::Generic,
+    ) {
         Ok(r) => r,
         Err(e) => {
             lines.push(format!("Scaffold failed: {e}"));

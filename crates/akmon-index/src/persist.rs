@@ -4,8 +4,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
-use crate::error::IndexError;
 use crate::RepoIndex;
+use crate::error::IndexError;
 
 /// Writes `index` to `path` (creates parent directories).
 pub fn save_index(index: &RepoIndex, path: &Path) -> Result<(), IndexError> {

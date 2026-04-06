@@ -191,21 +191,16 @@ fn parse_package_json(root: &Path) -> io::Result<Option<ProjectType>> {
         .and_then(|x| x.as_str())
         .unwrap_or("unknown")
         .to_string();
-    let deps = v.get("dependencies").cloned().unwrap_or(serde_json::json!({}));
+    let deps = v
+        .get("dependencies")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let dev = v
         .get("devDependencies")
         .cloned()
         .unwrap_or(serde_json::json!({}));
-    let framework = first_dep_framework(
-        &deps,
-        &["next", "react", "express", "vue", "svelte"],
-    )
-    .or_else(|| {
-        first_dep_framework(
-            &dev,
-            &["next", "react", "express", "vue", "svelte"],
-        )
-    });
+    let framework = first_dep_framework(&deps, &["next", "react", "express", "vue", "svelte"])
+        .or_else(|| first_dep_framework(&dev, &["next", "react", "express", "vue", "svelte"]));
     Ok(Some(ProjectType::Node { name, framework }))
 }
 
@@ -276,13 +271,16 @@ fn scan_requirements_for_framework(path: &Path) -> Option<String> {
 }
 
 fn parse_python_project(root: &Path) -> io::Result<Option<ProjectType>> {
-    if root.join("pyproject.toml").is_file() {
-        if let Some((name, mut fw)) = parse_pyproject_name_and_framework(root)? {
-            if fw.is_none() {
-                fw = scan_requirements_for_framework(&root.join("requirements.txt"));
-            }
-            return Ok(Some(ProjectType::Python { name, framework: fw }));
+    if root.join("pyproject.toml").is_file()
+        && let Some((name, mut fw)) = parse_pyproject_name_and_framework(root)?
+    {
+        if fw.is_none() {
+            fw = scan_requirements_for_framework(&root.join("requirements.txt"));
         }
+        return Ok(Some(ProjectType::Python {
+            name,
+            framework: fw,
+        }));
     }
     if root.join("setup.py").is_file() || root.join("requirements.txt").is_file() {
         let name = root
@@ -610,12 +608,12 @@ pub fn format_project_context_for_init(summary: &ProjectSummary) -> String {
     });
     s.push('\n');
 
-    if let Some(ex) = &summary.description {
-        if !ex.is_empty() {
-            s.push_str("README excerpt: ");
-            s.push_str(ex);
-            s.push('\n');
-        }
+    if let Some(ex) = &summary.description
+        && !ex.is_empty()
+    {
+        s.push_str("README excerpt: ");
+        s.push_str(ex);
+        s.push('\n');
     }
 
     s
@@ -812,12 +810,7 @@ func main() {
             )?;
         }
         _ => {
-            write_file(
-                root,
-                ".gitignore",
-                "*.log\n.DS_Store\n",
-                &mut files_created,
-            )?;
+            write_file(root, ".gitignore", "*.log\n.DS_Store\n", &mut files_created)?;
             write_file(
                 root,
                 "README.md",
@@ -883,7 +876,10 @@ path = "src/main.rs"
         .expect("write");
         let s = detect_project(root).expect("detect");
         match s.project_type {
-            ProjectType::Node { ref name, ref framework } => {
+            ProjectType::Node {
+                ref name,
+                ref framework,
+            } => {
                 assert_eq!(name, "webapp");
                 assert_eq!(framework.as_deref(), Some("react"));
             }

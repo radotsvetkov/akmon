@@ -15,7 +15,6 @@ fn config_path_json_is_valid() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("stdout must be JSON");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout must be JSON");
     assert!(v.get("path").and_then(|p| p.as_str()).is_some());
 }

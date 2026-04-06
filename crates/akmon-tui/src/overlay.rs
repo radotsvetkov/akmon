@@ -1,13 +1,13 @@
 //! Bordered overlay widgets for slash-command UX (help, lists, cost, autocomplete).
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::app::{Overlay, TuiApp};
-use crate::slash::{slash_command_name_prefix, COMMANDS};
+use crate::slash::{COMMANDS, slash_command_name_prefix};
 use crate::slash_exec::{cost_summary_lines, format_session_list_row};
 use crate::theme::{ACCENT, ACCENT_DIM, BORDER, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG};
 
@@ -118,14 +118,15 @@ pub fn draw_slash_autocomplete(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         let above = view_start;
         let below = matches.len().saturating_sub(view_start + view_h);
         let scroll_hint = if above > 0 || below > 0 {
-            format!("·  {}/{}  ·  ↑{above} ↓{below}  ", *selected + 1, matches.len())
+            format!(
+                "·  {}/{}  ·  ↑{above} ↓{below}  ",
+                *selected + 1,
+                matches.len()
+            )
         } else {
             format!("·  {}/{}  ", *selected + 1, matches.len())
         };
-        title_spans.push(Span::styled(
-            scroll_hint,
-            Style::default().fg(FG_MUTED),
-        ));
+        title_spans.push(Span::styled(scroll_hint, Style::default().fg(FG_MUTED)));
     }
     if area.width >= 52 {
         title_spans.push(Span::styled(
@@ -160,7 +161,9 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
     match &app.overlay {
         Overlay::None | Overlay::SlashAutocomplete { .. } => {}
         Overlay::Help => {
-            let h = (COMMANDS.len() as u16).saturating_add(5).min(msg_area.height);
+            let h = (COMMANDS.len() as u16)
+                .saturating_add(5)
+                .min(msg_area.height);
             let w = (msg_area.width.saturating_sub(4)).min(86);
             let r = centered_rect(msg_area, w, h);
             f.render_widget(Clear, r);
@@ -170,9 +173,7 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
                     Line::from(vec![
                         Span::styled(
                             format!("/{}", c.name),
-                            Style::default()
-                                .fg(ACCENT)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             format!("  {}", c.description),
@@ -323,9 +324,7 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
                             .fg(FG_PRIMARY)
                             .add_modifier(Modifier::BOLD)
                     } else if row.section_header {
-                        Style::default()
-                            .fg(ACCENT_DIM)
-                            .add_modifier(Modifier::BOLD)
+                        Style::default().fg(ACCENT_DIM).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(FG_MUTED)
                     };

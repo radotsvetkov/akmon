@@ -351,7 +351,7 @@ impl Indexer {
                 metas.push((rel.clone(), start_line, end_line, chunk_text));
             }
 
-            if file_count > 0 && file_count % SCAN_PROGRESS_EVERY_FILES == 0 {
+            if file_count > 0 && file_count.is_multiple_of(SCAN_PROGRESS_EVERY_FILES) {
                 eprintln!(
                     "akmon: indexing… {file_count} files read, {} chunks collected so far",
                     metas.len()
@@ -396,9 +396,7 @@ mod tests {
     #[test]
     fn chunk_splits_correctly() {
         let idx = Indexer::default();
-        let lines: Vec<String> = (1..=100)
-            .map(|i| format!("line{i}"))
-            .collect();
+        let lines: Vec<String> = (1..=100).map(|i| format!("line{i}")).collect();
         let chunks = idx.chunk_lines(&lines);
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].0, 1);
@@ -431,9 +429,8 @@ mod tests {
         let sandbox = Sandbox::new(root.to_path_buf());
         let mut idx = Indexer::default();
         idx.max_files = 2;
-        let (metas, file_count, hit_cap) = idx
-            .collect_file_chunks(root, &sandbox)
-            .expect("collect");
+        let (metas, file_count, hit_cap) =
+            idx.collect_file_chunks(root, &sandbox).expect("collect");
         assert!(hit_cap);
         assert_eq!(file_count, 2);
         assert!(!metas.is_empty());

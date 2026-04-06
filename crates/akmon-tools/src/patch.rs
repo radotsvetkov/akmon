@@ -6,14 +6,14 @@ use std::sync::OnceLock;
 
 use akmon_core::{Permission, SandboxError};
 use async_trait::async_trait;
-use diffy::{apply, Patch};
-use serde_json::{json, Value as JsonValue};
+use diffy::{Patch, apply};
+use serde_json::{Value as JsonValue, json};
 use tokio::fs;
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
 use crate::write_file::atomic_write_utf8;
-use crate::Tool;
 
 fn patch_file_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
@@ -171,10 +171,7 @@ impl Tool for PatchTool {
                 Err(e) => {
                     return ToolOutput::Error {
                         code: ToolErrorCode::InvalidArgs,
-                        message: format!(
-                            "invalid unified diff (segment {}): {e}",
-                            seg_ix + 1
-                        ),
+                        message: format!("invalid unified diff (segment {}): {e}", seg_ix + 1),
                     };
                 }
             };
@@ -325,7 +322,7 @@ impl Tool for PatchTool {
 mod tests {
     use super::*;
     use akmon_core::{PolicyEngine, PolicyEngineMode, Sandbox};
-    use serde_json::{json, Value as JsonValue};
+    use serde_json::{Value as JsonValue, json};
     use std::sync::Arc;
 
     use crate::read_file::ReadFileTool;
@@ -428,9 +425,7 @@ mod tests {
 +b
 "#;
         let tool = PatchTool::new();
-        let out = tool
-            .execute(json!({ "patch": patch }), &ctx(&inner))
-            .await;
+        let out = tool.execute(json!({ "patch": patch }), &ctx(&inner)).await;
         let ToolOutput::Error { code, .. } = out else {
             panic!("expected error");
         };
@@ -459,9 +454,7 @@ mod tests {
     async fn empty_patch_invalid_args() {
         let dir = tempfile::tempdir().expect("tmp");
         let tool = PatchTool::new();
-        let out = tool
-            .execute(json!({ "patch": "" }), &ctx(dir.path()))
-            .await;
+        let out = tool.execute(json!({ "patch": "" }), &ctx(dir.path())).await;
         let ToolOutput::Error { code, .. } = out else {
             panic!("expected error");
         };

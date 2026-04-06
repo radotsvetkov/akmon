@@ -8,20 +8,18 @@ use akmon_core::Secret;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::StatusCode;
+use reqwest::header::{HeaderName, HeaderValue};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::LlmProvider;
 use crate::config::CompletionConfig;
 use crate::error::ModelError;
 use crate::message::{Message, MessageRole};
-use crate::stream::{
-    CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport,
-};
+use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 use crate::tool_def::ToolDefinition;
-use crate::LlmProvider;
 
 /// Infers a conservative context window from model id substrings.
 pub fn infer_context_window_tokens(model_id: &str) -> usize {
@@ -70,7 +68,9 @@ fn trim_slash(mut s: String) -> String {
 }
 
 fn host_only(base_url: &str) -> String {
-    let base = base_url.trim_start_matches("https://").trim_start_matches("http://");
+    let base = base_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
     base.split('/')
         .next()
         .unwrap_or("")
@@ -123,38 +123,45 @@ fn tool_message_to_openai(m: &Message) -> Option<Value> {
 }
 
 fn assistant_to_openai(m: &Message) -> Value {
-    if let Ok(v) = serde_json::from_str::<Value>(&m.content) {
-        if let Some(arr) = v.get("tool_calls").and_then(|a| a.as_array()) {
-            if !arr.is_empty() {
-                let mut tcalls: Vec<Value> = Vec::new();
-                for tc in arr {
-                    let id = tc.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    let name = tc.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    let args = tc.get("arguments").cloned().unwrap_or(json!({}));
-                    let arg_str = match args {
-                        Value::String(ref s) => s.clone(),
-                        ref o => serde_json::to_string(o).unwrap_or_else(|_| "{}".into()),
-                    };
-                    tcalls.push(json!({
-                        "id": id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": arg_str,
-                        }
-                    }));
+    if let Ok(v) = serde_json::from_str::<Value>(&m.content)
+        && let Some(arr) = v.get("tool_calls").and_then(|a| a.as_array())
+        && !arr.is_empty()
+    {
+        let mut tcalls: Vec<Value> = Vec::new();
+        for tc in arr {
+            let id = tc
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = tc
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = tc.get("arguments").cloned().unwrap_or(json!({}));
+            let arg_str = match args {
+                Value::String(ref s) => s.clone(),
+                ref o => serde_json::to_string(o).unwrap_or_else(|_| "{}".into()),
+            };
+            tcalls.push(json!({
+                "id": id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arg_str,
                 }
-                let text = v
-                    .get("text")
-                    .and_then(|x| x.as_str())
-                    .filter(|t| !t.trim().is_empty());
-                return json!({
-                    "role": "assistant",
-                    "content": text.unwrap_or(""),
-                    "tool_calls": tcalls,
-                });
-            }
+            }));
         }
+        let text = v
+            .get("text")
+            .and_then(|x| x.as_str())
+            .filter(|t| !t.trim().is_empty());
+        return json!({
+            "role": "assistant",
+            "content": text.unwrap_or(""),
+            "tool_calls": tcalls,
+        });
     }
     json!({
         "role": "assistant",
@@ -267,7 +274,7 @@ impl OpenAiCompatBackend {
     ) -> Self {
         let client = build_client();
         let context_window = infer_context_window_tokens(&model);
-        let display_name = format!("{provider_slug}/{}", model);
+        let display_name = format!("{provider_slug}/{model}");
         Self {
             inner: Arc::new(OpenAiCompatInner {
                 display_name,
@@ -358,8 +365,8 @@ impl OpenAiCompatBackend {
     /// Sends `api-key` header (not `Authorization: Bearer`).
     pub fn azure(endpoint: String, api_key: String, api_version: String) -> Self {
         let endpoint = trim_slash(endpoint);
-        let deployment = extract_azure_deployment_from_endpoint(&endpoint)
-            .unwrap_or_else(|| "gpt-4".into());
+        let deployment =
+            extract_azure_deployment_from_endpoint(&endpoint).unwrap_or_else(|| "gpt-4".into());
         let post_url = if endpoint.contains("api-version=") {
             endpoint
         } else {
@@ -406,7 +413,7 @@ fn map_http_status(status: StatusCode, body: &str) -> ModelError {
             retry_after_secs: None,
         },
         _ => ModelError::BackendUnavailable {
-            message: format!("HTTP {status}: {}", truncate(body)),
+            message: format!("HTTP {status}: {msg}", msg = truncate(body)),
         },
     }
 }
@@ -416,7 +423,7 @@ fn truncate(s: &str) -> String {
     if s.len() <= M {
         s.to_string()
     } else {
-        format!("{}…", &s[..M])
+        format!("{prefix}…", prefix = &s[..M])
     }
 }
 
@@ -457,12 +464,17 @@ fn sse_block_to_json(block: &str) -> Result<Option<Value>, ModelError> {
     if s == "[DONE]" {
         return Ok(None);
     }
-    serde_json::from_str::<Value>(&s).map(Some).map_err(|e| ModelError::StreamInterrupted {
-        message: format!("invalid SSE JSON: {e}"),
-    })
+    serde_json::from_str::<Value>(&s)
+        .map(Some)
+        .map_err(|e| ModelError::StreamInterrupted {
+            message: format!("invalid SSE JSON: {e}"),
+        })
 }
 
-async fn read_next_sse_event<S>(buf: &mut String, stream: &mut S) -> Result<Option<String>, ModelError>
+async fn read_next_sse_event<S>(
+    buf: &mut String,
+    stream: &mut S,
+) -> Result<Option<String>, ModelError>
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
 {
@@ -513,30 +525,33 @@ fn apply_openai_sse_line(
         });
     }
 
-    let choice = v.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first());
+    let choice = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first());
     let delta = choice.and_then(|c| c.get("delta"));
     if let Some(d) = delta {
-        if let Some(txt) = d.get("content").and_then(|x| x.as_str()) {
-            if !txt.is_empty() {
-                out.push(StreamEvent::TextDelta {
-                    text: txt.to_string(),
-                });
-            }
+        if let Some(txt) = d.get("content").and_then(|x| x.as_str())
+            && !txt.is_empty()
+        {
+            out.push(StreamEvent::TextDelta {
+                text: txt.to_string(),
+            });
         }
         if let Some(tarr) = d.get("tool_calls").and_then(|x| x.as_array()) {
             for tc in tarr {
                 let index = tc.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                 let entry = tools.entry(index).or_default();
-                if let Some(id) = tc.get("id").and_then(|x| x.as_str()) {
-                    if !id.is_empty() {
-                        entry.id = id.to_string();
-                    }
+                if let Some(id) = tc.get("id").and_then(|x| x.as_str())
+                    && !id.is_empty()
+                {
+                    entry.id = id.to_string();
                 }
                 if let Some(f) = tc.get("function") {
-                    if let Some(n) = f.get("name").and_then(|x| x.as_str()) {
-                        if !n.is_empty() {
-                            entry.name = n.to_string();
-                        }
+                    if let Some(n) = f.get("name").and_then(|x| x.as_str())
+                        && !n.is_empty()
+                    {
+                        entry.name = n.to_string();
                     }
                     if let Some(a) = f.get("arguments").and_then(|x| x.as_str()) {
                         entry.args.push_str(a);
@@ -549,44 +564,45 @@ fn apply_openai_sse_line(
     let finish = choice
         .and_then(|c| c.get("finish_reason"))
         .and_then(|x| x.as_str());
-    if let Some(fr) = finish {
-        if !fr.is_empty() && fr != "null" {
-            let stop = match fr {
-                "tool_calls" => StopReason::ToolUse,
-                "length" => StopReason::MaxTokens,
-                _ => StopReason::EndTurn,
-            };
-            let mut model_calls: Vec<ModelToolCall> = Vec::new();
-            if stop == StopReason::ToolUse {
-                let drained = std::mem::take(tools);
-                for (_i, part) in drained {
-                    if part.name.is_empty() {
-                        continue;
-                    }
-                    let arguments = if part.args.trim().is_empty() {
-                        json!({})
-                    } else {
-                        serde_json::from_str(&part.args).unwrap_or(json!({}))
-                    };
-                    model_calls.push(ModelToolCall {
-                        id: if part.id.is_empty() {
-                            format!("call_{}", part.name)
-                        } else {
-                            part.id
-                        },
-                        name: part.name,
-                        arguments,
-                    });
+    if let Some(fr) = finish
+        && !fr.is_empty()
+        && fr != "null"
+    {
+        let stop = match fr {
+            "tool_calls" => StopReason::ToolUse,
+            "length" => StopReason::MaxTokens,
+            _ => StopReason::EndTurn,
+        };
+        let mut model_calls: Vec<ModelToolCall> = Vec::new();
+        if stop == StopReason::ToolUse {
+            let drained = std::mem::take(tools);
+            for (_i, part) in drained {
+                if part.name.is_empty() {
+                    continue;
                 }
+                let arguments = if part.args.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(&part.args).unwrap_or(json!({}))
+                };
+                model_calls.push(ModelToolCall {
+                    id: if part.id.is_empty() {
+                        format!("call_{name}", name = part.name)
+                    } else {
+                        part.id
+                    },
+                    name: part.name,
+                    arguments,
+                });
             }
-            if let Some(snap) = usage_acc.clone() {
-                out.push(StreamEvent::UsageReport(snap));
-            }
-            out.push(StreamEvent::Done {
-                stop_reason: stop,
-                tool_calls: model_calls,
-            });
         }
+        if let Some(snap) = usage_acc.clone() {
+            out.push(StreamEvent::UsageReport(snap));
+        }
+        out.push(StreamEvent::Done {
+            stop_reason: stop,
+            tool_calls: model_calls,
+        });
     }
 
     Ok(out)
@@ -611,7 +627,7 @@ async fn run_openai_stream(
         .header(reqwest::header::ACCEPT, "text/event-stream");
     match inner.auth {
         AuthStyle::Bearer => {
-            let tok = format!("Bearer {}", inner.api_key.expose_secret());
+            let tok = format!("Bearer {key}", key = inner.api_key.expose_secret());
             if let Ok(h) = HeaderValue::from_str(&tok) {
                 req = req.header(reqwest::header::AUTHORIZATION, h);
             }
@@ -649,27 +665,27 @@ async fn run_openai_stream(
     let mut byte_stream = resp.bytes_stream();
     let mut buf = String::new();
     let deadline = Duration::from_millis(config.first_token_deadline_ms);
-    let first = match tokio::time::timeout(deadline, read_next_sse_event(&mut buf, &mut byte_stream))
-        .await
-    {
-        Err(_) => {
-            let _ = tx.send(Err(ModelError::FirstTokenTimeout)).await;
-            return;
-        }
-        Ok(Err(e)) => {
-            let _ = tx.send(Err(e)).await;
-            return;
-        }
-        Ok(Ok(None)) => {
-            let _ = tx
-                .send(Err(ModelError::StreamInterrupted {
-                    message: "empty SSE stream".into(),
-                }))
-                .await;
-            return;
-        }
-        Ok(Ok(Some(b))) => b,
-    };
+    let first =
+        match tokio::time::timeout(deadline, read_next_sse_event(&mut buf, &mut byte_stream)).await
+        {
+            Err(_) => {
+                let _ = tx.send(Err(ModelError::FirstTokenTimeout)).await;
+                return;
+            }
+            Ok(Err(e)) => {
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+            Ok(Ok(None)) => {
+                let _ = tx
+                    .send(Err(ModelError::StreamInterrupted {
+                        message: "empty SSE stream".into(),
+                    }))
+                    .await;
+                return;
+            }
+            Ok(Ok(Some(b))) => b,
+        };
 
     let mut tools: BTreeMap<u32, ToolPart> = BTreeMap::new();
     let mut usage_acc: Option<UsageReport> = None;
@@ -795,15 +811,20 @@ mod tests {
     #[test]
     fn openrouter_base_url_and_headers() {
         let b = OpenAiCompatBackend::openrouter("k".into(), "anthropic/claude-3".into());
-        assert!(b.post_url().contains("openrouter.ai/api/v1/chat/completions"));
-        assert!(b
-            .extra_headers()
-            .iter()
-            .any(|(k, v)| k == "HTTP-Referer" && v == "https://akmon.dev"));
-        assert!(b
-            .extra_headers()
-            .iter()
-            .any(|(k, v)| k == "X-Title" && v == "Akmon"));
+        assert!(
+            b.post_url()
+                .contains("openrouter.ai/api/v1/chat/completions")
+        );
+        assert!(
+            b.extra_headers()
+                .iter()
+                .any(|(k, v)| k == "HTTP-Referer" && v == "https://akmon.dev")
+        );
+        assert!(
+            b.extra_headers()
+                .iter()
+                .any(|(k, v)| k == "X-Title" && v == "Akmon")
+        );
     }
 
     #[test]
@@ -841,7 +862,10 @@ mod tests {
             "choices": [{"delta": {"content": "Hi"}}]
         });
         let ev = apply_openai_sse_line(&v, &mut tools, &mut usage).expect("ok");
-        assert!(ev.iter().any(|e| matches!(e, StreamEvent::TextDelta { text } if text == "Hi")));
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta { text } if text == "Hi"))
+        );
         let v2 = json!({
             "choices": [{
                 "delta": {},

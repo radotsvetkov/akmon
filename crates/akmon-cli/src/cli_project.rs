@@ -5,9 +5,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use akmon_core::project::{
-    count_source_files_for_summary, detect_project, format_project_context_for_init,
-    scaffold_project, suggested_akmon_title, ProjectSummary, ProjectType, ScaffoldKind,
-    ScaffoldLanguage,
+    ProjectSummary, ProjectType, ScaffoldKind, ScaffoldLanguage, count_source_files_for_summary,
+    detect_project, format_project_context_for_init, scaffold_project, suggested_akmon_title,
 };
 use akmon_models::LlmProvider;
 use akmon_query::generate_akmon_md_markdown;
@@ -191,10 +190,10 @@ pub async fn run_init(cli: &Cli, project_root: &Path) -> ExitCode {
 }
 
 fn short_model_label(model: &str) -> String {
-    if model.to_lowercase().starts_with("claude") {
-        if let Some(rest) = model.strip_prefix("claude-") {
-            return format!("{rest}…");
-        }
+    if model.to_lowercase().starts_with("claude")
+        && let Some(rest) = model.strip_prefix("claude-")
+    {
+        return format!("{rest}…");
     }
     model.to_string()
 }
@@ -243,10 +242,7 @@ pub async fn run_new(cli: &Cli, args: &NewCmd, cwd: &Path) -> ExitCode {
 
     let dest_dir = cwd.join(&args.name);
     if dest_dir.exists() {
-        eprintln!(
-            "akmon: destination already exists: {}",
-            dest_dir.display()
-        );
+        eprintln!("akmon: destination already exists: {}", dest_dir.display());
         return ExitCode::from(2);
     }
 
@@ -301,20 +297,16 @@ pub async fn run_new(cli: &Cli, args: &NewCmd, cwd: &Path) -> ExitCode {
     };
 
     println!("\nGenerating AKMON.md...");
-    let body = match generate_akmon_md_markdown(
-        &*provider,
-        &ctx,
-        args.description.as_deref(),
-        &title,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("akmon: model error: {e}");
-            return ExitCode::from(1);
-        }
-    };
+    let body =
+        match generate_akmon_md_markdown(&*provider, &ctx, args.description.as_deref(), &title)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("akmon: model error: {e}");
+                return ExitCode::from(1);
+            }
+        };
 
     let akmon_path = dest_dir.join("AKMON.md");
     if let Err(e) = std::fs::write(&akmon_path, body.as_bytes()) {

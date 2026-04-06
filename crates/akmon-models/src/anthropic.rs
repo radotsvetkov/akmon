@@ -8,17 +8,17 @@ use akmon_core::Secret;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
-use serde_json::{json, Value};
+use reqwest::header::HeaderMap;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::LlmProvider;
 use crate::config::CompletionConfig;
 use crate::error::ModelError;
 use crate::message::{Message, MessageRole};
 use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 use crate::tool_def::ToolDefinition;
-use crate::LlmProvider;
 
 /// Default Anthropic Messages API host (no trailing slash).
 pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
@@ -141,29 +141,28 @@ fn non_tool_message_to_anthropic(m: &Message) -> Option<Value> {
             "content": m.content,
         })),
         MessageRole::Assistant => {
-            if let Ok(v) = serde_json::from_str::<Value>(&m.content) {
-                if let Some(arr) = v.get("tool_calls").and_then(|a| a.as_array()) {
-                    if !arr.is_empty() {
-                        let mut blocks: Vec<Value> = Vec::new();
-                        if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
-                            if !t.trim().is_empty() {
-                                blocks.push(json!({"type": "text", "text": t}));
-                            }
-                        }
-                        for tc in arr {
-                            let id = tc.get("id").and_then(|x| x.as_str()).unwrap_or("");
-                            let name = tc.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                            let input = tc.get("arguments").cloned().unwrap_or(json!({}));
-                            blocks.push(json!({
-                                "type": "tool_use",
-                                "id": id,
-                                "name": name,
-                                "input": input,
-                            }));
-                        }
-                        return Some(json!({ "role": "assistant", "content": blocks }));
-                    }
+            if let Ok(v) = serde_json::from_str::<Value>(&m.content)
+                && let Some(arr) = v.get("tool_calls").and_then(|a| a.as_array())
+                && !arr.is_empty()
+            {
+                let mut blocks: Vec<Value> = Vec::new();
+                if let Some(t) = v.get("text").and_then(|x| x.as_str())
+                    && !t.trim().is_empty()
+                {
+                    blocks.push(json!({"type": "text", "text": t}));
                 }
+                for tc in arr {
+                    let id = tc.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                    let name = tc.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                    let input = tc.get("arguments").cloned().unwrap_or(json!({}));
+                    blocks.push(json!({
+                        "type": "tool_use",
+                        "id": id,
+                        "name": name,
+                        "input": input,
+                    }));
+                }
+                return Some(json!({ "role": "assistant", "content": blocks }));
             }
             Some(json!({
                 "role": "assistant",
@@ -244,13 +243,10 @@ fn build_request_json(
     }
     map.insert("messages".to_string(), Value::Array(messages));
     if !tools.is_empty() {
-        if let Some(last) = tools.last_mut() {
-            if let Some(obj) = last.as_object_mut() {
-                obj.insert(
-                    "cache_control".to_string(),
-                    json!({ "type": "ephemeral" }),
-                );
-            }
+        if let Some(last) = tools.last_mut()
+            && let Some(obj) = last.as_object_mut()
+        {
+            obj.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
         }
         map.insert("tools".to_string(), Value::Array(tools));
     }
@@ -271,10 +267,7 @@ pub(crate) fn build_bedrock_anthropic_invoke_json(
         }
     }
     let mut map = serde_json::Map::new();
-    map.insert(
-        "anthropic_version".to_string(),
-        json!("bedrock-2023-05-31"),
-    );
+    map.insert("anthropic_version".to_string(), json!("bedrock-2023-05-31"));
     map.insert("max_tokens".to_string(), json!(config.max_tokens));
     map.insert("temperature".to_string(), json!(config.temperature));
     if !system.is_empty() {
@@ -303,7 +296,7 @@ fn map_anthropic_http_status(status: StatusCode, body: &str, headers: &HeaderMap
             message: format!("HTTP {status}"),
         },
         _ => ModelError::BackendUnavailable {
-            message: format!("HTTP {status}: {}", truncate_body(body)),
+            message: format!("HTTP {status}: {tb}", tb = truncate_body(body)),
         },
     }
 }
@@ -313,7 +306,7 @@ fn truncate_body(s: &str) -> String {
     if s.len() <= MAX {
         s.to_string()
     } else {
-        format!("{}…", &s[..MAX])
+        format!("{prefix}…", prefix = &s[..MAX])
     }
 }
 
@@ -359,9 +352,11 @@ fn sse_block_to_json(block: &str) -> Result<Option<Value>, ModelError> {
     if s == "[DONE]" {
         return Ok(None);
     }
-    serde_json::from_str::<Value>(&s).map(Some).map_err(|e| ModelError::StreamInterrupted {
-        message: format!("invalid SSE JSON: {e}"),
-    })
+    serde_json::from_str::<Value>(&s)
+        .map(Some)
+        .map_err(|e| ModelError::StreamInterrupted {
+            message: format!("invalid SSE JSON: {e}"),
+        })
 }
 
 /// Incremental tool-use state for Anthropic-style streaming JSON (shared with Bedrock Claude streaming).
@@ -371,7 +366,10 @@ pub(crate) struct ToolAccum {
     partial_json: String,
 }
 
-async fn read_next_sse_event<S>(buf: &mut String, stream: &mut S) -> Result<Option<String>, ModelError>
+async fn read_next_sse_event<S>(
+    buf: &mut String,
+    stream: &mut S,
+) -> Result<Option<String>, ModelError>
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
 {
@@ -410,19 +408,17 @@ pub(crate) fn apply_anthropic_sse_json(
     let ty = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
     match ty {
         "message_start" => {
-            if let Some(msg) = v.get("message") {
-                if let Some(u) = msg.get("usage") {
-                    *usage_acc = Some(UsageReport {
-                        input_tokens: u32_from_json_token_field(u.get("input_tokens")),
-                        output_tokens: u32_from_json_token_field(u.get("output_tokens")),
-                        cache_creation_tokens: u32_from_json_token_field(
-                            u.get("cache_creation_input_tokens"),
-                        ),
-                        cache_read_tokens: u32_from_json_token_field(
-                            u.get("cache_read_input_tokens"),
-                        ),
-                    });
-                }
+            if let Some(msg) = v.get("message")
+                && let Some(u) = msg.get("usage")
+            {
+                *usage_acc = Some(UsageReport {
+                    input_tokens: u32_from_json_token_field(u.get("input_tokens")),
+                    output_tokens: u32_from_json_token_field(u.get("output_tokens")),
+                    cache_creation_tokens: u32_from_json_token_field(
+                        u.get("cache_creation_input_tokens"),
+                    ),
+                    cache_read_tokens: u32_from_json_token_field(u.get("cache_read_input_tokens")),
+                });
             }
         }
         "error" => {
@@ -439,19 +435,18 @@ pub(crate) fn apply_anthropic_sse_json(
             if let Some(delta) = v.get("delta") {
                 let dt = delta.get("type").and_then(|x| x.as_str()).unwrap_or("");
                 if dt == "text_delta" {
-                    if let Some(text) = delta.get("text").and_then(|x| x.as_str()) {
-                        if !text.is_empty() {
-                            out.push(StreamEvent::TextDelta {
-                                text: text.to_string(),
-                            });
-                        }
+                    if let Some(text) = delta.get("text").and_then(|x| x.as_str())
+                        && !text.is_empty()
+                    {
+                        out.push(StreamEvent::TextDelta {
+                            text: text.to_string(),
+                        });
                     }
-                } else if dt == "input_json_delta" {
-                    if let Some(p) = delta.get("partial_json").and_then(|x| x.as_str()) {
-                        if let Some(acc) = tool_builds.get_mut(&index) {
-                            acc.partial_json.push_str(p);
-                        }
-                    }
+                } else if dt == "input_json_delta"
+                    && let Some(p) = delta.get("partial_json").and_then(|x| x.as_str())
+                    && let Some(acc) = tool_builds.get_mut(&index)
+                {
+                    acc.partial_json.push_str(p);
                 }
             }
         }
@@ -460,8 +455,16 @@ pub(crate) fn apply_anthropic_sse_json(
             if let Some(cb) = v.get("content_block") {
                 let cbt = cb.get("type").and_then(|x| x.as_str()).unwrap_or("");
                 if cbt == "tool_use" {
-                    let id = cb.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    let name = cb.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let id = cb
+                        .get("id")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = cb
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     tool_builds.insert(
                         index,
                         ToolAccum {
@@ -495,42 +498,41 @@ pub(crate) fn apply_anthropic_sse_json(
             }
         }
         "message_delta" => {
-            if let Some(u) = v.get("usage") {
-                if let Some(acc) = usage_acc.as_mut() {
-                    if u.get("input_tokens").is_some() {
-                        acc.input_tokens = u32_from_json_token_field(u.get("input_tokens"));
-                    }
-                    if u.get("output_tokens").is_some() {
-                        acc.output_tokens = u32_from_json_token_field(u.get("output_tokens"));
-                    }
-                    if u.get("cache_creation_input_tokens").is_some() {
-                        acc.cache_creation_tokens = u32_from_json_token_field(
-                            u.get("cache_creation_input_tokens"),
-                        );
-                    }
-                    if u.get("cache_read_input_tokens").is_some() {
-                        acc.cache_read_tokens =
-                            u32_from_json_token_field(u.get("cache_read_input_tokens"));
-                    }
+            if let Some(u) = v.get("usage")
+                && let Some(acc) = usage_acc.as_mut()
+            {
+                if u.get("input_tokens").is_some() {
+                    acc.input_tokens = u32_from_json_token_field(u.get("input_tokens"));
+                }
+                if u.get("output_tokens").is_some() {
+                    acc.output_tokens = u32_from_json_token_field(u.get("output_tokens"));
+                }
+                if u.get("cache_creation_input_tokens").is_some() {
+                    acc.cache_creation_tokens =
+                        u32_from_json_token_field(u.get("cache_creation_input_tokens"));
+                }
+                if u.get("cache_read_input_tokens").is_some() {
+                    acc.cache_read_tokens =
+                        u32_from_json_token_field(u.get("cache_read_input_tokens"));
                 }
             }
-            if let Some(delta) = v.get("delta") {
-                if let Some(sr) = delta.get("stop_reason").and_then(|x| x.as_str()) {
-                    let stop = match sr {
-                        "end_turn" => StopReason::EndTurn,
-                        "tool_use" => StopReason::ToolUse,
-                        "max_tokens" => StopReason::MaxTokens,
-                        _ => StopReason::EndTurn,
-                    };
-                    let tool_calls: Vec<ModelToolCall> = finished_tools.values().cloned().collect();
-                    if let Some(snap) = usage_acc.as_ref() {
-                        out.push(StreamEvent::UsageReport(snap.clone()));
-                    }
-                    out.push(StreamEvent::Done {
-                        stop_reason: stop,
-                        tool_calls,
-                    });
+            if let Some(delta) = v.get("delta")
+                && let Some(sr) = delta.get("stop_reason").and_then(|x| x.as_str())
+            {
+                let stop = match sr {
+                    "end_turn" => StopReason::EndTurn,
+                    "tool_use" => StopReason::ToolUse,
+                    "max_tokens" => StopReason::MaxTokens,
+                    _ => StopReason::EndTurn,
+                };
+                let tool_calls: Vec<ModelToolCall> = finished_tools.values().cloned().collect();
+                if let Some(snap) = usage_acc.as_ref() {
+                    out.push(StreamEvent::UsageReport(snap.clone()));
                 }
+                out.push(StreamEvent::Done {
+                    stop_reason: stop,
+                    tool_calls,
+                });
             }
         }
         _ => {}
@@ -544,19 +546,13 @@ async fn run_anthropic_stream(
     config: CompletionConfig,
     tx: mpsc::Sender<Result<StreamEvent, ModelError>>,
 ) {
-    let url = format!("{}/v1/messages", inner.base_url);
+    let url = format!("{base}/v1/messages", base = inner.base_url);
     let resp = match inner
         .client
         .post(&url)
-        .header(
-            "x-api-key",
-            inner.api_key.expose_secret().as_str(),
-        )
+        .header("x-api-key", inner.api_key.expose_secret().as_str())
         .header("anthropic-version", "2023-06-01")
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            "application/json",
-        )
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .json(&body)
         .send()
@@ -593,25 +589,27 @@ async fn run_anthropic_stream(
     let mut byte_stream = resp.bytes_stream();
     let mut buf = String::new();
 
-    let first = match tokio::time::timeout(deadline, read_next_sse_event(&mut buf, &mut byte_stream)).await {
-        Err(_) => {
-            let _ = tx.send(Err(ModelError::FirstTokenTimeout)).await;
-            return;
-        }
-        Ok(Err(e)) => {
-            let _ = tx.send(Err(e)).await;
-            return;
-        }
-        Ok(Ok(None)) => {
-            let _ = tx
-                .send(Err(ModelError::StreamInterrupted {
-                    message: "empty SSE stream".into(),
-                }))
-                .await;
-            return;
-        }
-        Ok(Ok(Some(o))) => o,
-    };
+    let first =
+        match tokio::time::timeout(deadline, read_next_sse_event(&mut buf, &mut byte_stream)).await
+        {
+            Err(_) => {
+                let _ = tx.send(Err(ModelError::FirstTokenTimeout)).await;
+                return;
+            }
+            Ok(Err(e)) => {
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+            Ok(Ok(None)) => {
+                let _ = tx
+                    .send(Err(ModelError::StreamInterrupted {
+                        message: "empty SSE stream".into(),
+                    }))
+                    .await;
+                return;
+            }
+            Ok(Ok(Some(o))) => o,
+        };
 
     let mut tool_builds: BTreeMap<usize, ToolAccum> = BTreeMap::new();
     let mut finished_tools: BTreeMap<usize, ModelToolCall> = BTreeMap::new();
@@ -700,13 +698,7 @@ impl LlmProvider for AnthropicBackend {
         let (system, rest) = anthropic_system_and_rest(messages);
         let api_messages = build_anthropic_api_messages(&rest);
         let tools = anthropic_tools_from_config(config);
-        let body = build_request_json(
-            &self.inner.model,
-            &system,
-            api_messages,
-            tools,
-            config,
-        );
+        let body = build_request_json(&self.inner.model, &system, api_messages, tools, config);
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent, ModelError>>(64);
         let inner = Arc::clone(&self.inner);
@@ -788,13 +780,9 @@ mod tests {
             },
             "delta": { "stop_reason": "end_turn" }
         });
-        let out = apply_anthropic_sse_json(
-            &v,
-            &mut tool_builds,
-            &mut finished_tools,
-            &mut usage_acc,
-        )
-        .expect("parse");
+        let out =
+            apply_anthropic_sse_json(&v, &mut tool_builds, &mut finished_tools, &mut usage_acc)
+                .expect("parse");
         assert!(out.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
         let snap = usage_acc.as_ref().expect("usage");
         assert_eq!(snap.input_tokens, 50);
@@ -806,13 +794,7 @@ mod tests {
     #[test]
     fn request_json_system_is_cached_content_block_array_when_non_empty() {
         let cfg = CompletionConfig::default();
-        let body = build_request_json(
-            "claude-test",
-            "system prompt body",
-            vec![],
-            vec![],
-            &cfg,
-        );
+        let body = build_request_json("claude-test", "system prompt body", vec![], vec![], &cfg);
         let sys = body.get("system").expect("system key");
         let arr = sys.as_array().expect("system must be array");
         assert_eq!(arr.len(), 1);

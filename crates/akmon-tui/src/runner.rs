@@ -1,6 +1,6 @@
 //! Crossterm event loop and ratatui draw pass for the interactive UI.
 
-use std::io::{stdout, Stdout, Write};
+use std::io::{Stdout, Write, stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,32 +11,34 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Terminal;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
-use crate::agent::{run_agent_loop, AgentTurn, BridgeMsg};
-use crate::tui_project::ProjectUiJob;
+use crate::TuiApp;
+use crate::agent::{AgentTurn, BridgeMsg, run_agent_loop};
 use crate::app::Overlay;
 use crate::command::UiCommand;
 use crate::config::TuiLaunchConfig;
 use crate::message::TuiMessage;
-use crate::overlay::{draw_message_overlays, draw_slash_autocomplete, slash_autocomplete_row_count};
+use crate::overlay::{
+    draw_message_overlays, draw_slash_autocomplete, slash_autocomplete_row_count,
+};
 use crate::render::{message_to_lines, paint_message_viewport};
 use crate::session_persist::save_session_snapshot;
 use crate::slash::{matching_commands, slash_command_name_prefix};
 use crate::slash_exec::{
-    handle_slash_line, model_picker_enter, session_list_enter, SlashEnv, SlashHandled,
+    SlashEnv, SlashHandled, handle_slash_line, model_picker_enter, session_list_enter,
 };
 use crate::theme::{ACCENT, ACCENT_DIM, BORDER, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN};
-use crate::TuiApp;
+use crate::tui_project::ProjectUiJob;
 
 /// Milliseconds between cursor blink ticks for streaming assistant rows.
 const STREAM_BLINK_MS: u64 = 450;
@@ -227,9 +229,10 @@ fn run_loop(
             })
             .map_err(TuiRunError::Io)?;
 
-        let has_streaming = app.messages.iter().any(|m| {
-            matches!(m, TuiMessage::Assistant { complete, .. } if !complete)
-        });
+        let has_streaming = app
+            .messages
+            .iter()
+            .any(|m| matches!(m, TuiMessage::Assistant { complete, .. } if !complete));
 
         let wait = Duration::from_millis(POLL_TICK_MS);
         if event::poll(wait).map_err(TuiRunError::Io)? {
@@ -403,9 +406,7 @@ fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
             if matches.is_empty() {
                 app.slash_ac_selected = 0;
             } else {
-                app.slash_ac_selected = app
-                    .slash_ac_selected
-                    .min(matches.len().saturating_sub(1));
+                app.slash_ac_selected = app.slash_ac_selected.min(matches.len().saturating_sub(1));
             }
             app.overlay = Overlay::SlashAutocomplete {
                 matches,
@@ -491,24 +492,24 @@ fn submit_slash_autocomplete_or_line(
     agent_task_tx: mpsc::UnboundedSender<AgentTurn>,
 ) -> Result<bool, TuiRunError> {
     let env = slash_env_for(app, shared_config, project_tx, agent_task_tx);
-    if let Overlay::SlashAutocomplete { matches, .. } = &app.overlay {
-        if !matches.is_empty() {
-            let sel = app.slash_ac_selected.min(matches.len().saturating_sub(1));
-            app.slash_ac_selected = sel;
-            let Some(cmd) = matches.get(sel) else {
-                return Ok(true);
-            };
-            let line = format!("/{}", cmd.name);
-            app.input_buffer.clear();
-            app.input_cursor = 0;
-            app.overlay = Overlay::None;
-            if let Some(SlashHandled::Quit) = handle_slash_line(app, &line, &env) {
-                save_session_best_effort(app, shared_config);
-                return Ok(false);
-            }
-            app.recompute_scroll_after_append(msg_h, term_width);
+    if let Overlay::SlashAutocomplete { matches, .. } = &app.overlay
+        && !matches.is_empty()
+    {
+        let sel = app.slash_ac_selected.min(matches.len().saturating_sub(1));
+        app.slash_ac_selected = sel;
+        let Some(cmd) = matches.get(sel) else {
             return Ok(true);
+        };
+        let line = format!("/{}", cmd.name);
+        app.input_buffer.clear();
+        app.input_cursor = 0;
+        app.overlay = Overlay::None;
+        if let Some(SlashHandled::Quit) = handle_slash_line(app, &line, &env) {
+            save_session_best_effort(app, shared_config);
+            return Ok(false);
         }
+        app.recompute_scroll_after_append(msg_h, term_width);
+        return Ok(true);
     }
     let raw = app.input_buffer.trim();
     if raw.starts_with('/') {
@@ -566,10 +567,7 @@ fn handle_key(
         }
     }
 
-    if matches!(
-        app.overlay,
-        Overlay::Help | Overlay::CostSummary
-    ) {
+    if matches!(app.overlay, Overlay::Help | Overlay::CostSummary) {
         app.overlay = Overlay::None;
         return Ok(true);
     }
@@ -585,23 +583,20 @@ fn handle_key(
                 app.recompute_scroll_after_append(msg_h, term_width);
             }
             KeyCode::Up => {
-                if let Overlay::SessionList { selected, .. } = &mut app.overlay {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
+                if let Overlay::SessionList { selected, .. } = &mut app.overlay
+                    && *selected > 0
+                {
+                    *selected -= 1;
                 }
                 session_list_clamp(app, list_vis);
             }
             KeyCode::Down => {
                 if let Overlay::SessionList {
-                    sessions,
-                    selected,
-                    ..
+                    sessions, selected, ..
                 } = &mut app.overlay
+                    && *selected + 1 < sessions.len()
                 {
-                    if *selected + 1 < sessions.len() {
-                        *selected += 1;
-                    }
+                    *selected += 1;
                 }
                 session_list_clamp(app, list_vis);
             }
@@ -621,10 +616,10 @@ fn handle_key(
                 app.recompute_scroll_after_append(msg_h, term_width);
             }
             KeyCode::Up => {
-                if let Overlay::ModelPicker { selected, .. } = &mut app.overlay {
-                    if *selected > 0 {
-                        *selected -= 1;
-                    }
+                if let Overlay::ModelPicker { selected, .. } = &mut app.overlay
+                    && *selected > 0
+                {
+                    *selected -= 1;
                 }
                 model_picker_clamp(app, list_vis);
             }
@@ -634,10 +629,9 @@ fn handle_key(
                     selected,
                     ..
                 } = &mut app.overlay
+                    && *selected + 1 < selectable.len()
                 {
-                    if *selected + 1 < selectable.len() {
-                        *selected += 1;
-                    }
+                    *selected += 1;
                 }
                 model_picker_clamp(app, list_vis);
             }
@@ -646,11 +640,7 @@ fn handle_key(
         return Ok(true);
     }
 
-    if let Overlay::AuditLog {
-        lines,
-        scroll,
-    } = &mut app.overlay
-    {
+    if let Overlay::AuditLog { lines, scroll } = &mut app.overlay {
         match key.code {
             KeyCode::Esc => {
                 app.overlay = Overlay::None;
@@ -786,19 +776,19 @@ fn handle_key(
             )? {
                 return Ok(false);
             }
-            if !app.agent_running {
-                if let Some(task) = app.submit_user_message() {
-                    interrupt.store(false, Ordering::SeqCst);
-                    let plan_only = app.take_plan_only_next_turn();
-                    let architect = app.take_architect_next_turn();
-                    let _ = task_tx.send(AgentTurn {
-                        task,
-                        plan_only,
-                        architect,
-                    });
-                    app.agent_running = true;
-                    app.recompute_scroll_after_append(msg_h, term_width);
-                }
+            if !app.agent_running
+                && let Some(task) = app.submit_user_message()
+            {
+                interrupt.store(false, Ordering::SeqCst);
+                let plan_only = app.take_plan_only_next_turn();
+                let architect = app.take_architect_next_turn();
+                let _ = task_tx.send(AgentTurn {
+                    task,
+                    plan_only,
+                    architect,
+                });
+                app.agent_running = true;
+                app.recompute_scroll_after_append(msg_h, term_width);
             }
             Ok(true)
         }
@@ -836,7 +826,9 @@ fn show_help(app: &mut TuiApp) {
 }
 
 fn message_viewport_height(term_height: u16, input_block_height: u16) -> u16 {
-    term_height.saturating_sub(1 + 1 + input_block_height).max(1)
+    term_height
+        .saturating_sub(1 + 1 + input_block_height)
+        .max(1)
 }
 
 fn input_area_height(app: &TuiApp) -> u16 {
@@ -889,10 +881,7 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     let input_body_h = (line_count.max(3) as u16).saturating_add(1);
     let input_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(ac_h),
-            Constraint::Length(input_body_h),
-        ])
+        .constraints([Constraint::Length(ac_h), Constraint::Length(input_body_h)])
         .split(chunks[3]);
 
     let input_block = Block::default()
@@ -958,9 +947,7 @@ fn build_header_line(app: &TuiApp) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             "akmon",
-            Style::default()
-                .fg(ACCENT)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(
@@ -1000,10 +987,7 @@ fn build_status_line(app: &TuiApp, total_width: u16) -> Line<'static> {
             Style::default().fg(ACCENT_DIM),
         ));
     }
-    let left_len: usize = spans
-        .iter()
-        .map(|s| s.content.chars().count())
-        .sum();
+    let left_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let help = "Ctrl+/ help";
     let w = total_width as usize;
     let pad = w.saturating_sub(left_len + help.chars().count());
@@ -1041,10 +1025,9 @@ fn build_input_widget(app: &TuiApp) -> Text<'static> {
                     answered,
                     ..
                 } = m
+                    && !answered
                 {
-                    if !answered {
-                        return Some(description.as_str());
-                    }
+                    return Some(description.as_str());
                 }
                 None
             })
@@ -1074,10 +1057,7 @@ fn build_input_widget(app: &TuiApp) -> Text<'static> {
             if ch == '\n' {
                 line_spans.push(cursor_span());
                 lines_out.push(Line::from(std::mem::take(&mut line_spans)));
-                line_spans.push(Span::styled(
-                    "  ",
-                    Style::default().fg(ACCENT_DIM),
-                ));
+                line_spans.push(Span::styled("  ", Style::default().fg(ACCENT_DIM)));
             } else {
                 line_spans.push(span_char_under_caret(ch));
             }
@@ -1085,10 +1065,7 @@ fn build_input_widget(app: &TuiApp) -> Text<'static> {
         }
         if ch == '\n' {
             lines_out.push(Line::from(std::mem::take(&mut line_spans)));
-            line_spans.push(Span::styled(
-                "  ",
-                Style::default().fg(ACCENT_DIM),
-            ));
+            line_spans.push(Span::styled("  ", Style::default().fg(ACCENT_DIM)));
             continue;
         }
         line_spans.push(Span::styled(
@@ -1111,8 +1088,8 @@ mod input_mouse_tests {
     use uuid::Uuid;
 
     use super::handle_input_left_click;
-    use crate::config::TuiLaunchConfig;
     use crate::TuiApp;
+    use crate::config::TuiLaunchConfig;
 
     fn cfg() -> TuiLaunchConfig {
         TuiLaunchConfig {

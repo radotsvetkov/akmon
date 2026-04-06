@@ -8,12 +8,12 @@ use akmon_core::AuditEvent;
 use async_trait::async_trait;
 use chrono::Utc;
 use regex::Regex;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use tokio::task::JoinHandle;
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::Tool;
 
 /// Wall-clock limit for each git subprocess.
 const GIT_TIMEOUT_SECS: u64 = 30;
@@ -24,7 +24,14 @@ const MAX_LOG_LINES: usize = 50;
 
 /// Subcommands that must never be forwarded to git.
 const DISALLOWED: &[&str] = &[
-    "push", "pull", "fetch", "clone", "remote", "config", "credential", "filter-branch",
+    "push",
+    "pull",
+    "fetch",
+    "clone",
+    "remote",
+    "config",
+    "credential",
+    "filter-branch",
 ];
 
 /// Runs git in `root` with non-interactive env; returns stdout as UTF-8 lossy string.
@@ -498,7 +505,11 @@ impl Tool for GitTool {
                         code: ToolErrorCode::InvalidArgs,
                         message: format!(
                             "nothing staged. Use git add to stage files first. Current status: {}",
-                            if st.trim().is_empty() { "clean" } else { "has unstaged/untracked" }
+                            if st.trim().is_empty() {
+                                "clean"
+                            } else {
+                                "has unstaged/untracked"
+                            }
                         ),
                     };
                 }
@@ -672,10 +683,7 @@ impl Tool for GitTool {
                     stat_text.truncate(MAX_DIFF_CHARS);
                     stat_text.push_str("\n[diff truncated — use args to narrow scope]");
                 }
-                let commit = argv
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "HEAD".into());
+                let commit = argv.first().cloned().unwrap_or_else(|| "HEAD".into());
                 ToolOutput::Success {
                     content: serde_json::to_string_pretty(&json!({
                         "commit": commit,
@@ -881,15 +889,10 @@ mod tests {
         let _ = run_git_output(root, &["config", "user.email", "t@t"]).expect("cfg");
         let _ = run_git_output(root, &["config", "user.name", "t"]).expect("cfg");
         std::fs::write(root.join("a.rs"), "//x\n").expect("w");
-        let ev = try_auto_commit_after_file_tool(
-            root,
-            "sid",
-            "write_file",
-            &json!({"path": "a.rs"}),
-        );
+        let ev =
+            try_auto_commit_after_file_tool(root, "sid", "write_file", &json!({"path": "a.rs"}));
         assert!(ev.is_some());
-        let log = run_git_output(root, &["log", "--oneline", "-1"])
-            .expect("log");
+        let log = run_git_output(root, &["log", "--oneline", "-1"]).expect("log");
         let s = String::from_utf8_lossy(&log.stdout);
         assert!(s.contains("akmon:"));
     }

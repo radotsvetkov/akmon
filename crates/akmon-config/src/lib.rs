@@ -209,7 +209,10 @@ pub fn append_akmon_gitignore_line(cwd: &Path) -> std::io::Result<bool> {
         return Ok(false);
     }
     let existing = fs::read_to_string(&gi)?;
-    if existing.lines().any(|l| l.trim() == ".akmon/" || l.trim() == ".akmon") {
+    if existing
+        .lines()
+        .any(|l| l.trim() == ".akmon/" || l.trim() == ".akmon")
+    {
         return Ok(false);
     }
     let mut out = existing;

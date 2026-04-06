@@ -1,17 +1,17 @@
 //! Write a UTF-8 file inside the sandbox using an atomic rename.
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use akmon_core::{Permission, SandboxError};
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use tokio::fs;
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::Tool;
 
 static WRITE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -92,10 +92,7 @@ pub(crate) async fn atomic_write_utf8(path: &Path, content: &[u8]) -> std::io::R
     fs::create_dir_all(parent).await?;
 
     let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path has no file name",
-        )
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
     })?;
 
     let n = WRITE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -226,10 +223,7 @@ mod tests {
         let r = ReadFileTool::new();
         let c = ctx(dir.path());
         let out = w
-            .execute(
-                json!({ "path": "out.txt", "content": "payload" }),
-                &c,
-            )
+            .execute(json!({ "path": "out.txt", "content": "payload" }), &c)
             .await;
         assert!(matches!(out, ToolOutput::Success { .. }));
         let read = r.execute(json!({ "path": "out.txt" }), &c).await;
@@ -248,10 +242,7 @@ mod tests {
         tokio::fs::create_dir_all(&inside).await.expect("mkdir");
         let w = WriteFileTool::new();
         let out = w
-            .execute(
-                json!({ "path": "../x.txt", "content": "a" }),
-                &ctx(&inside),
-            )
+            .execute(json!({ "path": "../x.txt", "content": "a" }), &ctx(&inside))
             .await;
         assert!(matches!(
             out,
@@ -267,10 +258,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let w = WriteFileTool::new();
         let out = w
-            .execute(
-                json!({ "content": "only" }),
-                &ctx(dir.path()),
-            )
+            .execute(json!({ "content": "only" }), &ctx(dir.path()))
             .await;
         assert!(matches!(
             out,

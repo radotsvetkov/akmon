@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use akmon_core::{McpServerConfig, Permission};
 use async_trait::async_trait;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::Tool;
 
 /// One tool entry decoded from a `tools/list` JSON-RPC result (before building an [`McpTool`]).
 #[derive(Debug, Clone)]
@@ -48,10 +48,7 @@ pub fn parse_tools_list_envelope(value: &JsonValue) -> Result<Vec<McpToolSpec>, 
             .and_then(|d| d.as_str())
             .unwrap_or("")
             .to_string();
-        let input_schema = t
-            .get("inputSchema")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let input_schema = t.get("inputSchema").cloned().unwrap_or_else(|| json!({}));
         out.push(McpToolSpec {
             name,
             description,
@@ -129,14 +126,7 @@ pub async fn discover_mcp_tools(server: &McpServerConfig) -> Result<Vec<McpTool>
     let specs = parse_tools_list_envelope(&value)?;
     Ok(specs
         .into_iter()
-        .map(|s| {
-            McpTool::new(
-                s.name,
-                s.description,
-                s.input_schema,
-                server.url.clone(),
-            )
-        })
+        .map(|s| McpTool::new(s.name, s.description, s.input_schema, server.url.clone()))
         .collect())
 }
 

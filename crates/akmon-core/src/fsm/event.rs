@@ -87,7 +87,10 @@ impl fmt::Display for AgentEvent {
                 write!(f, "ToolCallDispatched({name})")
             }
             AgentEvent::ToolCallCompleted {
-                name, success, message, ..
+                name,
+                success,
+                message,
+                ..
             } => write!(
                 f,
                 "ToolCallCompleted({name}, success={success}, message={message})"

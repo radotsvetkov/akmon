@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use tokio::fs;
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::Tool;
 
 fn list_directory_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
@@ -207,14 +207,10 @@ mod tests {
         fs::write(tmp.path().join("a.txt"), b"x")
             .await
             .expect("write");
-        fs::create_dir(tmp.path().join("sub"))
-            .await
-            .expect("dir");
+        fs::create_dir(tmp.path().join("sub")).await.expect("dir");
         let tool = ListDirectoryTool::new();
         let ctx = ctx_for_sandbox(tmp.path());
-        let out = tool
-            .execute(serde_json::json!({ "path": "." }), &ctx)
-            .await;
+        let out = tool.execute(serde_json::json!({ "path": "." }), &ctx).await;
         match out {
             ToolOutput::Success { content } => {
                 let v: JsonValue = serde_json::from_str(&content).expect("json");

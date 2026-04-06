@@ -9,18 +9,14 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use url::{Host, Url};
 
+use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::Tool;
 
 fn web_fetch_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
-    CELL.get_or_init(|| {
-        [Permission::NetworkFetch {
-            url: String::new(),
-        }]
-    })
-    .as_slice()
+    CELL.get_or_init(|| [Permission::NetworkFetch { url: String::new() }])
+        .as_slice()
 }
 
 /// Validates a URL for safe outbound HTTP(S) fetches (blocks loopback, private, link-local, and cloud metadata targets).
@@ -105,8 +101,9 @@ fn block_if_forbidden_ip(ip: IpAddr) -> Result<(), ToolOutput> {
             if v4.is_link_local() {
                 return Err(ToolOutput::Error {
                     code: ToolErrorCode::InvalidArgs,
-                    message: "link-local URLs are not permitted (potential cloud metadata endpoint)"
-                        .into(),
+                    message:
+                        "link-local URLs are not permitted (potential cloud metadata endpoint)"
+                            .into(),
                 });
             }
         }
@@ -120,8 +117,9 @@ fn block_if_forbidden_ip(ip: IpAddr) -> Result<(), ToolOutput> {
             if v6.is_unicast_link_local() {
                 return Err(ToolOutput::Error {
                     code: ToolErrorCode::InvalidArgs,
-                    message: "link-local URLs are not permitted (potential cloud metadata endpoint)"
-                        .into(),
+                    message:
+                        "link-local URLs are not permitted (potential cloud metadata endpoint)"
+                            .into(),
                 });
             }
             if v6.is_unique_local() {
