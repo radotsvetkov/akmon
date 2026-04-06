@@ -115,6 +115,8 @@ pub struct AgentSession {
     plan_mode: bool,
     /// Permissions the user allowed with “remember for session”; matched exactly before interactive prompts.
     permission_session_allowlist: Vec<Permission>,
+    /// How many automatic max-token continuations have run this turn (reset on EndTurn, ToolUse, new user turn).
+    pub continuation_count: u32,
 }
 
 impl AgentSession {
@@ -158,6 +160,7 @@ impl AgentSession {
             total_output_tokens: 0,
             plan_mode,
             permission_session_allowlist: Vec::new(),
+            continuation_count: 0,
         }
     }
 
@@ -240,6 +243,7 @@ impl AgentSession {
         }
         self.result_text.clear();
         self.tool_call_summaries.clear();
+        self.continuation_count = 0;
         Ok(())
     }
 
@@ -279,7 +283,6 @@ impl AgentSession {
 
         let mut iteration: u32 = 0;
         let mut user_line_committed = false;
-        let mut continuation_count: u32 = 0;
 
         'session: loop {
             match &self.state {
@@ -476,57 +479,67 @@ impl AgentSession {
                                     return Err(ae);
                                 }
 
-                                continuation_count = continuation_count.saturating_add(1);
-                                if continuation_count >= 3 {
+                                if self.continuation_count < 3 {
+                                    self.continuation_count =
+                                        self.continuation_count.saturating_add(1);
                                     self.apply_event(
                                         &event_tx,
                                         AgentEvent::StatusInfo {
-                                            message: "─ maximum continuations reached ─".into(),
+                                            message: format!(
+                                                "─ response truncated, continuing ({}/3)… ─",
+                                                self.continuation_count
+                                            ),
                                         },
                                         &task,
                                     )
                                     .await?;
-                                    let ae = AgentError::ResponseTruncated;
-                                    self.apply_event(
-                                        &event_tx,
-                                        AgentEvent::Error {
-                                            error: ae.clone(),
-                                            recoverable: false,
-                                        },
-                                        &task,
-                                    )
-                                    .await?;
-                                    return Err(ae);
+
+                                    if !user_line_committed {
+                                        self.context.push(Message {
+                                            role: MessageRole::User,
+                                            content: task.clone(),
+                                        });
+                                        user_line_committed = true;
+                                    }
+                                    self.context.push(Message {
+                                        role: MessageRole::Assistant,
+                                        content: accumulated,
+                                    });
+                                    self.context.push(Message {
+                                        role: MessageRole::User,
+                                        content: "Continue from exactly where you stopped. \
+Do not repeat anything already written. \
+Resume from the mid-sentence or mid-block point where the response was cut."
+                                            .into(),
+                                    });
+
+                                    continue 'session;
                                 }
 
                                 self.apply_event(
                                     &event_tx,
                                     AgentEvent::StatusInfo {
-                                        message: "─ response truncated, continuing… ─".into(),
+                                        message: "─ response could not complete — try asking for a smaller piece at a time ─"
+                                            .into(),
                                     },
                                     &task,
                                 )
                                 .await?;
-
-                                if !user_line_committed {
-                                    self.context.push(Message {
-                                        role: MessageRole::User,
-                                        content: task.clone(),
-                                    });
-                                    user_line_committed = true;
-                                }
-                                self.context.push(Message {
-                                    role: MessageRole::Assistant,
-                                    content: accumulated,
-                                });
-                                self.context.push(Message {
-                                    role: MessageRole::User,
-                                    content: "Continue from exactly where you left off. Do not repeat anything. Start from the point of truncation.".into(),
-                                });
-
-                                continue 'session;
+                                self.continuation_count = 0;
+                                let ae = AgentError::ResponseTruncated;
+                                self.apply_event(
+                                    &event_tx,
+                                    AgentEvent::Error {
+                                        error: ae.clone(),
+                                        recoverable: false,
+                                    },
+                                    &task,
+                                )
+                                .await?;
+                                return Err(ae);
                             }
                             StopReason::EndTurn => {
+                                self.continuation_count = 0;
                                 self.apply_event(&event_tx, AgentEvent::Done, &task).await?;
                                 if !user_line_committed {
                                     self.context.push(Message {
@@ -541,7 +554,7 @@ impl AgentSession {
                                 return Ok(());
                             }
                             StopReason::ToolUse => {
-                                continuation_count = 0;
+                                self.continuation_count = 0;
                                 if tool_calls.is_empty() {
                                     let ae = AgentError::ModelError {
                                         message: "model returned ToolUse with no tool_calls".into(),
@@ -1747,7 +1760,7 @@ mod tests {
         let mut saw_trunc_status = false;
         while let Ok(e) = rx.try_recv() {
             if let AgentEvent::StatusInfo { message } = e {
-                if message.contains("truncated, continuing") {
+                if message.contains("truncated, continuing") && message.contains("(1/3)") {
                     saw_trunc_status = true;
                 }
             }

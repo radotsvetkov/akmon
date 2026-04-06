@@ -8,14 +8,10 @@ pub fn max_tokens_for_model(model: &str) -> u32 {
     let m = model.to_lowercase();
     if m.contains("haiku") {
         8_192
-    } else if m.contains("sonnet") {
+    } else if m.contains("sonnet") || m.contains("opus") {
         32_000
-    } else if m.contains("opus") {
-        32_000
-    } else if m.contains("gpt-4") {
+    } else if m.contains("gpt-4o") {
         16_384
-    } else if m.contains("gpt-3.5") {
-        4_096
     } else {
         8_192
     }
@@ -36,7 +32,22 @@ mod tests {
     }
 
     #[test]
+    fn opus_budget() {
+        assert_eq!(max_tokens_for_model("claude-opus-4"), 32_000);
+    }
+
+    #[test]
     fn default_budget() {
         assert_eq!(max_tokens_for_model("llama3.2"), 8_192);
+    }
+
+    #[test]
+    fn gpt_4o_budget() {
+        assert_eq!(max_tokens_for_model("gpt-4o-mini"), 16_384);
+    }
+
+    #[test]
+    fn gpt_4_non_o_uses_default() {
+        assert_eq!(max_tokens_for_model("gpt-4-turbo"), 8_192);
     }
 }

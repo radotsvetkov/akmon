@@ -24,6 +24,33 @@ pub const PROJECT_CONTEXT_END: &str = "<<<PROJECT_CONTEXT_END>>>";
 /// per Anthropic documentation).
 const TOOL_REFERENCE: &str = include_str!("tool_reference.txt");
 
+/// File-writing discipline for implementation mode (injected into [`format_project_context`] when not in plan mode).
+///
+/// Encourages incremental tool use so single completions stay within output limits.
+pub const FILE_WRITING_STRATEGY: &str = "\
+FILE WRITING STRATEGY — FOLLOW EXACTLY:\n\
+\n\
+For new projects or new files:\n\
+- Write files in logical sections, not all at once.\n\
+- For a webpage: first the HTML structure, then the\n\
+  CSS in a separate <style> block, then the JavaScript.\n\
+  Each as a focused, complete section.\n\
+- For a backend: write one module at a time.\n\
+  main.rs first (small), then each module separately.\n\
+- Never write a file longer than 200 lines in one response.\n\
+  If it would be longer, split it into multiple focused writes.\n\
+\n\
+For existing files:\n\
+- ALWAYS use the `edit` tool instead of write_file.\n\
+  (`edit` replaces one exact substring per call — not “edit_file”, the tool name is `edit`.)\n\
+- `edit` sends only the changed section, not the whole file.\n\
+- A function that changes 10 lines in a 500-line file\n\
+  should produce a 10-line response, not a 500-line response.\n\
+- Only use write_file for brand new files that don't exist yet.\n\
+\n\
+This is not a limitation — this is how professional development\n\
+works. Small focused changes. One thing at a time.\n";
+
 /// Markdown-style instructions injected when the session is in read-only plan mode (`--plan`, `/plan`).
 pub const PLAN_MODE_SYSTEM_ADDON: &str = "\n\
 PLAN MODE ACTIVE.\n\
@@ -256,6 +283,8 @@ running inside the Akmon agent.\n\
 \n\
 Working directory: {project_root}\n\
 Available tools: {tools_line}\n\
+\n\
+{FILE_WRITING_STRATEGY}\n\
 \n\
 To work on this project:\n\
 {step1}\
