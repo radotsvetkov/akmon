@@ -430,9 +430,18 @@ pub async fn run_agent_loop(
                     }
                 }
 
-                let plan_saved_path = captured_plan.as_ref().and_then(|body| {
-                    save_plan_markdown(&cfg.project_root, &turn.task, body).ok()
-                });
+                let plan_saved_path = match captured_plan.as_ref() {
+                    Some(body) => match save_plan_markdown(&cfg.project_root, &turn.task, body) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            let _ = bridge_tx.send(BridgeMsg::StatusInfo(format!(
+                                "Could not save plan under .akmon/plans/: {e}"
+                            )));
+                            None
+                        }
+                    },
+                    None => None,
+                };
 
                 if let Err(e) = write_audit_jsonl(&cfg.audit_log_path, session.audit_events()) {
                     let _ = bridge_tx.send(BridgeMsg::Agent(AgentEvent::Error {

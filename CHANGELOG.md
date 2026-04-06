@@ -6,6 +6,13 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.5.1] - 2026-04-06
 
+### Fixed
+
+- **GitHub Releases** now ship prebuilt `akmon-darwin-arm64`, `akmon-darwin-x86_64`, and `akmon-linux-x86_64` binaries when you push a `v*` tag (the workflow previously created an empty release).
+- **TUI compose box**: bracketed paste support, up to **512 KiB** of input, and no arbitrary **6-line** cap — large prompts and multi-line paste no longer truncate or break submission.
+- **Project layout**: creating `.akmon/plans`, `.akmon/audit`, and `.akmon/specs` when launching the TUI or headless `--task` (skips seeding when the sandbox root is your home directory without a git repo, so global `~/.akmon` config is not confused with a project workspace).
+- **Plan mode**: if writing `.akmon/plans/*.md` fails, the TUI now shows the error instead of failing silently.
+
 ### Added
 
 - **Project intelligence layer** (`akmon-core::lang_profile`): language profiles (Rust, Python, TypeScript, JavaScript, Go, Java, C#, Elixir, Ruby, Swift, Kotlin, Dart/Flutter, C++, Zig), 40+ framework profiles (web, mobile, data, CLI/TUI, API specs), database and data-tool heuristics, architecture hints, and a capped (4000-byte) formatted block for prompts.

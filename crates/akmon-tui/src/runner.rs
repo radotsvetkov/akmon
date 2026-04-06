@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -33,7 +33,7 @@ use crate::message::TuiMessage;
 use crate::overlay::{
     draw_message_overlays, draw_slash_autocomplete, slash_autocomplete_row_count,
 };
-use crate::render::{message_to_lines, paint_message_viewport};
+use crate::render::{INPUT_UI_LINE_CAP, message_to_lines, paint_message_viewport};
 use crate::session_persist::{save_session_snapshot, saved_sessions_directory_empty};
 use crate::slash::{matching_commands, slash_command_name_prefix};
 use crate::slash_exec::{
@@ -173,6 +173,7 @@ fn run_terminal_loop(
     let mut stdout_mut = stdout_h;
     execute!(stdout_mut, EnterAlternateScreen)?;
     execute!(stdout_mut, EnableMouseCapture)?;
+    let _ = execute!(stdout_mut, EnableBracketedPaste);
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout_mut))?;
     let result = run_loop(
         &mut terminal,
@@ -185,6 +186,7 @@ fn run_terminal_loop(
         project_tx,
     );
     let backend = terminal.backend_mut();
+    let _ = execute!(backend, event::DisableBracketedPaste);
     let _ = execute!(backend, DisableMouseCapture);
     let _ = execute!(backend, LeaveAlternateScreen);
     let _ = backend.flush();
@@ -262,6 +264,10 @@ fn run_loop(
                         shared_config,
                         project_tx.clone(),
                     )?;
+                }
+                Event::Paste(text) => {
+                    app.input_paste(&text);
+                    app.recompute_scroll_after_append(msg_h, size.width);
                 }
                 Event::Mouse(m) => {
                     if m.kind == MouseEventKind::Down(MouseButton::Left) {
@@ -848,7 +854,7 @@ fn handle_key(
 
 fn show_help(app: &mut TuiApp) {
     app.push_system_info(
-        "Keys: Enter submit · Shift+Enter newline · ←→ caret · Tab expand tool · ↑↓ PgUp/PgDn scroll · Ctrl+C interrupt (exit when idle) · Ctrl+D exit · q exit when idle · Ctrl+/ help"
+        "Keys: Enter submit · Shift+Enter newline · paste multi-line text · ←→ caret · Tab expand tool · ↑↓ PgUp/PgDn scroll · Ctrl+C interrupt (exit when idle) · Ctrl+D exit · q exit when idle · Ctrl+/ help"
             .into(),
     );
 }
@@ -869,7 +875,11 @@ fn input_area_height(app: &TuiApp) -> u16 {
         return 5;
     }
     let ac = slash_autocomplete_row_count(app);
-    let line_count = app.input_buffer.split('\n').count().clamp(1, 6);
+    let line_count = app
+        .input_buffer
+        .split('\n')
+        .count()
+        .clamp(1, INPUT_UI_LINE_CAP);
     let body = (line_count.max(3) as u16).saturating_add(1);
     ac.saturating_add(body)
 }
@@ -918,7 +928,11 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
 
     let input_text = build_input_widget(app);
     let ac_h = slash_autocomplete_row_count(app);
-    let line_count = app.input_buffer.split('\n').count().clamp(1, 6);
+    let line_count = app
+        .input_buffer
+        .split('\n')
+        .count()
+        .clamp(1, INPUT_UI_LINE_CAP);
     let input_body_h = (line_count.max(3) as u16).saturating_add(1);
     let input_chunks = Layout::default()
         .direction(Direction::Vertical)

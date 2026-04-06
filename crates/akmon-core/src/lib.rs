@@ -49,4 +49,4 @@ pub use policy::{PolicyConfig, PolicyDecision, PolicyEngine, PolicyEngineError, 
 pub use sandbox::{Sandbox, SandboxError};
 pub use secret::Secret;
 
-pub use project::{save_plan_markdown, task_slug_for_plan_filename};
+pub use project::{ensure_dot_akmon_layout, save_plan_markdown, task_slug_for_plan_filename};

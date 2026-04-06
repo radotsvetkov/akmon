@@ -651,6 +651,16 @@ pub fn task_slug_for_plan_filename(task: &str) -> String {
     base.chars().take(80).collect()
 }
 
+/// Creates `<project_root>/.akmon/{plans,audit,specs}/` so local state has a stable layout
+/// before the first plan, audit, or spec run (visible in the file browser).
+pub fn ensure_dot_akmon_layout(project_root: &Path) -> io::Result<()> {
+    let base = project_root.join(".akmon");
+    fs::create_dir_all(base.join("plans"))?;
+    fs::create_dir_all(base.join("audit"))?;
+    fs::create_dir_all(base.join("specs"))?;
+    Ok(())
+}
+
 /// Writes markdown `body` to `<project_root>/.akmon/plans/{unix_timestamp}-{slug}.md`.
 pub fn save_plan_markdown(project_root: &Path, task: &str, body: &str) -> io::Result<PathBuf> {
     let plans_dir = project_root.join(".akmon").join("plans");
@@ -988,5 +998,14 @@ path = "src/main.rs"
             .expect("scaffold");
         assert!(r.files_created.iter().any(|p| p == "src/lib.rs"));
         assert!(!r.files_created.iter().any(|p| p == "src/main.rs"));
+    }
+
+    #[test]
+    fn ensure_dot_akmon_layout_creates_standard_dirs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        ensure_dot_akmon_layout(tmp.path()).expect("ensure");
+        assert!(tmp.path().join(".akmon/plans").is_dir());
+        assert!(tmp.path().join(".akmon/audit").is_dir());
+        assert!(tmp.path().join(".akmon/specs").is_dir());
     }
 }

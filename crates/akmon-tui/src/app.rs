@@ -548,20 +548,34 @@ impl TuiApp {
     /// Inserts `ch` at the caret if within input limits.
     pub fn input_insert(&mut self, ch: char) -> bool {
         self.slash_ac_suppress = false;
-        const MAX_INPUT_CHARS: usize = 16_384;
-        if self.input_buffer.len() >= MAX_INPUT_CHARS {
+        const MAX_INPUT_BYTES: usize = 512 * 1024;
+        if self.input_buffer.len() >= MAX_INPUT_BYTES {
             return false;
-        }
-        if ch == '\n' {
-            let lines = self.input_buffer.matches('\n').count() + 1;
-            if lines >= 6 {
-                return false;
-            }
         }
         let idx = self.input_cursor.min(self.input_buffer.len());
         self.input_buffer.insert(idx, ch);
         self.input_cursor = self.input_cursor.saturating_add(ch.len_utf8());
         true
+    }
+
+    /// Inserts pasted or bulk text at the caret (used for terminal bracketed paste).
+    pub fn input_paste(&mut self, text: &str) {
+        self.slash_ac_suppress = false;
+        const MAX_INPUT_BYTES: usize = 512 * 1024;
+        if self.input_buffer.len() >= MAX_INPUT_BYTES {
+            return;
+        }
+        let idx = self.input_cursor.min(self.input_buffer.len());
+        let remain = MAX_INPUT_BYTES.saturating_sub(self.input_buffer.len());
+        if remain == 0 {
+            return;
+        }
+        let mut end = text.len().min(remain);
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.input_buffer.insert_str(idx, &text[..end]);
+        self.input_cursor += end;
     }
 
     /// Removes the grapheme before the caret (ASCII slice-1 for slice 1).
@@ -842,12 +856,22 @@ mod tests {
     }
 
     #[test]
-    fn input_newline_cap_six_lines() {
+    fn input_allows_many_newlines_for_large_prompts() {
         let mut app = TuiApp::new(sample_config());
-        for _ in 0..5 {
+        for _ in 0..50 {
             assert!(app.input_insert('\n'));
         }
-        assert!(!app.input_insert('\n'));
+        assert!(app.input_buffer.matches('\n').count() >= 49);
+    }
+
+    #[test]
+    fn input_paste_inserts_at_caret() {
+        let mut app = TuiApp::new(sample_config());
+        assert!(app.input_insert('a'));
+        assert!(app.input_insert('b'));
+        app.input_cursor = 1;
+        app.input_paste("XYZ");
+        assert_eq!(app.input_buffer, "aXYZb");
     }
 
     #[test]

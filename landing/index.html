@@ -997,24 +997,31 @@
   <div class="container">
     <div class="section-label">// get started</div>
     <h2 class="section-title">Install in seconds</h2>
+    <p class="section-body" style="max-width:640px;margin-top:12px;margin-bottom:8px">
+      GitHub Releases attach a real binary per platform. Writing to <code>/usr/local/bin</code> usually requires <code>sudo</code> on macOS — installing to <code>~/bin</code> avoids that. If a download is HTML instead of a binary, the matching release asset is missing (cut a <code>v*</code> tag after the release workflow runs).
+    </p>
 
     <div class="install-tabs">
-      <button class="tab active" onclick="showTab('mac-arm')">macOS ARM</button>
-      <button class="tab" onclick="showTab('mac-x64')">macOS Intel</button>
-      <button class="tab" onclick="showTab('linux')">Linux</button>
-      <button class="tab" onclick="showTab('source')">From source</button>
-      <button class="tab" onclick="showTab('ollama')">With Ollama</button>
+      <button type="button" class="tab active" onclick="showTab('mac-arm', this)">macOS ARM</button>
+      <button type="button" class="tab" onclick="showTab('mac-x64', this)">macOS Intel</button>
+      <button type="button" class="tab" onclick="showTab('linux', this)">Linux</button>
+      <button type="button" class="tab" onclick="showTab('source', this)">From source</button>
+      <button type="button" class="tab" onclick="showTab('ollama', this)">With Ollama</button>
     </div>
 
     <div id="mac-arm" class="tab-panel active">
       <div class="code-block">
-        <button class="copy-btn" onclick="copy(this, 'curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \\\n  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon')">copy</button>
-        <span class="comment"># Apple Silicon — M1, M2, M3, M4</span><br>
+        <button class="copy-btn" onclick="copy(this, 'mkdir -p ~/bin && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 -o ~/bin/akmon && chmod +x ~/bin/akmon')">copy</button>
+        <span class="comment"># Apple Silicon — M1, M2, M3, M4 (no sudo)</span><br>
+        mkdir -p ~/bin<br>
         curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \<br>
-        &nbsp;&nbsp;-o /usr/local/bin/akmon &amp;&amp; chmod +x /usr/local/bin/akmon<br>
+        &nbsp;&nbsp;-o ~/bin/akmon &amp;&amp; chmod +x ~/bin/akmon<br>
+        <span class="comment"># If `akmon` is not found, add ~/bin to PATH (zsh):</span><br>
+        <span class="comment"># echo 'export PATH=&quot;$HOME/bin:$PATH&quot;' &gt;&gt; ~/.zshrc &amp;&amp; source ~/.zshrc</span><br>
+        <span class="comment"># Alternative: sudo curl … -o /usr/local/bin/akmon &amp;&amp; sudo chmod +x /usr/local/bin/akmon</span><br>
         <br>
         akmon <span class="keyword">--version</span>
-        <span class="comment">  # akmon 1.5.0</span><br>
+        <span class="comment">  # akmon 1.5.x</span><br>
         akmon <span class="keyword">config</span>
         <span class="comment">  # run setup wizard</span>
       </div>
@@ -1022,9 +1029,10 @@
 
     <div id="mac-x64" class="tab-panel">
       <div class="code-block">
-        <button class="copy-btn" onclick="copy(this, 'curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 \\\n  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon')">copy</button>
+        <button class="copy-btn" onclick="copy(this, 'mkdir -p ~/bin && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 -o ~/bin/akmon && chmod +x ~/bin/akmon')">copy</button>
+        mkdir -p ~/bin<br>
         curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 \<br>
-        &nbsp;&nbsp;-o /usr/local/bin/akmon &amp;&amp; chmod +x /usr/local/bin/akmon<br>
+        &nbsp;&nbsp;-o ~/bin/akmon &amp;&amp; chmod +x ~/bin/akmon<br>
         <br>
         akmon <span class="keyword">--version</span>
       </div>
@@ -1032,9 +1040,10 @@
 
     <div id="linux" class="tab-panel">
       <div class="code-block">
-        <button class="copy-btn" onclick="copy(this, 'curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \\\n  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon')">copy</button>
+        <button class="copy-btn" onclick="copy(this, 'mkdir -p ~/bin && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 -o ~/bin/akmon && chmod +x ~/bin/akmon')">copy</button>
+        mkdir -p ~/bin<br>
         curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \<br>
-        &nbsp;&nbsp;-o /usr/local/bin/akmon &amp;&amp; chmod +x /usr/local/bin/akmon<br>
+        &nbsp;&nbsp;-o ~/bin/akmon &amp;&amp; chmod +x ~/bin/akmon<br>
         <br>
         akmon <span class="keyword">--version</span>
       </div>
@@ -1042,7 +1051,7 @@
 
     <div id="source" class="tab-panel">
       <div class="code-block">
-        <button class="copy-btn" onclick="copy(this, 'git clone https://github.com/radotsvetkov/akmon\ncd akmon\ncargo build --release --no-default-features\ncp target/release/akmon /usr/local/bin/')">copy</button>
+        <button class="copy-btn" onclick="copy(this, 'git clone https://github.com/radotsvetkov/akmon\ncd akmon\nmkdir -p ~/bin\ncargo build --release --no-default-features\ncp target/release/akmon ~/bin/')">copy</button>
         git clone https://github.com/radotsvetkov/akmon<br>
         cd akmon<br>
         <br>
@@ -1052,7 +1061,8 @@
         <span class="comment"># Full build — 20MB, with semantic indexing</span><br>
         cargo build <span class="keyword">--release</span><br>
         <br>
-        cp target/release/akmon /usr/local/bin/
+        mkdir -p ~/bin<br>
+        cp target/release/akmon ~/bin/
       </div>
     </div>
 
@@ -1061,9 +1071,10 @@
         <span class="comment"># 1. Install Ollama from https://ollama.com</span><br>
         ollama pull qwen2.5-coder:7b<br>
         <br>
-        <span class="comment"># 2. Install Akmon</span><br>
+        <span class="comment"># 2. Install Akmon (example: Apple Silicon → ~/bin)</span><br>
+        mkdir -p ~/bin<br>
         curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \<br>
-        &nbsp;&nbsp;-o /usr/local/bin/akmon &amp;&amp; chmod +x /usr/local/bin/akmon<br>
+        &nbsp;&nbsp;-o ~/bin/akmon &amp;&amp; chmod +x ~/bin/akmon<br>
         <br>
         <span class="comment"># 3. Open any project</span><br>
         cd my-project<br>
@@ -1250,11 +1261,11 @@
 </footer>
 
 <script>
-  function showTab(id) {
+  function showTab(id, btn) {
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById(id).classList.add('active');
-    event.target.classList.add('active');
+    if (btn) btn.classList.add('active');
   }
 
   function copy(btn, text) {

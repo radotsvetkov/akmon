@@ -13,6 +13,9 @@ use crate::theme::{
 };
 use crate::welcome::render_welcome;
 
+/// Lines of vertical space reserved for the compose box; the buffer may hold more (tall pastes).
+pub(crate) const INPUT_UI_LINE_CAP: usize = 12;
+
 /// Paints the scrollable transcript area: branded welcome when `show_welcome`, otherwise `visible` lines.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_message_viewport(
@@ -52,12 +55,12 @@ pub fn paint_message_viewport(
 /// Maps a mouse cell column on visual line `rel_row` (0 = first `"> …"` row) to a UTF-8 byte offset in `buffer`.
 ///
 /// Assumes the same layout as the input widget: first line prefix `"> "` (2 cols), continuation lines `"  "` (2 cols),
-/// no hard wrapping (only `\n` breaks lines, at most 6 content lines).
+/// no hard wrapping (only `\n` breaks lines, at most [`INPUT_UI_LINE_CAP`] content lines for hit-testing).
 pub(crate) fn map_input_click_to_byte_index(buffer: &str, rel_row: usize, rel_col: usize) -> usize {
     if buffer.is_empty() {
         return 0;
     }
-    let lines: Vec<&str> = buffer.split('\n').take(6).collect();
+    let lines: Vec<&str> = buffer.split('\n').take(INPUT_UI_LINE_CAP).collect();
     if rel_row >= lines.len() {
         return buffer.len();
     }

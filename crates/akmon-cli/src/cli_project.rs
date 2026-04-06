@@ -393,3 +393,20 @@ pub fn resolve_sandbox_root(cwd: &Path) -> (PathBuf, bool) {
         None => (cwd.to_path_buf(), false),
     }
 }
+
+/// When `false`, skip seeding `<root>/.akmon/*` so we do not treat `$HOME` as a project workspace.
+pub(crate) fn should_ensure_project_dot_akmon(project_root: &Path, has_git_root: bool) -> bool {
+    if has_git_root {
+        return true;
+    }
+    let Ok(root) = dunce::canonicalize(project_root) else {
+        return true;
+    };
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return true;
+    };
+    let Ok(home) = dunce::canonicalize(home) else {
+        return true;
+    };
+    root != home
+}

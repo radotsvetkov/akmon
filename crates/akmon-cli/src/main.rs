@@ -675,6 +675,15 @@ async fn run_event_printer(
     }
 }
 
+fn seed_project_dot_akmon_if_applicable(project_root: &Path, has_git_root: bool) {
+    if !cli_project::should_ensure_project_dot_akmon(project_root, has_git_root) {
+        return;
+    }
+    if let Err(e) = akmon_core::ensure_dot_akmon_layout(project_root) {
+        eprintln!("akmon: warning: could not create .akmon directories: {e}");
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -742,6 +751,7 @@ async fn main() -> ExitCode {
     }
 
     let Some(task) = cli.task.clone() else {
+        seed_project_dot_akmon_if_applicable(&project_root, has_git_root);
         let global = load_user_global_config();
         let azure_ver = if cli.azure_api_version.is_empty() {
             global
@@ -901,6 +911,8 @@ async fn main() -> ExitCode {
             }
         };
     };
+
+    seed_project_dot_akmon_if_applicable(&project_root, has_git_root);
 
     let akmon_content = match load_akmon_md(&project_root) {
         Ok(c) => c,

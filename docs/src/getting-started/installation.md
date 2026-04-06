@@ -8,23 +8,55 @@
 
 ## Option 1 — Pre-built binary (recommended)
 
+Releases on GitHub include **`akmon-darwin-arm64`**, **`akmon-darwin-x86_64`**, and **`akmon-linux-x86_64`**. They are slim builds (`--no-default-features`, no bundled semantic index).
+
+### Install without `sudo` (recommended)
+
+Put the binary in **`~/bin`** and ensure it is on your `PATH`:
+
 **macOS — Apple Silicon**
 ```bash
-curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \
-  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon
+mkdir -p ~/bin
+curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \
+  -o ~/bin/akmon && chmod +x ~/bin/akmon
 ```
 
 **macOS — Intel**
 ```bash
-curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 \
-  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon
+mkdir -p ~/bin
+curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 \
+  -o ~/bin/akmon && chmod +x ~/bin/akmon
 ```
 
 **Linux — x86_64**
 ```bash
-curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \
-  -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon
+mkdir -p ~/bin
+curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \
+  -o ~/bin/akmon && chmod +x ~/bin/akmon
 ```
+
+**Shell PATH (zsh example)** — if `akmon` is not found:
+```bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+### Install to `/usr/local/bin` (needs admin)
+
+```bash
+sudo curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \
+  -o /usr/local/bin/akmon && sudo chmod +x /usr/local/bin/akmon
+```
+
+(Use the correct asset name for your platform.)
+
+### Troubleshooting downloads
+
+| Symptom | Cause / fix |
+|--------|-------------|
+| **Permission denied** writing to `/usr/local/bin` | Use `~/bin` + `PATH`, or prefix `sudo` on both `curl` and `chmod`. |
+| **Small file / `Not: command not found`** when running `akmon` | GitHub returned an HTML error page (often **404**). Ensure a release exists with that asset name (tag the repo so the [release workflow](https://github.com/radotsvetkov/akmon/blob/main/.github/workflows/release.yml) uploads binaries). Check with `file ~/bin/akmon` — it should say “Mach-O” or “ELF”, not “HTML”. |
+| **`curl: (56) Failure writing output`** | Destination directory missing or not writable; use `mkdir -p ~/bin` or fix permissions. |
 
 **Verify**
 ```bash
@@ -44,7 +76,8 @@ cargo build --release --no-default-features
 # Full build — with semantic indexing
 cargo build --release
 
-cp target/release/akmon /usr/local/bin/
+mkdir -p ~/bin
+cp target/release/akmon ~/bin/
 ```
 
 ## Option 3 — cargo install
@@ -58,8 +91,9 @@ cargo install akmon
 Akmon is a single static binary. Copy it to any remote machine:
 
 ```bash
-scp /usr/local/bin/akmon user@remote:/usr/local/bin/
+scp ~/bin/akmon user@remote:~/bin/
 ssh user@remote
+export PATH="$HOME/bin:$PATH"
 akmon chat
 ```
 
@@ -67,7 +101,9 @@ akmon chat
 
 ```dockerfile
 FROM debian:bookworm-slim
-RUN curl -L \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/* \
+  && curl -fsSL -L \
   https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \
   -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon
 WORKDIR /workspace
@@ -80,8 +116,8 @@ ENTRYPOINT ["akmon"]
 # GitHub Actions example
 - name: Install Akmon
   run: |
-    curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \
-      -o /usr/local/bin/akmon && chmod +x /usr/local/bin/akmon
+    sudo curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \
+      -o /usr/local/bin/akmon && sudo chmod +x /usr/local/bin/akmon
 
 - name: Run task
   env:
@@ -95,6 +131,6 @@ ENTRYPOINT ["akmon"]
 ## Uninstalling
 
 ```bash
-rm /usr/local/bin/akmon
+rm -f ~/bin/akmon /usr/local/bin/akmon
 rm -rf ~/.akmon   # removes config, sessions, audit logs
 ```
