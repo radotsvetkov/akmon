@@ -29,7 +29,7 @@ pub async fn generate_akmon_md_markdown(
     }
     user.push_str(&format!(
         "\n\nFollow this structure exactly (use these ## headings):\n\
-# {title}\n\n\
+# {title_for_heading}\n\n\
 ## Product\n\
 What this is, who it is for, what problem it solves. One paragraph. Plain language, no jargon.\n\n\
 ## Architecture\n\
@@ -42,7 +42,6 @@ Coding standards the agent must follow (error handling, naming, tests layout, co
 What you are working on right now. Update at the start of each session. If unknown, write: _Update this at the start of each work session._\n\n\
 ## Done\n\
 Brief completed milestones for historical context.\n",
-        title = title_for_heading
     ));
 
     let messages = vec![

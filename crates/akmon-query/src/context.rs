@@ -318,8 +318,7 @@ pub fn build_messages(
 
     if let Some(md) = akmon_md {
         let body = format!(
-            "Project configuration (AKMON.md):\n{}\n{md}\n{}",
-            AKMON_MD_START, AKMON_MD_END,
+            "Project configuration (AKMON.md):\n{AKMON_MD_START}\n{md}\n{AKMON_MD_END}",
         );
         out.push(Message {
             role: MessageRole::System,
@@ -357,8 +356,7 @@ pub fn build_followup_messages(
 
     if let Some(md) = akmon_md {
         let body = format!(
-            "Project configuration (AKMON.md):\n{}\n{md}\n{}",
-            AKMON_MD_START, AKMON_MD_END,
+            "Project configuration (AKMON.md):\n{AKMON_MD_START}\n{md}\n{AKMON_MD_END}",
         );
         out.push(Message {
             role: MessageRole::System,
