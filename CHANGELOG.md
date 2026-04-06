@@ -14,6 +14,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - TUI slash commands: `/plan`, `/implement`, `/architect`, `/spec`, `/update-context` (open `AKMON.md` in `$EDITOR` and reload).
 - Improved `AKMON.md` generation template: Product, Architecture, Conventions, **Current sprint**, and Done sections for better steering across sessions.
 
+### Changed
+
+- MSRV raised to **1.88** (required by the `fastembed` dependency chain: `ort`, ICU crates).
+
 ## [1.3.0] - 2026-04-06
 
 ### Added

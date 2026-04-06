@@ -21,7 +21,7 @@ Single binary · No subscription
 [![CI](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml/badge.svg)](https://github.com/radotsvetkov/akmon/actions)
 [![Crates.io](https://img.shields.io/crates/v/akmon.svg)](https://crates.io/crates/akmon)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![Tests](https://img.shields.io/badge/tests-200%2B_passing-brightgreen.svg)](https://github.com/radotsvetkov/akmon/actions)
 
 </div>
@@ -77,7 +77,7 @@ cargo build --release
 cp target/release/akmon /usr/local/bin/
 ```
 
-Requires Rust 1.85+ via [rustup](https://rustup.rs).
+Requires Rust 1.88+ via [rustup](https://rustup.rs).
 
 ---
 

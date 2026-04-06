@@ -21,7 +21,7 @@ uuid = { version = "1", features = ["v4"] }
 [workspace.package]
 version = "1.4.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/akmon-dev/akmon"
 homepage = "https://github.com/akmon-dev/akmon"
