@@ -147,7 +147,7 @@ akmon config
 <table>
 <tr>
 <td>
-akmon v1.5.4  │  project: my-app  │  your-model  │  INTERACTIVE
+akmon v1.5.6  │  project: my-app  │  your-model  │  INTERACTIVE
 ──────────────────────────────────────────────────────────────────
 You: find the auth code and explain how tokens work
 → semantic_search
