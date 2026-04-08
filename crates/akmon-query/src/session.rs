@@ -595,7 +595,8 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                         .as_ref()
                                         .is_some_and(|f| f.load(Ordering::SeqCst))
                                     {
-                                        self.apply_event(&event_tx, AgentEvent::Done, &task).await?;
+                                        self.apply_event(&event_tx, AgentEvent::Done, &task)
+                                            .await?;
                                         return Ok(());
                                     }
                                     iteration = iteration.saturating_add(1);
