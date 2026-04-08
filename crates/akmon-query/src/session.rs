@@ -463,20 +463,43 @@ impl AgentSession {
                         match stop_reason {
                             StopReason::MaxTokens => {
                                 if !tool_calls.is_empty() {
-                                    let ae = AgentError::ModelError {
-                                        message: "model hit output limit mid tool-call; retry or shorten the request"
-                                            .into(),
-                                    };
+                                    // Model was cut mid tool-call — execute what we have,
+                                    // then continue. The tool results will be in context
+                                    // for the next turn and the model can resume.
+                                    if !user_line_committed {
+                                        self.context.push(Message {
+                                            role: MessageRole::User,
+                                            content: task.clone(),
+                                        });
+                                        user_line_committed = true;
+                                    }
+                                    let assistant_record = json!({
+                                        "text": accumulated,
+                                        "tool_calls": tool_calls.iter().map(|c| {
+                                            json!({"id": c.id, "name": c.name, "arguments": c.arguments})
+                                        }).collect::<Vec<_>>(),
+                                    });
+                                    self.context.push(Message {
+                                        role: MessageRole::Assistant,
+                                        content: assistant_record.to_string(),
+                                    });
+                                    self.dispatch_tool_calls_batch(
+                                        tool_calls,
+                                        &event_tx,
+                                        &task,
+                                        interactive_policy_rx,
+                                    )
+                                    .await?;
                                     self.apply_event(
                                         &event_tx,
-                                        AgentEvent::Error {
-                                            error: ae.clone(),
-                                            recoverable: false,
+                                        AgentEvent::StatusInfo {
+                                            message: "─ truncated mid-tool, resuming… ─".into(),
                                         },
                                         &task,
                                     )
                                     .await?;
-                                    return Err(ae);
+                                    iteration = iteration.saturating_add(1);
+                                    continue 'session;
                                 }
 
                                 if self.continuation_count < 3 {
@@ -540,6 +563,46 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                             }
                             StopReason::EndTurn => {
                                 self.continuation_count = 0;
+                                // If the model ended its turn with pending tool calls,
+                                // execute them and continue. This happens when the model
+                                // produces a text response AND tool calls in the same turn.
+                                if !tool_calls.is_empty() {
+                                    if !user_line_committed {
+                                        self.context.push(Message {
+                                            role: MessageRole::User,
+                                            content: task.clone(),
+                                        });
+                                        user_line_committed = true;
+                                    }
+                                    let assistant_record = json!({
+                                        "text": accumulated,
+                                        "tool_calls": tool_calls.iter().map(|c| {
+                                            json!({"id": c.id, "name": c.name, "arguments": c.arguments})
+                                        }).collect::<Vec<_>>(),
+                                    });
+                                    self.context.push(Message {
+                                        role: MessageRole::Assistant,
+                                        content: assistant_record.to_string(),
+                                    });
+                                    self.dispatch_tool_calls_batch(
+                                        tool_calls,
+                                        &event_tx,
+                                        &task,
+                                        interactive_policy_rx,
+                                    )
+                                    .await?;
+                                    if interrupt_after_current_tools
+                                        .as_ref()
+                                        .is_some_and(|f| f.load(Ordering::SeqCst))
+                                    {
+                                        self.apply_event(&event_tx, AgentEvent::Done, &task).await?;
+                                        return Ok(());
+                                    }
+                                    iteration = iteration.saturating_add(1);
+                                    continue 'session;
+                                }
+
+                                // No tool calls — model is genuinely done with the task.
                                 self.apply_event(&event_tx, AgentEvent::Done, &task).await?;
                                 if !user_line_committed {
                                     self.context.push(Message {

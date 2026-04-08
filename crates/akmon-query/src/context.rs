@@ -94,6 +94,18 @@ CONCRETE EXAMPLE for “create a landing page”:\n\
   NOT: one giant index.html with HTML+CSS+JS (300+ lines)\n\
   — that risks truncation and is harder to debug.\n";
 
+/// Explicit autonomous completion behavior for multi-step implementation tasks.
+pub const AUTONOMOUS_TASK_COMPLETION: &str = "\
+AUTONOMOUS TASK COMPLETION:\n\
+- When given a multi-file task, complete it fully without stopping.\n\
+- Do not announce what you plan to do. Do it.\n\
+- Do not say 'Next I will create X' — just create X by calling the tool.\n\
+- The loop continues as long as you call tools. Only produce a final\n\
+  text response when every file is created and verified.\n\
+- Wrong: write app.py then say 'I will now write models.py'\n\
+  Right: write app.py → write models.py → write routes.py → bash verify\n\
+  Then final text only: 'Done. To run: flask run'\n";
+
 /// Markdown-style instructions injected when the session is in read-only plan mode (`--plan`, `/plan`).
 pub const PLAN_MODE_SYSTEM_ADDON: &str = "\n\
 PLAN MODE ACTIVE.\n\
@@ -342,6 +354,8 @@ Working directory: {project_root}\n\
 Available tools: {tools_line}\n\
 \n\
 {FILE_WRITING_STRATEGY}\n\
+\n\
+{AUTONOMOUS_TASK_COMPLETION}\n\
 \n\
 To work on this project:\n\
 {step1}\

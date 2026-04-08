@@ -16,3 +16,4 @@ typescript_repository/
 # Editor / agent tooling (not part of the product)
 .cursor/
 .specstory/
+.vscode/
