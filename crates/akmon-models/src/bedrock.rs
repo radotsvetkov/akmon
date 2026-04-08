@@ -373,6 +373,13 @@ async fn run_bedrock_response_stream(
         return;
     }
 
+    let _ = tx
+        .send(Ok(StreamEvent::ProviderReady {
+            provider: "AWS Bedrock".into(),
+            model: inner.model_id.clone(),
+        }))
+        .await;
+
     let mut bytes_stream = resp.bytes_stream();
     let mut acc: Vec<u8> = Vec::new();
     let mut tool_builds: BTreeMap<usize, ToolAccum> = BTreeMap::new();

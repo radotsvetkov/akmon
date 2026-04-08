@@ -44,6 +44,10 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
         (AgentState::Thinking { .. }, AgentEvent::UsageReport { .. }) => Ok(()),
         (AgentState::ToolExecution { .. }, AgentEvent::UsageReport { .. }) => Ok(()),
 
+        // Provider label from the live stream (no state change)
+        (AgentState::Planning { .. }, AgentEvent::ProviderConfirmed { .. }) => Ok(()),
+        (AgentState::Thinking { .. }, AgentEvent::ProviderConfirmed { .. }) => Ok(()),
+
         // Same states: status-only messages (no state change)
         (AgentState::Planning { .. }, AgentEvent::StatusInfo { .. }) => Ok(()),
         (AgentState::Thinking { .. }, AgentEvent::StatusInfo { .. }) => Ok(()),

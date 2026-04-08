@@ -122,6 +122,48 @@ pub(crate) fn anthropic_system_and_rest(messages: &[Message]) -> (String, Vec<&M
     (system_parts.join("\n\n"), rest)
 }
 
+/// Splits leading [`MessageRole::System`] messages so each can carry its own `cache_control` block.
+pub(crate) fn anthropic_leading_system_blocks(messages: &[Message]) -> (Vec<String>, Vec<&Message>) {
+    let mut blocks = Vec::new();
+    let mut i = 0usize;
+    while i < messages.len() && messages[i].role == MessageRole::System {
+        blocks.push(messages[i].content.clone());
+        i += 1;
+    }
+    (blocks, messages[i..].iter().collect())
+}
+
+fn apply_anthropic_conversation_user_cache(messages: &mut [Value]) {
+    if messages.len() <= 8 {
+        return;
+    }
+    let mut user_idxs: Vec<usize> = Vec::new();
+    for (idx, m) in messages.iter().enumerate() {
+        if m.get("role").and_then(|x| x.as_str()) != Some("user") {
+            continue;
+        }
+        if let Some(Value::String(_)) = m.get("content") {
+            user_idxs.push(idx);
+        }
+    }
+    if user_idxs.len() < 2 {
+        return;
+    }
+    let target = user_idxs[user_idxs.len() - 2];
+    let m = &mut messages[target];
+    let Some(Value::String(s)) = m.get("content").cloned() else {
+        return;
+    };
+    *m = json!({
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": s,
+            "cache_control": { "type": "ephemeral" }
+        }]
+    });
+}
+
 fn tool_message_to_result_block(m: &Message) -> Option<Value> {
     let v: Value = serde_json::from_str(&m.content).ok()?;
     let id = v.get("tool_call_id").and_then(|x| x.as_str())?;
@@ -221,7 +263,7 @@ fn u32_from_json_token_field(v: Option<&Value>) -> u32 {
 
 fn build_request_json(
     model: &str,
-    system: &str,
+    system_blocks: &[String],
     messages: Vec<Value>,
     mut tools: Vec<Value>,
     config: &CompletionConfig,
@@ -231,15 +273,18 @@ fn build_request_json(
     map.insert("max_tokens".to_string(), json!(config.max_tokens));
     map.insert("stream".to_string(), json!(true));
     map.insert("temperature".to_string(), json!(config.temperature));
-    if !system.is_empty() {
-        map.insert(
-            "system".to_string(),
-            json!([{
-                "type": "text",
-                "text": system,
-                "cache_control": { "type": "ephemeral" }
-            }]),
-        );
+    if !system_blocks.is_empty() {
+        let arr: Vec<Value> = system_blocks
+            .iter()
+            .map(|text| {
+                json!({
+                    "type": "text",
+                    "text": text,
+                    "cache_control": { "type": "ephemeral" }
+                })
+            })
+            .collect();
+        map.insert("system".to_string(), Value::Array(arr));
     }
     map.insert("messages".to_string(), Value::Array(messages));
     if !tools.is_empty() {
@@ -585,6 +630,13 @@ async fn run_anthropic_stream(
         return;
     }
 
+    let _ = tx
+        .send(Ok(StreamEvent::ProviderReady {
+            provider: "Anthropic".into(),
+            model: inner.model.clone(),
+        }))
+        .await;
+
     let deadline = Duration::from_millis(config.first_token_deadline_ms);
     let mut byte_stream = resp.bytes_stream();
     let mut buf = String::new();
@@ -699,10 +751,17 @@ impl LlmProvider for AnthropicBackend {
         messages: &[Message],
         config: &CompletionConfig,
     ) -> Result<CompletionStream, ModelError> {
-        let (system, rest) = anthropic_system_and_rest(messages);
-        let api_messages = build_anthropic_api_messages(&rest);
+        let (system_blocks, rest) = anthropic_leading_system_blocks(messages);
+        let mut api_messages = build_anthropic_api_messages(&rest);
+        apply_anthropic_conversation_user_cache(&mut api_messages);
         let tools = anthropic_tools_from_config(config);
-        let body = build_request_json(&self.inner.model, &system, api_messages, tools, config);
+        let body = build_request_json(
+            &self.inner.model,
+            &system_blocks,
+            api_messages,
+            tools,
+            config,
+        );
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent, ModelError>>(64);
         let inner = Arc::clone(&self.inner);
@@ -798,7 +857,8 @@ mod tests {
     #[test]
     fn request_json_system_is_cached_content_block_array_when_non_empty() {
         let cfg = CompletionConfig::default();
-        let body = build_request_json("claude-test", "system prompt body", vec![], vec![], &cfg);
+        let blocks = vec!["system prompt body".into()];
+        let body = build_request_json("claude-test", &blocks, vec![], vec![], &cfg);
         let sys = body.get("system").expect("system key");
         let arr = sys.as_array().expect("system must be array");
         assert_eq!(arr.len(), 1);
@@ -812,9 +872,22 @@ mod tests {
     }
 
     #[test]
+    fn request_json_splits_multiple_system_blocks_with_separate_cache() {
+        let cfg = CompletionConfig::default();
+        let blocks = vec!["base".into(), "project".into()];
+        let body = build_request_json("claude-test", &blocks, vec![], vec![], &cfg);
+        let arr = body["system"].as_array().expect("system array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["text"], json!("base"));
+        assert_eq!(arr[1]["text"], json!("project"));
+        assert!(arr[0].get("cache_control").is_some());
+        assert!(arr[1].get("cache_control").is_some());
+    }
+
+    #[test]
     fn request_json_omits_system_when_empty() {
         let cfg = CompletionConfig::default();
-        let body = build_request_json("m", "", vec![], vec![], &cfg);
+        let body = build_request_json("m", &[], vec![], vec![], &cfg);
         assert!(body.get("system").is_none());
     }
 
@@ -833,7 +906,7 @@ mod tests {
                 "input_schema": {},
             }),
         ];
-        let body = build_request_json("m", "", vec![], tools, &cfg);
+        let body = build_request_json("m", &[], vec![], tools, &cfg);
         let arr = body
             .get("tools")
             .expect("tools")

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "semantic-index")]
 use akmon_index::RepoIndex;
+use akmon_config::TerminalTheme;
 use akmon_models::LlmConnectConfig;
 #[cfg(feature = "semantic-index")]
 use fastembed::TextEmbedding;
@@ -86,79 +87,29 @@ pub struct TuiLaunchConfig {
     pub auto_commit: bool,
     /// Model id for `/architect` planning phase (`--planner-model` / config).
     pub planner_model: String,
+    /// TUI contrast (`~/.akmon/config.toml` `[display]`).
+    pub display_theme: TerminalTheme,
 }
 
 impl TuiLaunchConfig {
+    /// Use terminal default foreground for transcript body text (readable on light backgrounds).
+    #[must_use]
+    pub fn light_body_text(&self) -> bool {
+        matches!(self.display_theme, TerminalTheme::Light)
+    }
+
     /// Short cloud or local label for the status bar (mirrors [`LlmConnectConfig::resolve`] priority).
     pub fn provider_display_name(&self) -> String {
-        let model = self.model_name.as_str();
-        let aws_key_here = std::env::var("AWS_ACCESS_KEY_ID")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .is_some();
-        if self.bedrock || aws_key_here {
-            return "AWS Bedrock".into();
-        }
-        if model.contains('/') {
-            return "OpenRouter".into();
-        }
-        if model.to_lowercase().starts_with("claude")
-            && self
-                .anthropic_key
-                .as_ref()
-                .filter(|s| !s.trim().is_empty())
-                .is_some()
-        {
-            return "Anthropic".into();
-        }
-        if self
-            .azure_endpoint
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .is_some()
-            && self
-                .azure_key
-                .as_ref()
-                .filter(|s| !s.trim().is_empty())
-                .is_some()
-        {
-            return "Azure OpenAI".into();
-        }
-        if self
-            .openai_key
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .is_some()
-        {
-            return "OpenAI".into();
-        }
-        if self
-            .groq_key
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .is_some()
-        {
-            return "Groq".into();
-        }
-        if self
-            .openai_compatible_url
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .is_some()
-        {
-            return "OpenAI-compatible".into();
-        }
-        "Ollama".into()
+        self.llm_connect_for_model(self.model_name.clone())
+            .inferred_backend_name()
+            .to_string()
     }
 
     /// `true` when the active model is routed via OpenRouter (`/` in id and key present).
     pub fn uses_openrouter(&self) -> bool {
-        self.model_name.contains('/')
-            && self
-                .openrouter_key
-                .as_ref()
-                .filter(|s| !s.trim().is_empty())
-                .is_some()
+        self.llm_connect_for_model(self.model_name.clone())
+            .inferred_backend_name()
+            == "OpenRouter"
     }
 
     /// Local inference (Ollama fallback / no billable cloud keys resolved).
@@ -207,6 +158,7 @@ impl std::fmt::Debug for TuiLaunchConfig {
             .field("sandbox_has_git_root", &self.sandbox_has_git_root)
             .field("auto_commit", &self.auto_commit)
             .field("planner_model", &self.planner_model)
+            .field("display_theme", &self.display_theme)
             .finish_non_exhaustive()
     }
 }

@@ -10,7 +10,7 @@ AI-assisted development.
 ## Interface layout
 
 ```
-┌─ akmon · v1.5.x  │  INTERACTIVE ─────────────────────────────────────┐
+┌─ akmon · v1.6.x  │  INTERACTIVE ─────────────────────────────────────┐
 │                                                                        │
 │  You: find where authentication tokens are validated                   │
 │                                                                        │

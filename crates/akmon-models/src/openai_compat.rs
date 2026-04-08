@@ -80,6 +80,24 @@ fn host_only(base_url: &str) -> String {
         .to_string()
 }
 
+fn openai_stream_footer_label(display_name: &str) -> String {
+    let slug = display_name.split('/').next().unwrap_or(display_name);
+    match slug {
+        "openrouter" => "OpenRouter".into(),
+        "openai" => "OpenAI".into(),
+        "groq" => "Groq".into(),
+        "azure" => "Azure OpenAI".into(),
+        _ if !slug.is_empty() => {
+            let mut c = slug.chars();
+            c.next()
+                .map_or_else(|| "OpenAI-compatible".into(), |f| {
+                    f.to_uppercase().to_string() + c.as_str()
+                })
+        }
+        _ => "OpenAI-compatible".into(),
+    }
+}
+
 fn provider_slug_for_host(host: &str) -> String {
     match host {
         "openrouter.ai" | "www.openrouter.ai" => "openrouter".into(),
@@ -618,6 +636,7 @@ async fn run_openai_stream(
     inner: Arc<OpenAiCompatInner>,
     body: Value,
     config: CompletionConfig,
+    stream_footer_label: String,
     tx: mpsc::Sender<Result<StreamEvent, ModelError>>,
 ) {
     let mut req = inner
@@ -661,6 +680,13 @@ async fn run_openai_stream(
         let _ = tx.send(Err(map_http_status(status, &body))).await;
         return;
     }
+
+    let _ = tx
+        .send(Ok(StreamEvent::ProviderReady {
+            provider: stream_footer_label,
+            model: inner.model.clone(),
+        }))
+        .await;
 
     let mut byte_stream = resp.bytes_stream();
     let mut buf = String::new();
@@ -801,7 +827,8 @@ impl LlmProvider for OpenAiCompatBackend {
         let (tx, rx) = mpsc::channel(64);
         let inner = Arc::clone(&self.inner);
         let cfg = config.clone();
-        tokio::spawn(run_openai_stream(inner, body, cfg, tx));
+        let footer = openai_stream_footer_label(self.inner.display_name.as_str());
+        tokio::spawn(run_openai_stream(inner, body, cfg, footer, tx));
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 }

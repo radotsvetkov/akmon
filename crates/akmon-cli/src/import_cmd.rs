@@ -191,6 +191,8 @@ pub async fn run_import(
             StreamEvent::TextDelta { text } => body.push_str(&text),
             StreamEvent::Done { .. } => break,
             StreamEvent::UsageReport(_) => {}
+            StreamEvent::ProviderReady { .. } => {}
+            StreamEvent::StatusHint { .. } => {}
             StreamEvent::Error { error } => bail!("model error: {error}"),
         }
     }

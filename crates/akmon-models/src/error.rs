@@ -32,6 +32,14 @@ pub enum ModelError {
         /// Transport, framing, or parse detail (no secrets).
         message: String,
     },
+    /// Requested model is not available on the server (e.g. Ollama 404).
+    #[error("model not found: {model}\n{hint}")]
+    ModelNotFound {
+        /// Model id the user asked for.
+        model: String,
+        /// Install hints and/or list of available local models.
+        hint: String,
+    },
 }
 
 #[cfg(test)]
@@ -78,6 +86,14 @@ mod tests {
     fn stream_interrupted_display() {
         assert_nonempty(ModelError::StreamInterrupted {
             message: "reset".into(),
+        });
+    }
+
+    #[test]
+    fn model_not_found_display() {
+        assert_nonempty(ModelError::ModelNotFound {
+            model: "nope".into(),
+            hint: "pull it".into(),
         });
     }
 }

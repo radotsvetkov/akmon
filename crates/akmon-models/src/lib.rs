@@ -10,6 +10,7 @@ mod llm_connect;
 mod max_tokens;
 mod message;
 mod ollama;
+mod ollama_models;
 mod openai_compat;
 mod stream;
 mod tool_def;
@@ -21,10 +22,13 @@ pub use anthropic::{
 pub use bedrock::{BEDROCK_DISPLAY_MODEL_IDS, BedrockBackend};
 pub use config::CompletionConfig;
 pub use error::ModelError;
-pub use llm_connect::LlmConnectConfig;
+pub use llm_connect::{LlmConnectConfig, looks_like_ollama_model};
 pub use max_tokens::max_tokens_for_model;
 pub use message::{Message, MessageRole};
 pub use ollama::OllamaBackend;
+pub use ollama_models::{
+    OllamaModel, OllamaProbe, fetch_ollama_models, ollama_first_token_deadline_ms, probe_ollama,
+};
 pub use openai_compat::{OpenAiCompatBackend, infer_context_window_tokens};
 pub use stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 pub use tool_def::ToolDefinition;

@@ -61,7 +61,7 @@ sudo curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/downloa
 **Verify**
 ```bash
 akmon --version
-# e.g. akmon 1.5.1
+# e.g. akmon 1.6.0
 ```
 
 ## Option 2 — From source

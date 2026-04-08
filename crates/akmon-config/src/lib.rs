@@ -43,6 +43,27 @@ pub struct ArchitectConfig {
     pub planner_model: Option<String>,
 }
 
+/// Terminal background / contrast hint for the interactive UI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalTheme {
+    /// Assume a dark background (Akmon’s default palette).
+    #[default]
+    Auto,
+    /// Force dark-theme colors.
+    Dark,
+    /// Prefer high-contrast readable text on light backgrounds.
+    Light,
+}
+
+/// Display-related options in `~/.akmon/config.toml` (`[display]`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisplayConfig {
+    /// `auto` keeps the dark palette unless set to `light`.
+    #[serde(default)]
+    pub theme: TerminalTheme,
+}
+
 /// Serializable contents of `~/.akmon/config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AkmonGlobalConfig {
@@ -82,6 +103,9 @@ pub struct AkmonGlobalConfig {
     /// Architect / two-phase planning defaults.
     #[serde(default)]
     pub architect: ArchitectConfig,
+    /// TUI typography / contrast (`[display]`).
+    #[serde(default)]
+    pub display: DisplayConfig,
 }
 
 impl AkmonGlobalConfig {

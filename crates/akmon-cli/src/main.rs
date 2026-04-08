@@ -650,6 +650,8 @@ async fn run_event_printer(
                     InteractivePolicyReply {
                         verdict: PolicyVerdict::Allow,
                         remember_for_session: true,
+                        allow_all_writes_session: false,
+                        shell_allow_prefix: None,
                     }
                 } else if t.eq_ignore_ascii_case("y") {
                     InteractivePolicyReply::allow_once()
@@ -909,6 +911,7 @@ async fn main() -> ExitCode {
             semantic_index,
             auto_commit: cli.auto_commit,
             planner_model: planner_model_for_tui(&cli),
+            display_theme: global.display.theme,
         };
         let tui_outcome = akmon_tui::run_interactive(tui_config).await;
         if let Some(handle) = index_thread {

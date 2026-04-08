@@ -18,6 +18,7 @@ semantic-index = [
 ]
 
 [dependencies]
+akmon-config = { path = "../akmon-config" }
 akmon-core = { path = "../akmon-core" }
 akmon-index = { path = "../akmon-index", optional = true }
 akmon-models = { path = "../akmon-models" }
@@ -27,6 +28,7 @@ chrono = { version = "0.4", features = ["serde"] }
 crossterm = { workspace = true }
 fastembed = { version = "5", default-features = true, optional = true }
 ratatui = { workspace = true }
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }

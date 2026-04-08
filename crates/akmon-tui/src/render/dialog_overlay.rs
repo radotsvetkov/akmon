@@ -13,6 +13,15 @@ const RED: ratatui::style::Color = ratatui::style::Color::Rgb(244, 71, 71);
 const GREY: ratatui::style::Color = ratatui::style::Color::Rgb(204, 204, 204);
 const AMBER: ratatui::style::Color = ratatui::style::Color::Rgb(245, 158, 11);
 
+/// First whitespace-delimited token for shell prefix rules (`python a.py` → `python`, `npm run dev` → `npm`).
+#[must_use]
+pub fn shell_prefix_hint(cmd: &str) -> String {
+    cmd.split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Draws the centered permission window inside `viewport` bounds (choices + Enter to confirm).
 pub fn render_confirmation_overlay(
     f: &mut ratatui::Frame<'_>,
@@ -58,27 +67,76 @@ pub fn render_confirmation_overlay(
         }
     }
     lines.push(Line::from(""));
-    lines.push(choice_line(
-        " Allow once ",
-        ConfirmChoice::Allow,
-        dlg.selected_option,
-    ));
-    lines.push(choice_line(
-        " Allow always (this session) ",
-        ConfirmChoice::AllowAlways,
-        dlg.selected_option,
-    ));
-    lines.push(choice_line(
-        " Deny ",
-        ConfirmChoice::Deny,
-        dlg.selected_option,
-    ));
+    match &dlg.operation {
+        OperationType::WriteFile { .. } | OperationType::EditFile { .. } => {
+            lines.push(choice_line(
+                " [y] Allow once ",
+                ConfirmChoice::Allow,
+                dlg.selected_option,
+            ));
+            lines.push(choice_line(
+                " [s] Allow this session (this path only) ",
+                ConfirmChoice::AllowAlways,
+                dlg.selected_option,
+            ));
+            if dlg.broad_choice_enabled {
+                lines.push(choice_line(
+                    " [p] Allow all writes this session ",
+                    ConfirmChoice::AllowBroad,
+                    dlg.selected_option,
+                ));
+            }
+            lines.push(choice_line(" [n] Deny ", ConfirmChoice::Deny, dlg.selected_option));
+        }
+        OperationType::RunShell { command } => {
+            let pfx = shell_prefix_hint(command);
+            lines.push(choice_line(
+                " [y] Allow once ",
+                ConfirmChoice::Allow,
+                dlg.selected_option,
+            ));
+            lines.push(choice_line(
+                " [s] Allow this session (this command only) ",
+                ConfirmChoice::AllowAlways,
+                dlg.selected_option,
+            ));
+            if dlg.broad_choice_enabled {
+                let lbl = format!(" [r] Allow all: `{pfx}`* this session ");
+                lines.push(choice_line(
+                    lbl.as_str(),
+                    ConfirmChoice::AllowBroad,
+                    dlg.selected_option,
+                ));
+            }
+            lines.push(choice_line(" [n] Deny ", ConfirmChoice::Deny, dlg.selected_option));
+        }
+        _ => {
+            lines.push(choice_line(
+                " [y] Allow once ",
+                ConfirmChoice::Allow,
+                dlg.selected_option,
+            ));
+            lines.push(choice_line(
+                " [s] Allow this session ",
+                ConfirmChoice::AllowAlways,
+                dlg.selected_option,
+            ));
+            if dlg.broad_choice_enabled {
+                lines.push(choice_line(
+                    dlg.broad_choice_label.as_str(),
+                    ConfirmChoice::AllowBroad,
+                    dlg.selected_option,
+                ));
+            }
+            lines.push(choice_line(" [n] Deny ", ConfirmChoice::Deny, dlg.selected_option));
+        }
+    }
     lines.push(Line::from(Span::styled(
         "  Tab or Shift+Tab · ← → — pick option    PgUp/PgDn — scroll diff",
         Style::default().fg(ratatui::style::Color::DarkGray),
     )));
     lines.push(Line::from(Span::styled(
-        "  Enter / 1 / y — allow once · 2 / Y — remember session · Esc / 3 / n — deny",
+        "  Enter confirms · 1/y · 2/s session · p/r broad · Esc/n deny",
         Style::default().fg(ratatui::style::Color::DarkGray),
     )));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -179,12 +237,27 @@ pub fn dialog_from_confirmation(description: &str, diff: Option<&str>) -> Confir
             description: description.to_string(),
         }
     };
+    let (broad_choice_enabled, broad_choice_label) = match &op {
+        OperationType::WriteFile { .. } | OperationType::EditFile { .. } => {
+            (true, " Allow all writes this session ".to_string())
+        }
+        OperationType::RunShell { command } => {
+            let p = shell_prefix_hint(command);
+            (
+                true,
+                format!(" Allow shell prefix `{p}` this session "),
+            )
+        }
+        _ => (false, String::new()),
+    };
     ConfirmationDialog {
         title: "Approve this action?".into(),
         operation: op,
         diff_or_preview: diff_owned,
         selected_option: ConfirmChoice::Allow,
         scroll_offset: 0,
+        broad_choice_enabled,
+        broad_choice_label,
     }
 }
 

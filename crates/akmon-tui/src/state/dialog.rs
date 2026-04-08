@@ -49,6 +49,8 @@ pub enum ConfirmChoice {
     Allow,
     /// Remember for this session.
     AllowAlways,
+    /// Allow broadly for the session (all writes, or shell prefix — see dialog copy).
+    AllowBroad,
     /// Reject.
     Deny,
     /// Only used when diff is tall (scroll).
@@ -68,6 +70,10 @@ pub struct ConfirmationDialog {
     pub selected_option: ConfirmChoice,
     /// Vertical scroll within the diff viewport.
     pub scroll_offset: u16,
+    /// When `true`, [`ConfirmChoice::AllowBroad`] is part of the cycle (file/shell prompts).
+    pub broad_choice_enabled: bool,
+    /// Short label for the broad-allow row (includes leading space for alignment).
+    pub broad_choice_label: String,
 }
 
 impl ConfirmationDialog {
@@ -75,7 +81,14 @@ impl ConfirmationDialog {
     pub fn cycle_choice(&mut self) {
         self.selected_option = match self.selected_option {
             ConfirmChoice::Allow => ConfirmChoice::AllowAlways,
-            ConfirmChoice::AllowAlways => ConfirmChoice::Deny,
+            ConfirmChoice::AllowAlways => {
+                if self.broad_choice_enabled {
+                    ConfirmChoice::AllowBroad
+                } else {
+                    ConfirmChoice::Deny
+                }
+            }
+            ConfirmChoice::AllowBroad => ConfirmChoice::Deny,
             ConfirmChoice::Deny | ConfirmChoice::ViewMore => ConfirmChoice::Allow,
         };
     }
@@ -85,7 +98,14 @@ impl ConfirmationDialog {
         self.selected_option = match self.selected_option {
             ConfirmChoice::Allow => ConfirmChoice::Deny,
             ConfirmChoice::AllowAlways => ConfirmChoice::Allow,
-            ConfirmChoice::Deny | ConfirmChoice::ViewMore => ConfirmChoice::AllowAlways,
+            ConfirmChoice::AllowBroad => ConfirmChoice::AllowAlways,
+            ConfirmChoice::Deny | ConfirmChoice::ViewMore => {
+                if self.broad_choice_enabled {
+                    ConfirmChoice::AllowBroad
+                } else {
+                    ConfirmChoice::AllowAlways
+                }
+            }
         };
     }
 }

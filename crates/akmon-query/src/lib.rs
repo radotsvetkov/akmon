@@ -7,6 +7,7 @@ mod context;
 mod context_manager;
 mod error;
 mod session;
+mod tools_filter;
 
 pub use akmon_md_gen::{AKMON_MD_SYSTEM_PROMPT, generate_akmon_md_markdown};
 

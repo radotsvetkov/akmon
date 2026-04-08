@@ -11,6 +11,7 @@ mod command;
 mod config;
 mod cost_estimate;
 mod layout;
+mod linkify;
 mod message;
 mod model_picker;
 mod overlay;

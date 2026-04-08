@@ -10,6 +10,32 @@ fn nonempty(opt: Option<String>) -> Option<String> {
     opt.filter(|s| !s.trim().is_empty())
 }
 
+/// Heuristic for Ollama-style local model ids (`:` tags or common local prefixes).
+pub fn looks_like_ollama_model(model: &str) -> bool {
+    if model.contains(':') {
+        return true;
+    }
+    let lower = model.to_lowercase();
+    const PREFIXES: &[&str] = &[
+        "llama",
+        "qwen",
+        "mistral",
+        "deepseek",
+        "codellama",
+        "phi",
+        "gemma",
+        "vicuna",
+        "orca",
+        "neural",
+        "wizardcoder",
+        "starcoder",
+        "tinyllama",
+        "falcon",
+        "dolphin",
+    ];
+    PREFIXES.iter().any(|p| lower.starts_with(p))
+}
+
 /// CLI / config inputs that determine which [`LlmProvider`] implementation to use.
 #[derive(Debug, Clone)]
 pub struct LlmConnectConfig {
@@ -62,7 +88,79 @@ impl Default for LlmConnectConfig {
 }
 
 impl LlmConnectConfig {
-    /// Resolves a provider using priority order: Bedrock → OpenRouter (`/` in model) → Anthropic (Claude + key) → Azure → OpenAI → Groq → custom URL → Ollama.
+    /// Human-readable backend label for status bars (matches [`Self::resolve`] priority).
+    pub fn inferred_backend_name(&self) -> &'static str {
+        let model = self.model.trim();
+        let lower = model.to_lowercase();
+        // Claude ids are always Anthropic-class in the product UI, even if routing falls through.
+        if lower.starts_with("claude") {
+            return "Anthropic";
+        }
+        let aws_key_present = std::env::var("AWS_ACCESS_KEY_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_some();
+        if self.bedrock_explicit || aws_key_present {
+            return "AWS Bedrock";
+        }
+
+        if model.contains('/')
+            && self
+                .openrouter_api_key
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            return "OpenRouter";
+        }
+
+        if self
+            .azure_openai_endpoint
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+            && self
+                .azure_openai_api_key
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            return "Azure OpenAI";
+        }
+
+        if self
+            .openai_api_key
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return "OpenAI";
+        }
+
+        if self
+            .groq_api_key
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return "Groq";
+        }
+
+        if self
+            .openai_compatible_url
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+            && self
+                .openai_compatible_api_key
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            return "OpenAI-compatible";
+        }
+
+        if looks_like_ollama_model(model) {
+            return "Ollama";
+        }
+
+        "Ollama"
+    }
+
+    /// Resolves a provider using priority order: Bedrock → OpenRouter (`org/model`) → Anthropic (Claude + key) → Claude via OpenRouter → Azure → OpenAI → Groq → custom URL → Ollama heuristics → Ollama default.
     pub fn resolve(self) -> Result<Arc<dyn LlmProvider>, String> {
         let model = self.model;
         let aws_key_present = std::env::var("AWS_ACCESS_KEY_ID")
@@ -87,10 +185,15 @@ impl LlmConnectConfig {
             return Ok(Arc::new(OpenAiCompatBackend::openrouter(key, model)));
         }
 
-        if model.to_lowercase().starts_with("claude")
-            && let Some(key) = nonempty(self.anthropic_api_key)
-        {
-            return Ok(Arc::new(AnthropicBackend::new(Secret::new(key), model)));
+        let lower = model.to_lowercase();
+        if lower.starts_with("claude") {
+            if let Some(key) = nonempty(self.anthropic_api_key) {
+                return Ok(Arc::new(AnthropicBackend::new(Secret::new(key), model)));
+            }
+            if let Some(key) = nonempty(self.openrouter_api_key) {
+                let or_id = format!("anthropic/{model}");
+                return Ok(Arc::new(OpenAiCompatBackend::openrouter(key, or_id)));
+            }
         }
 
         if let (Some(ep), Some(k)) = (
@@ -119,6 +222,10 @@ impl LlmConnectConfig {
                 )
             })?;
             return Ok(Arc::new(OpenAiCompatBackend::custom(url, key, model)));
+        }
+
+        if looks_like_ollama_model(&model) {
+            return Ok(Arc::new(OllamaBackend::new(self.ollama_url, model)));
         }
 
         Ok(Arc::new(OllamaBackend::new(self.ollama_url, model)))

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use akmon_models::{OllamaProbe, probe_ollama};
 use chrono::{DateTime, Utc};
 use tokio::sync::{Notify, mpsc};
 use uuid::Uuid;
@@ -32,6 +33,25 @@ pub struct SlashEnv {
     pub project_job_tx: mpsc::UnboundedSender<ProjectUiJob>,
     /// Queues `/implement` runs on the agent task.
     pub agent_task_tx: mpsc::UnboundedSender<AgentTurn>,
+}
+
+fn nonempty_cfg(s: &Option<String>) -> bool {
+    s.as_ref().is_some_and(|x| !x.trim().is_empty())
+}
+
+fn probe_ollama_blocking(url: &str) -> OllamaProbe {
+    tokio::runtime::Handle::try_current()
+        .map(|h| h.block_on(probe_ollama(url)))
+        .unwrap_or(OllamaProbe {
+            reachable: false,
+            models: vec![],
+        })
+}
+
+fn refresh_app_provider_labels(app: &mut TuiApp, cfg: &TuiLaunchConfig) {
+    app.provider_display_name = cfg.provider_display_name();
+    app.uses_openrouter = cfg.uses_openrouter();
+    app.free_local_inference = cfg.is_free_local_inference();
 }
 
 /// Outcome of handling one slash line (buffer already consumed by caller).
@@ -248,6 +268,11 @@ fn dispatch(
                     g.model_name = name.to_string();
                 }
                 app.model_name = name.to_string();
+                let cfg_snapshot = match env.shared_config.lock() {
+                    Ok(g) => g.clone(),
+                    Err(e) => e.into_inner().clone(),
+                };
+                refresh_app_provider_labels(app, &cfg_snapshot);
                 env.reload_notify.notify_one();
                 app.push_system_info(format!("Model changed to {name}"));
                 app.overlay = Overlay::None;
@@ -256,11 +281,13 @@ fn dispatch(
                     Ok(g) => g.clone(),
                     Err(e) => e.into_inner().clone(),
                 };
-                let rows = build_model_picker_rows(&cfg_snapshot);
+                let probe = probe_ollama_blocking(&cfg_snapshot.ollama_url);
+                app.ollama_probe = probe.clone();
+                let rows = build_model_picker_rows(&cfg_snapshot, &probe, app.model_name.as_str());
                 let selectable: Vec<usize> = rows
                     .iter()
                     .enumerate()
-                    .filter(|(_, r)| !r.section_header)
+                    .filter(|(_, r)| r.selectable && !r.section_header)
                     .map(|(i, _)| i)
                     .collect();
                 if selectable.is_empty() {
@@ -279,6 +306,61 @@ fn dispatch(
                     };
                 }
             }
+            SlashHandled::Continue
+        }
+        "doctor" => {
+            let cfg_snapshot = match env.shared_config.lock() {
+                Ok(g) => g.clone(),
+                Err(e) => e.into_inner().clone(),
+            };
+            let probe = probe_ollama_blocking(&cfg_snapshot.ollama_url);
+            app.ollama_probe = probe.clone();
+            app.push_system_info("── Doctor ──".into());
+            app.push_system_info(format!(
+                "Model: {} · {}",
+                cfg_snapshot.model_name,
+                cfg_snapshot.provider_display_name()
+            ));
+            app.push_system_info(format!(
+                "Anthropic API key: {}",
+                if nonempty_cfg(&cfg_snapshot.anthropic_key) {
+                    "set"
+                } else {
+                    "not set"
+                }
+            ));
+            app.push_system_info(format!(
+                "OpenRouter API key: {}",
+                if nonempty_cfg(&cfg_snapshot.openrouter_key) {
+                    "set"
+                } else {
+                    "not set"
+                }
+            ));
+            app.push_system_info(format!(
+                "OpenAI API key: {}",
+                if nonempty_cfg(&cfg_snapshot.openai_key) {
+                    "set"
+                } else {
+                    "not set"
+                }
+            ));
+            if !probe.reachable {
+                app.push_system_info("✗  Ollama: not running".into());
+                app.push_system_info("Install from: https://ollama.com".into());
+                app.push_system_info("Then: ollama pull qwen2.5-coder:7b".into());
+            } else if probe.models.is_empty() {
+                app.push_system_info("○  Ollama: running, no models installed".into());
+                app.push_system_info("Run: ollama pull qwen2.5-coder:7b".into());
+            } else {
+                app.push_system_info("●  Ollama: running".into());
+                let mut sorted = probe.models.clone();
+                sorted.sort_by(|a, b| a.name.cmp(&b.name));
+                for m in sorted {
+                    app.push_system_info(format!("{}   {}", m.name, m.display_size()));
+                }
+            }
+            app.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "index" => {
@@ -651,7 +733,7 @@ pub fn model_picker_enter(app: &mut TuiApp, env: &SlashEnv) {
             let Some(row) = rows.get(row_i) else {
                 return;
             };
-            if row.section_header {
+            if row.section_header || !row.selectable {
                 return;
             }
             row.label.clone()
@@ -666,6 +748,11 @@ pub fn model_picker_enter(app: &mut TuiApp, env: &SlashEnv) {
         g.model_name = name.clone();
     }
     app.model_name = name.clone();
+    let cfg_snapshot = match env.shared_config.lock() {
+        Ok(g) => g.clone(),
+        Err(e) => e.into_inner().clone(),
+    };
+    refresh_app_provider_labels(app, &cfg_snapshot);
     env.reload_notify.notify_one();
     app.push_system_info(format!("Model changed to {name}"));
     app.overlay = Overlay::None;

@@ -4,6 +4,22 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-04-08
+
+### Added
+
+- **Anthropic prompt caching**: multi-block system prompts with `cache_control`, tool-definition cache marker, and conversation cache hints; footer and cost logic surface cache read tokens.
+- **TUI**: OSC 8 URL linkification in transcript text; `[display] theme = "light"` for readable body text on light terminals; status bar shows `tokens` / optional green `cache` with comma grouping.
+- **Ollama**: loading-hint status messages while waiting for the first stream bytes; first-token timeouts tuned for local models.
+- **Permissions**: session allowlist, allow-all-writes, and shell-prefix rules with labeled dialog options (`y` / `s` / `p` / `r` / `n`).
+- **Exit summary**: ANSI-formatted session summary on stdout after the TUI closes.
+- **`StreamEvent::StatusHint`**: propagated to `AgentEvent::StatusInfo` for provider UX hooks.
+
+### Changed
+
+- Provider label in the TUI follows confirmed backend after the first successful API response (`ProviderConfirmed`).
+- Local models: optional reduced tool set for Ollama to cut prompt size.
+
 ## [1.5.1] - 2026-04-06
 
 ### Fixed

@@ -136,6 +136,12 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "doctor",
+        aliases: &[],
+        description: "Show provider keys and Ollama status",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "exit",
         aliases: &["quit", "q"],
         description: "Save and exit",

@@ -7,7 +7,7 @@ use akmon_core::{
     AgentConfig, AgentEvent, InteractivePolicyReply, McpServerConfig, PolicyEngine,
     PolicyEngineMode, PolicyVerdict, Sandbox, save_plan_markdown, write_audit_jsonl,
 };
-use akmon_models::LlmProvider;
+use akmon_models::{LlmProvider, OllamaProbe};
 use akmon_query::AgentSession;
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
@@ -53,6 +53,8 @@ pub enum BridgeMsg {
         /// When `true`, reload `AKMON.md` from disk into [`TuiLaunchConfig`] and rebuild the agent session.
         reload_akmon_md: bool,
     },
+    /// Ollama `/api/tags` probe finished (startup background refresh or explicit `/model`).
+    OllamaCatalog(OllamaProbe),
 }
 
 type PolicySenderSlot = Arc<tokio::sync::Mutex<Option<mpsc::Sender<InteractivePolicyReply>>>>;
@@ -256,6 +258,8 @@ pub async fn run_agent_loop(
                 UiCommand::Confirm {
                     allow,
                     remember_for_session,
+                    allow_all_writes_session,
+                    shell_allow_prefix,
                 } => {
                     let reply = InteractivePolicyReply {
                         verdict: if allow {
@@ -264,6 +268,12 @@ pub async fn run_agent_loop(
                             PolicyVerdict::Deny
                         },
                         remember_for_session: allow && remember_for_session,
+                        allow_all_writes_session: allow && allow_all_writes_session,
+                        shell_allow_prefix: if allow {
+                            shell_allow_prefix
+                        } else {
+                            None
+                        },
                     };
                     let guard = slot_for_ui.lock().await;
                     if let Some(tx) = guard.as_ref() {

@@ -29,7 +29,7 @@ pub enum PolicyVerdict {
 }
 
 /// Verdict from an interactive prompt (TUI or stdin), optionally remembering this permission for the session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InteractivePolicyReply {
     /// Whether the user allowed or denied the pending permission.
     pub verdict: PolicyVerdict,
@@ -37,6 +37,12 @@ pub struct InteractivePolicyReply {
     /// may auto-approve for the rest of the agent session without prompting again (orchestrator-defined).
     #[serde(default)]
     pub remember_for_session: bool,
+    /// When `true` with allow, any write/edit file permission is auto-approved for this session.
+    #[serde(default)]
+    pub allow_all_writes_session: bool,
+    /// When set with allow for shell, commands with this prefix are auto-approved (session-wide).
+    #[serde(default)]
+    pub shell_allow_prefix: Option<String>,
 }
 
 impl InteractivePolicyReply {
@@ -45,6 +51,8 @@ impl InteractivePolicyReply {
         Self {
             verdict: PolicyVerdict::Allow,
             remember_for_session: false,
+            allow_all_writes_session: false,
+            shell_allow_prefix: None,
         }
     }
 
@@ -53,6 +61,8 @@ impl InteractivePolicyReply {
         Self {
             verdict: PolicyVerdict::Deny,
             remember_for_session: false,
+            allow_all_writes_session: false,
+            shell_allow_prefix: None,
         }
     }
 }

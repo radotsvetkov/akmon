@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use ratatui::layout::Rect;
 
 use akmon_core::{AgentEvent, ContextScan, scan_context_files};
+use akmon_models::OllamaProbe;
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
@@ -33,8 +34,12 @@ pub enum ExternalEditTarget {
 pub struct ModelPickerRow {
     /// When `true`, `label` is a section heading (not selectable).
     pub section_header: bool,
-    /// Section title or model id.
+    /// When `false`, the row is a note (e.g. “not configured”) and cannot be selected.
+    pub selectable: bool,
+    /// Model id used when applying selection (ignored for headers / notes).
     pub label: String,
+    /// Optional override for on-screen text (e.g. bullet + size column).
+    pub display: Option<String>,
 }
 
 /// Modal overlay drawn over the transcript or above the input (slash UI).
@@ -122,6 +127,8 @@ pub struct TuiApp {
     pub uses_openrouter: bool,
     /// Ollama fallback (no billable cloud keys in use).
     pub free_local_inference: bool,
+    /// Use terminal default foreground for transcript body (see `[display] theme = "light"`).
+    pub light_body_text: bool,
     /// Whether an agent turn is in flight.
     pub agent_running: bool,
     /// Short status for the header when [`Self::agent_running`] (e.g. “Model is responding…”).
@@ -205,6 +212,8 @@ pub struct TuiApp {
     pub mouse_capture_enabled: bool,
     /// Last value applied to the terminal via crossterm (keeps state in sync after toggles).
     pub mouse_capture_applied: bool,
+    /// Latest Ollama `/api/tags` probe (background refresh + `/model` / `/doctor`).
+    pub ollama_probe: OllamaProbe,
 }
 
 impl TuiApp {
@@ -213,6 +222,7 @@ impl TuiApp {
         let provider_display_name = config.provider_display_name();
         let uses_openrouter = config.uses_openrouter();
         let free_local_inference = config.is_free_local_inference();
+        let light_body_text = config.light_body_text();
         let session_id = config.session_id;
         let started = Utc::now();
         let project_name = config
@@ -249,6 +259,7 @@ impl TuiApp {
             provider_display_name,
             uses_openrouter,
             free_local_inference,
+            light_body_text,
             agent_running: false,
             agent_activity_line: String::new(),
             current_iteration: 0,
@@ -290,6 +301,10 @@ impl TuiApp {
             spinner_frame: 0,
             mouse_capture_enabled: true,
             mouse_capture_applied: false,
+            ollama_probe: OllamaProbe {
+                reachable: false,
+                models: vec![],
+            },
         }
     }
 
@@ -505,6 +520,8 @@ impl TuiApp {
                 self.push_system_info(message.clone());
                 if message.contains("continuing") {
                     self.agent_activity_line = "continuing response…".into();
+                } else if message.starts_with('⟳') {
+                    self.agent_activity_line = message.clone();
                 }
             }
             AgentEvent::SummarizationStarted => {
@@ -525,6 +542,11 @@ impl TuiApp {
                 self.total_cache_write_tokens = self
                     .total_cache_write_tokens
                     .saturating_add(cache_creation_tokens);
+            }
+            AgentEvent::ProviderConfirmed { provider, .. } => {
+                self.provider_display_name = provider.clone();
+                self.uses_openrouter = provider == "OpenRouter";
+                self.free_local_inference = provider == "Ollama";
             }
             AgentEvent::IterationStarted { n, max } => {
                 self.current_iteration = n;
@@ -587,7 +609,7 @@ impl TuiApp {
     pub fn total_message_lines(&self, width: u16) -> usize {
         self.messages
             .iter()
-            .map(|m| crate::render::message_line_count(m, width))
+            .map(|m| crate::render::message_line_count(m, width, self.light_body_text))
             .sum()
     }
 
@@ -807,6 +829,7 @@ mod tests {
             semantic_index: None,
             auto_commit: false,
             planner_model: "llama3.2".into(),
+            display_theme: akmon_config::TerminalTheme::default(),
         }
     }
 

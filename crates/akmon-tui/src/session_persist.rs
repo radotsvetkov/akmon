@@ -323,6 +323,7 @@ mod tests {
             semantic_index: None,
             auto_commit: false,
             planner_model: "llama3.2".into(),
+            display_theme: akmon_config::TerminalTheme::default(),
         });
         let cfg = crate::TuiLaunchConfig {
             version: "t".into(),
@@ -356,6 +357,7 @@ mod tests {
             semantic_index: None,
             auto_commit: false,
             planner_model: "llama3.2".into(),
+            display_theme: akmon_config::TerminalTheme::default(),
         };
         let path = save_session_snapshot(&app, &cfg, Utc::now(), Some(&sessions)).expect("save");
         assert_eq!(

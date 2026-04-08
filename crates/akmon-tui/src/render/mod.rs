@@ -9,7 +9,9 @@ mod status_bar;
 mod viewport_paint;
 mod wrap;
 
-pub use dialog_overlay::{dialog_from_confirmation, render_confirmation_overlay};
+pub use dialog_overlay::{
+    dialog_from_confirmation, render_confirmation_overlay, shell_prefix_hint,
+};
 pub use flatten::{flatten_transcript, message_line_count, message_to_lines};
 pub use header_bar::render_header_bar;
 pub use input_hit::{input_body_row_count, map_input_click_wrapped, snap_utf8_cursor};

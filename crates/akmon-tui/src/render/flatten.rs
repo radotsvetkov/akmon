@@ -6,6 +6,7 @@ use serde_json::Value as JsonValue;
 
 use super::code::{code_block_bg, highlight_line};
 use super::wrap::wrap_text;
+use crate::linkify::linkify_text;
 use crate::message::TuiMessage;
 
 const AMBER: ratatui::style::Color = ratatui::style::Color::Rgb(245, 158, 11);
@@ -19,8 +20,8 @@ const ERR: ratatui::style::Color = ratatui::style::Color::Rgb(248, 113, 113);
 
 /// Total lines one message occupies at `width`.
 #[must_use]
-pub fn message_line_count(msg: &TuiMessage, width: u16) -> usize {
-    flatten_message(msg, width, true).len()
+pub fn message_line_count(msg: &TuiMessage, width: u16, light_body_text: bool) -> usize {
+    flatten_message(msg, width, true, light_body_text).len()
 }
 
 /// Back-compat: synonym for [`flatten_message`] with streaming cursor support.
@@ -29,8 +30,14 @@ pub fn message_to_lines(
     msg: &TuiMessage,
     width: u16,
     stream_cursor_visible: bool,
+    light_body_text: bool,
 ) -> Vec<Line<'static>> {
-    flatten_message(msg, width, stream_cursor_visible)
+    flatten_message(
+        msg,
+        width,
+        stream_cursor_visible,
+        light_body_text,
+    )
 }
 
 #[must_use]
@@ -38,10 +45,16 @@ pub fn flatten_transcript(
     messages: &[TuiMessage],
     width: u16,
     stream_cursor_visible: bool,
+    light_body_text: bool,
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for m in messages {
-        out.extend(flatten_message(m, width, stream_cursor_visible));
+        out.extend(flatten_message(
+            m,
+            width,
+            stream_cursor_visible,
+            light_body_text,
+        ));
     }
     out
 }
@@ -51,12 +64,18 @@ fn flatten_message(
     msg: &TuiMessage,
     width: u16,
     stream_cursor_visible: bool,
+    light_body_text: bool,
 ) -> Vec<Line<'static>> {
     let w = width.saturating_sub(4).max(8);
+    let body_paint = if light_body_text {
+        ratatui::style::Color::Reset
+    } else {
+        FG
+    };
     match msg {
-        TuiMessage::User { content } => user_block(content, w),
+        TuiMessage::User { content } => user_block(content, w, body_paint),
         TuiMessage::Assistant { content, complete } => {
-            assistant_with_code(content, w, *complete, stream_cursor_visible)
+            assistant_with_code(content, w, *complete, stream_cursor_visible, body_paint)
         }
         TuiMessage::SystemInfo { content } => system_line(content, w),
         TuiMessage::Error { content } => vec![Line::from(Span::styled(
@@ -70,7 +89,15 @@ fn flatten_message(
             success,
             expanded,
             ..
-        } => tool_card(name, args, result.as_deref(), *success, *expanded, w),
+        } => tool_card(
+            name,
+            args,
+            result.as_deref(),
+            *success,
+            *expanded,
+            w,
+            body_paint,
+        ),
         TuiMessage::Confirmation {
             description,
             answered,
@@ -81,13 +108,13 @@ fn flatten_message(
             if !*answered {
                 Vec::new()
             } else {
-                confirmation_short(description, *answered, *answer, w)
+                confirmation_short(description, *answered, *answer, w, body_paint)
             }
         }
     }
 }
 
-fn user_block(content: &str, w: u16) -> Vec<Line<'static>> {
+fn user_block(content: &str, w: u16, body_paint: ratatui::style::Color) -> Vec<Line<'static>> {
     let mut v = vec![Line::from(vec![
         Span::styled("┌─ ", Style::default().fg(BORDER)),
         Span::styled(
@@ -99,10 +126,10 @@ fn user_block(content: &str, w: u16) -> Vec<Line<'static>> {
             Style::default().fg(BORDER),
         ),
     ])];
-    for line in wrap_text(content, w) {
+    for line in wrap_text(&linkify_text(content), w) {
         v.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(BORDER)),
-            Span::styled(line, Style::default().fg(FG)),
+            Span::styled(line, Style::default().fg(body_paint)),
         ]));
     }
     v.push(Line::from(Span::styled(
@@ -117,6 +144,7 @@ fn assistant_with_code(
     w: u16,
     complete: bool,
     stream_blink: bool,
+    body_paint: ratatui::style::Color,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     for seg in split_fences(content) {
@@ -125,19 +153,19 @@ fn assistant_with_code(
                 if text.trim().is_empty() {
                     continue;
                 }
-                for line in wrap_text(&text, w) {
+                for line in wrap_text(&linkify_text(&text), w) {
                     let label = if out.is_empty() {
                         vec![
                             Span::styled(
                                 "Akmon ",
                                 Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(line, Style::default().fg(FG)),
+                            Span::styled(line, Style::default().fg(body_paint)),
                         ]
                     } else {
                         vec![
                             Span::styled("     ", Style::default()),
-                            Span::styled(line, Style::default().fg(FG)),
+                            Span::styled(line, Style::default().fg(body_paint)),
                         ]
                     };
                     out.push(Line::from(label));
@@ -256,6 +284,7 @@ fn tool_card(
     success: Option<bool>,
     expanded: bool,
     w: u16,
+    body_paint: ratatui::style::Color,
 ) -> Vec<Line<'static>> {
     let summary = args_summary(name, args);
     let status = match (success, result.as_ref()) {
@@ -266,7 +295,7 @@ fn tool_card(
     };
     let mut v = vec![Line::from(vec![
         Span::styled("→ ", Style::default().fg(AMBER)),
-        Span::styled(format!("{name}  "), Style::default().fg(FG)),
+        Span::styled(format!("{name}  "), Style::default().fg(body_paint)),
         Span::styled(
             status.0,
             Style::default().fg(status.1).add_modifier(Modifier::BOLD),
@@ -299,22 +328,22 @@ fn tool_card(
             Span::styled("│ Input:    ", Style::default().fg(DIM)),
             Span::styled(
                 serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string()),
-                Style::default().fg(FG),
+                Style::default().fg(body_paint),
             ),
         ]));
         if let Some(r) = result {
             if let Ok(val) = serde_json::from_str::<JsonValue>(r) {
                 if val.get("type").and_then(|x| x.as_str()) == Some("file_edit_diff") {
                     if let Some(diff) = val.get("diff").and_then(|x| x.as_str()) {
-                        append_colored_unified_diff_lines(&mut v, diff, w);
+                        append_colored_unified_diff_lines(&mut v, diff, w, body_paint);
                     } else {
-                        append_wrapped_output_lines(&mut v, r, w);
+                        append_wrapped_output_lines(&mut v, r, w, body_paint);
                     }
                 } else {
-                    append_wrapped_output_lines(&mut v, r, w);
+                    append_wrapped_output_lines(&mut v, r, w, body_paint);
                 }
             } else {
-                append_wrapped_output_lines(&mut v, r, w);
+                append_wrapped_output_lines(&mut v, r, w, body_paint);
             }
         }
         v.push(Line::from(Span::styled(
@@ -325,16 +354,26 @@ fn tool_card(
     v
 }
 
-fn append_wrapped_output_lines(v: &mut Vec<Line<'static>>, text: &str, w: u16) {
-    for line in wrap_text(text, w.saturating_sub(4)) {
+fn append_wrapped_output_lines(
+    v: &mut Vec<Line<'static>>,
+    text: &str,
+    w: u16,
+    body_paint: ratatui::style::Color,
+) {
+    for line in wrap_text(&linkify_text(text), w.saturating_sub(4)) {
         v.push(Line::from(vec![
             Span::styled("│ Output:   ", Style::default().fg(DIM)),
-            Span::styled(line, Style::default().fg(FG)),
+            Span::styled(line, Style::default().fg(body_paint)),
         ]));
     }
 }
 
-fn append_colored_unified_diff_lines(v: &mut Vec<Line<'static>>, diff: &str, w: u16) {
+fn append_colored_unified_diff_lines(
+    v: &mut Vec<Line<'static>>,
+    diff: &str,
+    w: u16,
+    body_paint: ratatui::style::Color,
+) {
     let col_w = w.saturating_sub(4);
     for raw in diff.lines() {
         let style = if raw.starts_with('+') && !raw.starts_with("+++") {
@@ -344,7 +383,7 @@ fn append_colored_unified_diff_lines(v: &mut Vec<Line<'static>>, diff: &str, w: 
         } else if raw.starts_with('@') {
             Style::default().fg(DIFF_HEADER)
         } else {
-            Style::default().fg(FG)
+            Style::default().fg(body_paint)
         };
         for line in wrap_text(raw, col_w) {
             v.push(Line::from(vec![
@@ -383,6 +422,7 @@ fn confirmation_short(
     answered: bool,
     answer: Option<bool>,
     w: u16,
+    body_paint: ratatui::style::Color,
 ) -> Vec<Line<'static>> {
     let line: String = description
         .lines()
@@ -404,7 +444,7 @@ fn confirmation_short(
     } else {
         vec![Line::from(vec![
             Span::styled("⚠ ", Style::default().fg(AMBER)),
-            Span::styled(line, Style::default().fg(FG)),
+            Span::styled(line, Style::default().fg(body_paint)),
         ])]
     }
 }
@@ -419,7 +459,7 @@ mod tests {
             content: "Hi\n```rust\nfn a(){}\n```\nDone".into(),
             complete: true,
         };
-        let lines = flatten_message(&m, 60, true);
+        let lines = flatten_message(&m, 60, true, false);
         let s: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|sp| sp.content.to_string()))
@@ -432,7 +472,7 @@ mod tests {
         let m = TuiMessage::User {
             content: "a b c d e f g h i j".into(),
         };
-        assert!(message_line_count(&m, 12) >= 2);
+        assert!(message_line_count(&m, 12, false) >= 2);
     }
 
     #[test]
@@ -441,7 +481,7 @@ mod tests {
             content: "```rust\nlet x = 1;\n```".into(),
             complete: true,
         };
-        let lines = flatten_message(&m, 50, true);
+        let lines = flatten_message(&m, 50, true, false);
         let flat: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))

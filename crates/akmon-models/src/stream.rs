@@ -52,6 +52,20 @@ pub enum StopReason {
 /// One item from a streaming completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
+    /// HTTP handshake succeeded and byte streaming has started (one per request).
+    ///
+    /// Lets the UI confirm which backend is actually serving the model (routing vs label).
+    ProviderReady {
+        /// Human-readable provider name (e.g. `Anthropic`, `Ollama`, `OpenRouter`).
+        provider: String,
+        /// Model id for this request.
+        model: String,
+    },
+    /// UX hint while waiting for the first bytes from a slow local backend (e.g. Ollama model load).
+    StatusHint {
+        /// Short message for the UI status line / transcript.
+        message: String,
+    },
     /// Incremental assistant text.
     TextDelta {
         /// UTF-8 fragment (may be empty in edge cases; callers should concatenate).

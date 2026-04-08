@@ -13,6 +13,7 @@ use akmon_models::{
     CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
     ModelToolCall, StopReason, StreamEvent, ToolDefinition, UsageReport,
     anthropic_system_block_text, approximate_tokens, max_tokens_for_model,
+    ollama_first_token_deadline_ms,
 };
 use akmon_tools::{Tool, ToolContext, ToolOutput, unified_diff_text};
 use chrono::Utc;
@@ -23,6 +24,7 @@ use uuid::Uuid;
 
 use crate::context::{build_followup_messages, build_messages};
 use crate::context_manager::ContextManager;
+use crate::tools_filter::tools_for_model_id;
 
 /// One finished tool invocation recorded for machine-readable run summaries (CLI `--output json`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -74,11 +76,16 @@ fn completion_config_for_tools(
             parameters: t.as_ref().parameters_schema(),
         })
         .collect();
-    CompletionConfig {
+    let mut cfg = CompletionConfig {
         tools: defs,
         max_tokens: max_tokens_for_model(provider.completion_model_id()),
         ..CompletionConfig::default()
+    };
+    if provider.name() == "ollama" {
+        cfg.first_token_deadline_ms =
+            ollama_first_token_deadline_ms(provider.completion_model_id());
     }
+    cfg
 }
 
 /// Owns one running agent: configuration, FSM state, policy, model backend, tool registry, chat
@@ -115,6 +122,10 @@ pub struct AgentSession {
     plan_mode: bool,
     /// Permissions the user allowed with “remember for session”; matched exactly before interactive prompts.
     permission_session_allowlist: Vec<Permission>,
+    /// User chose “allow all writes” in the permission dialog for this session.
+    permission_allow_all_writes: bool,
+    /// Shell command prefixes approved for the whole session (from “allow prefix” in the dialog).
+    permission_shell_prefixes: Vec<String>,
     /// How many automatic max-token continuations have run this turn (reset on EndTurn, ToolUse, new user turn).
     pub continuation_count: u32,
 }
@@ -160,6 +171,8 @@ impl AgentSession {
             total_output_tokens: 0,
             plan_mode,
             permission_session_allowlist: Vec::new(),
+            permission_allow_all_writes: false,
+            permission_shell_prefixes: Vec::new(),
             continuation_count: 0,
         }
     }
@@ -306,8 +319,9 @@ impl AgentSession {
             }
 
             let project_root = self.sandbox.primary_root().display().to_string();
-            let tool_name_strings: Vec<String> = self
-                .tools
+            let model_id = self.provider.completion_model_id();
+            let tools_for_call = tools_for_model_id(model_id, &self.tools);
+            let tool_name_strings: Vec<String> = tools_for_call
                 .iter()
                 .map(|t| t.as_ref().name().to_string())
                 .collect();
@@ -377,7 +391,7 @@ impl AgentSession {
             }
 
             let completion_config =
-                completion_config_for_tools(&self.tools, self.provider.as_ref());
+                completion_config_for_tools(&tools_for_call, self.provider.as_ref());
             let mut stream: CompletionStream =
                 match self.provider.complete(&messages, &completion_config).await {
                     Ok(s) => s,
@@ -412,6 +426,22 @@ impl AgentSession {
                         )
                         .await?;
                         return Err(ae);
+                    }
+                    Ok(StreamEvent::ProviderReady { provider, model }) => {
+                        self.apply_event(
+                            &event_tx,
+                            AgentEvent::ProviderConfirmed { provider, model },
+                            &task,
+                        )
+                        .await?;
+                    }
+                    Ok(StreamEvent::StatusHint { message }) => {
+                        self.apply_event(
+                            &event_tx,
+                            AgentEvent::StatusInfo { message },
+                            &task,
+                        )
+                        .await?;
                     }
                     Ok(StreamEvent::TextDelta { text }) => {
                         accumulated.push_str(&text);
@@ -797,6 +827,55 @@ Complete and verify the current file(s), then continue in the next turn.";
                 file_change_diff_preview(self.sandbox.as_ref(), name.as_str(), &args).await;
 
             for perm in perms {
+                if self.permission_allow_all_writes && matches!(perm, Permission::WriteFile { .. }) {
+                    let decision = self.policy.resolve_interactive(
+                        session_id.as_str(),
+                        perm.clone(),
+                        PolicyVerdict::Allow,
+                        "allow all writes for session",
+                    );
+                    let decision = match decision {
+                        Ok(d) => d,
+                        Err(e) => {
+                            return Err(AgentError::SessionFailed {
+                                message: e.to_string(),
+                            });
+                        }
+                    };
+                    self.audit_log.push(decision.audit.clone());
+                    if !decision.allowed {
+                        policy_denial_message = Some(format!("policy denied: {perm:?}"));
+                        break;
+                    }
+                    continue;
+                }
+                if let Permission::ExecuteCommand { command, .. } = &perm
+                    && self
+                        .permission_shell_prefixes
+                        .iter()
+                        .any(|pfx| command.starts_with(pfx))
+                {
+                    let decision = self.policy.resolve_interactive(
+                        session_id.as_str(),
+                        perm.clone(),
+                        PolicyVerdict::Allow,
+                        "shell command prefix allowed for session",
+                    );
+                    let decision = match decision {
+                        Ok(d) => d,
+                        Err(e) => {
+                            return Err(AgentError::SessionFailed {
+                                message: e.to_string(),
+                            });
+                        }
+                    };
+                    self.audit_log.push(decision.audit.clone());
+                    if !decision.allowed {
+                        policy_denial_message = Some(format!("policy denied: {perm:?}"));
+                        break;
+                    }
+                    continue;
+                }
                 if self.permission_session_allowlist.contains(&perm) {
                     let decision = self.policy.resolve_interactive(
                         session_id.as_str(),
@@ -906,6 +985,15 @@ Complete and verify the current file(s), then continue in the next turn.";
                                     && !self.permission_session_allowlist.contains(&perm)
                                 {
                                     self.permission_session_allowlist.push(perm.clone());
+                                }
+                                if reply.allow_all_writes_session && decision.allowed {
+                                    self.permission_allow_all_writes = true;
+                                }
+                                if decision.allowed
+                                    && let Some(prefix) = reply.shell_allow_prefix.clone()
+                                    && !prefix.trim().is_empty()
+                                {
+                                    self.permission_shell_prefixes.push(prefix);
                                 }
                                 self.apply_event(
                                     event_tx,
@@ -1169,6 +1257,8 @@ Complete and verify the current file(s), then continue in the next turn.";
                 }
                 Ok(StreamEvent::TextDelta { text }) => summary_text.push_str(&text),
                 Ok(StreamEvent::UsageReport(_)) => {}
+                Ok(StreamEvent::ProviderReady { .. }) => {}
+                Ok(StreamEvent::StatusHint { .. }) => {}
                 Ok(StreamEvent::Error { .. }) => {
                     self.restore_state_after_summarization_abort();
                     self.trim_oldest_non_system_fraction_of_context(0.2);
@@ -1321,6 +1411,17 @@ Complete and verify the current file(s), then continue in the next turn.";
             }
             (AgentState::Summarizing { iteration }, AgentEvent::UsageReport { .. }) => {
                 Ok(AgentState::Summarizing {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Planning { task, iteration }, AgentEvent::ProviderConfirmed { .. }) => {
+                Ok(AgentState::Planning {
+                    task: task.clone(),
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Thinking { iteration }, AgentEvent::ProviderConfirmed { .. }) => {
+                Ok(AgentState::Thinking {
                     iteration: *iteration,
                 })
             }

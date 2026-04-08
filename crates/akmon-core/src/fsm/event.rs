@@ -77,6 +77,13 @@ pub enum AgentEvent {
         /// Tokens read from the prompt cache (non-zero when the cache was used).
         cache_read_tokens: u32,
     },
+    /// Confirmed provider for the active HTTP stream (emitted once per model request when supported).
+    ProviderConfirmed {
+        /// e.g. `Anthropic`, `Ollama`, `OpenRouter`.
+        provider: String,
+        /// Model id for this request.
+        model: String,
+    },
     /// A structured failure or policy outcome wrapped as an event.
     Error {
         /// Failure classification.
@@ -120,6 +127,9 @@ impl fmt::Display for AgentEvent {
                 "UsageReport(input={input_tokens}, cache_read={cache_read_tokens}, cache_write={cache_creation_tokens})"
             ),
             AgentEvent::Error { error, .. } => write!(f, "Error({error})"),
+            AgentEvent::ProviderConfirmed { provider, .. } => {
+                write!(f, "ProviderConfirmed({provider})")
+            }
         }
     }
 }

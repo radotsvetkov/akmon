@@ -329,11 +329,15 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
                             .add_modifier(Modifier::BOLD)
                     } else if row.section_header {
                         Style::default().fg(ACCENT_DIM).add_modifier(Modifier::BOLD)
+                    } else if row.selectable {
+                        Style::default().fg(FG_PRIMARY)
                     } else {
                         Style::default().fg(FG_MUTED)
                     };
                     let txt = if row.section_header {
                         format!("── {} ──", row.label)
+                    } else if let Some(ref d) = row.display {
+                        d.clone()
                     } else {
                         format!("  {}", row.label)
                     };
@@ -342,7 +346,7 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Enter select · Esc cancel · ↑↓",
+                "↑↓ navigate · Enter select · Esc cancel",
                 Style::default().fg(FG_MUTED),
             )));
             f.render_widget(
@@ -351,7 +355,7 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(BORDER))
                         .title(Span::styled(
-                            " model ",
+                            " Select model ",
                             Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
                         )),
                 ),

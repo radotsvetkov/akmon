@@ -7,6 +7,19 @@ use ratatui::widgets::{Block, Paragraph};
 
 const BG: ratatui::style::Color = ratatui::style::Color::Rgb(17, 17, 20);
 
+#[must_use]
+fn fmt_u32_commas(n: u32) -> String {
+    let s = n.to_string();
+    let mut out: Vec<char> = Vec::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.into_iter().rev().collect()
+}
+
 /// Draws the session / usage / contextual hint line.
 pub fn render_status_bar(f: &mut ratatui::Frame<'_>, area: Rect, parts: StatusParts) {
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -15,12 +28,21 @@ pub fn render_status_bar(f: &mut ratatui::Frame<'_>, area: Rect, parts: StatusPa
 
     spans.push(Span::styled(parts.session_prefix.clone(), dg));
     spans.push(Span::styled("  │  ", sep));
-    spans.push(Span::styled(format!("tokens:{}", parts.tokens), dg));
-    spans.push(Span::styled("  │  ", sep));
     spans.push(Span::styled(
-        format!("cache:{}", parts.cache),
-        parts.cache_style,
+        format!(
+            "tokens:{}  out:{}",
+            fmt_u32_commas(parts.input_tokens),
+            fmt_u32_commas(parts.output_tokens)
+        ),
+        dg,
     ));
+    if parts.cache > 0 {
+        spans.push(Span::styled("  │  ", sep));
+        spans.push(Span::styled(
+            format!("cache:{}", fmt_u32_commas(parts.cache)),
+            parts.cache_style,
+        ));
+    }
     if let Some(cost) = parts.cost_line {
         spans.push(Span::styled("  │  ", sep));
         spans.push(Span::styled(cost.text, cost.style));
@@ -57,8 +79,10 @@ pub struct CostFrag {
 pub struct StatusParts {
     /// Short session id (8 chars).
     pub session_prefix: String,
-    /// Combined input + output tokens.
-    pub tokens: u32,
+    /// Sum of input (non-cache) tokens for the session.
+    pub input_tokens: u32,
+    /// Sum of output tokens for the session.
+    pub output_tokens: u32,
     /// Cache read tokens.
     pub cache: u32,
     /// Style for cache field.

@@ -81,6 +81,8 @@ Brief completed milestones for historical context.\n",
                 break;
             }
             Ok(StreamEvent::UsageReport(_)) => {}
+            Ok(StreamEvent::ProviderReady { .. }) => {}
+            Ok(StreamEvent::StatusHint { .. }) => {}
             Ok(StreamEvent::Error { error }) => return Err(error),
             Err(e) => return Err(e),
         }

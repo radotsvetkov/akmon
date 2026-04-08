@@ -44,7 +44,7 @@ use crate::slash::{matching_commands, slash_command_name_prefix};
 use crate::slash_exec::{
     SlashEnv, SlashHandled, handle_slash_line, model_picker_enter, session_list_enter,
 };
-use crate::state::{AgentDisplayState, ConfirmChoice};
+use crate::state::{AgentDisplayState, ConfirmChoice, OperationType};
 use crate::theme::{
     ACCENT, ACCENT_DIM, BORDER, ERR, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN,
 };
@@ -134,6 +134,13 @@ pub async fn run_interactive(config: TuiLaunchConfig) -> Result<(), TuiRunError>
     let (task_tx, task_rx) = mpsc::unbounded_channel::<AgentTurn>();
     let (ui_cmd_tx, ui_cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
     let interrupt = Arc::new(AtomicBool::new(false));
+
+    let ollama_bridge = bridge_tx.clone();
+    let ollama_url = config.ollama_url.clone();
+    tokio::spawn(async move {
+        let probe = akmon_models::probe_ollama(&ollama_url).await;
+        let _ = ollama_bridge.send(BridgeMsg::OllamaCatalog(probe));
+    });
 
     let shared_config = Arc::new(Mutex::new(config.clone()));
     let reload_notify = Arc::new(Notify::new());
@@ -458,6 +465,9 @@ fn drain_bridge_messages(
                 }
                 app.recompute_scroll_after_append(msg_h, width);
             }
+            BridgeMsg::OllamaCatalog(probe) => {
+                app.ollama_probe = probe;
+            }
         }
     }
 }
@@ -705,11 +715,17 @@ fn handle_key(
                 diff_preview.as_deref(),
             ));
         }
-        let send_confirm = |app: &mut TuiApp, allow: bool, remember: bool| {
+        let send_confirm = |app: &mut TuiApp,
+                            allow: bool,
+                            remember: bool,
+                            allow_all_writes: bool,
+                            shell_prefix: Option<String>| {
             if let Some(tx) = app.ui_command_tx.as_ref() {
                 let _ = tx.send(UiCommand::Confirm {
                     allow,
                     remember_for_session: remember,
+                    allow_all_writes_session: allow_all_writes,
+                    shell_allow_prefix: if allow { shell_prefix } else { None },
                 });
             }
         };
@@ -740,30 +756,75 @@ fn handle_key(
                     return Ok(true);
                 }
                 KeyCode::Enter => {
-                    let (allow, remember) = match dlg.selected_option {
-                        ConfirmChoice::Allow => (true, false),
-                        ConfirmChoice::AllowAlways => (true, true),
-                        ConfirmChoice::Deny | ConfirmChoice::ViewMore => (false, false),
+                    let shell_pfx = match &dlg.operation {
+                        OperationType::RunShell { command } if dlg.broad_choice_enabled => {
+                            Some(crate::render::shell_prefix_hint(command))
+                        }
+                        _ => None,
                     };
-                    send_confirm(app, allow, remember);
+                    let (allow, remember, allow_all_wr, sh_pfx) = match dlg.selected_option {
+                        ConfirmChoice::Allow => (true, false, false, None),
+                        ConfirmChoice::AllowAlways => (true, true, false, None),
+                        ConfirmChoice::AllowBroad => {
+                            if dlg.broad_choice_enabled {
+                                match &dlg.operation {
+                                    OperationType::RunShell { .. } => {
+                                        (true, false, false, shell_pfx)
+                                    }
+                                    _ => (true, false, true, None),
+                                }
+                            } else {
+                                (false, false, false, None)
+                            }
+                        }
+                        ConfirmChoice::Deny | ConfirmChoice::ViewMore => (false, false, false, None),
+                    };
+                    send_confirm(app, allow, remember, allow_all_wr, sh_pfx);
                     app.mark_confirmation_answered(allow);
                     app.recompute_scroll_after_append(msg_h, term_width);
                     return Ok(true);
                 }
                 KeyCode::Char('1') | KeyCode::Char('y') => {
-                    send_confirm(app, true, false);
+                    send_confirm(app, true, false, false, None);
                     app.mark_confirmation_answered(true);
                     app.recompute_scroll_after_append(msg_h, term_width);
                     return Ok(true);
                 }
-                KeyCode::Char('2') | KeyCode::Char('Y') => {
-                    send_confirm(app, true, true);
+                KeyCode::Char('2') | KeyCode::Char('Y') | KeyCode::Char('s') | KeyCode::Char('S') => {
+                    send_confirm(app, true, true, false, None);
                     app.mark_confirmation_answered(true);
                     app.recompute_scroll_after_append(msg_h, term_width);
                     return Ok(true);
                 }
-                KeyCode::Char('3') | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    send_confirm(app, false, false);
+                KeyCode::Char('p') | KeyCode::Char('P')
+                    if dlg.broad_choice_enabled
+                        && matches!(
+                            dlg.operation,
+                            OperationType::WriteFile { .. } | OperationType::EditFile { .. }
+                        ) =>
+                {
+                    send_confirm(app, true, false, true, None);
+                    app.mark_confirmation_answered(true);
+                    app.recompute_scroll_after_append(msg_h, term_width);
+                    return Ok(true);
+                }
+                KeyCode::Char('r') | KeyCode::Char('R')
+                    if dlg.broad_choice_enabled
+                        && matches!(dlg.operation, OperationType::RunShell { .. }) =>
+                {
+                    let shell_pfx = match &dlg.operation {
+                        OperationType::RunShell { command } => {
+                            Some(crate::render::shell_prefix_hint(command))
+                        }
+                        _ => None,
+                    };
+                    send_confirm(app, true, false, false, shell_pfx);
+                    app.mark_confirmation_answered(true);
+                    app.recompute_scroll_after_append(msg_h, term_width);
+                    return Ok(true);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    send_confirm(app, false, false, false, None);
                     app.mark_confirmation_answered(false);
                     app.recompute_scroll_after_append(msg_h, term_width);
                     return Ok(true);
@@ -776,6 +837,8 @@ fn handle_key(
                 let _ = tx.send(UiCommand::Confirm {
                     allow: false,
                     remember_for_session: false,
+                    allow_all_writes_session: false,
+                    shell_allow_prefix: None,
                 });
             }
             app.mark_confirmation_answered(false);
@@ -1076,7 +1139,7 @@ fn show_help(app: &mut TuiApp) {
     app.push_system_info(
         "Keys: Enter submit  ·  Shift+Enter newline  ·  ←→ caret  ·  Tab expand tool\n\
          Scroll: PgUp/PgDn  ·  ↑↓ when input empty  ·  Ctrl+↑↓ always  ·  mouse wheel on transcript  ·  End = latest\n\
-         Approvals: centered dialog — Tab / ←→ choose  ·  Enter / 1 / y (once)  ·  2 / Y (session)  ·  Esc / 3 / n (deny)\n\
+         Approvals: Tab / ←→  ·  Enter  ·  y once  ·  2/s session  ·  p all writes  ·  r shell prefix  ·  n/Esc deny\n\
          Ctrl+C (running)=interrupt  ·  Ctrl+D / q exit  ·  Ctrl+/ this help"
             .into(),
     );
@@ -1084,9 +1147,6 @@ fn show_help(app: &mut TuiApp) {
 
 fn status_bar_parts(app: &TuiApp) -> StatusParts {
     let sid: String = app.session_id.to_string().chars().take(8).collect();
-    let tok = app
-        .total_input_tokens
-        .saturating_add(app.total_output_tokens);
     let cache_style = if app.total_cache_read_tokens > 0 {
         Style::default().fg(OK_GREEN)
     } else {
@@ -1120,7 +1180,8 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
     let mut hint = if let Some(ref s) = app.status_flash {
         s.clone()
     } else if app.awaiting_confirmation {
-        "Permission: Tab pick · Enter/1/y once · 2/Y remember · Esc/3/n deny".into()
+        "Permission: Tab · Enter · y once · s session · p all writes · r shell prefix · n/Esc deny"
+            .into()
     } else if app.agent_running {
         if let AgentDisplayState::Streaming { chars_received } = app.agent_display {
             format!("streaming {chars_received} chars")
@@ -1140,7 +1201,8 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
 
     StatusParts {
         session_prefix: sid,
-        tokens: tok,
+        input_tokens: app.total_input_tokens,
+        output_tokens: app.total_output_tokens,
         cache: app.total_cache_read_tokens,
         cache_style,
         cost_line,
@@ -1173,7 +1235,12 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     );
 
     let vp = clip(rects.viewport);
-    let flat = flatten_transcript(&app.messages, vp.width, app.stream_cursor_visible);
+    let flat = flatten_transcript(
+        &app.messages,
+        vp.width,
+        app.stream_cursor_visible,
+        app.light_body_text,
+    );
     let viewport_h = vp.height as usize;
     let max_off = flat.len().saturating_sub(viewport_h);
     app.scroll_offset = app.scroll_offset.min(max_off);
@@ -1340,83 +1407,144 @@ fn build_context_line(app: &TuiApp, total_width: u16) -> Option<Line<'static>> {
     )))
 }
 
-fn format_session_duration(d: Duration) -> String {
-    let s = d.as_secs();
-    if s < 60 {
-        format!("{s}s")
-    } else if s < 3600 {
-        format!("{}m {:02}s", s / 60, s % 60)
+fn exit_shorten_path(path: &str) -> String {
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+        && path.starts_with(&home)
+    {
+        format!("~{}", &path[home.len()..])
     } else {
-        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
+        path.to_string()
     }
 }
 
+fn exit_format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+fn exit_format_duration(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Plain-text summary after the TUI tears down (ANSI colors for readability).
 fn print_exit_summary(app: &TuiApp) {
+    let w = 52usize;
+    let bar = "─".repeat(w);
+    let amber = "\x1b[33m";
+    let green = "\x1b[32m";
+    let dim = "\x1b[2m";
+    let bold = "\x1b[1m";
+    let reset = "\x1b[0m";
+
     let wall = app.session_instant.elapsed();
-    let cwd = crate::paths::cwd_shortened(&app.project_root);
-    let sid8: String = app.session_id.to_string().chars().take(8).collect();
-    let est = estimate_cost_usd(
-        u64::from(app.total_input_tokens),
-        u64::from(app.total_output_tokens),
-        u64::from(app.total_cache_read_tokens),
+    let duration_secs = wall.as_secs();
+    let sid = app.session_id.to_string();
+    let sid_short_len = 8usize.min(sid.len());
+    let sid_short: String = sid.chars().take(sid_short_len).collect();
+    let work_dir = app.project_root.to_string_lossy();
+    let work_short = exit_shorten_path(&work_dir);
+
+    let in_t = u64::from(app.total_input_tokens);
+    let out_t = u64::from(app.total_output_tokens);
+    let cache = u64::from(app.total_cache_read_tokens);
+
+    let total_cost_usd = estimate_cost_usd(
+        in_t,
+        out_t,
+        cache,
         &app.model_name,
         app.uses_openrouter,
         app.free_local_inference,
-    );
-    let in_t = app.total_input_tokens;
-    let out_t = app.total_output_tokens;
-    let cache = app.total_cache_read_tokens;
-    let audit_line = app.audit_log_path.display().to_string();
+    )
+    .unwrap_or(0.0);
+
     println!();
-    println!("  Akmon session complete");
+    println!("  {amber}▓▓ AKMON  Session complete{reset}");
     println!();
-    println!("  Session");
-    println!("  ─────────────────────────────────");
-    println!("  ID         {sid8}");
-    println!("  Duration   {}", format_session_duration(wall));
-    println!("  Directory  {cwd}");
+    println!("  {bar}");
+    println!();
+
+    println!("  {bold}Session{reset}");
+    println!("  {:<22} {}", "ID", sid_short);
     println!(
-        "  Model      {} ({})",
-        app.model_name, app.provider_display_name
+        "  {:<22} {}",
+        "Duration",
+        exit_format_duration(duration_secs)
+    );
+    println!("  {:<22} {}", "Directory", work_short);
+    println!("  {:<22} {}", "Model", app.model_name);
+    println!();
+
+    println!("  {bold}Activity{reset}");
+    println!("  {:<22} {}", "Messages", app.message_count);
+    println!("  {:<22} {}", "Tool calls", app.total_tool_calls);
+    println!(
+        "  {:<22} {green}✓ succeeded {}{}",
+        " ",
+        app.successful_tool_calls,
+        reset
+    );
+    if app.failed_tool_calls > 0 {
+        println!(
+            "    \x1b[31m✗ failed\x1b[0m  {}",
+            app.failed_tool_calls
+        );
+    }
+    if !app.files_written.is_empty() {
+        println!(
+            "  {:<22} {}",
+            "Files written",
+            app.files_written.len()
+        );
+        for f in &app.files_written {
+            let p = exit_shorten_path(f);
+            println!("  {dim}{:<22} → {}{reset}", "", p);
+        }
+    }
+    println!();
+
+    println!("  {bold}Tokens{reset}");
+    println!("  {:<22} {}", "Input", exit_format_tokens(in_t));
+    println!("  {:<22} {}", "Output", exit_format_tokens(out_t));
+    if cache > 0 {
+        let pct = (cache * 100) / in_t.max(1);
+        println!(
+            "  {:<22} {green}{}  ({}% cache savings){}",
+            "Cache hit",
+            exit_format_tokens(cache),
+            pct,
+            reset
+        );
+    }
+
+    let cost_line = if total_cost_usd < 0.0001 {
+        format!("{green}free (local model){reset}")
+    } else {
+        format!("~${total_cost_usd:.4}")
+    };
+    println!("  {:<22} {}", "Est. cost", cost_line);
+
+    println!();
+    println!("  {bar}");
+    println!();
+
+    println!(
+        "  {dim}Audit log{reset}  .akmon/audit/{sid_short}.jsonl"
     );
     println!();
-    println!("  Activity");
-    println!("  ─────────────────────────────────");
-    println!("  Messages   {}", app.message_count);
-    println!("  Tool calls {}", app.total_tool_calls);
-    println!("    ✓ Succeeded  {}", app.successful_tool_calls);
-    println!("    ✗ Failed     {}", app.failed_tool_calls);
-    println!("  Files read   {}", app.files_read.len());
-    println!("  Files written {}", app.files_written.len());
-    println!();
-    println!("  Tokens");
-    println!("  ─────────────────────────────────");
-    println!("  Input      {in_t}");
-    println!("  Output     {out_t}");
-    if cache > 0 {
-        let pct = u64::from(cache)
-            .saturating_mul(100)
-            .saturating_div(u64::from(in_t).saturating_add(1));
-        println!("  Cache hit  {cache} ({pct}% savings)");
-    }
-    let cost_line = if app.free_local_inference {
-        "free (local model)".to_string()
-    } else if let Some(c) = est {
-        if c <= 0.0 {
-            "free (local model)".to_string()
-        } else {
-            format!("~${c:.3}")
-        }
-    } else {
-        "~$?".to_string()
-    };
-    println!("  Est. cost  {cost_line}");
-    println!();
-    println!("  Audit log");
-    println!("  ─────────────────────────────────");
-    println!("  {audit_line}");
-    println!();
-    println!("  Agent powering down. Goodbye!");
+    println!("  {amber}Goodbye!{reset}");
     println!();
 }
 
@@ -1585,6 +1713,7 @@ mod input_mouse_tests {
             semantic_index: None,
             auto_commit: false,
             planner_model: "llama3.2".into(),
+            display_theme: akmon_config::TerminalTheme::default(),
         }
     }
 

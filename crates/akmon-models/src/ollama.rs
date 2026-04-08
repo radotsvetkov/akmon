@@ -1,6 +1,8 @@
 //! [Ollama](https://ollama.com/) `/api/chat` backend.
 
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -396,6 +398,7 @@ async fn process_json_line(
     tx: &mpsc::Sender<Result<StreamEvent, ModelError>>,
     done_sent: &mut bool,
     pending_tool_calls: &mut Vec<ModelToolCall>,
+    first_token: Option<&Arc<AtomicBool>>,
 ) -> Result<(), ModelError> {
     let parsed: OllamaChatLine =
         serde_json::from_str(line).map_err(|e| ModelError::StreamInterrupted {
@@ -413,7 +416,8 @@ async fn process_json_line(
     }
 
     let from_line = extract_tool_calls_from_line(&parsed);
-    if !from_line.is_empty() {
+    let has_tools = !from_line.is_empty();
+    if has_tools {
         *pending_tool_calls = from_line;
     }
 
@@ -432,7 +436,39 @@ async fn process_json_line(
             .await;
     }
 
+    let content_hit = parsed
+        .message
+        .as_ref()
+        .is_some_and(|m| !m.content.is_empty());
+    if (content_hit || has_tools) && let Some(f) = first_token {
+        f.store(true, Ordering::SeqCst);
+    }
+
     Ok(())
+}
+
+async fn ollama_model_missing_error(base_url: &str, model_name: &str) -> ModelError {
+    let available = crate::fetch_ollama_models(base_url).await;
+    let available_list = if available.is_empty() {
+        "No models found. Run: ollama pull qwen2.5-coder:7b".to_string()
+    } else {
+        format!(
+            "Available models:\n{}",
+            available
+                .iter()
+                .map(|m| format!("  ollama run {}", m.name))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    ModelError::ModelNotFound {
+        model: model_name.to_string(),
+        hint: format!(
+            "Model '{model_name}' not found in Ollama.\n\
+To install it: ollama pull {model_name}\n\n\
+{available_list}",
+        ),
+    }
 }
 
 async fn run_streaming(
@@ -476,9 +512,53 @@ async fn run_streaming(
                 return;
             }
         };
+        if status == StatusCode::NOT_FOUND {
+            let err =
+                ollama_model_missing_error(backend.base_url.as_str(), backend.model.as_str()).await;
+            let _ = tx.send(Err(err)).await;
+            return;
+        }
         let _ = tx.send(Err(map_status(status, &body, &headers))).await;
         return;
     }
+
+    let _ = tx
+        .send(Ok(StreamEvent::ProviderReady {
+            provider: "Ollama".into(),
+            model: backend.model.clone(),
+        }))
+        .await;
+
+    let first_token_received = Arc::new(AtomicBool::new(false));
+    let tx_hint = tx.clone();
+    let model_hint = backend.model.clone();
+    let first_hint = Arc::clone(&first_token_received);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if !first_hint.load(Ordering::SeqCst) {
+            let _ = tx_hint
+                .send(Ok(StreamEvent::StatusHint {
+                    message: format!("⟳ Loading {model_hint}…"),
+                }))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        if !first_hint.load(Ordering::SeqCst) {
+            let _ = tx_hint
+                .send(Ok(StreamEvent::StatusHint {
+                    message: "⟳ Loading model into RAM… first request is slow".into(),
+                }))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        if !first_hint.load(Ordering::SeqCst) {
+            let _ = tx_hint
+                .send(Ok(StreamEvent::StatusHint {
+                    message: "⟳ Still loading… M-series loads to unified RAM, subsequent requests will be fast".into(),
+                }))
+                .await;
+        }
+    });
 
     let byte_stream = resp.bytes_stream();
     let deadline = Duration::from_millis(config.first_token_deadline_ms);
@@ -493,8 +573,14 @@ async fn run_streaming(
 
     let mut done_sent = false;
     let mut pending_tool_calls: Vec<ModelToolCall> = Vec::new();
-    if let Err(e) =
-        process_json_line(&first_line, &tx, &mut done_sent, &mut pending_tool_calls).await
+    if let Err(e) = process_json_line(
+        &first_line,
+        &tx,
+        &mut done_sent,
+        &mut pending_tool_calls,
+        Some(&first_token_received),
+    )
+    .await
     {
         let _ = tx.send(Err(e)).await;
         return;
@@ -507,8 +593,14 @@ async fn run_streaming(
                 return;
             }
             Ok(line) => {
-                if let Err(e) =
-                    process_json_line(&line, &tx, &mut done_sent, &mut pending_tool_calls).await
+                if let Err(e) = process_json_line(
+                    &line,
+                    &tx,
+                    &mut done_sent,
+                    &mut pending_tool_calls,
+                    Some(&first_token_received),
+                )
+                .await
                 {
                     let _ = tx.send(Err(e)).await;
                     return;
@@ -547,6 +639,38 @@ async fn run_buffered(
     };
 
     let deadline = Duration::from_millis(config.first_token_deadline_ms);
+    let first_token_received = Arc::new(AtomicBool::new(false));
+    let tx_hint = tx.clone();
+    let model_hint = backend.model.clone();
+    let first_hint = Arc::clone(&first_token_received);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if !first_hint.load(Ordering::SeqCst) {
+            let _ = tx_hint
+                .send(Ok(StreamEvent::StatusHint {
+                    message: format!("⟳ Loading {model_hint}…"),
+                }))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        if !first_hint.load(Ordering::SeqCst) {
+            let _ = tx_hint
+                .send(Ok(StreamEvent::StatusHint {
+                    message: "⟳ Loading model into RAM… first request is slow".into(),
+                }))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        if !first_hint.load(Ordering::SeqCst) {
+            let _ = tx_hint
+                .send(Ok(StreamEvent::StatusHint {
+                    message: "⟳ Still loading… M-series loads to unified RAM, subsequent requests will be fast".into(),
+                }))
+                .await;
+        }
+    });
+
+    let tx_ok = tx.clone();
     let collect = async {
         let resp = backend
             .client
@@ -565,8 +689,22 @@ async fn run_buffered(
                 .map_err(|e| ModelError::StreamInterrupted {
                     message: e.to_string(),
                 })?;
+            if status == StatusCode::NOT_FOUND {
+                return Err(ollama_model_missing_error(
+                    backend.base_url.as_str(),
+                    backend.model.as_str(),
+                )
+                .await);
+            }
             return Err(map_status(status, &body, &headers));
         }
+
+        let _ = tx_ok
+            .send(Ok(StreamEvent::ProviderReady {
+                provider: "Ollama".into(),
+                model: backend.model.clone(),
+            }))
+            .await;
 
         resp.text()
             .await
@@ -584,7 +722,10 @@ async fn run_buffered(
             let _ = tx.send(Err(e)).await;
             return;
         }
-        Ok(Ok(t)) => t,
+        Ok(Ok(t)) => {
+            first_token_received.store(true, Ordering::SeqCst);
+            t
+        }
     };
 
     let parsed: OllamaChatLine = match serde_json::from_str(&text) {
