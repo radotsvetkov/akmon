@@ -89,10 +89,10 @@ fn openai_stream_footer_label(display_name: &str) -> String {
         "azure" => "Azure OpenAI".into(),
         _ if !slug.is_empty() => {
             let mut c = slug.chars();
-            c.next()
-                .map_or_else(|| "OpenAI-compatible".into(), |f| {
-                    f.to_uppercase().to_string() + c.as_str()
-                })
+            c.next().map_or_else(
+                || "OpenAI-compatible".into(),
+                |f| f.to_uppercase().to_string() + c.as_str(),
+            )
         }
         _ => "OpenAI-compatible".into(),
     }

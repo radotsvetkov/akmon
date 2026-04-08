@@ -16,10 +16,7 @@ const AMBER: ratatui::style::Color = ratatui::style::Color::Rgb(245, 158, 11);
 /// First whitespace-delimited token for shell prefix rules (`python a.py` → `python`, `npm run dev` → `npm`).
 #[must_use]
 pub fn shell_prefix_hint(cmd: &str) -> String {
-    cmd.split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string()
+    cmd.split_whitespace().next().unwrap_or("").to_string()
 }
 
 /// Draws the centered permission window inside `viewport` bounds (choices + Enter to confirm).
@@ -86,7 +83,11 @@ pub fn render_confirmation_overlay(
                     dlg.selected_option,
                 ));
             }
-            lines.push(choice_line(" [n] Deny ", ConfirmChoice::Deny, dlg.selected_option));
+            lines.push(choice_line(
+                " [n] Deny ",
+                ConfirmChoice::Deny,
+                dlg.selected_option,
+            ));
         }
         OperationType::RunShell { command } => {
             let pfx = shell_prefix_hint(command);
@@ -108,7 +109,11 @@ pub fn render_confirmation_overlay(
                     dlg.selected_option,
                 ));
             }
-            lines.push(choice_line(" [n] Deny ", ConfirmChoice::Deny, dlg.selected_option));
+            lines.push(choice_line(
+                " [n] Deny ",
+                ConfirmChoice::Deny,
+                dlg.selected_option,
+            ));
         }
         _ => {
             lines.push(choice_line(
@@ -128,7 +133,11 @@ pub fn render_confirmation_overlay(
                     dlg.selected_option,
                 ));
             }
-            lines.push(choice_line(" [n] Deny ", ConfirmChoice::Deny, dlg.selected_option));
+            lines.push(choice_line(
+                " [n] Deny ",
+                ConfirmChoice::Deny,
+                dlg.selected_option,
+            ));
         }
     }
     lines.push(Line::from(Span::styled(
@@ -243,10 +252,7 @@ pub fn dialog_from_confirmation(description: &str, diff: Option<&str>) -> Confir
         }
         OperationType::RunShell { command } => {
             let p = shell_prefix_hint(command);
-            (
-                true,
-                format!(" Allow shell prefix `{p}` this session "),
-            )
+            (true, format!(" Allow shell prefix `{p}` this session "))
         }
         _ => (false, String::new()),
     };

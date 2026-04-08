@@ -123,7 +123,9 @@ pub(crate) fn anthropic_system_and_rest(messages: &[Message]) -> (String, Vec<&M
 }
 
 /// Splits leading [`MessageRole::System`] messages so each can carry its own `cache_control` block.
-pub(crate) fn anthropic_leading_system_blocks(messages: &[Message]) -> (Vec<String>, Vec<&Message>) {
+pub(crate) fn anthropic_leading_system_blocks(
+    messages: &[Message],
+) -> (Vec<String>, Vec<&Message>) {
     let mut blocks = Vec::new();
     let mut i = 0usize;
     while i < messages.len() && messages[i].role == MessageRole::System {

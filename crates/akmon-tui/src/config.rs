@@ -4,9 +4,9 @@ use std::path::PathBuf;
 #[cfg(feature = "semantic-index")]
 use std::sync::{Arc, Mutex};
 
+use akmon_config::TerminalTheme;
 #[cfg(feature = "semantic-index")]
 use akmon_index::RepoIndex;
-use akmon_config::TerminalTheme;
 use akmon_models::LlmConnectConfig;
 #[cfg(feature = "semantic-index")]
 use fastembed::TextEmbedding;

@@ -269,11 +269,7 @@ pub async fn run_agent_loop(
                         },
                         remember_for_session: allow && remember_for_session,
                         allow_all_writes_session: allow && allow_all_writes_session,
-                        shell_allow_prefix: if allow {
-                            shell_allow_prefix
-                        } else {
-                            None
-                        },
+                        shell_allow_prefix: if allow { shell_allow_prefix } else { None },
                     };
                     let guard = slot_for_ui.lock().await;
                     if let Some(tx) = guard.as_ref() {

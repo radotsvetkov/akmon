@@ -125,18 +125,15 @@ pub async fn fetch_ollama_models(base_url: &str) -> Vec<OllamaModel> {
 #[must_use]
 pub fn ollama_first_token_deadline_ms(model: &str) -> u64 {
     let m = model.to_lowercase();
-    let base_secs: u64 = if m.contains("120b")
-        || m.contains("70b")
-        || m.contains("72b")
-        || m.contains("gpt-oss")
-    {
-        120
-    } else if m.contains("27b") || m.contains("32b") {
-        90
-    } else if m.contains("13b") || m.contains("14b") {
-        60
-    } else {
-        45
-    };
+    let base_secs: u64 =
+        if m.contains("120b") || m.contains("70b") || m.contains("72b") || m.contains("gpt-oss") {
+            120
+        } else if m.contains("27b") || m.contains("32b") {
+            90
+        } else if m.contains("13b") || m.contains("14b") {
+            60
+        } else {
+            45
+        };
     (base_secs.saturating_add(30)).saturating_mul(1000)
 }

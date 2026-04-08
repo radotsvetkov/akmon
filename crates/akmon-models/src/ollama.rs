@@ -440,7 +440,9 @@ async fn process_json_line(
         .message
         .as_ref()
         .is_some_and(|m| !m.content.is_empty());
-    if (content_hit || has_tools) && let Some(f) = first_token {
+    if (content_hit || has_tools)
+        && let Some(f) = first_token
+    {
         f.store(true, Ordering::SeqCst);
     }
 

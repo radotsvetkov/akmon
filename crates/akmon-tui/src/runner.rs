@@ -777,7 +777,9 @@ fn handle_key(
                                 (false, false, false, None)
                             }
                         }
-                        ConfirmChoice::Deny | ConfirmChoice::ViewMore => (false, false, false, None),
+                        ConfirmChoice::Deny | ConfirmChoice::ViewMore => {
+                            (false, false, false, None)
+                        }
                     };
                     send_confirm(app, allow, remember, allow_all_wr, sh_pfx);
                     app.mark_confirmation_answered(allow);
@@ -790,7 +792,10 @@ fn handle_key(
                     app.recompute_scroll_after_append(msg_h, term_width);
                     return Ok(true);
                 }
-                KeyCode::Char('2') | KeyCode::Char('Y') | KeyCode::Char('s') | KeyCode::Char('S') => {
+                KeyCode::Char('2')
+                | KeyCode::Char('Y')
+                | KeyCode::Char('s')
+                | KeyCode::Char('S') => {
                     send_confirm(app, true, true, false, None);
                     app.mark_confirmation_answered(true);
                     app.recompute_scroll_after_append(msg_h, term_width);
@@ -1492,22 +1497,13 @@ fn print_exit_summary(app: &TuiApp) {
     println!("  {:<22} {}", "Tool calls", app.total_tool_calls);
     println!(
         "  {:<22} {green}✓ succeeded {}{}",
-        " ",
-        app.successful_tool_calls,
-        reset
+        " ", app.successful_tool_calls, reset
     );
     if app.failed_tool_calls > 0 {
-        println!(
-            "    \x1b[31m✗ failed\x1b[0m  {}",
-            app.failed_tool_calls
-        );
+        println!("    \x1b[31m✗ failed\x1b[0m  {}", app.failed_tool_calls);
     }
     if !app.files_written.is_empty() {
-        println!(
-            "  {:<22} {}",
-            "Files written",
-            app.files_written.len()
-        );
+        println!("  {:<22} {}", "Files written", app.files_written.len());
         for f in &app.files_written {
             let p = exit_shorten_path(f);
             println!("  {dim}{:<22} → {}{reset}", "", p);
@@ -1540,9 +1536,7 @@ fn print_exit_summary(app: &TuiApp) {
     println!("  {bar}");
     println!();
 
-    println!(
-        "  {dim}Audit log{reset}  .akmon/audit/{sid_short}.jsonl"
-    );
+    println!("  {dim}Audit log{reset}  .akmon/audit/{sid_short}.jsonl");
     println!();
     println!("  {amber}Goodbye!{reset}");
     println!();

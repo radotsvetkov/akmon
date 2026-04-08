@@ -32,12 +32,7 @@ pub fn message_to_lines(
     stream_cursor_visible: bool,
     light_body_text: bool,
 ) -> Vec<Line<'static>> {
-    flatten_message(
-        msg,
-        width,
-        stream_cursor_visible,
-        light_body_text,
-    )
+    flatten_message(msg, width, stream_cursor_visible, light_body_text)
 }
 
 #[must_use]

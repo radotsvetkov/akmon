@@ -4,10 +4,8 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(https?://[^\s)]+|http://localhost:\d+[^\s)]*|http://127\.0\.0\.1:\d+[^\s)]*)",
-    )
-    .expect("url regex")
+    Regex::new(r"(https?://[^\s)]+|http://localhost:\d+[^\s)]*|http://127\.0\.0\.1:\d+[^\s)]*)")
+        .expect("url regex")
 });
 
 /// Wraps `url` as a clickable OSC 8 link with visible `label` (often the same as the URL).

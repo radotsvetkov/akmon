@@ -436,12 +436,8 @@ impl AgentSession {
                         .await?;
                     }
                     Ok(StreamEvent::StatusHint { message }) => {
-                        self.apply_event(
-                            &event_tx,
-                            AgentEvent::StatusInfo { message },
-                            &task,
-                        )
-                        .await?;
+                        self.apply_event(&event_tx, AgentEvent::StatusInfo { message }, &task)
+                            .await?;
                     }
                     Ok(StreamEvent::TextDelta { text }) => {
                         accumulated.push_str(&text);
@@ -827,7 +823,8 @@ Complete and verify the current file(s), then continue in the next turn.";
                 file_change_diff_preview(self.sandbox.as_ref(), name.as_str(), &args).await;
 
             for perm in perms {
-                if self.permission_allow_all_writes && matches!(perm, Permission::WriteFile { .. }) {
+                if self.permission_allow_all_writes && matches!(perm, Permission::WriteFile { .. })
+                {
                     let decision = self.policy.resolve_interactive(
                         session_id.as_str(),
                         perm.clone(),
