@@ -745,24 +745,20 @@ impl AgentSession {
             let mut stream: CompletionStream =
                 match self.provider.complete(&messages, &completion_config).await {
                     Ok(s) => s,
-                    Err(e) => {
-                        match self.handle_model_error_for_run(&event_tx, &task, e).await? {
-                            Some(ae) => return Err(ae),
-                            None => return Ok(()),
-                        }
-                    }
+                    Err(e) => match self.handle_model_error_for_run(&event_tx, &task, e).await? {
+                        Some(ae) => return Err(ae),
+                        None => return Ok(()),
+                    },
                 };
 
             let mut accumulated = String::new();
 
             while let Some(item) = stream.next().await {
                 match item {
-                    Err(e) => {
-                        match self.handle_model_error_for_run(&event_tx, &task, e).await? {
-                            Some(ae) => return Err(ae),
-                            None => return Ok(()),
-                        }
-                    }
+                    Err(e) => match self.handle_model_error_for_run(&event_tx, &task, e).await? {
+                        Some(ae) => return Err(ae),
+                        None => return Ok(()),
+                    },
                     Ok(StreamEvent::ProviderReady { provider, model }) => {
                         self.apply_event(
                             &event_tx,
