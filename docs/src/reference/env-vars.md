@@ -35,3 +35,9 @@ Rough priority when multiple backends could apply:
 4. Local Ollama fallback
 
 Use `akmon config show` (masked) to see what your install resolved.
+
+## Wizard vs env vs `config.toml`
+
+- **`akmon config`** (no subcommand) interactively writes `~/.akmon/config.toml`.
+- The same settings usually have **environment variable** equivalents listed in the sections above (handy for CI, containers, or secret managers).
+- Advanced fields (Architect defaults, `[display]`, MCP entries) are often easiest to edit in TOML or via `akmon config mcp …`; see [Configuration](../getting-started/configuration.md) and `akmon config --help`.

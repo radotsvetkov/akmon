@@ -130,13 +130,13 @@ pub fn render_confirmation_overlay(
                 dlg.selected_option,
             ));
             lines.push(choice_line(
-                " [s] Allow this session (this path only) ",
+                " [s] Remember for session (auto-approve same file path) ",
                 ConfirmChoice::AllowAlways,
                 dlg.selected_option,
             ));
             if dlg.broad_choice_enabled {
                 lines.push(choice_line(
-                    " [p] Allow all writes this session ",
+                    " [p] Allow all file writes this session ",
                     ConfirmChoice::AllowBroad,
                     dlg.selected_option,
                 ));
@@ -155,12 +155,12 @@ pub fn render_confirmation_overlay(
                 dlg.selected_option,
             ));
             lines.push(choice_line(
-                " [s] Allow this session (this command only) ",
+                " [s] Remember for session (this exact shell command only) ",
                 ConfirmChoice::AllowAlways,
                 dlg.selected_option,
             ));
             if dlg.broad_choice_enabled {
-                let lbl = format!(" [r] Allow all: `{pfx}`* this session ");
+                let lbl = format!(" [r] Allow commands starting with `{pfx}` this session ");
                 lines.push(choice_line(
                     lbl.as_str(),
                     ConfirmChoice::AllowBroad,
@@ -180,7 +180,7 @@ pub fn render_confirmation_overlay(
                 dlg.selected_option,
             ));
             lines.push(choice_line(
-                " [s] Allow this session ",
+                " [s] Remember for session (same request shape as this) ",
                 ConfirmChoice::AllowAlways,
                 dlg.selected_option,
             ));
@@ -199,11 +199,15 @@ pub fn render_confirmation_overlay(
         }
     }
     lines.push(Line::from(Span::styled(
-        "  Tab or Shift+Tab · ← → — pick option    PgUp/PgDn — scroll diff",
+        "  Tab / Shift+Tab · ← / → — move focus    PgUp / PgDn — scroll diff",
         Style::default().fg(ratatui::style::Color::DarkGray),
     )));
     lines.push(Line::from(Span::styled(
-        "  Enter confirms · 1/y · 2/s session · p/r broad · Esc/n deny",
+        "  Enter confirms · [s] stores one exact permission for the rest of this session",
+        Style::default().fg(ratatui::style::Color::DarkGray),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  1/y once · 2/s remember · p/r broad (when shown) · Esc or n deny",
         Style::default().fg(ratatui::style::Color::DarkGray),
     )));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);

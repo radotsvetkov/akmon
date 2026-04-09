@@ -441,7 +441,7 @@ fn drain_bridge_messages(
                     app.latest_plan_path = Some(p.clone());
                     let rel = p.strip_prefix(&cfg.project_root).unwrap_or(&p);
                     app.push_system_info(format!(
-                        "Plan saved to {}\n\n  /implement  execute this plan\n  /edit-plan  open in $EDITOR\n  /view-plan  show in TUI",
+                        "Plan saved to {}\n\n  /implement  execute this plan\n  /edit-plan  open in $EDITOR\n  /view-plan  full plan (scrollable overlay)",
                         rel.display()
                     ));
                 }
@@ -522,6 +522,7 @@ fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
             | Overlay::SessionList { .. }
             | Overlay::ModelPicker { .. }
             | Overlay::AuditLog { .. }
+            | Overlay::ScrollText { .. }
             | Overlay::CostSummary
     ) {
         return;
@@ -564,7 +565,8 @@ fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
 
 fn session_list_visible_rows(term_w: u16, term_h: u16, app: &TuiApp) -> usize {
     let msg_h = viewport_msg_h(term_w, term_h, app);
-    msg_h.saturating_sub(8).max(3)
+    // Mirrors overlay session list: intro lines + footer reserve space in the box.
+    msg_h.saturating_sub(11).max(3)
 }
 
 fn model_picker_clamp(app: &mut TuiApp, visible: usize) {
@@ -969,7 +971,10 @@ fn handle_key(
         return Ok(true);
     }
 
-    if let Overlay::AuditLog { lines, scroll } = &mut app.overlay {
+    if let Overlay::AuditLog { lines, scroll } | Overlay::ScrollText { lines, scroll, .. } =
+        &mut app.overlay
+    {
+        let page = msg_h.saturating_sub(6).max(3);
         match key.code {
             KeyCode::Esc => {
                 app.overlay = Overlay::None;
@@ -980,6 +985,14 @@ fn handle_key(
             KeyCode::Down => {
                 if !lines.is_empty() {
                     *scroll = (*scroll + 1).min(lines.len().saturating_sub(1));
+                }
+            }
+            KeyCode::PageUp => {
+                *scroll = scroll.saturating_sub(page);
+            }
+            KeyCode::PageDown => {
+                if !lines.is_empty() {
+                    *scroll = (*scroll + page).min(lines.len().saturating_sub(1));
                 }
             }
             _ => {}

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use akmon_config::{AkmonGlobalConfig, McpScope};
 use akmon_models::{OllamaProbe, probe_ollama};
 use chrono::{DateTime, Utc};
 use tokio::sync::{Notify, mpsc};
@@ -270,7 +271,10 @@ fn dispatch(
             let arg = match arg.map(str::trim) {
                 Some(a) if !a.is_empty() => a,
                 _ => {
-                    open_sessions_overlay(app);
+                    app.push_system_info(
+                        "Usage: /resume <session-id-prefix>\nUse /sessions to open the list, or copy an id prefix from ~/.akmon/sessions/*.json."
+                            .into(),
+                    );
                     return SlashHandled::Continue;
                 }
             };
@@ -575,14 +579,52 @@ Autocompact at: {}% ({} tokens remaining)",
             match path {
                 Some(p) if p.is_file() => match std::fs::read_to_string(&p) {
                     Ok(body) => {
-                        let snippet: String = body.chars().take(6000).collect();
-                        app.push_system_info(format!("--- {} ---\n{snippet}", p.display()));
+                        let lines: Vec<String> =
+                            body.lines().map(std::string::ToString::to_string).collect();
+                        let leaf = p.file_name().and_then(|s| s.to_str()).unwrap_or("plan");
+                        app.overlay = Overlay::ScrollText {
+                            title: format!("Plan — {leaf}"),
+                            lines,
+                            scroll: 0,
+                        };
                     }
-                    Err(e) => app.push_system_info(format!("Could not read plan: {e}")),
+                    Err(e) => {
+                        app.push_system_info(format!("Could not read plan: {e}"));
+                        app.overlay = Overlay::None;
+                    }
                 },
-                _ => app.push_system_info("No plan file found.".into()),
+                _ => {
+                    app.push_system_info("No plan file found.".into());
+                    app.overlay = Overlay::None;
+                }
             }
-            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
+        "mcp" => {
+            match akmon_config::load_user_config() {
+                Ok((_, cfg)) => {
+                    let lines = build_mcp_overlay_lines(&cfg);
+                    app.overlay = Overlay::ScrollText {
+                        title: "MCP servers".into(),
+                        lines,
+                        scroll: 0,
+                    };
+                }
+                Err(e) => app.push_system_info(format!("Could not load config: {e}")),
+            }
+            SlashHandled::Continue
+        }
+        "transcript" => {
+            match export_transcript_to_file(app) {
+                Ok(p) => {
+                    let rel = p.strip_prefix(&app.project_root).unwrap_or(&p);
+                    app.push_system_info(format!(
+                        "Full transcript written to {} (fullscreen TUI does not keep normal scrollback; open this file in an editor or `less`).",
+                        rel.display()
+                    ));
+                }
+                Err(e) => app.push_system_info(format!("Could not export transcript: {e}")),
+            }
             SlashHandled::Continue
         }
         "implement" => {
@@ -665,6 +707,93 @@ Autocompact at: {}% ({} tokens remaining)",
             SlashHandled::Continue
         }
     }
+}
+
+fn build_mcp_overlay_lines(cfg: &AkmonGlobalConfig) -> Vec<String> {
+    let mut lines = vec![
+        "MCP servers are HTTP tool registries (see provider docs for URLs and auth headers)."
+            .to_string(),
+        String::new(),
+        "CLI — add (user config):".to_string(),
+        "  akmon config mcp add <name> <url>".to_string(),
+        "CLI — add (project-scoped):".to_string(),
+        "  akmon config mcp add <name> <url> --scope project".to_string(),
+        String::new(),
+        "CLI — list / test / toggle:".to_string(),
+        "  akmon config mcp list".to_string(),
+        "  akmon config mcp test [<name>]".to_string(),
+        "  akmon config mcp enable <name>   |   akmon config mcp disable <name>".to_string(),
+        "  akmon config mcp remove <name>".to_string(),
+        String::new(),
+        "Configured entries (from ~/.akmon/config.toml):".to_string(),
+    ];
+    if cfg.mcp.is_empty() {
+        lines.push("  (none)".to_string());
+    } else {
+        for e in &cfg.mcp {
+            let state = if e.enabled { "on" } else { "off" };
+            let sc = match e.scope {
+                McpScope::User => "user",
+                McpScope::Project => "project",
+            };
+            lines.push(format!("  • {}  [{}]  {state}  {}", e.name, sc, e.url));
+        }
+    }
+    lines
+}
+
+fn tui_message_export_md(m: &crate::message::TuiMessage) -> Option<String> {
+    use crate::message::TuiMessage;
+    match m {
+        TuiMessage::User { content } => Some(format!("## You\n\n{content}\n")),
+        TuiMessage::Assistant { content, .. } => Some(format!("## Assistant\n\n{content}\n")),
+        TuiMessage::ToolCall {
+            name,
+            args,
+            result,
+            success,
+            ..
+        } => {
+            let args_s = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
+            let res = result.as_deref().unwrap_or("—");
+            let ok = match success {
+                Some(true) => "ok",
+                Some(false) => "error",
+                None => "pending",
+            };
+            Some(format!(
+                "## Tool `{name}` ({ok})\n\n```json\n{args_s}\n```\n\n{res}\n"
+            ))
+        }
+        TuiMessage::Confirmation {
+            description,
+            answered,
+            answer,
+            ..
+        } => Some(format!(
+            "## Permission prompt\n\n{description}\n\n_(answered={answered}, allow={answer:?})_\n"
+        )),
+        TuiMessage::SystemInfo { content } => Some(format!("### System\n\n{content}\n")),
+        TuiMessage::Error { content } => Some(format!("### Error\n\n{content}\n")),
+    }
+}
+
+fn export_transcript_to_file(app: &TuiApp) -> std::io::Result<PathBuf> {
+    let dir = app.project_root.join(".akmon");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("transcript_export.md");
+    let mut w = String::new();
+    w.push_str("# Akmon transcript export\n\n");
+    w.push_str(&format!("Session: `{}`\n", app.session_id));
+    w.push_str(&format!("Exported: {}\n\n", Utc::now().to_rfc3339()));
+    for m in &app.messages {
+        if let Some(block) = tui_message_export_md(m) {
+            w.push_str(&block);
+            w.push('\n');
+        }
+    }
+    std::fs::write(&path, w)?;
+    Ok(path)
 }
 
 fn open_sessions_overlay(app: &mut TuiApp) {

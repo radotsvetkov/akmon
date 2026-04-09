@@ -202,18 +202,35 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
             let w = msg_area.width.saturating_sub(2).max(10);
             let r = centered_rect(msg_area, w, inner_h);
             f.render_widget(Clear, r);
+            const SESSION_FOOTER_LINES: usize = 2;
+            const SESSION_INTRO_LINES: usize = 3;
             let body_rows = (r.height.saturating_sub(4)) as usize;
-            let max_rows = body_rows.max(1);
             let mut lines: Vec<Line<'static>> = Vec::new();
             if sessions.is_empty() {
                 lines.push(Line::from("No previous sessions found."));
             } else {
-                let view_start = if sessions.len() <= max_rows {
+                lines.push(Line::from(Span::styled(
+                    "Browse snapshots under ~/.akmon/sessions.",
+                    Style::default().fg(FG_MUTED),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Enter loads that transcript here (same as picking from this list).",
+                    Style::default().fg(FG_MUTED),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "To skip this UI:  /resume <uuid-prefix>",
+                    Style::default().fg(FG_MUTED),
+                )));
+                let list_cap = body_rows
+                    .saturating_sub(SESSION_INTRO_LINES)
+                    .saturating_sub(SESSION_FOOTER_LINES)
+                    .max(1);
+                let view_start = if sessions.len() <= list_cap {
                     0
                 } else {
-                    (*scroll).min(sessions.len().saturating_sub(max_rows))
+                    (*scroll).min(sessions.len().saturating_sub(list_cap))
                 };
-                for row_idx in 0..max_rows {
+                for row_idx in 0..list_cap {
                     let i = view_start + row_idx;
                     let Some(row) = sessions.get(i) else {
                         break;
@@ -267,7 +284,7 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
             }
             out.push(Line::from(""));
             out.push(Line::from(Span::styled(
-                "Esc to close",
+                "Esc close · ↑↓ · PgUp/PgDn",
                 Style::default().fg(FG_MUTED),
             )));
             f.render_widget(
@@ -278,6 +295,46 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
                             .border_style(Style::default().fg(BORDER))
                             .title(Span::styled(
                                 " audit ",
+                                Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
+                            )),
+                    )
+                    .wrap(Wrap { trim: true }),
+                r,
+            );
+        }
+        Overlay::ScrollText {
+            title,
+            lines,
+            scroll,
+        } => {
+            let inner_h = msg_area.height.saturating_sub(2).max(6);
+            let w = msg_area.width.saturating_sub(2).max(10);
+            let r = centered_rect(msg_area, w, inner_h);
+            f.render_widget(Clear, r);
+            let body_h = inner_h.saturating_sub(4).max(1) as usize;
+            let mut out: Vec<Line<'static>> = Vec::new();
+            if lines.is_empty() {
+                out.push(Line::from("(empty)"));
+            } else {
+                let start = (*scroll).min(lines.len().saturating_sub(1));
+                for line in lines.iter().skip(start).take(body_h) {
+                    out.push(Line::from(line.clone()));
+                }
+            }
+            out.push(Line::from(""));
+            out.push(Line::from(Span::styled(
+                "Esc close · ↑↓ · PgUp/PgDn",
+                Style::default().fg(FG_MUTED),
+            )));
+            let title_line = format!(" {title} ");
+            f.render_widget(
+                Paragraph::new(out)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(BORDER))
+                            .title(Span::styled(
+                                title_line,
                                 Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
                             )),
                     )

@@ -189,7 +189,8 @@ pub struct AgentSession {
     last_run_exit: SessionRunExit,
     /// When `true`, project system prompts are read-only (plan mode); tools should match.
     plan_mode: bool,
-    /// Permissions the user allowed with “remember for session”; matched exactly before interactive prompts.
+    /// Permissions the user allowed with “remember for session”; checked with equality against
+    /// each new request (same path, same shell command string, etc.) before prompting again.
     permission_session_allowlist: Vec<Permission>,
     /// User chose “allow all writes” in the permission dialog for this session.
     permission_allow_all_writes: bool,

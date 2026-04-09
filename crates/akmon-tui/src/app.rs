@@ -50,7 +50,7 @@ pub enum Overlay {
     None,
     /// `/help` — lists slash commands (any key closes).
     Help,
-    /// `/sessions` or bare `/resume` — pick a saved session.
+    /// `/sessions` — picker for saved snapshots under `~/.akmon/sessions/`.
     SessionList {
         /// Newest-first rows from `~/.akmon/sessions/`.
         sessions: Vec<SessionSummary>,
@@ -64,6 +64,15 @@ pub enum Overlay {
         /// Pre-formatted rows (`timestamp kind description`).
         lines: Vec<String>,
         /// Index of the first visible line.
+        scroll: usize,
+    },
+    /// `/view-plan`, `/mcp` — scrollable plain-text overlay (full width).
+    ScrollText {
+        /// Title shown in the border (e.g. plan path or "MCP servers").
+        title: String,
+        /// One string per source line; long lines wrap within the viewport.
+        lines: Vec<String>,
+        /// Index of the first visible source line.
         scroll: usize,
     },
     /// `/cost` — token table and cost hint (any key closes).

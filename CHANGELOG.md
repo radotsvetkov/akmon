@@ -4,6 +4,21 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.6] - 2026-04-09
+
+### Added
+
+- **`akmon config` wizard:** running `akmon config` with no subcommand starts an interactive stdin flow (default model, optional Anthropic/OpenRouter keys, Ollama URL). `akmon config --json` still requires an explicit subcommand.
+- **TUI `/transcript`:** exports the current chat to `.akmon/transcript_export.md` for reading outside the alternate-screen UI.
+- **TUI `/mcp`:** scrollable panel with `akmon config mcp …` recipes and configured MCP servers from `~/.akmon/config.toml`.
+- **TUI `/view-plan`:** full plan content in a scrollable overlay (with **PgUp/PgDn** on audit-style overlays).
+
+### Changed
+
+- **TUI `/resume`:** bare `/resume` shows usage; **`/sessions`** remains the session picker (no duplicate behavior).
+- **Permission dialog:** clearer labels for once vs “remember for session” (exact permission match) vs broad allow.
+- **Documentation:** configuration page covers wizard behavior, scrollback limits, and env/TOML; env-vars page adds wizard vs env notes.
+
 ## [1.7.5] - 2026-04-10
 
 ### Fixed

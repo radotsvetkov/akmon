@@ -124,6 +124,7 @@ const FIRST_SESSION_HINTS: &[&str] = &[
     "  Tips:",
     "  › /plan first for large changes",
     "  › /init to generate project memory",
+    "  › /transcript exports chat to .akmon/ (fullscreen TUI limits scrollback)",
     "  › /help for all commands",
     "  › --yes flag to skip confirmations on safe operations",
 ];

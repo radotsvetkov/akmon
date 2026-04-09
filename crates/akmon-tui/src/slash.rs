@@ -60,13 +60,13 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "sessions",
         aliases: &[],
-        description: "List past sessions to resume",
+        description: "Open picker for saved sessions (~/.akmon/sessions)",
         takes_arg: false,
     },
     SlashCommand {
         name: "resume",
         aliases: &[],
-        description: "Resume session by id (or open list with no arg)",
+        description: "Resume by session id prefix (see /sessions for ids)",
         takes_arg: true,
     },
     SlashCommand {
@@ -126,7 +126,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "view-plan",
         aliases: &[],
-        description: "Show the latest plan in the chat view",
+        description: "Latest plan in a scrollable overlay (/edit-plan uses $EDITOR)",
         takes_arg: false,
     },
     SlashCommand {
@@ -151,6 +151,18 @@ pub const COMMANDS: &[SlashCommand] = &[
         name: "doctor",
         aliases: &[],
         description: "Show provider keys and Ollama status",
+        takes_arg: false,
+    },
+    SlashCommand {
+        name: "mcp",
+        aliases: &[],
+        description: "MCP setup hints and servers from ~/.akmon/config.toml",
+        takes_arg: false,
+    },
+    SlashCommand {
+        name: "transcript",
+        aliases: &["export-chat"],
+        description: "Export chat to .akmon/transcript_export.md (read in less/editor)",
         takes_arg: false,
     },
     SlashCommand {

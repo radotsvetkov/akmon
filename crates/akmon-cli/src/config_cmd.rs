@@ -19,8 +19,9 @@ pub struct ConfigArgs {
     /// Machine-readable JSON on stdout.
     #[arg(long, global = true)]
     pub json: bool,
+    /// When omitted (and not `--json`), runs an interactive setup wizard.
     #[command(subcommand)]
-    pub cmd: ConfigSubcommand,
+    pub cmd: Option<ConfigSubcommand>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -145,7 +146,16 @@ pub async fn run_config(args: ConfigArgs) -> ExitCode {
 }
 
 async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
-    match &args.cmd {
+    let Some(cmd) = args.cmd.as_ref() else {
+        if args.json {
+            return Err(
+                "`akmon config --json` requires a subcommand (e.g. `akmon config show --json`)."
+                    .into(),
+            );
+        }
+        return run_config_wizard().await;
+    };
+    match cmd {
         ConfigSubcommand::Path => {
             let Some(p) = akmon_config::akmon_config_path() else {
                 return Err("cannot resolve home directory".into());
@@ -344,6 +354,74 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
         },
         ConfigSubcommand::Mcp(m) => run_mcp(&args, m).await,
     }
+}
+
+fn read_wizard_line(prompt: &str) -> Result<String, String> {
+    print!("{prompt}");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    Ok(line.trim().to_string())
+}
+
+/// Interactive stdin wizard when `akmon config` is run without a subcommand.
+async fn run_config_wizard() -> Result<(), String> {
+    let Some(path) = akmon_config::akmon_config_path() else {
+        return Err("cannot resolve home directory".into());
+    };
+    let (_, mut cfg) = load_user_config().map_err(|e| e.to_string())?;
+    println!("Akmon configuration wizard");
+    println!("─────────────────────────");
+    println!(
+        "This writes `{}` (masked values: `akmon config show`).",
+        path.display()
+    );
+    println!();
+    println!("Tip: keys can also live in env vars (see docs: Environment variables).");
+    println!("     `akmon config key set anthropic …` avoids pasting into this prompt.");
+    println!();
+
+    let cur = cfg
+        .default_model
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(not set)");
+    let model = read_wizard_line(&format!("Default model [{cur}]: "))?;
+    if !model.is_empty() {
+        cfg.default_model = Some(model);
+    }
+
+    let anthropic = read_wizard_line("Anthropic API key (Enter to skip; paste is visible): ")?;
+    if !anthropic.is_empty() {
+        cfg.anthropic_api_key = Some(anthropic);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if append_akmon_gitignore_line(&cwd).unwrap_or(false) {
+            eprintln!("✓ appended .akmon/ to .gitignore in {}", cwd.display());
+        }
+        eprintln!("Warning: ~/.akmon/config.toml may contain secrets — do not commit it.");
+    }
+
+    let or_key = read_wizard_line("OpenRouter API key (Enter to skip): ")?;
+    if !or_key.is_empty() {
+        cfg.openrouter_api_key = Some(or_key);
+    }
+
+    let ou = cfg
+        .ollama_url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:11434".into());
+    let url = read_wizard_line(&format!("Ollama URL [{ou}]: "))?;
+    if !url.is_empty() {
+        cfg.ollama_url = Some(url);
+    }
+
+    save_user_config(&cfg).map_err(|e| e.to_string())?;
+    println!();
+    println!("✓ Saved. Next:  akmon config show");
+    println!("CLI reference:  akmon config --help");
+    Ok(())
 }
 
 fn mask_key(k: &str) -> String {
@@ -806,15 +884,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_json_without_subcommand_errors() {
+        let code = run_config(ConfigArgs {
+            json: true,
+            cmd: None,
+        })
+        .await;
+        assert_eq!(code, ExitCode::FAILURE);
+    }
+
+    #[tokio::test]
     async fn model_set_saves_to_config() {
         let _lock = FAKE_HOME_LOCK.lock().expect("lock");
         let tmp = tempfile::tempdir().expect("tmp");
         let _home = TempHome::new(tmp.path());
         let code = run_config(ConfigArgs {
             json: true,
-            cmd: ConfigSubcommand::Model(ModelCmd::Set {
+            cmd: Some(ConfigSubcommand::Model(ModelCmd::Set {
                 model: "llama3.2".into(),
-            }),
+            })),
         })
         .await;
         assert_eq!(code, ExitCode::SUCCESS);
@@ -830,13 +918,13 @@ mod tests {
         let _home = TempHome::new(tmp.path());
         let code = run_config(ConfigArgs {
             json: false,
-            cmd: ConfigSubcommand::Mcp(McpCmd::Add {
+            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Add {
                 name: "srv".into(),
                 url: "http://127.0.0.1:9/none".into(),
                 scope: McpScopeArg::Project,
                 test: false,
                 env: vec![],
-            }),
+            })),
         })
         .await;
         assert_eq!(code, ExitCode::SUCCESS);
@@ -853,18 +941,18 @@ mod tests {
         let _home = TempHome::new(tmp.path());
         run_config(ConfigArgs {
             json: true,
-            cmd: ConfigSubcommand::Mcp(McpCmd::Add {
+            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Add {
                 name: "x".into(),
                 url: "http://127.0.0.1:9/none".into(),
                 scope: McpScopeArg::User,
                 test: false,
                 env: vec![],
-            }),
+            })),
         })
         .await;
         let code = run_config(ConfigArgs {
             json: true,
-            cmd: ConfigSubcommand::Mcp(McpCmd::Remove { name: "x".into() }),
+            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Remove { name: "x".into() })),
         })
         .await;
         assert_eq!(code, ExitCode::SUCCESS);
@@ -880,18 +968,18 @@ mod tests {
         let _home = TempHome::new(tmp.path());
         run_config(ConfigArgs {
             json: true,
-            cmd: ConfigSubcommand::Mcp(McpCmd::Add {
+            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Add {
                 name: "y".into(),
                 url: "http://127.0.0.1:9/none".into(),
                 scope: McpScopeArg::User,
                 test: false,
                 env: vec![],
-            }),
+            })),
         })
         .await;
         let code = run_config(ConfigArgs {
             json: true,
-            cmd: ConfigSubcommand::Mcp(McpCmd::Disable { name: "y".into() }),
+            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Disable { name: "y".into() })),
         })
         .await;
         assert_eq!(code, ExitCode::SUCCESS);
@@ -907,9 +995,9 @@ mod tests {
         let _home = TempHome::new(tmp.path());
         let code = run_config(ConfigArgs {
             json: false,
-            cmd: ConfigSubcommand::Mcp(McpCmd::Remove {
+            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Remove {
                 name: "nope".into(),
-            }),
+            })),
         })
         .await;
         assert_eq!(code, ExitCode::FAILURE);
@@ -937,10 +1025,10 @@ mod tests {
         std::env::set_current_dir(proj.path()).expect("cd");
         let code = run_config(ConfigArgs {
             json: true,
-            cmd: ConfigSubcommand::Key(KeyCmd::Set {
+            cmd: Some(ConfigSubcommand::Key(KeyCmd::Set {
                 provider: KeyProvider::Anthropic,
                 key: "sk-ant-test".into(),
-            }),
+            })),
         })
         .await;
         std::env::set_current_dir(&old_cwd).expect("cd back");

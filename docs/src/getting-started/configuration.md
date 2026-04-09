@@ -8,7 +8,14 @@ Akmon reads settings from `~/.akmon/config.toml` and environment variables. CLI 
 akmon config
 ```
 
-Opens an interactive flow for default model, keys, and paths.
+With **no subcommand**, Akmon runs a short interactive questionnaire on stdin: default model, optional Anthropic / OpenRouter keys, and Ollama base URL. It writes `~/.akmon/config.toml` (and may append `.akmon/` to `.gitignore` when you store an Anthropic key).
+
+- For **automation or JSON output**, pass an explicit subcommand. `akmon config --json` **requires** a subcommand (for example `akmon config show --json`) so stdout stays machine-readable.
+- Everything the wizard sets can also be configured with `akmon config <topic> …`, by editing TOML, or via **environment variables** (see [Environment variables](../reference/env-vars.md)).
+
+## Fullscreen TUI and scrollback
+
+The default chat UI uses the terminal’s **alternate screen**, so your emulator’s normal **scrollback may not include the full conversation**. Use the **`/transcript`** slash command to write the current chat to `.akmon/transcript_export.md` in the project, then open it in `less`, an editor, or a pager.
 
 ## Show effective config
 
