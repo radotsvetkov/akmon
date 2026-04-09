@@ -4,6 +4,13 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] - 2026-04-09
+
+### Changed
+
+- **Documentation rewrite:** expanded core docs depth across `README.md` and mdBook with practical, production-style guidance for usage, architecture, MCP, costs, headless automation, and contributor internals.
+- **Operational guides:** added stronger troubleshooting and common-mistakes sections across comparison, security, git, semantic search, interactive mode, planning modes, and capabilities reference.
+
 ## [1.7.3] - 2026-04-09
 
 ### Fixed
