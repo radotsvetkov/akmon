@@ -399,6 +399,8 @@ async fn process_json_line(
     tx: &mpsc::Sender<Result<StreamEvent, ModelError>>,
     done_sent: &mut bool,
     pending_tool_calls: &mut Vec<ModelToolCall>,
+    received_content: &mut bool,
+    received_tool_calls: &mut bool,
     first_token: Option<&Arc<AtomicBool>>,
 ) -> Result<(), ModelError> {
     let v: JsonValue = match serde_json::from_str(line) {
@@ -410,8 +412,12 @@ async fn process_json_line(
         }
     };
     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
-        return Err(ModelError::BackendUnavailable {
-            message: format!("Ollama error: {err}"),
+        let lower = err.to_lowercase();
+        if lower.contains("context") || lower.contains("length") || lower.contains("token") {
+            return Err(ModelError::ContextWindowExceeded);
+        }
+        return Err(ModelError::StreamInterrupted {
+            message: err.to_string(),
         });
     }
     let parsed: OllamaChatLine = match serde_json::from_value(v) {
@@ -426,6 +432,7 @@ async fn process_json_line(
     if let Some(msg) = &parsed.message
         && !msg.content.is_empty()
     {
+        *received_content = true;
         let _ = tx
             .send(Ok(StreamEvent::TextDelta {
                 text: msg.content.clone(),
@@ -436,6 +443,7 @@ async fn process_json_line(
     let from_line = extract_tool_calls_from_line(&parsed);
     let has_tools = !from_line.is_empty();
     if has_tools {
+        *received_tool_calls = true;
         *pending_tool_calls = from_line;
     }
 
@@ -593,6 +601,8 @@ async fn run_streaming(
 
     let mut done_sent = false;
     let mut pending_tool_calls: Vec<ModelToolCall> = Vec::new();
+    let mut received_content = false;
+    let mut received_tool_calls = false;
     let mut first = true;
     loop {
         let line = if first {
@@ -626,6 +636,8 @@ async fn run_streaming(
             &tx,
             &mut done_sent,
             &mut pending_tool_calls,
+            &mut received_content,
+            &mut received_tool_calls,
             Some(&first_token_received),
         )
         .await
@@ -636,6 +648,15 @@ async fn run_streaming(
         if done_sent {
             break;
         }
+    }
+
+    if !received_content && !received_tool_calls {
+        let _ = tx
+            .send(Err(ModelError::StreamInterrupted {
+                message: "Model produced no output. The context may be too large for this model. Try /clear to reset context or use a model with a larger context window.".to_string(),
+            }))
+            .await;
+        return;
     }
 
     if !done_sent {
@@ -769,9 +790,14 @@ async fn run_buffered(
         }
     };
     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        let lower = err.to_lowercase();
+        if lower.contains("context") || lower.contains("length") || lower.contains("token") {
+            let _ = tx.send(Err(ModelError::ContextWindowExceeded)).await;
+            return;
+        }
         let _ = tx
-            .send(Err(ModelError::BackendUnavailable {
-                message: format!("Ollama error: {err}"),
+            .send(Err(ModelError::StreamInterrupted {
+                message: err.to_string(),
             }))
             .await;
         return;
@@ -788,9 +814,11 @@ async fn run_buffered(
         }
     };
 
+    let mut received_content = false;
     if let Some(ref msg) = parsed.message
         && !msg.content.is_empty()
     {
+        received_content = true;
         let _ = tx
             .send(Ok(StreamEvent::TextDelta {
                 text: msg.content.clone(),
@@ -800,6 +828,15 @@ async fn run_buffered(
 
     let reason = stop_reason_from_line(&parsed);
     let tool_calls = extract_tool_calls_from_line(&parsed);
+    let received_tool_calls = !tool_calls.is_empty();
+    if !received_content && !received_tool_calls {
+        let _ = tx
+            .send(Err(ModelError::StreamInterrupted {
+                message: "Model produced no output. The context may be too large for this model. Try /clear to reset context or use a model with a larger context window.".to_string(),
+            }))
+            .await;
+        return;
+    }
     let _ = tx
         .send(Ok(StreamEvent::Done {
             stop_reason: reason,

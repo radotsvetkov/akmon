@@ -62,6 +62,29 @@ pub fn looks_like_ollama_model(model: &str) -> bool {
     PREFIXES.iter().any(|p| lower.starts_with(p))
 }
 
+/// Provider display label inferred from model id only (UI hint, no key checks).
+#[must_use]
+pub fn provider_display_name(model: &str) -> &'static str {
+    if looks_like_claude_api_model(model) {
+        return "Anthropic";
+    }
+    if model.contains('/') {
+        return "OpenRouter";
+    }
+    let lower = model.trim().to_lowercase();
+    if lower.starts_with("gpt-")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+    {
+        return "OpenAI";
+    }
+    if lower.starts_with("llama-") || lower.starts_with("mixtral-") {
+        return "Groq";
+    }
+    "Ollama"
+}
+
 /// CLI / config inputs that determine which [`LlmProvider`] implementation to use.
 #[derive(Debug, Clone)]
 pub struct LlmConnectConfig {

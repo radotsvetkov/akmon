@@ -1,7 +1,7 @@
 //! Bottom status strip: session, tokens, cache, cost, hint.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
@@ -20,6 +20,43 @@ fn fmt_u32_commas(n: u32) -> String {
     out.into_iter().rev().collect()
 }
 
+/// Returns a conservative context window size for UI usage indicators.
+#[must_use]
+pub fn context_window_for_model(model: &str) -> u64 {
+    if model.contains("claude") {
+        200_000
+    } else if model.starts_with("gpt-4.1") {
+        1_047_576
+    } else if model.starts_with("gpt-4o") {
+        128_000
+    } else if model.starts_with("o1") || model.starts_with("o3") {
+        200_000
+    } else {
+        8_192
+    }
+}
+
+#[must_use]
+pub fn context_usage_percent(input_tokens: u32, model: &str) -> u8 {
+    let window = context_window_for_model(model);
+    let used = u64::from(input_tokens);
+    ((used as f64 / window as f64 * 100.0).min(100.0)) as u8
+}
+
+#[must_use]
+pub fn render_context_bar(pct: u8) -> (String, Color) {
+    let filled = (usize::from(pct) * 20 / 100).min(20);
+    let empty = 20usize.saturating_sub(filled);
+    let bar = format!("[{}{}] {pct}%", "█".repeat(filled), "░".repeat(empty));
+    let color = match pct {
+        0..=60 => Color::Green,
+        61..=80 => Color::Yellow,
+        81..=90 => Color::Rgb(245, 158, 11),
+        _ => Color::Red,
+    };
+    (bar, color)
+}
+
 /// Draws the session / usage / contextual hint line.
 pub fn render_status_bar(f: &mut ratatui::Frame<'_>, area: Rect, parts: StatusParts) {
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -29,11 +66,14 @@ pub fn render_status_bar(f: &mut ratatui::Frame<'_>, area: Rect, parts: StatusPa
     spans.push(Span::styled(parts.session_prefix.clone(), dg));
     spans.push(Span::styled("  │  ", sep));
     spans.push(Span::styled(
-        format!(
-            "tokens:{}  out:{}",
-            fmt_u32_commas(parts.input_tokens),
-            fmt_u32_commas(parts.output_tokens)
-        ),
+        format!("tokens:{}", fmt_u32_commas(parts.input_tokens)),
+        dg,
+    ));
+    spans.push(Span::styled("  ", Style::default()));
+    spans.push(Span::styled(parts.context_bar, parts.context_bar_style));
+    spans.push(Span::styled("  │  ", sep));
+    spans.push(Span::styled(
+        format!("out:{}", fmt_u32_commas(parts.output_tokens)),
         dg,
     ));
     if parts.cache > 0 {
@@ -90,6 +130,10 @@ pub struct StatusParts {
     pub input_tokens: u32,
     /// Sum of output tokens for the session.
     pub output_tokens: u32,
+    /// Context usage bar with percent text (`[██░░...] 42%`).
+    pub context_bar: String,
+    /// Style for the context usage bar.
+    pub context_bar_style: Style,
     /// Cache read tokens.
     pub cache: u32,
     /// Estimated input tokens cleared by micro-compaction (dim when shown).

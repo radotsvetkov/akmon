@@ -4,6 +4,14 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-04-09
+
+### Fixed
+
+- **Todo persistence across `-c` / `--continue`:** todo storage is now project-scoped at `.akmon/todos/current.json` instead of session-id filenames, so active tasks survive resumed sessions.
+- **Todo prompt injection:** active task loading now reads the project-level todo file and no longer depends on `session_id`.
+- **Todo lifecycle cleanup:** when all tasks are completed, `current.json` is removed automatically to avoid stale completed-only todo context.
+
 ## [1.7.0] - 2026-04-08
 
 ### Added

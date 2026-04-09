@@ -185,6 +185,20 @@ LARGE-TASK WORKFLOW — RESEARCH → PLAN → IMPLEMENT:\n\
 \n\
 - RESEARCH: Understand the codebase with read/search (and semantic_search when available).\n\
   Use `spawn_subagent` for deep, narrow exploration so the main context stays small.\n\
+  USE `spawn_subagent` WHEN:\n\
+    - You need to understand existing code before modifying it (3+ files).\n\
+    - You need to search where symbols/logic are defined across the repo.\n\
+    - You need to verify implementation by running tests in isolation.\n\
+    - The research would take more than 2 tool calls.\n\
+  DO NOT use `spawn_subagent` for:\n\
+    - Single-file reads.\n\
+    - Simple grep/search operations.\n\
+    - Writing new files.\n\
+  EXAMPLE (correct):\n\
+    User: 'Add authentication to the Flask app'\n\
+    1) spawn_subagent task='Find user-management files, route structure, existing auth code'\n\
+    2) write_spec('auth-research', subagent summary)\n\
+    3) Plan from research, then implement.\n\
   Persist durable decisions in `.akmon/specs/` via `write_spec` / `read_spec`.\n\
 \n\
 - PLAN: Before large edits, outline files to touch, risks, and ordering.\n\

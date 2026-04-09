@@ -16,5 +16,7 @@ pub use dialog_overlay::{
 pub use flatten::{flatten_transcript, message_line_count, message_to_lines};
 pub use header_bar::render_header_bar;
 pub use input_hit::{input_body_row_count, map_input_click_wrapped, snap_utf8_cursor};
-pub use status_bar::{CostFrag, StatusParts, render_status_bar};
+pub use status_bar::{
+    CostFrag, StatusParts, context_usage_percent, render_context_bar, render_status_bar,
+};
 pub use viewport_paint::{paint_message_viewport, paint_terminal_too_small};

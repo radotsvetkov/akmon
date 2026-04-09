@@ -7,7 +7,6 @@ use akmon_core::Permission;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use uuid::Uuid;
 
 use crate::Tool;
 use crate::context::ToolContext;
@@ -112,7 +111,13 @@ impl Tool for TodoWriteTool {
                 message: format!("create .akmon/todos: {e}"),
             };
         }
-        let path = todos_dir.join(format!("{}.json", ctx.session_id_short()));
+        let path = todos_dir.join("current.json");
+        if todos.iter().all(|t| t.status == TodoStatus::Completed) {
+            let _ = std::fs::remove_file(&path);
+            return ToolOutput::Success {
+                content: "Todos updated: all tasks completed (current.json removed)".into(),
+            };
+        }
         let json = match serde_json::to_string_pretty(&todos) {
             Ok(s) => s,
             Err(e) => {
@@ -150,21 +155,18 @@ impl Tool for TodoWriteTool {
     }
 }
 
-/// Loads todos for `session_id` if the JSON file exists.
+/// Loads project-level todos from `current.json` if it exists.
 #[must_use]
-pub fn load_session_todos(project_root: &Path, session_id: Uuid) -> Option<Vec<TodoItem>> {
-    let short: String = session_id.as_simple().to_string().chars().take(8).collect();
-    let path = project_root
-        .join(".akmon/todos")
-        .join(format!("{short}.json"));
+pub fn load_current_todos(project_root: &Path) -> Option<Vec<TodoItem>> {
+    let path = project_root.join(".akmon/todos").join("current.json");
     let raw = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
 /// Formats active (non-completed) todos for system prompt injection.
 #[must_use]
-pub fn format_active_tasks_block(project_root: &Path, session_id: Uuid) -> Option<String> {
-    let todos = load_session_todos(project_root, session_id)?;
+pub fn format_active_tasks_block(project_root: &Path) -> Option<String> {
+    let todos = load_current_todos(project_root)?;
     let active: Vec<_> = todos
         .iter()
         .filter(|t| t.status != TodoStatus::Completed)
@@ -194,7 +196,7 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn ctx(dir: &std::path::Path, sid: Uuid) -> ToolContext {
+    fn ctx(dir: &std::path::Path, sid: uuid::Uuid) -> ToolContext {
         let sandbox = akmon_core::Sandbox::with_git_root(dir.to_path_buf(), false);
         let policy = Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive));
         ToolContext::new(sandbox, policy).with_session(sid, true)
@@ -203,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn todo_write_creates_file() {
         let dir = TempDir::new().unwrap();
-        let sid = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let sid = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let tool = TodoWriteTool;
         let out = tool
             .execute(
@@ -216,7 +218,7 @@ mod tests {
             )
             .await;
         assert!(matches!(out, ToolOutput::Success { .. }));
-        let path = dir.path().join(".akmon/todos/00000000.json");
+        let path = dir.path().join(".akmon/todos/current.json");
         let raw = std::fs::read_to_string(&path).expect("file");
         assert!(raw.contains("one"));
         assert!(raw.contains("pending"));
@@ -225,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn todo_write_replaces_previous_list() {
         let dir = TempDir::new().unwrap();
-        let sid = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let sid = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
         let tool = TodoWriteTool;
         let _ = tool
             .execute(
@@ -243,7 +245,7 @@ mod tests {
                 &ctx(dir.path(), sid),
             )
             .await;
-        let todos = load_session_todos(dir.path(), sid).expect("loaded");
+        let todos = load_current_todos(dir.path()).expect("loaded");
         assert_eq!(todos.len(), 1);
         assert_eq!(todos[0].id, "2");
     }
@@ -251,20 +253,39 @@ mod tests {
     #[test]
     fn completed_not_in_active_block() {
         let dir = TempDir::new().unwrap();
-        let sid = Uuid::nil();
         let path = dir.path().join(".akmon/todos");
         std::fs::create_dir_all(&path).unwrap();
-        let short: String = sid.as_simple().to_string().chars().take(8).collect();
         let todos = vec![TodoItem {
             id: "x".into(),
             task: "done".into(),
             status: TodoStatus::Completed,
         }];
         std::fs::write(
-            path.join(format!("{short}.json")),
+            path.join("current.json"),
             serde_json::to_string_pretty(&todos).unwrap(),
         )
         .unwrap();
-        assert!(format_active_tasks_block(dir.path(), sid).is_none());
+        assert!(format_active_tasks_block(dir.path()).is_none());
+    }
+
+    #[test]
+    fn todos_persist_across_simulated_sessions() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path();
+        let todos_path = project.join(".akmon/todos");
+        std::fs::create_dir_all(&todos_path).unwrap();
+        let todos = vec![TodoItem {
+            id: "1".into(),
+            task: "Create API".into(),
+            status: TodoStatus::Pending,
+        }];
+        std::fs::write(
+            todos_path.join("current.json"),
+            serde_json::to_string_pretty(&todos).unwrap(),
+        )
+        .unwrap();
+        let loaded = format_active_tasks_block(project);
+        assert!(loaded.is_some());
+        assert!(loaded.unwrap().contains("Create API"));
     }
 }

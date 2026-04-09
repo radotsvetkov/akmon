@@ -16,6 +16,7 @@ use crate::command::{SessionSideEffect, UiCommand};
 use crate::config::TuiLaunchConfig;
 use crate::layout::LayoutRects;
 use crate::message::TuiMessage;
+use crate::render::context_usage_percent;
 use crate::session_persist::SessionSummary;
 use crate::slash::SlashCommand;
 use crate::state::{AgentDisplayState, ConfirmationDialog};
@@ -156,6 +157,10 @@ pub struct TuiApp {
     pub total_cache_read_tokens: u32,
     /// Cumulative output tokens.
     pub total_output_tokens: u32,
+    /// Whether the 80% context warning has already been shown this session.
+    pub context_warn_80_shown: bool,
+    /// Whether the 90% context warning has already been shown this session.
+    pub context_warn_90_shown: bool,
     /// Toggles streaming cursor visibility on a fixed interval.
     pub stream_cursor_visible: bool,
     /// `--index` flag echo for the header.
@@ -305,6 +310,8 @@ impl TuiApp {
             total_input_tokens: 0,
             total_cache_read_tokens: 0,
             total_output_tokens: 0,
+            context_warn_80_shown: false,
+            context_warn_90_shown: false,
             stream_cursor_visible: true,
             index_enabled: config.index_enabled,
             awaiting_confirmation: false,
@@ -608,6 +615,16 @@ impl TuiApp {
                 self.total_cache_write_tokens = self
                     .total_cache_write_tokens
                     .saturating_add(cache_creation_tokens);
+                let pct = context_usage_percent(self.total_input_tokens, &self.model_name);
+                if pct >= 90 && !self.context_warn_90_shown {
+                    self.status_flash =
+                        Some("─ context at 90% — auto-compact will trigger soon ─".into());
+                    self.context_warn_90_shown = true;
+                    self.context_warn_80_shown = true;
+                } else if pct >= 80 && !self.context_warn_80_shown {
+                    self.status_flash = Some("─ context at 80% — consider /compact soon ─".into());
+                    self.context_warn_80_shown = true;
+                }
             }
             AgentEvent::ProviderConfirmed { provider, .. } => {
                 self.provider_display_name = provider.clone();

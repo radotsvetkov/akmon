@@ -164,6 +164,8 @@ fn dispatch(
             app.total_cache_write_tokens = 0;
             app.total_output_tokens = 0;
             app.total_microcompact_cleared = 0;
+            app.context_warn_80_shown = false;
+            app.context_warn_90_shown = false;
             app.current_iteration = 0;
             app.session_started_at = Utc::now();
             app.session_instant = std::time::Instant::now();
@@ -634,6 +636,8 @@ fn apply_loaded_session(
     app.total_cache_write_tokens = 0;
     app.total_output_tokens = 0;
     app.total_microcompact_cleared = 0;
+    app.context_warn_80_shown = false;
+    app.context_warn_90_shown = false;
     app.current_iteration = 0;
     app.session_started_at = loaded.started_at;
     app.scroll_offset = 0;
@@ -747,15 +751,16 @@ pub fn cost_summary_lines(app: &TuiApp) -> Vec<String> {
 }
 
 fn estimate_cost_usd(app: &TuiApp) -> String {
-    let m = app.model_name.to_lowercase();
-    if m.contains("haiku") && m.contains("4-5") {
-        let in_cost = app.total_input_tokens as f64 * 0.80 / 1_000_000.0;
-        let cache_r = app.total_cache_read_tokens as f64 * 0.08 / 1_000_000.0;
-        let out_cost = app.total_output_tokens as f64 * 4.00 / 1_000_000.0;
-        let total = in_cost + cache_r + out_cost;
-        format!("~${total:.4}")
-    } else {
-        "rate unknown".to_string()
+    match akmon_core::estimate_cost_usd(
+        u64::from(app.total_input_tokens),
+        u64::from(app.total_output_tokens),
+        u64::from(app.total_cache_read_tokens),
+        &app.model_name,
+        app.uses_openrouter,
+        app.free_local_inference,
+    ) {
+        Some(total) => format!("~${total:.4}"),
+        None => "rate unknown".to_string(),
     }
 }
 

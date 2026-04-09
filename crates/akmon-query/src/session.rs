@@ -280,6 +280,83 @@ impl AgentSession {
         };
     }
 
+    fn write_rate_limit_handoff_note(&self, task: &str) {
+        let handoff = specs_and_handoff::handoff_path(self.sandbox.primary_root());
+        if let Some(parent) = handoff.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let model = self.provider.completion_model_id();
+        let body = format!(
+            "**Model:** {model}\n\n\
+**Status:** Rate limit exhausted after 5 retries.\n\n\
+**Resume:** Wait a few minutes then continue with: `akmon -c`\n\n\
+**Last task:**\n\n{task}\n"
+        );
+        let _ = std::fs::write(handoff, body);
+    }
+
+    async fn handle_model_error_for_run(
+        &mut self,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        task: &str,
+        err: ModelError,
+    ) -> Result<Option<AgentError>, AgentError> {
+        if matches!(err, ModelError::RateLimited { .. }) {
+            let resume = "Rate limit exhausted after 5 retries.\nWait a few minutes then continue with: akmon -c";
+            self.result_text.push_str(resume);
+            self.result_text.push('\n');
+            self.apply_event(
+                event_tx,
+                AgentEvent::StatusInfo {
+                    message: resume.into(),
+                },
+                task,
+            )
+            .await?;
+            self.apply_event(event_tx, AgentEvent::Done, task).await?;
+            self.last_run_exit = SessionRunExit::Completed;
+            self.record_run_finished_success();
+            self.write_rate_limit_handoff_note(task);
+            return Ok(None);
+        }
+
+        let context_hint = match &err {
+            ModelError::ContextWindowExceeded => Some(
+                "Context too large for local model. Options:\n 1. Type /clear to reset and continue with less context\n 2. Switch to cloud: /model claude-haiku-4-5-20251001\n 3. Use a larger local model: /model qwen3.5:27b",
+            ),
+            ModelError::StreamInterrupted { message }
+                if message.contains("The context may be too large for this model.") =>
+            {
+                Some(
+                    "Context too large for local model. Options:\n 1. Type /clear to reset and continue with less context\n 2. Switch to cloud: /model claude-haiku-4-5-20251001\n 3. Use a larger local model: /model qwen3.5:27b",
+                )
+            }
+            _ => None,
+        };
+        if let Some(message) = context_hint {
+            self.apply_event(
+                event_tx,
+                AgentEvent::StatusInfo {
+                    message: message.into(),
+                },
+                task,
+            )
+            .await?;
+        }
+
+        let ae = map_model_error(err);
+        self.apply_event(
+            event_tx,
+            AgentEvent::Error {
+                error: ae.clone(),
+                recoverable: true,
+            },
+            task,
+        )
+        .await?;
+        Ok(Some(ae))
+    }
+
     fn note_successful_file_tool_for_handoff(&mut self, r: &ToolCallResult) {
         if !r.success {
             return;
@@ -329,9 +406,7 @@ impl AgentSession {
         let handoff_ref = handoff_owned.as_deref();
         let extras: Vec<String> = {
             let mut v = Vec::new();
-            if let Some(s) =
-                akmon_tools::format_active_tasks_block(root_path, self.config.session_id)
-            {
+            if let Some(s) = akmon_tools::format_active_tasks_block(root_path) {
                 v.push(s);
             }
             if let Some(s) = akmon_tools::format_relevant_memories_block(root_path, task) {
@@ -671,17 +746,10 @@ impl AgentSession {
                 match self.provider.complete(&messages, &completion_config).await {
                     Ok(s) => s,
                     Err(e) => {
-                        let ae = map_model_error(e);
-                        self.apply_event(
-                            &event_tx,
-                            AgentEvent::Error {
-                                error: ae.clone(),
-                                recoverable: true,
-                            },
-                            &task,
-                        )
-                        .await?;
-                        return Err(ae);
+                        match self.handle_model_error_for_run(&event_tx, &task, e).await? {
+                            Some(ae) => return Err(ae),
+                            None => return Ok(()),
+                        }
                     }
                 };
 
@@ -690,17 +758,10 @@ impl AgentSession {
             while let Some(item) = stream.next().await {
                 match item {
                     Err(e) => {
-                        let ae = map_model_error(e);
-                        self.apply_event(
-                            &event_tx,
-                            AgentEvent::Error {
-                                error: ae.clone(),
-                                recoverable: true,
-                            },
-                            &task,
-                        )
-                        .await?;
-                        return Err(ae);
+                        match self.handle_model_error_for_run(&event_tx, &task, e).await? {
+                            Some(ae) => return Err(ae),
+                            None => return Ok(()),
+                        }
                     }
                     Ok(StreamEvent::ProviderReady { provider, model }) => {
                         self.apply_event(
@@ -734,17 +795,13 @@ impl AgentSession {
                         .await?;
                     }
                     Ok(StreamEvent::Error { error }) => {
-                        let ae = map_model_error(error);
-                        self.apply_event(
-                            &event_tx,
-                            AgentEvent::Error {
-                                error: ae.clone(),
-                                recoverable: true,
-                            },
-                            &task,
-                        )
-                        .await?;
-                        return Err(ae);
+                        match self
+                            .handle_model_error_for_run(&event_tx, &task, error)
+                            .await?
+                        {
+                            Some(ae) => return Err(ae),
+                            None => return Ok(()),
+                        }
                     }
                     Ok(StreamEvent::Done {
                         stop_reason,

@@ -43,7 +43,7 @@ pub use search::{DEFAULT_MAX_SEARCH_FILE_BYTES, DEFAULT_MAX_SEARCH_RESULTS, Sear
 pub use semantic_search::SemanticSearchTool;
 pub use shell::ShellTool;
 pub use todo_write::{
-    TodoItem, TodoStatus, TodoWriteTool, format_active_tasks_block, load_session_todos,
+    TodoItem, TodoStatus, TodoWriteTool, format_active_tasks_block, load_current_todos,
 };
 pub use web_fetch::{WebFetchTool, validate_url};
 pub use write_file::WriteFileTool;

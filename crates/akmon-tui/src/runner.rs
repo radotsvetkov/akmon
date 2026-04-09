@@ -36,8 +36,9 @@ use crate::overlay::{
     slash_autocomplete_row_count,
 };
 use crate::render::{
-    CostFrag, StatusParts, flatten_transcript, paint_message_viewport, paint_terminal_too_small,
-    render_confirmation_overlay, render_header_bar, render_question_overlay, render_status_bar,
+    CostFrag, StatusParts, context_usage_percent, render_context_bar, flatten_transcript,
+    paint_message_viewport, paint_terminal_too_small, render_confirmation_overlay,
+    render_header_bar, render_question_overlay, render_status_bar,
 };
 use crate::session_persist::{save_session_snapshot, saved_sessions_directory_empty};
 use crate::slash::{matching_commands, slash_command_name_prefix};
@@ -1188,6 +1189,9 @@ fn show_help(app: &mut TuiApp) {
 }
 
 fn status_bar_parts(app: &TuiApp) -> StatusParts {
+    let context_pct = context_usage_percent(app.total_input_tokens, &app.model_name);
+    let (context_bar, context_color) = render_context_bar(context_pct);
+
     let mut sid: String = app.session_id.to_string().chars().take(8).collect();
     if let Some(ref n) = app.session_display_name {
         let t = n.trim();
@@ -1251,6 +1255,8 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
         session_prefix: sid,
         input_tokens: app.total_input_tokens,
         output_tokens: app.total_output_tokens,
+        context_bar,
+        context_bar_style: Style::default().fg(context_color),
         cache: app.total_cache_read_tokens,
         cleared: app.total_microcompact_cleared,
         cache_style,

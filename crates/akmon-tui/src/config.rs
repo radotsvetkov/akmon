@@ -104,16 +104,12 @@ impl TuiLaunchConfig {
 
     /// Short cloud or local label for the status bar (mirrors [`LlmConnectConfig::resolve`] priority).
     pub fn provider_display_name(&self) -> String {
-        self.llm_connect_for_model(self.model_name.clone())
-            .inferred_backend_name()
-            .to_string()
+        akmon_models::provider_display_name(&self.model_name).to_string()
     }
 
     /// `true` when the active model is routed via OpenRouter (`/` in id and key present).
     pub fn uses_openrouter(&self) -> bool {
-        self.llm_connect_for_model(self.model_name.clone())
-            .inferred_backend_name()
-            == "OpenRouter"
+        akmon_models::provider_display_name(&self.model_name) == "OpenRouter"
     }
 
     /// Local inference (Ollama fallback / no billable cloud keys resolved).

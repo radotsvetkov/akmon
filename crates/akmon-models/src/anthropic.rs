@@ -598,19 +598,13 @@ async fn run_anthropic_stream(
             rate_limit_attempts = rate_limit_attempts.saturating_add(1);
             if rate_limit_attempts > RETRY_MAX {
                 let headers = resp.headers().clone();
-                let body_text = match resp.text().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(ModelError::StreamInterrupted {
-                                message: e.to_string(),
-                            }))
-                            .await;
-                        return;
-                    }
-                };
+                let retry_after_secs = headers
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+                let _ = resp.text().await;
                 let _ = tx
-                    .send(Err(map_anthropic_http_status(status, &body_text, &headers)))
+                    .send(Err(ModelError::RateLimited { retry_after_secs }))
                     .await;
                 return;
             }

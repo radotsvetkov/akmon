@@ -23,7 +23,9 @@ pub use anthropic::{
 pub use bedrock::{BEDROCK_DISPLAY_MODEL_IDS, BedrockBackend};
 pub use config::CompletionConfig;
 pub use error::ModelError;
-pub use llm_connect::{LlmConnectConfig, looks_like_claude_api_model, looks_like_ollama_model};
+pub use llm_connect::{
+    LlmConnectConfig, looks_like_claude_api_model, looks_like_ollama_model, provider_display_name,
+};
 pub use max_tokens::{max_tokens_for_model, max_tokens_for_openai_style_model};
 pub use message::{Message, MessageRole};
 pub use ollama::OllamaBackend;
