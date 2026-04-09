@@ -761,7 +761,8 @@ async fn run_openai_stream(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok());
 
-            let exp = RETRY_BASE_SECS.saturating_mul(RETRY_MULT.pow(rate_attempts.saturating_sub(1)));
+            let exp =
+                RETRY_BASE_SECS.saturating_mul(RETRY_MULT.pow(rate_attempts.saturating_sub(1)));
             let base_wait = header_wait.unwrap_or(exp).max(1);
             let wait_secs = jittered_wait_secs(base_wait).min(RETRY_CAP_SECS);
 
@@ -954,10 +955,7 @@ impl LlmProvider for OpenAiCompatBackend {
             config.max_tokens
         };
         body_map.insert("max_tokens".into(), json!(max_out));
-        body_map.insert(
-            "stream_options".into(),
-            json!({ "include_usage": true }),
-        );
+        body_map.insert("stream_options".into(), json!({ "include_usage": true }));
         if self.inner.post_url.contains("api.openai.com") {
             body_map.insert("store".into(), json!(false));
         }

@@ -54,11 +54,7 @@ pub fn context_limit_for_model(model: &str) -> usize {
 #[must_use]
 pub fn is_openai_native_chat_model(model_id: &str) -> bool {
     let m = model_id.to_lowercase();
-    if m.starts_with("gpt-")
-        || m.starts_with("o1")
-        || m.starts_with("o3")
-        || m.starts_with("o4")
-    {
+    if m.starts_with("gpt-") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
         return true;
     }
     m.starts_with("openai/gpt")
@@ -308,7 +304,8 @@ Examples of bad semantic_search queries (use search instead):\n\
     };
 
     let intel_block = if include_project_intelligence {
-        format!("{}\n", project_intelligence_for_prompt(project_root))
+        let pi = project_intelligence_for_prompt(project_root);
+        format!("{pi}\n")
     } else {
         String::new()
     };
@@ -471,7 +468,8 @@ Examples of bad semantic_search queries\n\
     };
 
     let intel_block = if include_project_intelligence {
-        format!("{}\n", project_intelligence_for_prompt(project_root))
+        let pi = project_intelligence_for_prompt(project_root);
+        format!("{pi}\n")
     } else {
         String::new()
     };
@@ -592,12 +590,7 @@ pub fn build_messages(
     let main_system = if looks_like_ollama_model(model_id) {
         format_local_project_context(project_root, tool_names, plan_mode)
     } else {
-        format_project_context(
-            project_root,
-            tool_names,
-            plan_mode,
-            include_intel_in_system,
-        )
+        format_project_context(project_root, tool_names, plan_mode, include_intel_in_system)
     };
     out.push(Message {
         role: MessageRole::System,
@@ -685,12 +678,7 @@ pub fn build_followup_messages(
     let main_system = if looks_like_ollama_model(model_id) {
         format_local_project_context(project_root, tool_names, plan_mode)
     } else {
-        format_project_context(
-            project_root,
-            tool_names,
-            plan_mode,
-            include_intel_in_system,
-        )
+        format_project_context(project_root, tool_names, plan_mode, include_intel_in_system)
     };
     out.push(Message {
         role: MessageRole::System,

@@ -5,7 +5,8 @@ use std::sync::Arc;
 use akmon_core::Secret;
 
 use crate::{
-    AnthropicBackend, BedrockBackend, LlmProvider, OllamaBackend, OpenAiCompatBackend, ProviderError,
+    AnthropicBackend, BedrockBackend, LlmProvider, OllamaBackend, OpenAiCompatBackend,
+    ProviderError,
 };
 
 fn nonempty(opt: Option<String>) -> Option<String> {

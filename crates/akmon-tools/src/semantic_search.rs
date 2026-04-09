@@ -45,7 +45,8 @@ impl SemanticSearchTool {
         if s.len() <= max {
             s.to_string()
         } else {
-            format!("{}…", &s[..max])
+            let prefix = &s[..max];
+            format!("{prefix}…")
         }
     }
 }

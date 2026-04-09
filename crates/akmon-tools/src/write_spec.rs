@@ -236,10 +236,7 @@ mod tests {
             relative_markdown_path_for_spec_name("Foo Bar").as_deref(),
             Some(".akmon/specs/Foo-Bar.md")
         );
-        assert_eq!(
-            relative_markdown_path_for_spec_name("../etc/passwd"),
-            None
-        );
+        assert_eq!(relative_markdown_path_for_spec_name("../etc/passwd"), None);
         assert_eq!(relative_markdown_path_for_spec_name(""), None);
     }
 
@@ -249,10 +246,7 @@ mod tests {
         let tool = WriteSpecTool::new();
         for name in ["a/b", r"a\b", "..", "x/../y"] {
             let out = tool
-                .execute(
-                    json!({ "name": name, "content": "z" }),
-                    &ctx(dir.path()),
-                )
+                .execute(json!({ "name": name, "content": "z" }), &ctx(dir.path()))
                 .await;
             assert!(
                 matches!(
@@ -278,10 +272,7 @@ mod tests {
                 &ctx(dir.path()),
             )
             .await;
-        assert!(
-            matches!(out, ToolOutput::Success { .. }),
-            "{out:?}"
-        );
+        assert!(matches!(out, ToolOutput::Success { .. }), "{out:?}");
         let p = dir.path().join(".akmon/specs/my-spec.md");
         let body = tokio::fs::read_to_string(&p).await.expect("read");
         assert_eq!(body, "# Hello");

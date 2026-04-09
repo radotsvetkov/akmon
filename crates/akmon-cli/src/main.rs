@@ -314,7 +314,7 @@ fn print_json_early_error_and_exit(error: String) -> ! {
         "files_written": [],
         "cache_read_tokens": 0,
     });
-    println!("{}", error_report);
+    println!("{error_report}");
     std::process::exit(2);
 }
 
@@ -480,10 +480,20 @@ pub(crate) struct Cli {
     #[arg(long = "planner-model", value_name = "MODEL", global = true)]
     planner_model: Option<String>,
     /// Resume the last session for this project directory (uses `~/.akmon/last_session.json`).
-    #[arg(short = 'c', long = "continue", global = true, conflicts_with = "resume_session")]
+    #[arg(
+        short = 'c',
+        long = "continue",
+        global = true,
+        conflicts_with = "resume_session"
+    )]
     continue_last: bool,
     /// Resume a specific session id (full UUID or unique `*.json` prefix under `~/.akmon/sessions/`).
-    #[arg(short = 's', long = "session", global = true, conflicts_with = "continue_last")]
+    #[arg(
+        short = 's',
+        long = "session",
+        global = true,
+        conflicts_with = "continue_last"
+    )]
     resume_session: Option<String>,
     /// Display name for this session (status line / JSON tooling).
     #[arg(short = 'n', long = "name", global = true)]
@@ -643,14 +653,8 @@ fn cli_attach_specs_subagent(
     let shell_allow = cli.shell_allow.clone();
     let web_fetch = cli.web_fetch;
     let plan_for_sub = plan_mode;
-    let factory: SubagentToolFactory = Arc::new(move || {
-        build_tool_registry(
-            &shell_allow,
-            web_fetch,
-            has_git_root,
-            plan_for_sub,
-        )
-    });
+    let factory: SubagentToolFactory =
+        Arc::new(move || build_tool_registry(&shell_allow, web_fetch, has_git_root, plan_for_sub));
     let rt = Arc::new(SubagentRuntime {
         provider: Arc::clone(provider),
         policy: Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
@@ -778,7 +782,11 @@ fn resolve_resume_session_id(cli: &Cli, project_root: &Path) -> Result<Option<uu
     Ok(None)
 }
 
-fn sandbox_for_cli(project_root: PathBuf, has_git_root: bool, add_dirs: &[PathBuf]) -> Arc<Sandbox> {
+fn sandbox_for_cli(
+    project_root: PathBuf,
+    has_git_root: bool,
+    add_dirs: &[PathBuf],
+) -> Arc<Sandbox> {
     let extra: Vec<PathBuf> = add_dirs
         .iter()
         .filter_map(|p| dunce::canonicalize(p).ok())
@@ -786,7 +794,11 @@ fn sandbox_for_cli(project_root: PathBuf, has_git_root: bool, add_dirs: &[PathBu
     if extra.is_empty() {
         Arc::new(Sandbox::with_git_root(project_root, has_git_root))
     } else {
-        Arc::new(Sandbox::with_additional_roots_git(project_root, extra, has_git_root))
+        Arc::new(Sandbox::with_additional_roots_git(
+            project_root,
+            extra,
+            has_git_root,
+        ))
     }
 }
 
@@ -794,9 +806,7 @@ fn model_messages_to_tui(msgs: Vec<Message>) -> Vec<akmon_tui::TuiMessage> {
     use akmon_tui::TuiMessage;
     msgs.into_iter()
         .filter_map(|m| match m.role {
-            MessageRole::User => Some(TuiMessage::User {
-                content: m.content,
-            }),
+            MessageRole::User => Some(TuiMessage::User { content: m.content }),
             MessageRole::Assistant => Some(TuiMessage::Assistant {
                 content: m.content,
                 complete: true,
@@ -828,16 +838,18 @@ fn headless_persist(
 ) {
     let msgs: Vec<Message> = session.context_messages().to_vec();
     let started_str = started_at.to_rfc3339();
-    if let Err(e) = session_transcript::save_headless_session_file(session_transcript::HeadlessSessionSnapshot {
-        session_id: session.session_id(),
-        project_root,
-        model,
-        messages: &msgs,
-        started_at_rfc3339: &started_str,
-        total_input_tokens: session.total_input_tokens(),
-        total_cache_read_tokens: session.total_cache_read_tokens(),
-        total_output_tokens: session.total_output_tokens(),
-    }) {
+    if let Err(e) = session_transcript::save_headless_session_file(
+        session_transcript::HeadlessSessionSnapshot {
+            session_id: session.session_id(),
+            project_root,
+            model,
+            messages: &msgs,
+            started_at_rfc3339: &started_str,
+            total_input_tokens: session.total_input_tokens(),
+            total_cache_read_tokens: session.total_cache_read_tokens(),
+            total_output_tokens: session.total_output_tokens(),
+        },
+    ) {
         eprintln!("akmon: warning: could not save session snapshot: {e}");
     }
     let mut index = session_index::SessionIndex::load();
@@ -911,7 +923,8 @@ async fn run_event_printer(
             } => {
                 eprintln!("{description}");
                 if let Some(diff) = diff_preview {
-                    eprint!("{}", akmon_tools::colorize_unified_diff(&diff));
+                    let colored = akmon_tools::colorize_unified_diff(&diff);
+                    eprint!("{colored}");
                 }
                 let line: String = tokio::task::spawn_blocking(|| {
                     print!("Allow? [y=once / Y=remember session / n=N]: ");
@@ -982,12 +995,7 @@ async fn main() -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => {
-            exit_early_config_error(
-                &cli,
-                format!("cannot read current directory: {e}"),
-                None,
-                2,
-            );
+            exit_early_config_error(&cli, format!("cannot read current directory: {e}"), None, 2);
         }
     };
 
@@ -1231,12 +1239,7 @@ async fn main() -> ExitCode {
     let akmon_content = match load_akmon_md(&project_root) {
         Ok(c) => c,
         Err(e) => {
-            exit_early_config_error(
-                &cli,
-                format!("failed to read AKMON.md: {e}"),
-                None,
-                2,
-            );
+            exit_early_config_error(&cli, format!("failed to read AKMON.md: {e}"), None, 2);
         }
     };
 
@@ -1677,7 +1680,9 @@ async fn main() -> ExitCode {
         let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
         let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
         let mut policy_opt = Some(policy_rx);
-        let run_outcome = session.run(impl_task, ev_tx, &mut policy_opt, &mut None, None).await;
+        let run_outcome = session
+            .run(impl_task, ev_tx, &mut policy_opt, &mut None, None)
+            .await;
         drop(policy_opt);
         let _ = printer.await;
         let mut combined_audit: Vec<AuditEvent> = Vec::new();
@@ -1825,7 +1830,9 @@ async fn main() -> ExitCode {
     let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
 
     let mut policy_opt = Some(policy_rx);
-    let run_outcome = session.run(task, ev_tx, &mut policy_opt, &mut None, None).await;
+    let run_outcome = session
+        .run(task, ev_tx, &mut policy_opt, &mut None, None)
+        .await;
 
     drop(policy_opt);
 

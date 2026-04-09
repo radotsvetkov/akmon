@@ -15,8 +15,7 @@ use uuid::Uuid;
 use crate::session::AgentSession;
 
 /// Builds a fresh tool list for each nested run (excludes `spawn_subagent`).
-pub type SubagentToolFactory =
-    Arc<dyn Fn() -> Vec<Box<dyn Tool>> + Send + Sync + 'static>;
+pub type SubagentToolFactory = Arc<dyn Fn() -> Vec<Box<dyn Tool>> + Send + Sync + 'static>;
 
 /// Shared dependencies for [`SpawnSubagentTool`].
 pub struct SubagentRuntime {
@@ -120,9 +119,7 @@ impl Tool for SpawnSubagentTool {
         );
 
         let (ev_tx, mut ev_rx) = mpsc::channel::<AgentEvent>(32);
-        let drain = tokio::spawn(async move {
-            while ev_rx.recv().await.is_some() {}
-        });
+        let drain = tokio::spawn(async move { while ev_rx.recv().await.is_some() {} });
 
         let mut policy_in = Some(seed_rx);
         let outcome = session

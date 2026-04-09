@@ -647,13 +647,17 @@ fn apply_loaded_session(
 fn format_index_age(dt: DateTime<Utc>) -> String {
     let d = Utc::now().signed_duration_since(dt);
     if d.num_seconds() < 60 {
-        format!("{}s ago", d.num_seconds().max(0))
+        let s = d.num_seconds().max(0);
+        format!("{s}s ago")
     } else if d.num_minutes() < 60 {
-        format!("{}m ago", d.num_minutes())
+        let m = d.num_minutes();
+        format!("{m}m ago")
     } else if d.num_hours() < 48 {
-        format!("{}h ago", d.num_hours())
+        let h = d.num_hours();
+        format!("{h}h ago")
     } else {
-        format!("{}d ago", d.num_days())
+        let days = d.num_days();
+        format!("{days}d ago")
     }
 }
 
@@ -734,10 +738,7 @@ pub fn cost_summary_lines(app: &TuiApp) -> Vec<String> {
         format!("Cache hits:         {}", app.total_cache_read_tokens),
         format!("Cache writes:       {}", app.total_cache_write_tokens),
         format!("Output tokens:      {}", app.total_output_tokens),
-        format!(
-            "Microcompact (~saved): {}",
-            app.total_microcompact_cleared
-        ),
+        format!("Microcompact (~saved): {}", app.total_microcompact_cleared),
         "─────────────────────────".to_string(),
     ];
     let est = estimate_cost_usd(app);

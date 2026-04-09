@@ -60,10 +60,9 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
         (AgentState::Thinking { .. }, AgentEvent::MicrocompactEstimate { .. }) => Ok(()),
         (AgentState::ToolExecution { .. }, AgentEvent::MicrocompactEstimate { .. }) => Ok(()),
         (AgentState::Summarizing { .. }, AgentEvent::MicrocompactEstimate { .. }) => Ok(()),
-        (
-            AgentState::AwaitingConfirmation { .. },
-            AgentEvent::MicrocompactEstimate { .. },
-        ) => Ok(()),
+        (AgentState::AwaitingConfirmation { .. }, AgentEvent::MicrocompactEstimate { .. }) => {
+            Ok(())
+        }
 
         // Planning / Thinking → Summarizing (context compaction)
         (AgentState::Planning { .. }, AgentEvent::SummarizationStarted) => Ok(()),

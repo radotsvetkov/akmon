@@ -82,10 +82,10 @@ pub fn apply_microcompact_context(messages: &mut [Message], keep_recent_non_syst
         }
 
         let old_est = estimate_tokens_for_content(&msg.content);
-        let placeholder =
-            serde_json::to_value(&ToolOutput::Success { content: CLEARED.into() }).unwrap_or(
-                json!({ "status": "success", "content": CLEARED }),
-            );
+        let placeholder = serde_json::to_value(&ToolOutput::Success {
+            content: CLEARED.into(),
+        })
+        .unwrap_or(json!({ "status": "success", "content": CLEARED }));
         if let Some(out) = v.get_mut("output") {
             *out = placeholder;
         }

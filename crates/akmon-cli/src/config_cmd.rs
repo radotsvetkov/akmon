@@ -151,9 +151,11 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                 return Err("cannot resolve home directory".into());
             };
             if args.json {
-                println!("{}", json!({ "path": p }));
+                let j = json!({ "path": p });
+                println!("{j}");
             } else {
-                println!("{}", p.display());
+                let pd = p.display();
+                println!("{pd}");
             }
             Ok(())
         }
@@ -175,12 +177,11 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                     "architect": cfg.architect,
                     "mcp": cfg.mcp,
                 });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?
-                );
+                let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+                println!("{pretty}");
             } else {
-                print!("{}", cfg.display_masked_toml());
+                let toml = cfg.display_masked_toml();
+                print!("{toml}");
             }
             Ok(())
         }
@@ -196,9 +197,11 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
             }
             let _ = akmon_config::load_config_from(&path).map_err(|e| e.to_string())?;
             if args.json {
-                println!("{}", json!({ "ok": true, "path": path }));
+                let j = json!({ "ok": true, "path": path });
+                println!("{j}");
             } else {
-                println!("✓ config valid: {}", path.display());
+                let pd = path.display();
+                println!("✓ config valid: {pd}");
             }
             Ok(())
         }
@@ -217,7 +220,8 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
             let (path, _) = load_user_config().map_err(|e| e.to_string())?;
             save_config_to(&path, &AkmonGlobalConfig::default()).map_err(|e| e.to_string())?;
             if args.json {
-                println!("{}", json!({ "ok": true }));
+                let j = json!({ "ok": true });
+                println!("{j}");
             } else {
                 println!("✓ config reset");
             }
@@ -228,7 +232,8 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                 let (_, cfg) = load_user_config().map_err(|e| e.to_string())?;
                 let d = cfg.default_model.unwrap_or_else(|| "llama3.2".into());
                 if args.json {
-                    println!("{}", json!({ "default": d }));
+                    let j = json!({ "default": d });
+                    println!("{j}");
                 } else {
                     println!("default: {d}");
                 }
@@ -239,7 +244,8 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                 cfg.default_model = Some(model.clone());
                 save_user_config(&cfg).map_err(|e| e.to_string())?;
                 if args.json {
-                    println!("{}", json!({ "ok": true, "default": model }));
+                    let j = json!({ "ok": true, "default": model });
+                    println!("{j}");
                 } else {
                     println!("✓ default model → {model}");
                 }
@@ -253,7 +259,8 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
             cfg.ollama_url = Some(url.clone());
             save_user_config(&cfg).map_err(|e| e.to_string())?;
             if args.json {
-                println!("{}", json!({ "ok": true, "ollama_url": url }));
+                let j = json!({ "ok": true, "ollama_url": url });
+                println!("{j}");
             } else {
                 println!("✓ ollama_url → {url}");
             }
@@ -269,7 +276,8 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                 save_user_config(&cfg).map_err(|e| e.to_string())?;
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 if append_akmon_gitignore_line(&cwd).unwrap_or(false) && !args.json {
-                    eprintln!("✓ appended .akmon/ to .gitignore in {}", cwd.display());
+                    let cwd_disp = cwd.display();
+                    eprintln!("✓ appended .akmon/ to .gitignore in {cwd_disp}");
                 }
                 if !args.json {
                     eprintln!(
@@ -277,7 +285,8 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                     );
                 }
                 if args.json {
-                    println!("{}", json!({ "ok": true }));
+                    let j = json!({ "ok": true });
+                    println!("{j}");
                 } else {
                     println!("✓ anthropic key stored");
                 }
@@ -290,7 +299,8 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                 cfg.anthropic_api_key = None;
                 save_user_config(&cfg).map_err(|e| e.to_string())?;
                 if args.json {
-                    println!("{}", json!({ "ok": true }));
+                    let j = json!({ "ok": true });
+                    println!("{j}");
                 } else {
                     println!("✓ anthropic key removed");
                 }
@@ -307,14 +317,12 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                     Err(_) => (false, 0),
                 };
                 if args.json {
-                    println!(
-                        "{}",
-                        json!({
-                            "anthropic_configured": cfg.anthropic_api_key.as_ref().is_some_and(|s| !s.is_empty()),
-                            "ollama_running": ollama_ok,
-                            "ollama_model_count": ollama_n,
-                        })
-                    );
+                    let j = json!({
+                        "anthropic_configured": cfg.anthropic_api_key.as_ref().is_some_and(|s| !s.is_empty()),
+                        "ollama_running": ollama_ok,
+                        "ollama_model_count": ollama_n,
+                    });
+                    println!("{j}");
                 } else {
                     if cfg
                         .anthropic_api_key
@@ -342,7 +350,8 @@ fn mask_key(k: &str) -> String {
     if k.len() <= 8 {
         "****".into()
     } else {
-        format!("{}****", &k[..8])
+        let prefix = &k[..8];
+        format!("{prefix}****")
     }
 }
 
@@ -355,14 +364,18 @@ async fn openrouter_models_top_display(api_key: &str) -> Result<String, String> 
         .map_err(|e| e.to_string())?;
     let r = client
         .get("https://openrouter.ai/api/v1/models")
-        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Authorization", {
+            let key = api_key.trim();
+            format!("Bearer {key}")
+        })
         .header("HTTP-Referer", "https://akmon.dev")
         .header("X-Title", "Akmon")
         .send()
         .await
         .map_err(|e| e.to_string())?;
     if !r.status().is_success() {
-        return Err(format!("HTTP {}", r.status()));
+        let st = r.status();
+        return Err(format!("HTTP {st}"));
     }
     let v: serde_json::Value = r.json().await.map_err(|e| e.to_string())?;
     let Some(arr) = v.get("data").and_then(|x| x.as_array()) else {
@@ -408,7 +421,9 @@ async fn openrouter_models_top_display(api_key: &str) -> Result<String, String> 
     let mut s = String::new();
     for row in rows {
         let ck = row.ctx / 1000;
-        s.push_str(&format!("  {}  {}k  {}\n", row.id, ck, row.price));
+        let id = &row.id;
+        let price = &row.price;
+        s.push_str(&format!("  {id}  {ck}k  {price}\n"));
     }
     Ok(s)
 }
@@ -457,15 +472,13 @@ async fn model_list(args: &ConfigArgs) -> Result<(), String> {
     }
     if args.json {
         let tags = ollama_tags_json(&url).await.unwrap_or_default();
-        println!(
-            "{}",
-            json!({
-                "ollama": tags,
-                "anthropic_key_set": cfg.anthropic_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
-                "openrouter_key_set": cfg.openrouter_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
-                "openrouter_top_display": openrouter_text,
-            })
-        );
+        let j = json!({
+            "ollama": tags,
+            "anthropic_key_set": cfg.anthropic_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
+            "openrouter_key_set": cfg.openrouter_api_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false),
+            "openrouter_top_display": openrouter_text,
+        });
+        println!("{j}");
     } else {
         print!("{out}");
     }
@@ -560,14 +573,13 @@ async fn model_test(args: &ConfigArgs, model_override: Option<&str>) -> Result<(
         .await
         .map_err(|e| format!("request failed: {e}"))?;
     if !r.status().is_success() {
-        return Err(format!("Ollama returned {}", r.status()));
+        let st = r.status();
+        return Err(format!("Ollama returned {st}"));
     }
     let elapsed = start.elapsed().as_secs_f32();
     if args.json {
-        println!(
-            "{}",
-            json!({ "ok": true, "model": model, "seconds": elapsed })
-        );
+        let j = json!({ "ok": true, "model": model, "seconds": elapsed });
+        println!("{j}");
     } else {
         println!("Testing {model}…");
         println!("✓ responded in {elapsed:.1}s");
@@ -580,21 +592,23 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
     match m {
         McpCmd::List => {
             if args.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({ "mcp": cfg.mcp }))
-                        .map_err(|e| e.to_string())?
-                );
+                let pretty = serde_json::to_string_pretty(&json!({ "mcp": cfg.mcp }))
+                    .map_err(|e| e.to_string())?;
+                println!("{pretty}");
             } else {
                 println!("user scope:");
                 for e in cfg.mcp.iter().filter(|e| e.scope == McpScope::User) {
                     let on = if e.enabled { "[on]" } else { "[off]" };
-                    println!("  {}  {}  {on}", e.name, e.url);
+                    let n = &e.name;
+                    let u = &e.url;
+                    println!("  {n}  {u}  {on}");
                 }
                 println!("project scope:");
                 for e in cfg.mcp.iter().filter(|e| e.scope == McpScope::Project) {
                     let on = if e.enabled { "[on]" } else { "[off]" };
-                    println!("  {}  {}  {on}", e.name, e.url);
+                    let n = &e.name;
+                    let u = &e.url;
+                    println!("  {n}  {u}  {on}");
                 }
             }
             Ok(())
@@ -634,10 +648,8 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
                 McpScopeArg::Project => "project",
             };
             if args.json {
-                println!(
-                    "{}",
-                    json!({ "ok": true, "name": name, "scope": scope_label, "tool_count": tool_count })
-                );
+                let j = json!({ "ok": true, "name": name, "scope": scope_label, "tool_count": tool_count });
+                println!("{j}");
             } else {
                 println!("✓ {name} added ({scope_label} scope, {tool_count} tools)");
             }
@@ -651,7 +663,8 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
             }
             save_user_config(&cfg).map_err(|e| e.to_string())?;
             if args.json {
-                println!("{}", json!({ "ok": true }));
+                let j = json!({ "ok": true });
+                println!("{j}");
             } else {
                 println!("✓ {name} removed");
             }
@@ -664,7 +677,8 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
             e.enabled = true;
             save_user_config(&cfg).map_err(|e| e.to_string())?;
             if args.json {
-                println!("{}", json!({ "ok": true }));
+                let j = json!({ "ok": true });
+                println!("{j}");
             } else {
                 println!("✓ {name} enabled");
             }
@@ -677,7 +691,8 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
             e.enabled = false;
             save_user_config(&cfg).map_err(|e| e.to_string())?;
             if args.json {
-                println!("{}", json!({ "ok": true }));
+                let j = json!({ "ok": true });
+                println!("{j}");
             } else {
                 println!("✓ {name} disabled");
             }
@@ -697,29 +712,33 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
                 match client.get(&e.url).send().await {
                     Ok(r) if r.status().is_success() => {
                         if args.json {
-                            println!("{}", json!({ "name": e.name, "ok": true }));
+                            let j = json!({ "name": e.name, "ok": true });
+                            println!("{j}");
                         } else {
-                            println!("{}  {}  ✓", e.name, e.url);
+                            let n = &e.name;
+                            let u = &e.url;
+                            println!("{n}  {u}  ✓");
                         }
                     }
                     Ok(r) => {
                         if args.json {
-                            println!(
-                                "{}",
-                                json!({ "name": e.name, "ok": false, "status": r.status().as_u16() })
-                            );
+                            let j = json!({ "name": e.name, "ok": false, "status": r.status().as_u16() });
+                            println!("{j}");
                         } else {
-                            println!("{}  {}  ✗ status {}", e.name, e.url, r.status());
+                            let n = &e.name;
+                            let u = &e.url;
+                            let st = r.status();
+                            println!("{n}  {u}  ✗ status {st}");
                         }
                     }
                     Err(_) => {
                         if args.json {
-                            println!(
-                                "{}",
-                                json!({ "name": e.name, "ok": false, "error": "timeout" })
-                            );
+                            let j = json!({ "name": e.name, "ok": false, "error": "timeout" });
+                            println!("{j}");
                         } else {
-                            println!("{}  {}  ✗ timeout", e.name, e.url);
+                            let n = &e.name;
+                            let u = &e.url;
+                            println!("{n}  {u}  ✗ timeout");
                         }
                     }
                 }
@@ -731,14 +750,15 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
                 return Err(format!("unknown server: {name}"));
             };
             if args.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(e).map_err(|err| err.to_string())?
-                );
+                let pretty = serde_json::to_string_pretty(e).map_err(|err| err.to_string())?;
+                println!("{pretty}");
             } else {
-                println!("name: {}", e.name);
-                println!("url: {}", e.url);
-                println!("enabled: {}", e.enabled);
+                let n = &e.name;
+                let u = &e.url;
+                let en = e.enabled;
+                println!("name: {n}");
+                println!("url: {u}");
+                println!("enabled: {en}");
                 println!("scope: {:?}", e.scope);
                 println!("(tool list requires MCP session — use `akmon` with --mcp-server)");
             }

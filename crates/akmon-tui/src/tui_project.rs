@@ -160,9 +160,7 @@ async fn run_init_job(cfg: &TuiLaunchConfig) -> (Vec<String>, bool) {
     };
 
     let detected = project_type_label(&summary);
-    lines.push(format!(
-        "Detected: {detected} (markers at project root).",
-    ));
+    lines.push(format!("Detected: {detected} (markers at project root).",));
 
     let ctx = format_project_context_for_init(&summary);
     let title = suggested_akmon_title(&summary);

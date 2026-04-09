@@ -65,7 +65,12 @@ impl ToolContext {
     /// Short id for filenames (first 8 hex digits of the UUID simple form).
     #[must_use]
     pub fn session_id_short(&self) -> String {
-        self.session_id.as_simple().to_string().chars().take(8).collect()
+        self.session_id
+            .as_simple()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect()
     }
 
     /// Stable hash for cross-session memory storage under `~/.akmon/memory/<hash>/`.

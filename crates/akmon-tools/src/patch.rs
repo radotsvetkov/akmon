@@ -169,9 +169,10 @@ impl Tool for PatchTool {
             let patch = match Patch::from_str(chunk) {
                 Ok(p) => p,
                 Err(e) => {
+                    let seg = seg_ix + 1;
                     return ToolOutput::Error {
                         code: ToolErrorCode::InvalidArgs,
-                        message: format!("invalid unified diff (segment {}): {e}", seg_ix + 1),
+                        message: format!("invalid unified diff (segment {seg}): {e}"),
                     };
                 }
             };

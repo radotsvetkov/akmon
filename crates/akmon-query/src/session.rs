@@ -27,12 +27,11 @@ use crate::context::{
     build_followup_messages, build_messages, build_subagent_followup_messages,
     build_subagent_task_messages, context_limit_for_model,
 };
-use crate::specs_and_handoff;
 use crate::context_manager::ContextManager;
 use crate::microcompact::{
-    MICROCOMPACT_KEEP_RECENT_DEFAULT, MICROCOMPACT_KEEP_RECENT_GROQ,
-    apply_microcompact_context,
+    MICROCOMPACT_KEEP_RECENT_DEFAULT, MICROCOMPACT_KEEP_RECENT_GROQ, apply_microcompact_context,
 };
+use crate::specs_and_handoff;
 use crate::tools_filter::{filter_tools_for_model, tools_for_model_id};
 
 /// One finished tool invocation recorded for machine-readable run summaries (CLI `--output json`).
@@ -304,7 +303,9 @@ impl AgentSession {
                 .map(PathBuf::from),
             _ => None,
         };
-        if let Some(pb) = rel && !self.modified_paths.contains(&pb) {
+        if let Some(pb) = rel
+            && !self.modified_paths.contains(&pb)
+        {
             self.modified_paths.push(pb);
         }
     }
@@ -328,7 +329,8 @@ impl AgentSession {
         let handoff_ref = handoff_owned.as_deref();
         let extras: Vec<String> = {
             let mut v = Vec::new();
-            if let Some(s) = akmon_tools::format_active_tasks_block(root_path, self.config.session_id)
+            if let Some(s) =
+                akmon_tools::format_active_tasks_block(root_path, self.config.session_id)
             {
                 v.push(s);
             }
@@ -558,8 +560,9 @@ impl AgentSession {
                 self.apply_event(
                     &event_tx,
                     AgentEvent::StatusInfo {
-                        message: "Headless budget limit reached — stopping before another model call."
-                            .into(),
+                        message:
+                            "Headless budget limit reached — stopping before another model call."
+                                .into(),
                     },
                     &task,
                 )
@@ -570,12 +573,7 @@ impl AgentSession {
                 return Ok(());
             }
 
-            let keep_tail = if self
-                .provider
-                .name()
-                .to_lowercase()
-                .starts_with("groq/")
-            {
+            let keep_tail = if self.provider.name().to_lowercase().starts_with("groq/") {
                 MICROCOMPACT_KEEP_RECENT_GROQ
             } else {
                 MICROCOMPACT_KEEP_RECENT_DEFAULT
@@ -903,11 +901,12 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                         self.apply_event(&event_tx, AgentEvent::Done, &task)
                                             .await?;
                                         self.record_run_finished_success();
-                                        self.last_run_exit = if self.budget_stop_before_next_iteration {
-                                            SessionRunExit::BudgetLimit
-                                        } else {
-                                            SessionRunExit::Completed
-                                        };
+                                        self.last_run_exit =
+                                            if self.budget_stop_before_next_iteration {
+                                                SessionRunExit::BudgetLimit
+                                            } else {
+                                                SessionRunExit::Completed
+                                            };
                                         return Ok(());
                                     }
                                     iteration = iteration.saturating_add(1);
@@ -1965,7 +1964,12 @@ Complete and verify the current file(s), then continue in the next turn.";
         }
     }
 
-    fn accumulate_usage_cost(&mut self, input_tokens: u32, output_tokens: u32, cache_read_tokens: u32) {
+    fn accumulate_usage_cost(
+        &mut self,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_tokens: u32,
+    ) {
         if self.config.max_budget_usd.is_none() {
             return;
         }
@@ -2469,7 +2473,9 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
-        let r = session.run("task".into(), tx, &mut no_policy, &mut None, None).await;
+        let r = session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await;
         assert!(r.is_ok(), "{r:?}");
         assert!(
             session.result_text().contains("partial"),
@@ -2570,7 +2576,9 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
-        let r = session.run("task".into(), tx, &mut no_policy, &mut None, None).await;
+        let r = session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await;
         assert!(r.is_ok());
 
         let mut names = Vec::new();
@@ -3444,9 +3452,8 @@ mod tests {
         s.last_assistant_snippet = Some("summary".into());
         crate::specs_and_handoff::write_handoff_file(&s, tmp.path(), "test-model")
             .expect("handoff");
-        let body =
-            std::fs::read_to_string(crate::specs_and_handoff::handoff_path(tmp.path()))
-                .expect("read");
+        let body = std::fs::read_to_string(crate::specs_and_handoff::handoff_path(tmp.path()))
+            .expect("read");
         assert!(body.contains("test-model"));
         assert!(body.contains("summary"));
     }

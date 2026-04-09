@@ -245,10 +245,7 @@ fn build_request_json(
     map.insert("stream".to_string(), json!(true));
     map.insert("temperature".to_string(), json!(config.temperature));
     // Automatic prompt caching (documented): one breakpoint at the last cacheable prefix.
-    map.insert(
-        "cache_control".to_string(),
-        json!({ "type": "ephemeral" }),
-    );
+    map.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
     if !system_blocks.is_empty() {
         let arr: Vec<Value> = system_blocks
             .iter()

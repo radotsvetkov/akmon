@@ -10,8 +10,8 @@ mod diff_render;
 mod edit;
 mod git;
 mod list_directory;
-mod memory_write;
 mod mcp_client;
+mod memory_write;
 mod output;
 mod patch;
 mod read_file;
@@ -32,8 +32,8 @@ pub use diff_render::{colorize_unified_diff, render_diff, unified_diff_text};
 pub use edit::EditTool;
 pub use git::{GitTool, try_auto_commit_after_file_tool};
 pub use list_directory::ListDirectoryTool;
-pub use memory_write::{MemoryWriteTool, format_relevant_memories_block, load_relevant_memories};
 pub use mcp_client::{McpTool, discover_mcp_tools};
+pub use memory_write::{MemoryWriteTool, format_relevant_memories_block, load_relevant_memories};
 pub use output::{ToolErrorCode, ToolOutput};
 pub use patch::{PatchTool, patch_write_relative_paths};
 pub use read_file::{DEFAULT_MAX_READ_BYTES, ReadFileTool};
@@ -47,7 +47,7 @@ pub use todo_write::{
 };
 pub use web_fetch::{WebFetchTool, validate_url};
 pub use write_file::WriteFileTool;
-pub use write_spec::{relative_markdown_path_for_spec_name, WriteSpecTool};
+pub use write_spec::{WriteSpecTool, relative_markdown_path_for_spec_name};
 
 use akmon_core::Permission;
 use async_trait::async_trait;

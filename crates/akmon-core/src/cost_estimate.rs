@@ -35,9 +35,7 @@ pub fn estimate_cost_usd(
         _ if m.contains("gpt-4.1") => (2.00_f64, 8.0_f64, 0.25_f64),
         _ if m.contains("gpt-5") => (2.00_f64, 8.0_f64, 0.25_f64),
         _ if m.contains("gpt-4o") => (2.50_f64, 10.0_f64, 0.5_f64),
-        _ if m.contains("gpt-4-") || m.contains("gpt-4-turbo") => {
-            (10.0_f64, 30.0_f64, 0.5_f64)
-        }
+        _ if m.contains("gpt-4-") || m.contains("gpt-4-turbo") => (10.0_f64, 30.0_f64, 0.5_f64),
         _ if m.contains("gpt-4") => (2.50_f64, 10.0_f64, 0.5_f64),
         _ if m.contains("gpt-3.5") => (0.50_f64, 1.50_f64, 0.5_f64),
         _ if m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") => {

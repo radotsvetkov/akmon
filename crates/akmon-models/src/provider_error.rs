@@ -10,7 +10,9 @@ pub enum ProviderError {
     AwsCredentialsNotFound,
 
     /// A native `claude-*` model id was given without Anthropic or OpenRouter credentials.
-    #[error("Claude models require ANTHROPIC_API_KEY or OPENROUTER_API_KEY (set env or use --anthropic-key / --openrouter-key).")]
+    #[error(
+        "Claude models require ANTHROPIC_API_KEY or OPENROUTER_API_KEY (set env or use --anthropic-key / --openrouter-key)."
+    )]
     ClaudeModelsRequireApiKey,
 
     /// An `org/model` slug was used without an OpenRouter API key.

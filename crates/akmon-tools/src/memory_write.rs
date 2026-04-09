@@ -69,10 +69,7 @@ impl Tool for MemoryWriteTool {
         if !allowed.contains(&input.memory_type.as_str()) {
             return ToolOutput::Error {
                 code: ToolErrorCode::InvalidArgs,
-                message: format!(
-                    "type must be one of: {}",
-                    allowed.join(", ")
-                ),
+                message: format!("type must be one of: {}", allowed.join(", ")),
             };
         }
 
@@ -82,9 +79,7 @@ impl Tool for MemoryWriteTool {
                 message: "could not resolve home directory".into(),
             };
         };
-        let memory_dir = home
-            .join(".akmon/memory")
-            .join(ctx.project_hash());
+        let memory_dir = home.join(".akmon/memory").join(ctx.project_hash());
         if let Err(e) = std::fs::create_dir_all(&memory_dir) {
             return ToolOutput::Error {
                 code: ToolErrorCode::PermissionDenied,
@@ -122,7 +117,11 @@ impl Tool for MemoryWriteTool {
 
 /// Loads memory file bodies relevant to the current task (caps at `max_files`).
 #[must_use]
-pub fn load_relevant_memories(memory_dir: &Path, task_keywords: &[&str], max_files: usize) -> Vec<String> {
+pub fn load_relevant_memories(
+    memory_dir: &Path,
+    task_keywords: &[&str],
+    max_files: usize,
+) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(memory_dir) else {
         return vec![];
     };
@@ -195,16 +194,8 @@ mod tests {
     #[test]
     fn memory_load_always_includes_user_type() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("user__prefs.md"),
-            "# prefs\n\nbody",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("project__other.md"),
-            "# other",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("user__prefs.md"), "# prefs\n\nbody").unwrap();
+        std::fs::write(dir.path().join("project__other.md"), "# other").unwrap();
         let m = load_relevant_memories(dir.path(), &["zzznope"], 5);
         assert_eq!(m.len(), 1);
         assert!(m[0].contains("prefs"));

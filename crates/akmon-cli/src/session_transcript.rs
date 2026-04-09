@@ -95,8 +95,7 @@ pub fn load_resume_messages(session_id: Uuid, project_root: &Path) -> Result<Vec
     let file_root = crate::session_index::canonical_key(Path::new(&doc.project_root));
     if canon != file_root {
         return Err(format!(
-            "session file project_root mismatch (expected {}, file has {})",
-            canon, file_root
+            "session file project_root mismatch (expected {canon}, file has {file_root})",
         ));
     }
     let mut out = Vec::new();
@@ -138,7 +137,9 @@ pub fn resolve_session_id_from_cli_arg(input: &str) -> Result<Uuid, String> {
         let Some(id_part) = name.strip_suffix(".json") else {
             continue;
         };
-        if id_part.starts_with(needle) && let Ok(u) = Uuid::parse_str(id_part) {
+        if id_part.starts_with(needle)
+            && let Ok(u) = Uuid::parse_str(id_part)
+        {
             matches.push(u);
         }
     }

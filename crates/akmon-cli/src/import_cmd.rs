@@ -66,17 +66,16 @@ fn synthesis_user_prompt(files: &[ContextFile], project_root: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("project");
     let mut s = String::new();
-    s.push_str(&format!("Project directory: {}\n", project_root.display()));
+    let pd = project_root.display();
+    s.push_str(&format!("Project directory: {pd}\n"));
     s.push_str(&format!(
         "Project name for the `#` title: {project_name}\n\n"
     ));
     for cf in files {
-        s.push_str(&format!(
-            "=== {}: {} ===\n{}\n=== END ===\n\n",
-            cf.tool.display_name(),
-            cf.path,
-            cf.content
-        ));
+        let tool = cf.tool.display_name();
+        let path = &cf.path;
+        let body = &cf.content;
+        s.push_str(&format!("=== {tool}: {path} ===\n{body}\n=== END ===\n\n",));
     }
     s
 }
@@ -116,13 +115,11 @@ pub async fn run_import(
 
     let tool_ids: std::collections::HashSet<_> = files.iter().map(|f| f.tool).collect();
     let n_tools = tool_ids.len();
-    println!(
-        "Found {} context file(s) from {} tool(s).",
-        files.len(),
-        n_tools
-    );
+    let n_files = files.len();
+    println!("Found {n_files} context file(s) from {n_tools} tool(s).",);
     if let Some(pt) = primary_tool_from_files(&files) {
-        println!("Primary tool detected: {}", pt.display_name());
+        let tool_name = pt.display_name();
+        println!("Primary tool detected: {tool_name}");
     }
     println!();
 
@@ -204,9 +201,11 @@ pub async fn run_import(
     }
 
     std::fs::write(&dest, body.as_str()).with_context(|| dest.display().to_string())?;
-    println!("Wrote {}.", dest.display());
+    let dest_disp = dest.display();
+    println!("Wrote {dest_disp}.");
     for cf in &files {
-        println!("  ✓ included {}", cf.path);
+        let p = &cf.path;
+        println!("  ✓ included {p}");
     }
     Ok(())
 }

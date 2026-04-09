@@ -154,7 +154,9 @@ impl Tool for TodoWriteTool {
 #[must_use]
 pub fn load_session_todos(project_root: &Path, session_id: Uuid) -> Option<Vec<TodoItem>> {
     let short: String = session_id.as_simple().to_string().chars().take(8).collect();
-    let path = project_root.join(".akmon/todos").join(format!("{short}.json"));
+    let path = project_root
+        .join(".akmon/todos")
+        .join(format!("{short}.json"));
     let raw = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&raw).ok()
 }

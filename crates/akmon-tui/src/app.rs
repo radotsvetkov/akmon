@@ -538,8 +538,8 @@ impl TuiApp {
                 question,
                 suggestions,
             } => {
-                self.agent_activity_line = "Answer the question below — Enter to submit, Esc to skip"
-                    .into();
+                self.agent_activity_line =
+                    "Answer the question below — Enter to submit, Esc to skip".into();
                 self.awaiting_question = true;
                 self.input_buffer.clear();
                 self.input_cursor = 0;
