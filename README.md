@@ -5,6 +5,7 @@ A terminal-native AI coding agent in a single Rust binary.
 Bring your own model and key (Anthropic, OpenAI, OpenRouter, Groq, Azure, Bedrock), or run fully offline with Ollama. Every sensitive action is permissioned and sessions can be audited as JSONL.
 
 [![CI](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml/badge.svg)](https://github.com/radotsvetkov/akmon/actions)
+[![Passed tests](https://img.shields.io/github/actions/workflow/status/radotsvetkov/akmon/ci.yml?branch=main&label=passed%20tests)](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
@@ -130,3 +131,9 @@ Real session example:
 ## License
 
 Apache-2.0 only. See [LICENSE](LICENSE).
+
+---
+
+### What "Akmon" means
+
+Akmon is named after the forge/anvil idea: shape complex code with pressure and precision, while keeping control over every strike (permissions, audit trail, and model choice).
