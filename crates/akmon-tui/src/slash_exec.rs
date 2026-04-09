@@ -13,6 +13,7 @@ use crate::app::{ExternalEditTarget, Overlay, TuiApp};
 use crate::command::SessionSideEffect;
 use crate::config::TuiLaunchConfig;
 use crate::model_picker::build_model_picker_rows;
+use crate::render::{context_usage_percent, context_window_for_model, render_context_bar};
 use crate::session_persist::{
     SessionSummary, default_audit_log_path, latest_dot_akmon_plan, load_session_file,
     load_session_summaries, resolve_session_id, save_session_snapshot, sessions_directory,
@@ -180,6 +181,12 @@ fn dispatch(
             app.pending_plan = None;
             app.latest_plan_path = None;
             app.scroll_offset = 0;
+            app.specs_loaded = std::fs::read_dir(app.project_root.join(".akmon/specs"))
+                .ok()
+                .is_some_and(|rd| {
+                    rd.flatten()
+                        .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+                });
             app.overlay = Overlay::None;
             env.reload_notify.notify_one();
             app.push_system_info("New session started.".into());
@@ -444,6 +451,54 @@ fn dispatch(
             app.overlay = Overlay::CostSummary;
             SlashHandled::Continue
         }
+        "context" => {
+            let window = context_window_for_model(&app.model_name);
+            let used = u64::from(app.total_input_tokens);
+            let pct = context_usage_percent(app.total_input_tokens, &app.model_name);
+            let (bar, _) = render_context_bar(pct);
+            let baseline_system_and_tools = 5000u64;
+            let messages_est = used.saturating_sub(baseline_system_and_tools);
+            let free = window.saturating_sub(used.min(window));
+            let compact_at_pct = 85u8;
+            let compact_cap = (window.saturating_mul(u64::from(compact_at_pct))) / 100;
+            let until_compact = compact_cap.saturating_sub(used.min(compact_cap));
+            let free_pct = if window == 0 {
+                0
+            } else {
+                ((free as f64 / window as f64) * 100.0).round() as u8
+            };
+            let breakdown = format!(
+                "Context Usage\n\
+{bar}\n\
+Model: {} · {}/{} tokens ({}%)\n\
+\n\
+Breakdown (estimated)\n\
+System prompt:  ~{}k tokens\n\
+Tool defs:      ~{}k tokens\n\
+Messages:       ~{}k tokens\n\
+Specs loaded:   {}\n\
+AKMON.md:       {}\n\
+\n\
+Free space:     ~{}k tokens ({}%)\n\
+Autocompact at: {}% ({} tokens remaining)",
+                app.model_name,
+                used / 1000,
+                window / 1000,
+                pct,
+                4,
+                1,
+                messages_est / 1000,
+                if app.specs_loaded { "yes" } else { "none" },
+                if app.akmon_md_loaded { "yes" } else { "none" },
+                free / 1000,
+                free_pct,
+                compact_at_pct,
+                until_compact,
+            );
+            app.push_system_info(breakdown);
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
         "plan" => {
             app.plan_only_next_turn = true;
             app.push_system_info(
@@ -630,6 +685,13 @@ fn apply_loaded_session(
     app.model_name = loaded.model_name;
     app.audit_log_path = audit;
     app.has_akmon_md = has_akmon_md;
+    app.akmon_md_loaded = has_akmon_md;
+    app.specs_loaded = std::fs::read_dir(app.project_root.join(".akmon/specs"))
+        .ok()
+        .is_some_and(|rd| {
+            rd.flatten()
+                .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+        });
     app.messages = loaded.messages;
     app.total_input_tokens = 0;
     app.total_cache_read_tokens = 0;

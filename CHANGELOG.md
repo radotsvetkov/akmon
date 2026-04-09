@@ -4,6 +4,19 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] - 2026-04-09
+
+### Changed
+
+- **Token efficiency:** reduced global system prompt verbosity and removed redundant prompt sections to lower per-turn context cost.
+- **Tool reference:** replaced long tool reference content with concise, high-signal descriptions to reduce recurring token overhead.
+- **TUI:** added `/context` command to show context-window usage, estimated breakdown, and compact headroom.
+
+### Fixed
+
+- **Prompt assembly:** removed stale `OUTPUT_BREVITY` export and aligned tests with token-efficiency targets.
+- **Context UX state:** track `AKMON.md` and specs presence in TUI app state for context diagnostics.
+
 ## [1.7.1] - 2026-04-09
 
 ### Fixed

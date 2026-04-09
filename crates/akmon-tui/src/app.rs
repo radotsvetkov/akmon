@@ -201,6 +201,10 @@ pub struct TuiApp {
     pub welcome_spark_phase: bool,
     /// Mirrors [`TuiLaunchConfig::has_akmon_md`] for empty-state hints.
     pub has_akmon_md: bool,
+    /// Whether `AKMON.md` is loaded for the current session context.
+    pub akmon_md_loaded: bool,
+    /// Whether project specs are present and may be injected.
+    pub specs_loaded: bool,
     /// Other tools' context files detected at startup ([`scan_context_files`]).
     pub context_scan: ContextScan,
     /// Next message uses read-only plan mode (`/plan`).
@@ -258,6 +262,12 @@ impl TuiApp {
             .and_then(|s| s.to_str())
             .unwrap_or(".")
             .to_string();
+        let specs_loaded = std::fs::read_dir(config.project_root.join(".akmon/specs"))
+            .ok()
+            .is_some_and(|rd| {
+                rd.flatten()
+                    .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+            });
         let context_scan = scan_context_files(&config.project_root);
         const AKMON_MD_LARGE_CHARS: usize = 2000;
         let mut messages: Vec<TuiMessage> = config.resume_messages.unwrap_or_default();
@@ -332,6 +342,8 @@ impl TuiApp {
             input_body_inner: None,
             welcome_spark_phase: false,
             has_akmon_md: config.has_akmon_md,
+            akmon_md_loaded: config.has_akmon_md,
+            specs_loaded,
             context_scan,
             plan_only_next_turn: false,
             architect_next_turn: false,

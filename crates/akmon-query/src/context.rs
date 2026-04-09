@@ -101,111 +101,31 @@ Available tools: {tools_line}\
 ///
 /// Encourages incremental tool use so single completions stay within output limits.
 pub const FILE_WRITING_STRATEGY: &str = "\
-FILE WRITING STRATEGY — THIS IS HOW YOU MUST WORK:\n\
-\n\
-You are a developer making targeted changes, not a code\n\
-generator dumping everything at once. Follow this exactly:\n\
-\n\
-FOR EXISTING FILES — always use `edit`, never write_file:\n\
-  `edit` sends only the changed section.\n\
-  A 10-line change to a 500-line file = a small tool payload.\n\
-  Never rewrite an entire file you can surgically edit.\n\
-  read_file first, identify the exact section to change,\n\
-  then edit with old_str/new_str.\n\
-\n\
-FOR NEW FILES — write incrementally, not monolithically:\n\
-  Step 1: Write the skeleton (imports, empty functions, types).\n\
-          This is always small — about 20–40 lines.\n\
-  Step 2: Implement each function or section with `edit`.\n\
-          One function at a time. Each change stays small.\n\
-\n\
-  Never write a new file longer than 150 lines in one shot.\n\
-  If a file would be 300 lines, use write_file for a short\n\
-  skeleton, then fill with `edit` (or a second small write_file).\n\
-\n\
-FOR NEW PROJECTS — plan before writing a single file:\n\
-  In your reply, list every file you will create (bullet list).\n\
-  Then create files one at a time, starting with the smallest.\n\
-  Prefer at most one write_file per assistant turn (two max).\n\
-\n\
-FOR HTML/CSS/JS:\n\
-  Write HTML structure first (skeleton, no inline styles).\n\
-  Then add CSS as a <style> block or separate .css file.\n\
-  Then add JavaScript separately.\n\
-  Each is its own turn. Prefer each write under ~150 lines.\n\
-\n\
-WHY: Completion output is limited (~8192 tokens per response).\n\
-A very long file risks truncation mid-way.\n\
-Small targeted writes stay within limits.\n\
-\n\
-NEW PROJECT WORKFLOW — FOLLOW THIS SEQUENCE EXACTLY:\n\
-\n\
-When asked to create a project from scratch:\n\
-\n\
-Step 1: Plan (small reply, ~20 lines)\n\
-  List every file you will create (bullets).\n\
-\n\
-Step 2: Create the smallest files first\n\
-  requirements.txt, package.json, Cargo.toml — a few lines each.\n\
-\n\
-Step 3: Skeleton files (empty structures)\n\
-  e.g. app entry: imports and empty function bodies.\n\
-  e.g. index.html: full structure with empty sections; no inline CSS yet.\n\
-\n\
-Step 4: Fill in with `edit` (or apply_patch/patch for larger hunks)\n\
-  One function or section at a time.\n\
-\n\
-Step 5: Verify with shell\n\
-  Run the project, fix errors.\n\
-\n\
-CONCRETE EXAMPLE for “create a landing page”:\n\
-  Turn 1: write_file index.html skeleton (~30 lines HTML only)\n\
-  Turn 2: edit to add <style> block (CSS)\n\
-  Turn 3: edit to add JavaScript if needed\n\
-  Turn 4: open or verify with shell\n\
-\n\
-  NOT: one giant index.html with HTML+CSS+JS (300+ lines)\n\
-  — that risks truncation and is harder to debug.\n";
+FILE WRITING STRATEGY:\n\
+- Read the file before editing.\n\
+- Use edit for existing files; avoid full rewrites.\n\
+- Use write_file only for new files.\n\
+- Keep changes small and verifiable; run checks after edits.\n\
+- For web UIs: HTML first, then CSS, then JS.\n";
 
 /// Explicit autonomous completion behavior for multi-step implementation tasks.
 pub const AUTONOMOUS_TASK_COMPLETION: &str = "\
 AUTONOMOUS TASK COMPLETION:\n\
-- When given a multi-file task, complete it fully without stopping.\n\
-- Do not announce what you plan to do. Do it.\n\
-- Do not say 'Next I will create X' — just create X by calling the tool.\n\
-- The loop continues as long as you call tools. Only produce a final\n\
-  text response when every file is created and verified.\n\
-- Wrong: write app.py then say 'I will now write models.py'\n\
-  Right: write app.py → write models.py → write routes.py → bash verify\n\
-  Then final text only: 'Done. To run: flask run'\n";
+- Complete multi-file tasks end-to-end before final response.\n\
+- Execute needed tool calls; avoid planning narration.\n\
+- Keep iterating while work remains.\n\
+- Verify changes with tests or build commands.\n\
+- If blocked, ask one focused follow-up question.\n\
+- Do not repeat tool outputs in prose.\n\
+- Finish with only concrete run or verify instructions.\n\
+- Be concise. No preamble. No summary after completing work.\n";
 
 /// Three-phase workflow for large or cross-cutting work (injected with implementation-mode project context).
 pub const RESEARCH_PLAN_IMPLEMENT_WORKFLOW: &str = "\
-LARGE-TASK WORKFLOW — RESEARCH → PLAN → IMPLEMENT:\n\
-\n\
-- RESEARCH: Understand the codebase with read/search (and semantic_search when available).\n\
-  Use `spawn_subagent` for deep, narrow exploration so the main context stays small.\n\
-  USE `spawn_subagent` WHEN:\n\
-    - You need to understand existing code before modifying it (3+ files).\n\
-    - You need to search where symbols/logic are defined across the repo.\n\
-    - You need to verify implementation by running tests in isolation.\n\
-    - The research would take more than 2 tool calls.\n\
-  DO NOT use `spawn_subagent` for:\n\
-    - Single-file reads.\n\
-    - Simple grep/search operations.\n\
-    - Writing new files.\n\
-  EXAMPLE (correct):\n\
-    User: 'Add authentication to the Flask app'\n\
-    1) spawn_subagent task='Find user-management files, route structure, existing auth code'\n\
-    2) write_spec('auth-research', subagent summary)\n\
-    3) Plan from research, then implement.\n\
-  Persist durable decisions in `.akmon/specs/` via `write_spec` / `read_spec`.\n\
-\n\
-- PLAN: Before large edits, outline files to touch, risks, and ordering.\n\
-  Put stable requirements and checklists in specs, not only in chat.\n\
-\n\
-- IMPLEMENT: Make small, verifiable edits; run shell checks when appropriate.\n\
-  After substantive progress, the session may write `.akmon/HANDOFF.md` for the next run.\n";
+LARGE-TASK WORKFLOW:\n\
+Use `spawn_subagent` when understanding existing logic needs 3+ files.\n\
+Research key files, produce a short plan, then implement incrementally.\n\
+Persist durable decisions in `.akmon/specs/` with write_spec/read_spec.\n";
 
 /// Compact system instructions for nested `spawn_subagent` runs (short; full TOOL_REFERENCE omitted).
 pub const SUBAGENT_SYSTEM_PROMPT: &str = "\
@@ -217,19 +137,6 @@ Rules:\n\
 - Do not call spawn_subagent (you are already nested).\n\
 - Return a dense factual summary the parent agent can act on; no filler.\n\
 - If you change specs under `.akmon/specs/`, keep them accurate and minimal.\n";
-
-/// Steers models toward shorter replies — output tokens dominate cloud cost.
-pub const OUTPUT_BREVITY: &str = "\
-OUTPUT BREVITY — CRITICAL FOR COST:\n\
-- Never explain what you are about to do. Do it.\n\
-- Never summarize what you just did in prose.\n\
-  Show the user: Done. To run: {command}\n\
-- Never add preamble. Start with the action.\n\
-- Never add 'I hope this helps' or similar.\n\
-- Tool call results are already visible in the TUI.\n\
-  Do not re-describe them in text.\n\
-- Code only needs comments when the logic is non-obvious.\n\
-  Do not add comments that restate what the code does.\n";
 
 /// Markdown-style instructions injected when the session is in read-only plan mode (`--plan`, `/plan`).
 pub const PLAN_MODE_SYSTEM_ADDON: &str = "\n\
@@ -499,8 +406,6 @@ Available tools: {tools_line}\n\
 {FILE_WRITING_STRATEGY}\n\
 \n\
 {AUTONOMOUS_TASK_COMPLETION}\n\
-\n\
-{OUTPUT_BREVITY}\n\
 \n\
 {RESEARCH_PLAN_IMPLEMENT_WORKFLOW}\n\
 \n\
@@ -917,10 +822,9 @@ mod tests {
         assert!(ctx.contains("Rust"));
     }
 
-    /// Anthropic Claude Haiku 4.5 requires a large cacheable prefix (4096+ tokens); this guards the
-    /// padded project-context block plus typical `AKMON.md` so caching can activate.
+    /// Keep global system blocks reasonably small for token efficiency.
     #[test]
-    fn combined_system_messages_meet_haiku_45_cache_char_threshold() {
+    fn combined_system_messages_stay_below_efficiency_target() {
         let akmon = include_str!("../../../AKMON.md");
         let msgs = build_messages(
             Some(akmon),
@@ -952,15 +856,15 @@ mod tests {
         if n_sys > 1 {
             joined_len += 2 * (n_sys - 1);
         }
-        let approx_tokens = joined_len as f64 / 3.5;
+        let approx_tokens = joined_len as f64 / 4.0;
         assert!(
-            approx_tokens >= 4096.0,
-            "approx_tokens={approx_tokens} joined_chars={joined_len} (need >= 4096 for Haiku 4.5 cache minimum)"
+            approx_tokens < 6000.0,
+            "approx_tokens={approx_tokens} joined_chars={joined_len} (target < 6000)"
         );
     }
 
     #[test]
-    fn project_context_alone_meets_haiku_45_cache_char_threshold_without_akmon_md() {
+    fn project_context_alone_stays_below_efficiency_target_without_akmon_md() {
         let msgs = build_messages(
             None,
             &[],
@@ -977,10 +881,10 @@ mod tests {
             .iter()
             .find(|m| m.role == MessageRole::System)
             .expect("project context");
-        let approx_tokens = sys.content.len() as f64 / 3.5;
+        let approx_tokens = sys.content.len() as f64 / 4.0;
         assert!(
-            approx_tokens >= 4096.0,
-            "approx_tokens={approx_tokens} chars={} (no AKMON.md)",
+            approx_tokens < 4000.0,
+            "approx_tokens={approx_tokens} chars={} (target < 4000 without AKMON.md)",
             sys.content.len()
         );
     }

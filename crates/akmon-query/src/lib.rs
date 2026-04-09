@@ -16,11 +16,11 @@ pub use akmon_md_gen::{AKMON_MD_SYSTEM_PROMPT, generate_akmon_md_markdown};
 
 pub use akmon_models::UsageReport;
 pub use context::{
-    AKMON_MD_END, AKMON_MD_START, LOCAL_MODEL_SYSTEM_PROMPT, OUTPUT_BREVITY,
-    PLAN_MODE_SYSTEM_ADDON, PROJECT_CONTEXT_END, PROJECT_CONTEXT_START,
-    RESEARCH_PLAN_IMPLEMENT_WORKFLOW, SUBAGENT_SYSTEM_PROMPT, build_followup_messages,
-    build_messages, build_subagent_followup_messages, build_subagent_task_messages,
-    context_limit_for_model, is_openai_native_chat_model, system_prompt_for_model,
+    AKMON_MD_END, AKMON_MD_START, LOCAL_MODEL_SYSTEM_PROMPT, PLAN_MODE_SYSTEM_ADDON,
+    PROJECT_CONTEXT_END, PROJECT_CONTEXT_START, RESEARCH_PLAN_IMPLEMENT_WORKFLOW,
+    SUBAGENT_SYSTEM_PROMPT, build_followup_messages, build_messages,
+    build_subagent_followup_messages, build_subagent_task_messages, context_limit_for_model,
+    is_openai_native_chat_model, system_prompt_for_model,
 };
 pub use context_manager::{COMPACT_RESERVED_BUFFER, COMPACT_TRIGGER, ContextManager};
 pub use error::SessionError;

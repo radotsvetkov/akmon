@@ -1,239 +1,70 @@
-AKMON TOOL REFERENCE (for the model)
-=====================================
+AKMON TOOL REFERENCE (concise)
+==============================
 
-This section documents every built-in Akmon tool: JSON arguments, successful outputs, and errors.
-Paths are always relative to the project sandbox root unless noted. Absolute paths and ".." segments are rejected.
+All paths are sandbox-relative. Absolute paths and `..` are rejected.
+Success shape: {"status":"success","content":"..."}
+Error shape: {"status":"error","code":"snake_case","message":"..."}
 
-GENERAL OUTPUT SHAPE
-------------------
-Success: {"status":"success","content":"<string>"}  (content may embed JSON as text)
-Error: {"status":"error","code":"<snake_case>","message":"<string>"}
-Question (interactive UI only; the runtime replaces this with Success after the user answers): {"status":"question","question":"<string>","suggestions":["..."]}
-
----
 TOOL: list_directory
---------------------
-Purpose: List files and subdirectories at a path (use before read_file on unknown trees).
+Purpose: List files and folders at a path.
+Input: path.
 
-Arguments (JSON object):
-  path (string, required): Relative directory path; use "." for project root.
-
-Example invocation:
-  {"path":"."}
-
-Typical success: content lists entry names (files and dirs) with types.
-Typical errors: not_found, path_escape if outside sandbox.
-
----
 TOOL: read_file
----------------
-Purpose: Read full UTF-8 text from one file (capped by max bytes, default 1 MiB).
+Purpose: Read one UTF-8 file.
+Input: path.
 
-Arguments:
-  path (string, required): Relative path to file.
-
-Example:
-  {"path":"crates/akmon-core/src/lib.rs"}
-
-Success: file body as string in content (may be truncated with notice if huge).
-Errors: not_found, not_a_file (if path is directory), binary_content, path_escape, too_large.
-
----
 TOOL: write_file
-----------------
-Purpose: Atomically write UTF-8 text to a file (new file or replace). Usually requires policy confirmation.
+Purpose: Create or replace a file atomically.
+Input: path, content.
 
-Arguments:
-  path (string, required)
-  content (string, required)
-
-Example:
-  {"path":"notes.txt","content":"hello"}
-
-Errors: invalid_args, path_escape, permission_denied (policy), io errors as permission_denied or message.
-
----
-TOOL: search
-------------
-Purpose: Regex search across text files under a path (exact/pattern matching). Prefer this for symbols/strings.
-
-Arguments:
-  pattern (string, required): Rust regex pattern.
-  path (string, optional): Directory or file root; default ".".
-  file_pattern (string, optional): Glob filter e.g. "*.rs".
-  case_sensitive (boolean, optional): default false.
-
-Example:
-  {"pattern":"fn main","path":"crates","file_pattern":"*.rs"}
-
-Success JSON (inside content string) includes matches with paths and lines; may set truncated:true when capped.
-Errors: invalid_args for bad regex, path_escape.
-
----
 TOOL: edit
-----------
-Purpose: Replace exactly one occurrence of old_str with new_str in a file (unique match required).
+Purpose: Modify existing file by replacing one unique old_str.
+Input: path, old_str, new_str.
 
-Arguments:
-  path (string, required)
-  old_str (string, required)
-  new_str (string, required; may be empty to delete old_str)
+TOOL: search
+Purpose: Find regex text matches in files.
+Input: pattern, optional path, optional file_pattern, optional case_sensitive.
 
-Example:
-  {"path":"src/lib.rs","old_str":"pub const OLD: i32 = 1;","new_str":"pub const OLD: i32 = 2;"}
-
-Errors: not_found, ambiguous_match (if old_str appears 0 or >1 times), path_escape.
-
----
 TOOL: patch
------------
-Purpose: Apply a unified diff to one or more files.
+Purpose: Apply unified diff to one or more files.
+Input: patch.
 
-Arguments:
-  patch (string, required): Full unified diff body (---/+++ / @@ lines).
-
-Errors: patch_failed, not_found, path_escape.
-
----
 TOOL: apply_patch
------------------
-Purpose: Apply a unified diff to exactly one file; pass the path and the diff (optionally without ---/+++ headers).
+Purpose: Apply unified diff to exactly one file.
+Input: file_path, patch.
 
-Arguments:
-  file_path (string, required): Relative path in the sandbox.
-  patch (string, required): Unified diff body (full or hunks-only).
+TOOL: shell
+Purpose: Run allowlisted shell command; cwd persists between calls.
+Input: command.
 
-Errors: invalid_args (multi-file), patch_failed, not_found, path_escape.
+TOOL: semantic_search
+Purpose: Find relevant code by meaning.
+Input: query, optional top_k.
 
----
-TOOL: web_fetch (only if registered)
-------------------------------------
-Purpose: HTTPS GET public URL; SSRF-blocked for private IPs and metadata hosts.
+TOOL: web_fetch
+Purpose: Fetch a public HTTPS URL (SSRF protected).
+Input: url.
 
-Arguments:
-  url (string, required): https URL only.
+TOOL: write_spec
+Purpose: Save durable project spec loaded in later sessions.
+Input: name, content.
 
-Errors: permission_denied, invalid_args for disallowed URL.
+TOOL: read_spec
+Purpose: Read one spec or list specs.
+Input: optional name.
 
----
-TOOL: shell (only if --shell-allow patterns registered)
--------------------------------------------------------
-Purpose: Run allowlisted argv-only commands (no shell metacharacters).
+TOOL: spawn_subagent
+Purpose: Run isolated research agent and return summary.
+Input: task.
 
-Arguments:
-  command (string, required): Must match a configured allowlist pattern.
-
-Errors: subprocess_failed, permission_denied.
-
----
-TOOL: semantic_search (only with CLI --index)
----------------------------------------------
-Purpose: Natural-language codebase search using embeddings. Use for concepts ("error handling policy").
-For exact strings or regex, use search.
-
-Arguments:
-  query (string, required)
-  top_k (integer, optional): default 5, max 20.
-
-Returns JSON with query, results: [{file, start_line, end_line, score, preview}, ...].
-If index is still building: error message "indexing in progress". If embedding model failed to load: unavailable message.
-
----
-TOOL: ask_followup (interactive TUI only; headless `--task` returns permission_denied)
---------------------------------------------------------------------------------------
-Purpose: Ask the user a clarifying question and wait for a typed answer without ending the session.
-
-Arguments:
-  question (string, required)
-  suggestions (array of strings, optional)
-
-Example: {"question":"Which port should the dev server use?","suggestions":["3000","5173"]}
-
-The UI turns the reply into a normal success tool result for the model.
-
----
 TOOL: todo_write
-----------------
-Purpose: Replace the session todo list stored under `.akmon/todos/<session_id_short>.json`.
+Purpose: Update project task list stored in `.akmon/todos/current.json`.
+Input: todos array with id, task, status.
 
-Arguments:
-  todos (array, required): items with id (string), task (string), status: pending | in_progress | completed
+TOOL: ask_followup
+Purpose: Ask user a focused question and wait for answer.
+Input: question, optional suggestions.
 
-Success: summary counts. Active todos may appear in the system prompt on later turns.
-
----
 TOOL: memory_write
-------------------
-Purpose: Save durable project notes under `~/.akmon/memory/<project_hash>/<type>__<slug>.md`.
-
-Arguments:
-  type (string, required): project | user | pattern | decision
-  title (string, required)
-  content (string, required)
-
-Matching memories and all `user__*` files may be injected into the system prompt (capped).
-
----
-WORKFLOW HINTS
---------------
-1) list_directory(".") then search or read_file.
-2) Prefer edit/patch over write_file for existing files.
-3) Never read_file on a directory.
-
----
-EXTENDED EXAMPLES (repetition for token budget / prompt cache with Claude Haiku 4.5)
-Example block 0: list_directory path='src/i0'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 1: list_directory path='src/i1'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 2: list_directory path='src/i2'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 3: list_directory path='src/i3'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 4: list_directory path='src/i4'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 5: list_directory path='src/i5'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 6: list_directory path='src/i6'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 7: list_directory path='src/i7'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 8: list_directory path='src/i8'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 9: list_directory path='src/i9'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 10: list_directory path='src/i10'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 11: list_directory path='src/i11'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 12: list_directory path='src/i12'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 13: list_directory path='src/i13'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 14: list_directory path='src/i14'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 15: list_directory path='src/i15'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 16: list_directory path='src/i16'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 17: list_directory path='src/i17'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 18: list_directory path='src/i18'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 19: list_directory path='src/i19'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 20: list_directory path='src/i20'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 21: list_directory path='src/i21'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 22: list_directory path='src/i22'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 23: list_directory path='src/i23'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 24: list_directory path='src/i24'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 25: list_directory path='src/i25'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 26: list_directory path='src/i26'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 27: list_directory path='src/i27'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 28: list_directory path='src/i28'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 29: list_directory path='src/i29'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 30: list_directory path='src/i30'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 31: list_directory path='src/i31'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 32: list_directory path='src/i32'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 33: list_directory path='src/i33'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 34: list_directory path='src/i34'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 35: list_directory path='src/i35'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 36: list_directory path='src/i36'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 37: list_directory path='src/i37'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 38: list_directory path='src/i38'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 39: list_directory path='src/i39'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 40: list_directory path='src/i40'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 41: list_directory path='src/i41'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 42: list_directory path='src/i42'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 43: list_directory path='src/i43'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 44: list_directory path='src/i44'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 45: list_directory path='src/i45'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 46: list_directory path='src/i46'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 47: list_directory path='src/i47'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 48: list_directory path='src/i48'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 49: list_directory path='src/i49'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 50: list_directory path='src/i50'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 51: list_directory path='src/i51'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 52: list_directory path='src/i52'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 53: list_directory path='src/i53'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
-Example block 54: list_directory path='src/i54'; read_file path='README.md'; search pattern='TODO|FIXME' path='.' file_pattern='*.rs'; edit path='x.rs' old_str='a' new_str='b'; patch patch='--- a\n+++ b\n@@ ..'; write_file path='new.txt' content='data'; semantic_search query='authentication flow' top_k=8.
+Purpose: Save project memory for future relevant retrieval.
+Input: type, title, content.

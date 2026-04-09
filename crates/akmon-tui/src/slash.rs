@@ -94,6 +94,12 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "context",
+        aliases: &[],
+        description: "Show context window usage breakdown",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "plan",
         aliases: &[],
         description: "Next message: read-only plan (no writes)",
