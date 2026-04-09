@@ -364,14 +364,14 @@ fn run_loop(
                         MouseEventKind::ScrollUp => {
                             if rect_contains(lay.viewport, m.column, m.row) {
                                 let ev_msg_h = lay.viewport.height as usize;
-                                let step = (ev_msg_h / 4).max(3).min(24);
+                                let step = (ev_msg_h / 4).clamp(3, 24);
                                 app.scroll_up(step, ev_msg_h, size.width);
                             }
                         }
                         MouseEventKind::ScrollDown => {
                             if rect_contains(lay.viewport, m.column, m.row) {
                                 let ev_msg_h = lay.viewport.height as usize;
-                                let step = (ev_msg_h / 4).max(3).min(24);
+                                let step = (ev_msg_h / 4).clamp(3, 24);
                                 app.scroll_down(step, ev_msg_h, size.width);
                             }
                         }

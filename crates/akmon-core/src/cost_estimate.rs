@@ -40,10 +40,10 @@ pub fn match_model_cost_row<'a>(
 /// Context window size used for **percentage bars only** (heuristic unless overridden in config).
 #[must_use]
 pub fn context_window_tokens_hint(model: &str, overrides: &[ModelCostEstimateRow]) -> u64 {
-    if let Some(row) = match_model_cost_row(model, overrides) {
-        if let Some(w) = row.context_window_tokens {
-            return w;
-        }
+    if let Some(row) = match_model_cost_row(model, overrides)
+        && let Some(w) = row.context_window_tokens
+    {
+        return w;
     }
     let m = model.to_lowercase();
     if m.contains("claude") {

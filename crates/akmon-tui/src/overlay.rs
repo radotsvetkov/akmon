@@ -452,7 +452,7 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
 
 fn draw_settings_panel(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect, st: &SettingsOverlayState) {
     let inner_h = msg_area.height.saturating_sub(2).max(12);
-    let w = msg_area.width.saturating_sub(4).max(50).min(96);
+    let w = msg_area.width.saturating_sub(4).clamp(50, 96);
     let r = centered_rect(msg_area, w, inner_h);
     f.render_widget(Clear, r);
     let mut lines: Vec<Line> = Vec::new();
@@ -532,10 +532,7 @@ fn draw_settings_panel(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect, st: &Set
                 Style::default().fg(FG_MUTED),
             )));
             lines.push(Line::from(Span::styled(
-                format!(
-                    "If context field empty, status bar uses built-in hint: {} tokens",
-                    hint
-                ),
+                format!("If context field empty, status bar uses built-in hint: {hint} tokens"),
                 Style::default().fg(FG_MUTED),
             )));
             lines.push(Line::from(Span::styled(
