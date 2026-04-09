@@ -453,8 +453,8 @@ fn dispatch(
         }
         "context" => {
             let window = context_window_for_model(&app.model_name);
-            let used =
-                u64::from(app.total_input_tokens).saturating_add(u64::from(app.total_cache_read_tokens));
+            let used = u64::from(app.total_input_tokens)
+                .saturating_add(u64::from(app.total_cache_read_tokens));
             let pct = context_usage_percent(
                 app.total_input_tokens,
                 app.total_cache_read_tokens,
