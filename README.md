@@ -50,11 +50,11 @@ Example live session:
 
 ```text
 You: build a FastAPI service with users CRUD and PostgreSQL
-→ Akmon explores project files
-→ proposes a plan and asks for file-write permission
-→ writes models/routes/tests step by step
-→ runs verification commands (pytest) after changes
-→ exits with token usage, cache, estimated cost, and audit path
+→ Akmon explores project files and usually proposes an implementation plan
+→ requests permission before file writes and other sensitive actions
+→ implements models/routes/tests incrementally with visible tool steps
+→ runs verification commands (for example pytest) when your task and permissions allow it
+→ exits with token usage, cache stats, estimated cost, and audit log path
 ```
 
 ## Install now
