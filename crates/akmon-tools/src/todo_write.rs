@@ -144,8 +144,7 @@ impl Tool for TodoWriteTool {
 
         ToolOutput::Success {
             content: format!(
-                "Todos updated: {} pending, {} in progress, {} completed",
-                pending, in_progress, completed
+                "Todos updated: {pending} pending, {in_progress} in progress, {completed} completed",
             ),
         }
     }

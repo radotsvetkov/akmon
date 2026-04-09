@@ -649,8 +649,7 @@ async fn run_anthropic_stream(
                 let _ = tx
                     .send(Ok(StreamEvent::StatusHint {
                         message: format!(
-                            "⟳ rate limited — retrying in {}s ({}/{})",
-                            remaining, rate_limit_attempts, RETRY_MAX
+                            "⟳ rate limited — retrying in {remaining}s ({rate_limit_attempts}/{RETRY_MAX})",
                         ),
                     }))
                     .await;
