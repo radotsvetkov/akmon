@@ -360,6 +360,7 @@ Project memory: [`AKMON.md`](AKMON.md)
 
 We welcome issues and pull requests on [GitHub](https://github.com/radotsvetkov/akmon).
 
+- **Contribution guide:** see [CONTRIBUTING.md](CONTRIBUTING.md) for workflow, checks, and PR expectations.
 - **Book:** [Development setup](https://radotsvetkov.github.io/akmon/docs/contributing/setup.html) (clone, build, test, crate map).
 - **Expectations:** clear description, tests where feasible, no `unwrap` in library crates, `rustdoc` on new public APIs.
 - **Scope:** keep changes focused; match existing style and abstractions.

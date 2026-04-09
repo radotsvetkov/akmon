@@ -20,9 +20,9 @@ use crate::LlmProvider;
 use crate::config::CompletionConfig;
 use crate::error::ModelError;
 use crate::message::{Message, MessageRole};
+use crate::ollama_stream_idle_timeout_secs;
 use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent};
 use crate::tool_def::ToolDefinition;
-use crate::ollama_stream_idle_timeout_secs;
 
 /// JSON line from Ollama's NDJSON chat stream (or the single JSON body when `stream: false`).
 #[derive(Debug, serde::Deserialize)]

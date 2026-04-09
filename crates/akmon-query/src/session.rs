@@ -1754,7 +1754,10 @@ Complete and verify the current file(s), then continue in the next turn.";
                 Ok(StreamEvent::StatusHint { .. }) => {}
                 Ok(StreamEvent::Error { error }) => {
                     if matches!(error, ModelError::RateLimited { .. }) {
-                        match self.handle_model_error_for_run(event_tx, task, error).await? {
+                        match self
+                            .handle_model_error_for_run(event_tx, task, error)
+                            .await?
+                        {
                             Some(ae) => return Err(ae),
                             None => return Ok(()),
                         }
