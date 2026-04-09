@@ -257,8 +257,10 @@ mod tests {
     fn model_roundtrip_save() {
         let dir = tempdir().expect("tmp");
         let path = dir.path().join("config.toml");
-        let mut c = AkmonGlobalConfig::default();
-        c.default_model = Some("llama3.2".into());
+        let c = AkmonGlobalConfig {
+            default_model: Some("llama3.2".into()),
+            ..Default::default()
+        };
         save_config_to(&path, &c).expect("save");
         let l = load_config_from(&path).expect("load");
         assert_eq!(l.default_model.as_deref(), Some("llama3.2"));
@@ -301,8 +303,10 @@ mod tests {
 
     #[test]
     fn show_masks_api_key() {
-        let mut c = AkmonGlobalConfig::default();
-        c.anthropic_api_key = Some("sk-ant-api03-abcdef123456".into());
+        let c = AkmonGlobalConfig {
+            anthropic_api_key: Some("sk-ant-api03-abcdef123456".into()),
+            ..Default::default()
+        };
         let s = c.display_masked_toml();
         assert!(!s.contains("abcdef123456"));
         assert!(s.contains("sk-ant-a"));

@@ -2,11 +2,20 @@
 
 use akmon_models::{LlmProvider, Message, MessageRole, approximate_tokens};
 
+/// Fraction of **available** context (after reserved buffer) that triggers auto-compaction.
+pub const COMPACT_TRIGGER: f64 = 0.85;
+/// Reserve headroom for the summarization model call (tokens).
+pub const COMPACT_RESERVED_BUFFER: usize = 30_000;
+
+fn reserved_for_window(max_tokens: usize) -> usize {
+    COMPACT_RESERVED_BUFFER.min(max_tokens.saturating_mul(3) / 4)
+}
+
 /// Decides when chat history should be compacted and how to split messages for summarization.
 pub struct ContextManager {
     /// Maximum tokens (context window cap) used with [`Self::threshold`] to trigger summarization.
     pub max_tokens: usize,
-    /// Fraction of `max_tokens` that triggers summarization (e.g. `0.85`).
+    /// Legacy field — summarization now uses [`COMPACT_TRIGGER`] and [`COMPACT_RESERVED_BUFFER`].
     pub threshold: f64,
     /// How many recent non-system messages to preserve after summarization.
     pub keep_recent: usize,
@@ -18,7 +27,7 @@ impl Default for ContextManager {
     fn default() -> Self {
         Self {
             max_tokens: 8192,
-            threshold: 0.85,
+            threshold: COMPACT_TRIGGER,
             keep_recent: 10,
             fixed_system_messages: 1,
         }
@@ -26,13 +35,16 @@ impl Default for ContextManager {
 }
 
 impl ContextManager {
-    /// Returns true when estimated tokens exceed `(max_tokens * threshold)` (strict `>`).
+    /// Returns true when estimated input exceeds [`COMPACT_TRIGGER`] of usable context
+    /// ([`Self::max_tokens`] minus a capped reserved band — see [`reserved_for_window`]).
     pub fn needs_summarization(&self, messages: &[Message], provider: &dyn LlmProvider) -> bool {
         let tokens = provider
             .estimate_tokens(messages)
             .unwrap_or_else(|| approximate_tokens(messages));
-        let limit = (self.max_tokens as f64 * self.threshold) as usize;
-        tokens > limit
+        let reserved = reserved_for_window(self.max_tokens);
+        let available = self.max_tokens.saturating_sub(reserved).max(1);
+        let ratio = tokens as f64 / available as f64;
+        ratio > COMPACT_TRIGGER
     }
 
     /// Splits the message list into `(to_summarize, to_keep)`.
@@ -123,7 +135,7 @@ mod tests {
     fn default_values() {
         let d = ContextManager::default();
         assert_eq!(d.max_tokens, 8192);
-        assert_eq!(d.threshold, 0.85);
+        assert_eq!(d.threshold, COMPACT_TRIGGER);
         assert_eq!(d.keep_recent, 10);
         assert_eq!(d.fixed_system_messages, 1);
     }
@@ -132,7 +144,7 @@ mod tests {
     fn needs_summarization_false_under_threshold() {
         let cm = ContextManager {
             max_tokens: 1000,
-            threshold: 0.85,
+            threshold: COMPACT_TRIGGER,
             keep_recent: 10,
             fixed_system_messages: 1,
         };
@@ -148,7 +160,7 @@ mod tests {
     fn needs_summarization_true_over_threshold() {
         let cm = ContextManager {
             max_tokens: 100,
-            threshold: 0.85,
+            threshold: COMPACT_TRIGGER,
             keep_recent: 10,
             fixed_system_messages: 1,
         };
@@ -166,7 +178,7 @@ mod tests {
     fn messages_to_summarize_excludes_fixed_system() {
         let cm = ContextManager {
             max_tokens: 100,
-            threshold: 0.85,
+            threshold: COMPACT_TRIGGER,
             keep_recent: 2,
             fixed_system_messages: 1,
         };
@@ -200,7 +212,7 @@ mod tests {
     fn messages_to_summarize_skips_body_system_then_splits() {
         let cm = ContextManager {
             max_tokens: 100,
-            threshold: 0.85,
+            threshold: COMPACT_TRIGGER,
             keep_recent: 1,
             fixed_system_messages: 1,
         };
@@ -233,7 +245,7 @@ mod tests {
     fn messages_to_summarize_keep_recent_tail() {
         let cm = ContextManager {
             max_tokens: 100,
-            threshold: 0.85,
+            threshold: COMPACT_TRIGGER,
             keep_recent: 3,
             fixed_system_messages: 0,
         };

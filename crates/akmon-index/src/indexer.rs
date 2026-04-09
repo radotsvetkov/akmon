@@ -427,8 +427,10 @@ mod tests {
             writeln!(f, "// line\nlet x = 1;\n").expect("write");
         }
         let sandbox = Sandbox::new(root.to_path_buf());
-        let mut idx = Indexer::default();
-        idx.max_files = 2;
+        let idx = Indexer {
+            max_files: 2,
+            ..Default::default()
+        };
         let (metas, file_count, hit_cap) =
             idx.collect_file_chunks(root, &sandbox).expect("collect");
         assert!(hit_cap);

@@ -19,29 +19,30 @@ Akmon is a local-first, trust-first AI coding agent written in Rust.
 Single binary. No runtime dependencies. Works with any LLM provider.
 Logs every action to an audit trail.
 
+**Project site (landing + hosted book):** [radotsvetkov.github.io/akmon](https://radotsvetkov.github.io/akmon/)
+
 ## Why Akmon?
 
-Most AI coding tools require you to trust a vendor with your code,
-your API keys, and your workflow. Anthropic can block your access
-overnight. Cursor can change billing without warning. Claude Code
-requires a subscription you do not control.
+Most AI coding products ask you to trust their stack, billing, and roadmap.
+Akmon is the opposite: **you run the binary**, **you pick the model**, and
+**you get an explicit permission trail** when you want accountability.
 
-Akmon is different by design:
+- **Audit-friendly by default.** Tool calls, policy decisions, and session flow
+  can be written to JSONL for review later.
 
-- **Every action is audited.** Every tool call, permission decision,
-  and model response is logged to a JSONL file. No other terminal
-  coding agent does this.
+- **Sandboxed workspace.** Paths stay under your repo root; optional
+  `web_fetch` is guarded against common SSRF patterns; keys are handled
+  carefully (zeroized in memory where applicable).
 
-- **Nothing leaves without permission.** Files are sandboxed to your
-  git root. Web requests are SSRF-protected. API keys are zeroized
-  in memory on drop.
-
-- **No subscription. No lock-in.** Bring your own API key for any
-  provider — or run fully offline with Ollama. You own the tool.
+- **No subscription for the agent.** Use Ollama offline or plug in any
+  supported cloud provider with your own keys.
 
 - **Single binary.** Roughly 3–4MB without semantic indexing (larger with `--index`). Drop it in
-  `/usr/local/bin` and it works. Works over SSH. Works in Docker.
-  Works in CI.
+  `/usr/local/bin` and it works over SSH, in Docker, or in CI.
+
+- **Apache 2.0.** Permissive license suited to developer tools and agent integrations ([License](./license.md)).
+
+[Other tools vs Akmon](./comparison.md) — a short, non-billboard contrast when you need it.
 
 ## What Akmon does
 
@@ -58,7 +59,10 @@ akmon spec payment-flow "Stripe integration with webhooks"
 # Headless for scripting and CI
 akmon --yes --task "fix all clippy warnings"
 
-# Import context from Claude Code, Cursor, Kiro, and others
+# Structured output for automation (including early config errors in JSON mode)
+akmon --yes --output json --task "list TODO comments" | jq .
+
+# Import context from Claude Code, Cursor, Codex, and others
 akmon import
 
 # Export AKMON.md to any other tool format
@@ -79,10 +83,14 @@ akmon export --all
 - **Terminal-native developers** who do not want to live in VS Code
   to get good AI assistance
 
+- **Automation authors** composing headless runs, CI jobs, and multi-step “agent” scripts ([Tutorials](./tutorials/overview.md))
+
 ## Quick navigation
 
 - New to Akmon? → [Installation](./getting-started/installation.md)
 - Already installed? → [Quick Start](./getting-started/quickstart.md)
+- **Tutorials (step-by-step, multi-agent, architecture)** → [Tutorials overview](./tutorials/overview.md)
+- Full capability map → [Capabilities](./reference/capabilities.md)
 - Want examples? → [Language Guides](./languages/rust.md)
 - Need a reference? → [CLI Reference](./reference/cli.md)
 

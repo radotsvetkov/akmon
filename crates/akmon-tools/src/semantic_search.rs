@@ -248,6 +248,7 @@ mod tests {
             ToolOutput::Error { message, .. } => {
                 panic!("unexpected error: {message}");
             }
+            ToolOutput::Question { .. } => panic!("unexpected question"),
         }
     }
 }

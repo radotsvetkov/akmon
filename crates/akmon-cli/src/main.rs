@@ -5,6 +5,8 @@ mod cli_project;
 mod config_cmd;
 mod export_cmd;
 mod import_cmd;
+mod session_index;
+mod session_transcript;
 mod spec_cmd;
 
 use std::io::Write;
@@ -19,19 +21,24 @@ use akmon_core::{
     AgentConfig, AgentError, AgentEvent, AuditEvent, InteractivePolicyReply, McpServerConfig,
     PolicyEngine, PolicyEngineMode, PolicyVerdict, Sandbox, write_audit_jsonl,
 };
-use akmon_models::{LlmConnectConfig, LlmProvider};
-use akmon_query::{AgentSession, ToolCallSummary};
+use akmon_models::{LlmConnectConfig, LlmProvider, Message, MessageRole, ProviderError};
+use akmon_query::{
+    AgentSession, SessionRunExit, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
+    ToolCallSummary, write_handoff_file,
+};
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
 use akmon_tools::{
-    ApplyPatchTool, EditTool, GitTool, ListDirectoryTool, PatchTool, ReadFileTool, SearchTool,
-    ShellTool, WebFetchTool, WriteFileTool, discover_mcp_tools,
+    ApplyPatchTool, AskFollowupTool, EditTool, GitTool, ListDirectoryTool, MemoryWriteTool,
+    PatchTool, ReadFileTool, ReadSpecTool, SearchTool, ShellTool, TodoWriteTool, WebFetchTool,
+    WriteFileTool, WriteSpecTool, discover_mcp_tools,
 };
 use akmon_tui::TuiLaunchConfig;
 use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(feature = "semantic-index")]
 use fastembed::{TextEmbedding, TextInitOptions};
 use serde::Serialize;
+use serde_json::json;
 #[cfg(feature = "semantic-index")]
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
@@ -211,10 +218,24 @@ pub(crate) fn find_git_project_root(start: &Path) -> Option<PathBuf> {
 }
 
 /// Reads `AKMON.md` from `project_root` when the file exists.
+///
+/// Warns when the file is large: it is reinjected on every model call, so oversized files can
+/// dominate input cost despite prompt caching.
+const AKMON_MD_MAX_CHARS: usize = 2000;
+
 fn load_akmon_md(project_root: &Path) -> std::io::Result<Option<String>> {
     let path = project_root.join("AKMON.md");
     if path.is_file() {
-        std::fs::read_to_string(path).map(Some)
+        let content = std::fs::read_to_string(path)?;
+        if content.len() > AKMON_MD_MAX_CHARS {
+            tracing::warn!(
+                akmon_md_chars = content.len(),
+                akmon_md_tokens_estimate = content.len() / 4,
+                "AKMON.md is large; files over {} chars (~500+ tokens) add more cost than they save — consider trimming",
+                AKMON_MD_MAX_CHARS
+            );
+        }
+        Ok(Some(content))
     } else {
         Ok(None)
     }
@@ -241,6 +262,18 @@ struct RunUsageSummary {
     total_output_tokens: u32,
 }
 
+/// Why a headless run stopped (JSON `--output json`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // Interrupted reserved for future signal handling
+enum ExitReason {
+    Completed,
+    MaxTurns,
+    BudgetLimit,
+    Error,
+    Interrupted,
+}
+
 /// Resolved run summary for `--output json` (stable field names for automation).
 #[derive(Debug, Serialize)]
 struct RunReport {
@@ -248,6 +281,8 @@ struct RunReport {
     session_id: String,
     /// `"success"` or `"error"`.
     status: &'static str,
+    /// Machine-readable stop reason (headless integrations).
+    exit_reason: ExitReason,
     /// Full assistant reply text accumulated from stream deltas.
     result: String,
     /// Tool completions in chronological order.
@@ -258,6 +293,59 @@ struct RunReport {
     audit_log_path: String,
     /// Token totals for this run (Ollama typically leaves cache fields at zero).
     usage: RunUsageSummary,
+    /// Estimated cumulative USD (heuristic; zero when unknown or local).
+    cost_usd: f64,
+    /// Prompt-cache read tokens (duplicate of `usage` for CI consumers).
+    cache_read_tokens: u64,
+    /// Sandbox-relative paths touched by successful writes/edits this run.
+    files_written: Vec<String>,
+}
+
+/// Single JSON object on stdout for `--output json` when exiting before any agent session exists.
+fn print_json_early_error_and_exit(error: String) -> ! {
+    let error_report = json!({
+        "session_id": "",
+        "status": "error",
+        "result": "",
+        "tool_calls": [],
+        "error": error,
+        "exit_reason": "error",
+        "cost_usd": 0.0,
+        "files_written": [],
+        "cache_read_tokens": 0,
+    });
+    println!("{}", error_report);
+    std::process::exit(2);
+}
+
+/// Configuration / setup failure: stderr in text mode, JSON on stdout when `--output json`.
+fn exit_early_config_error(
+    cli: &Cli,
+    error: String,
+    index_thread: Option<&mut Option<std::thread::JoinHandle<()>>>,
+    text_exit_code: i32,
+) -> ! {
+    if let Some(slot) = index_thread
+        && let Some(h) = slot.take()
+    {
+        eprintln!("akmon: waiting for index to finish building...");
+        let _ = h.join();
+    }
+    if cli.output == OutputFormat::Json {
+        print_json_early_error_and_exit(error);
+    }
+    eprintln!("akmon: {error}");
+    std::process::exit(text_exit_code);
+}
+
+/// [`resolve_resume_session_id`] failure (text mode prints two lines).
+fn exit_resume_session_error(cli: &Cli, e: String) -> ! {
+    if cli.output == OutputFormat::Json {
+        print_json_early_error_and_exit(format!("{e}\nStart a new session: akmon"));
+    }
+    eprintln!("akmon: {e}");
+    eprintln!("Start a new session: akmon");
+    std::process::exit(1);
 }
 
 /// Command-line interface for the Akmon agent binary.
@@ -391,9 +479,24 @@ pub(crate) struct Cli {
     /// Model id for the planning phase when using `--architect`. Overrides `[architect] planner_model` in `~/.akmon/config.toml`; default `llama3.2`.
     #[arg(long = "planner-model", value_name = "MODEL", global = true)]
     planner_model: Option<String>,
-    /// Resume or label a session (full resume is slice 4; value is shown in the TUI today).
-    #[arg(long = "session", global = true)]
-    session: Option<uuid::Uuid>,
+    /// Resume the last session for this project directory (uses `~/.akmon/last_session.json`).
+    #[arg(short = 'c', long = "continue", global = true, conflicts_with = "resume_session")]
+    continue_last: bool,
+    /// Resume a specific session id (full UUID or unique `*.json` prefix under `~/.akmon/sessions/`).
+    #[arg(short = 's', long = "session", global = true, conflicts_with = "continue_last")]
+    resume_session: Option<String>,
+    /// Display name for this session (status line / JSON tooling).
+    #[arg(short = 'n', long = "name", global = true)]
+    session_name: Option<String>,
+    /// Stop after estimated spend reaches this USD amount (headless only; ignored for Ollama).
+    #[arg(long = "max-budget-usd", global = true, value_name = "USD")]
+    max_budget_usd: Option<f64>,
+    /// Extra directories merged into the sandbox (in addition to the project root). Repeatable.
+    #[arg(long = "add-dir", global = true, value_name = "DIR", action = clap::ArgAction::Append)]
+    add_dirs: Vec<PathBuf>,
+    /// Model to try on repeated HTTP 429/529 before giving up (headless only).
+    #[arg(long = "fallback-model", global = true, value_name = "MODEL")]
+    fallback_model: Option<String>,
 }
 
 /// Top-level `akmon` subcommands.
@@ -441,6 +544,9 @@ fn build_tool_registry(
             Box::new(ReadFileTool::new()),
             Box::new(ListDirectoryTool::new()),
             Box::new(SearchTool::new()),
+            Box::new(AskFollowupTool),
+            Box::new(TodoWriteTool),
+            Box::new(MemoryWriteTool),
         ];
         if web_fetch {
             tools.push(Box::new(WebFetchTool::new()));
@@ -459,6 +565,9 @@ fn build_tool_registry(
         Box::new(EditTool::new()),
         Box::new(PatchTool::new()),
         Box::new(ApplyPatchTool::new()),
+        Box::new(AskFollowupTool),
+        Box::new(TodoWriteTool),
+        Box::new(MemoryWriteTool),
     ];
     if web_fetch {
         tools.push(Box::new(WebFetchTool::new()));
@@ -474,6 +583,84 @@ fn build_tool_registry(
         tools.push(Box::new(GitTool::new()));
     }
     tools
+}
+
+#[cfg(feature = "semantic-index")]
+#[allow(clippy::too_many_arguments)]
+fn cli_attach_specs_subagent(
+    tools: &mut Vec<Box<dyn akmon_tools::Tool>>,
+    cli: &Cli,
+    has_git_root: bool,
+    plan_mode: bool,
+    provider: &Arc<dyn LlmProvider>,
+    sandbox: &Arc<Sandbox>,
+    akmon_md: &Option<String>,
+    semantic_parts: Option<SemanticIndexParts>,
+) {
+    tools.push(Box::new(ReadSpecTool::new()));
+    if !plan_mode {
+        tools.push(Box::new(WriteSpecTool::new()));
+    }
+    let shell_allow = cli.shell_allow.clone();
+    let web_fetch = cli.web_fetch;
+    let semantic = semantic_parts.clone();
+    let plan_for_sub = plan_mode;
+    let factory: SubagentToolFactory = Arc::new(move || {
+        build_tool_registry(
+            &shell_allow,
+            web_fetch,
+            has_git_root,
+            plan_for_sub,
+            semantic.clone(),
+        )
+    });
+    let rt = Arc::new(SubagentRuntime {
+        provider: Arc::clone(provider),
+        policy: Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
+        sandbox: Arc::clone(sandbox),
+        akmon_md: akmon_md.clone(),
+        plan_mode,
+        confirmation_timeout_secs: 30,
+        tool_factory: factory,
+    });
+    tools.push(Box::new(SpawnSubagentTool::new(rt)));
+}
+
+#[cfg(not(feature = "semantic-index"))]
+fn cli_attach_specs_subagent(
+    tools: &mut Vec<Box<dyn akmon_tools::Tool>>,
+    cli: &Cli,
+    has_git_root: bool,
+    plan_mode: bool,
+    provider: &Arc<dyn LlmProvider>,
+    sandbox: &Arc<Sandbox>,
+    akmon_md: &Option<String>,
+) {
+    tools.push(Box::new(ReadSpecTool::new()));
+    if !plan_mode {
+        tools.push(Box::new(WriteSpecTool::new()));
+    }
+    let shell_allow = cli.shell_allow.clone();
+    let web_fetch = cli.web_fetch;
+    let plan_for_sub = plan_mode;
+    let factory: SubagentToolFactory = Arc::new(move || {
+        build_tool_registry(
+            &shell_allow,
+            web_fetch,
+            has_git_root,
+            plan_for_sub,
+        )
+    });
+    let rt = Arc::new(SubagentRuntime {
+        provider: Arc::clone(provider),
+        policy: Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
+        sandbox: Arc::clone(sandbox),
+        akmon_md: akmon_md.clone(),
+        plan_mode,
+        confirmation_timeout_secs: 30,
+        tool_factory: factory,
+    });
+    tools.push(Box::new(SpawnSubagentTool::new(rt)));
 }
 
 fn load_user_global_config() -> AkmonGlobalConfig {
@@ -541,7 +728,7 @@ fn resolve_llm(
     cli: &Cli,
     global: &AkmonGlobalConfig,
     model: String,
-) -> Result<Arc<dyn LlmProvider>, String> {
+) -> Result<Arc<dyn LlmProvider>, ProviderError> {
     llm_connect_from_cli(cli, global, model).resolve()
 }
 
@@ -573,6 +760,96 @@ fn resolve_audit_log_path(
         Some(p) => p,
         None => default_audit_log_path(project_root, session_id),
     }
+}
+
+fn resolve_resume_session_id(cli: &Cli, project_root: &Path) -> Result<Option<uuid::Uuid>, String> {
+    if cli.continue_last {
+        let index = session_index::SessionIndex::load();
+        let Some(entry) = index.get_for_project(project_root) else {
+            return Err("No previous session found for this directory.".into());
+        };
+        let u = uuid::Uuid::parse_str(&entry.session_id)
+            .map_err(|e| format!("invalid session id in index: {e}"))?;
+        return Ok(Some(u));
+    }
+    if let Some(ref s) = cli.resume_session {
+        return session_transcript::resolve_session_id_from_cli_arg(s).map(Some);
+    }
+    Ok(None)
+}
+
+fn sandbox_for_cli(project_root: PathBuf, has_git_root: bool, add_dirs: &[PathBuf]) -> Arc<Sandbox> {
+    let extra: Vec<PathBuf> = add_dirs
+        .iter()
+        .filter_map(|p| dunce::canonicalize(p).ok())
+        .collect();
+    if extra.is_empty() {
+        Arc::new(Sandbox::with_git_root(project_root, has_git_root))
+    } else {
+        Arc::new(Sandbox::with_additional_roots_git(project_root, extra, has_git_root))
+    }
+}
+
+fn model_messages_to_tui(msgs: Vec<Message>) -> Vec<akmon_tui::TuiMessage> {
+    use akmon_tui::TuiMessage;
+    msgs.into_iter()
+        .filter_map(|m| match m.role {
+            MessageRole::User => Some(TuiMessage::User {
+                content: m.content,
+            }),
+            MessageRole::Assistant => Some(TuiMessage::Assistant {
+                content: m.content,
+                complete: true,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn exit_reason_ok(session: &AgentSession) -> ExitReason {
+    match session.last_run_exit() {
+        SessionRunExit::BudgetLimit => ExitReason::BudgetLimit,
+        SessionRunExit::Completed => ExitReason::Completed,
+    }
+}
+
+fn exit_reason_err(e: &AgentError) -> ExitReason {
+    match e {
+        AgentError::IterationLimitReached { .. } => ExitReason::MaxTurns,
+        _ => ExitReason::Error,
+    }
+}
+
+fn headless_persist(
+    project_root: &Path,
+    session: &AgentSession,
+    model: &str,
+    started_at: chrono::DateTime<chrono::Utc>,
+) {
+    let msgs: Vec<Message> = session.context_messages().to_vec();
+    let started_str = started_at.to_rfc3339();
+    if let Err(e) = session_transcript::save_headless_session_file(session_transcript::HeadlessSessionSnapshot {
+        session_id: session.session_id(),
+        project_root,
+        model,
+        messages: &msgs,
+        started_at_rfc3339: &started_str,
+        total_input_tokens: session.total_input_tokens(),
+        total_cache_read_tokens: session.total_cache_read_tokens(),
+        total_output_tokens: session.total_output_tokens(),
+    }) {
+        eprintln!("akmon: warning: could not save session snapshot: {e}");
+    }
+    let mut index = session_index::SessionIndex::load();
+    index.record(
+        project_root,
+        session_index::SessionEntry {
+            session_id: session.session_id().to_string(),
+            model: model.into(),
+            started_at: started_str,
+            turn_count: session.user_turns_finished,
+        },
+    );
 }
 
 /// Prints [`AgentEvent`]s for the TTY and forwards interactive policy replies.
@@ -705,8 +982,12 @@ async fn main() -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("akmon: cannot read current directory: {e}");
-            return ExitCode::from(2);
+            exit_early_config_error(
+                &cli,
+                format!("cannot read current directory: {e}"),
+                None,
+                2,
+            );
         }
     };
 
@@ -730,8 +1011,7 @@ async fn main() -> ExitCode {
             let provider = match cli_project::resolve_provider(&cli) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("akmon: {e}");
-                    return ExitCode::from(2);
+                    exit_early_config_error(&cli, e.to_string(), None, 2);
                 }
             };
             return match import_cmd::run_import(args.clone(), project_root.clone(), provider).await
@@ -785,7 +1065,24 @@ async fn main() -> ExitCode {
         let has_akmon_md = project_root.join("AKMON.md").is_file();
 
         let mode_label = if cli.yes { "AUTO" } else { "INTERACTIVE" };
-        let session_id = cli.session.unwrap_or_else(uuid::Uuid::new_v4);
+        let resolved_resume = match resolve_resume_session_id(&cli, &project_root) {
+            Ok(x) => x,
+            Err(e) => {
+                exit_resume_session_error(&cli, e);
+            }
+        };
+        let session_id = resolved_resume.unwrap_or_else(uuid::Uuid::new_v4);
+        let resume_messages = if resolved_resume.is_some() {
+            match session_transcript::load_resume_messages(session_id, &project_root) {
+                Ok(m) => Some(model_messages_to_tui(m)),
+                Err(e) => {
+                    eprintln!("akmon: warning: could not load session transcript: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let audit_log_path =
             resolve_audit_log_path(&project_root, session_id, cli.audit_log.clone());
 
@@ -796,7 +1093,7 @@ async fn main() -> ExitCode {
 
         #[cfg(feature = "semantic-index")]
         let semantic_index: Option<akmon_tui::SemanticIndexSlot> = if cli.index {
-            let sandbox = Arc::new(Sandbox::with_git_root(project_root.clone(), has_git_root));
+            let sandbox = sandbox_for_cli(project_root.clone(), has_git_root, &cli.add_dirs);
             let index_path = project_root.join(".akmon").join("index.bin");
             if !index_path.is_file() {
                 eprintln!("akmon: downloading embedding model (~22MB) on first use...");
@@ -912,6 +1209,8 @@ async fn main() -> ExitCode {
             auto_commit: cli.auto_commit,
             planner_model: planner_model_for_tui(&cli),
             display_theme: global.display.theme,
+            session_display_name: cli.session_name.clone(),
+            resume_messages,
         };
         let tui_outcome = akmon_tui::run_interactive(tui_config).await;
         if let Some(handle) = index_thread {
@@ -932,14 +1231,22 @@ async fn main() -> ExitCode {
     let akmon_content = match load_akmon_md(&project_root) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("akmon: failed to read AKMON.md: {e}");
-            return ExitCode::from(2);
+            exit_early_config_error(
+                &cli,
+                format!("failed to read AKMON.md: {e}"),
+                None,
+                2,
+            );
         }
     };
 
     if cli.plan && cli.architect {
-        eprintln!("akmon: --plan cannot be combined with --architect");
-        return ExitCode::from(2);
+        exit_early_config_error(
+            &cli,
+            "--plan cannot be combined with --architect".into(),
+            None,
+            2,
+        );
     }
 
     if cli.output == OutputFormat::Text {
@@ -950,10 +1257,28 @@ async fn main() -> ExitCode {
         }
     }
 
-    let session_id = cli.session.unwrap_or_else(uuid::Uuid::new_v4);
+    let resolved_resume = match resolve_resume_session_id(&cli, &project_root) {
+        Ok(x) => x,
+        Err(e) => {
+            exit_resume_session_error(&cli, e);
+        }
+    };
+    let session_id = resolved_resume.unwrap_or_else(uuid::Uuid::new_v4);
+    let headless_started_at = chrono::Utc::now();
+    let resume_ctx: Vec<Message> = if resolved_resume.is_some() {
+        session_transcript::load_resume_messages(session_id, &project_root).unwrap_or_else(|e| {
+            eprintln!("akmon: warning: could not load session transcript: {e}");
+            Vec::new()
+        })
+    } else {
+        Vec::new()
+    };
+
     let agent_config = AgentConfig {
         session_id,
         auto_commit: cli.auto_commit,
+        max_budget_usd: cli.max_budget_usd,
+        fallback_model: cli.fallback_model.clone(),
         ..Default::default()
     };
     let audit_log_path = resolve_audit_log_path(&project_root, session_id, cli.audit_log.clone());
@@ -973,12 +1298,12 @@ async fn main() -> ExitCode {
         PolicyEngineMode::Interactive
     };
     let policy = Arc::new(PolicyEngine::new(policy_mode));
-    let sandbox = Arc::new(Sandbox::with_git_root(project_root.clone(), has_git_root));
+    let sandbox = sandbox_for_cli(project_root.clone(), has_git_root, &cli.add_dirs);
 
     #[cfg(feature = "semantic-index")]
     let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
     #[cfg(not(feature = "semantic-index"))]
-    let index_thread: Option<std::thread::JoinHandle<()>> = None;
+    let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
 
     #[cfg(feature = "semantic-index")]
     let semantic_parts: Option<SemanticIndexParts> = if cli.index {
@@ -1049,15 +1374,10 @@ async fn main() -> ExitCode {
         let provider = match resolve_llm(&cli, &global, cli.model.clone()) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("akmon: {e}");
-                if let Some(handle) = index_thread {
-                    eprintln!("akmon: waiting for index to finish building...");
-                    let _ = handle.join();
-                }
-                return ExitCode::from(2);
+                exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
             }
         };
-        let tools = build_tool_registry(
+        let mut tools = build_tool_registry(
             &cli.shell_allow,
             cli.web_fetch,
             has_git_root,
@@ -1065,9 +1385,30 @@ async fn main() -> ExitCode {
             #[cfg(feature = "semantic-index")]
             semantic_parts.clone(),
         );
+        #[cfg(feature = "semantic-index")]
+        cli_attach_specs_subagent(
+            &mut tools,
+            &cli,
+            has_git_root,
+            true,
+            &provider,
+            &sandbox,
+            &akmon_content,
+            semantic_parts.clone(),
+        );
+        #[cfg(not(feature = "semantic-index"))]
+        cli_attach_specs_subagent(
+            &mut tools,
+            &cli,
+            has_git_root,
+            true,
+            &provider,
+            &sandbox,
+            &akmon_content,
+        );
         let plan_agent_config = AgentConfig {
             auto_commit: false,
-            ..agent_config
+            ..agent_config.clone()
         };
         let mut session = AgentSession::new(
             plan_agent_config,
@@ -1078,12 +1419,15 @@ async fn main() -> ExitCode {
             akmon_content.clone(),
             true,
         );
+        if !resume_ctx.is_empty() {
+            session.restore_context_from_messages(resume_ctx.clone());
+        }
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
         let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
         let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
         let mut policy_opt = Some(policy_rx);
         let run_outcome = session
-            .run(task.clone(), ev_tx, &mut policy_opt, None)
+            .run(task.clone(), ev_tx, &mut policy_opt, &mut None, None)
             .await;
         drop(policy_opt);
         let _ = printer.await;
@@ -1091,12 +1435,12 @@ async fn main() -> ExitCode {
         let saved_path = match akmon_core::save_plan_markdown(&project_root, &task, &plan_body) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("akmon: failed to save plan: {e}");
-                if let Some(handle) = index_thread {
-                    eprintln!("akmon: waiting for index to finish building...");
-                    let _ = handle.join();
-                }
-                return ExitCode::from(2);
+                exit_early_config_error(
+                    &cli,
+                    format!("failed to save plan: {e}"),
+                    Some(&mut index_thread),
+                    2,
+                );
             }
         };
         if cli.output == OutputFormat::Text {
@@ -1117,6 +1461,8 @@ async fn main() -> ExitCode {
                 audit_log_path.display()
             );
         }
+        let _ = write_handoff_file(&session, &project_root, &cli.model);
+        headless_persist(&project_root, &session, &cli.model, headless_started_at);
         if let Some(handle) = index_thread {
             eprintln!("akmon: waiting for index to finish building...");
             eprintln!(
@@ -1129,9 +1475,14 @@ async fn main() -> ExitCode {
                 Ok(()) => ("success", None),
                 Err(e) => ("error", Some(e.to_string())),
             };
+            let exit_reason = match &run_outcome {
+                Ok(()) => exit_reason_ok(&session),
+                Err(e) => exit_reason_err(e),
+            };
             let report = RunReport {
                 session_id: session.session_id().to_string(),
                 status,
+                exit_reason,
                 result: plan_body,
                 tool_calls: session.tool_call_summaries().to_vec(),
                 error: error_opt,
@@ -1141,12 +1492,18 @@ async fn main() -> ExitCode {
                     total_cache_read_tokens: session.total_cache_read_tokens(),
                     total_output_tokens: session.total_output_tokens(),
                 },
+                cost_usd: session.total_cost_usd(),
+                cache_read_tokens: u64::from(session.total_cache_read_tokens()),
+                files_written: session
+                    .modified_paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect(),
             };
             let json_line = match serde_json::to_string(&report) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("akmon: failed to serialize run report: {e}");
-                    return ExitCode::from(2);
+                    print_json_early_error_and_exit(format!("failed to serialize run report: {e}"));
                 }
             };
             println!("{json_line}");
@@ -1167,15 +1524,10 @@ async fn main() -> ExitCode {
         let provider_planner = match resolve_llm(&cli, &global, planner_model.clone()) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("akmon: {e}");
-                if let Some(handle) = index_thread {
-                    eprintln!("akmon: waiting for index to finish building...");
-                    let _ = handle.join();
-                }
-                return ExitCode::from(2);
+                exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
             }
         };
-        let tools_planner = build_tool_registry(
+        let mut tools_planner = build_tool_registry(
             &cli.shell_allow,
             cli.web_fetch,
             has_git_root,
@@ -1183,9 +1535,30 @@ async fn main() -> ExitCode {
             #[cfg(feature = "semantic-index")]
             semantic_parts.clone(),
         );
+        #[cfg(feature = "semantic-index")]
+        cli_attach_specs_subagent(
+            &mut tools_planner,
+            &cli,
+            has_git_root,
+            true,
+            &provider_planner,
+            &sandbox,
+            &akmon_content,
+            semantic_parts.clone(),
+        );
+        #[cfg(not(feature = "semantic-index"))]
+        cli_attach_specs_subagent(
+            &mut tools_planner,
+            &cli,
+            has_git_root,
+            true,
+            &provider_planner,
+            &sandbox,
+            &akmon_content,
+        );
         let planner_agent_config = AgentConfig {
             auto_commit: false,
-            ..agent_config
+            ..agent_config.clone()
         };
         let mut planner_session = AgentSession::new(
             planner_agent_config,
@@ -1196,12 +1569,15 @@ async fn main() -> ExitCode {
             akmon_content.clone(),
             true,
         );
+        if !resume_ctx.is_empty() {
+            planner_session.restore_context_from_messages(resume_ctx.clone());
+        }
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
         let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
         let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
         let mut policy_opt = Some(policy_rx);
         let plan_run = planner_session
-            .run(task.clone(), ev_tx, &mut policy_opt, None)
+            .run(task.clone(), ev_tx, &mut policy_opt, &mut None, None)
             .await;
         drop(policy_opt);
         let _ = printer.await;
@@ -1231,12 +1607,7 @@ async fn main() -> ExitCode {
         let provider_main = match resolve_llm(&cli, &global, cli.model.clone()) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("akmon: {e}");
-                if let Some(handle) = index_thread {
-                    eprintln!("akmon: waiting for index to finish building...");
-                    let _ = handle.join();
-                }
-                return ExitCode::from(2);
+                exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
             }
         };
         let mut tools = build_tool_registry(
@@ -1245,7 +1616,7 @@ async fn main() -> ExitCode {
             has_git_root,
             false,
             #[cfg(feature = "semantic-index")]
-            semantic_parts,
+            semantic_parts.clone(),
         );
         for url in &cli.mcp_server {
             let server = McpServerConfig {
@@ -1269,6 +1640,27 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        #[cfg(feature = "semantic-index")]
+        cli_attach_specs_subagent(
+            &mut tools,
+            &cli,
+            has_git_root,
+            false,
+            &provider_main,
+            &sandbox,
+            &akmon_content,
+            semantic_parts.clone(),
+        );
+        #[cfg(not(feature = "semantic-index"))]
+        cli_attach_specs_subagent(
+            &mut tools,
+            &cli,
+            has_git_root,
+            false,
+            &provider_main,
+            &sandbox,
+            &akmon_content,
+        );
         let mut session = AgentSession::new(
             agent_config,
             Arc::clone(&policy),
@@ -1285,7 +1677,7 @@ async fn main() -> ExitCode {
         let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
         let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
         let mut policy_opt = Some(policy_rx);
-        let run_outcome = session.run(impl_task, ev_tx, &mut policy_opt, None).await;
+        let run_outcome = session.run(impl_task, ev_tx, &mut policy_opt, &mut None, None).await;
         drop(policy_opt);
         let _ = printer.await;
         let mut combined_audit: Vec<AuditEvent> = Vec::new();
@@ -1297,6 +1689,8 @@ async fn main() -> ExitCode {
                 audit_log_path.display()
             );
         }
+        let _ = write_handoff_file(&session, &project_root, &cli.model);
+        headless_persist(&project_root, &session, &cli.model, headless_started_at);
         if let Some(handle) = index_thread {
             eprintln!("akmon: waiting for index to finish building...");
             eprintln!(
@@ -1309,9 +1703,14 @@ async fn main() -> ExitCode {
                 Ok(()) => ("success", None),
                 Err(e) => ("error", Some(e.to_string())),
             };
+            let exit_reason = match &run_outcome {
+                Ok(()) => exit_reason_ok(&session),
+                Err(e) => exit_reason_err(e),
+            };
             let report = RunReport {
                 session_id: session.session_id().to_string(),
                 status,
+                exit_reason,
                 result: session.result_text().to_string(),
                 tool_calls: session.tool_call_summaries().to_vec(),
                 error: error_opt,
@@ -1321,12 +1720,18 @@ async fn main() -> ExitCode {
                     total_cache_read_tokens: session.total_cache_read_tokens(),
                     total_output_tokens: session.total_output_tokens(),
                 },
+                cost_usd: session.total_cost_usd(),
+                cache_read_tokens: u64::from(session.total_cache_read_tokens()),
+                files_written: session
+                    .modified_paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect(),
             };
             let json_line = match serde_json::to_string(&report) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("akmon: failed to serialize run report: {e}");
-                    return ExitCode::from(2);
+                    print_json_early_error_and_exit(format!("failed to serialize run report: {e}"));
                 }
             };
             println!("{json_line}");
@@ -1345,12 +1750,7 @@ async fn main() -> ExitCode {
     let provider = match resolve_llm(&cli, &global, cli.model.clone()) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("akmon: {e}");
-            if let Some(handle) = index_thread {
-                eprintln!("akmon: waiting for index to finish building...");
-                let _ = handle.join();
-            }
-            return ExitCode::from(2);
+            exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
         }
     };
 
@@ -1360,7 +1760,7 @@ async fn main() -> ExitCode {
         has_git_root,
         false,
         #[cfg(feature = "semantic-index")]
-        semantic_parts,
+        semantic_parts.clone(),
     );
     for url in &cli.mcp_server {
         let server = McpServerConfig {
@@ -1384,6 +1784,27 @@ async fn main() -> ExitCode {
             }
         }
     }
+    #[cfg(feature = "semantic-index")]
+    cli_attach_specs_subagent(
+        &mut tools,
+        &cli,
+        has_git_root,
+        false,
+        &provider,
+        &sandbox,
+        &akmon_content,
+        semantic_parts,
+    );
+    #[cfg(not(feature = "semantic-index"))]
+    cli_attach_specs_subagent(
+        &mut tools,
+        &cli,
+        has_git_root,
+        false,
+        &provider,
+        &sandbox,
+        &akmon_content,
+    );
 
     let mut session = AgentSession::new(
         agent_config,
@@ -1395,12 +1816,16 @@ async fn main() -> ExitCode {
         false,
     );
 
+    if !resume_ctx.is_empty() {
+        session.restore_context_from_messages(resume_ctx);
+    }
+
     let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
     let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
     let printer = tokio::spawn(run_event_printer(ev_rx, policy_tx, cli.output));
 
     let mut policy_opt = Some(policy_rx);
-    let run_outcome = session.run(task, ev_tx, &mut policy_opt, None).await;
+    let run_outcome = session.run(task, ev_tx, &mut policy_opt, &mut None, None).await;
 
     drop(policy_opt);
 
@@ -1412,6 +1837,10 @@ async fn main() -> ExitCode {
             audit_log_path.display()
         );
     }
+
+    let _ = write_handoff_file(&session, &project_root, &cli.model);
+
+    headless_persist(&project_root, &session, &cli.model, headless_started_at);
 
     if let Some(handle) = index_thread {
         eprintln!("akmon: waiting for index to finish building...");
@@ -1428,9 +1857,14 @@ async fn main() -> ExitCode {
             Ok(()) => ("success", None),
             Err(e) => ("error", Some(e.to_string())),
         };
+        let exit_reason = match &run_outcome {
+            Ok(()) => exit_reason_ok(&session),
+            Err(e) => exit_reason_err(e),
+        };
         let report = RunReport {
             session_id: session.session_id().to_string(),
             status,
+            exit_reason,
             result: session.result_text().to_string(),
             tool_calls: session.tool_call_summaries().to_vec(),
             error: error_opt,
@@ -1440,12 +1874,18 @@ async fn main() -> ExitCode {
                 total_cache_read_tokens: session.total_cache_read_tokens(),
                 total_output_tokens: session.total_output_tokens(),
             },
+            cost_usd: session.total_cost_usd(),
+            cache_read_tokens: u64::from(session.total_cache_read_tokens()),
+            files_written: session
+                .modified_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
         };
         let json_line = match serde_json::to_string(&report) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("akmon: failed to serialize run report: {e}");
-                return ExitCode::from(2);
+                print_json_early_error_and_exit(format!("failed to serialize run report: {e}"));
             }
         };
         println!("{json_line}");
@@ -1545,6 +1985,7 @@ mod tests {
         let report = RunReport {
             session_id: "550e8400-e29b-41d4-a716-446655440000".into(),
             status: "success",
+            exit_reason: ExitReason::Completed,
             result: "hello".into(),
             tool_calls: vec![ToolCallSummary {
                 name: "read_file".into(),
@@ -1558,16 +1999,25 @@ mod tests {
                 total_cache_read_tokens: 3,
                 total_output_tokens: 7,
             },
+            cost_usd: 0.01,
+            cache_read_tokens: 3,
+            files_written: vec!["src/main.rs".into()],
         };
         let v = serde_json::to_value(&report).expect("serialize");
         assert_eq!(v["session_id"], "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(v["status"], "success");
+        assert_eq!(v["exit_reason"], "completed");
         assert_eq!(v["result"], "hello");
         assert!(v["error"].is_null());
         assert_eq!(v["audit_log_path"], "/tmp/x.jsonl");
         assert_eq!(v["usage"]["total_input_tokens"], 10);
         assert_eq!(v["usage"]["total_cache_read_tokens"], 3);
         assert_eq!(v["usage"]["total_output_tokens"], 7);
+        assert_eq!(v["cost_usd"], 0.01);
+        assert_eq!(v["cache_read_tokens"], 3);
+        let files = v["files_written"].as_array().expect("files");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], "src/main.rs");
         let tools = v["tool_calls"].as_array().expect("array");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "read_file");

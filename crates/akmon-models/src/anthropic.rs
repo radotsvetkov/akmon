@@ -122,7 +122,7 @@ pub(crate) fn anthropic_system_and_rest(messages: &[Message]) -> (String, Vec<&M
     (system_parts.join("\n\n"), rest)
 }
 
-/// Splits leading [`MessageRole::System`] messages so each can carry its own `cache_control` block.
+/// Splits leading [`MessageRole::System`] messages into separate API `system` content blocks.
 pub(crate) fn anthropic_leading_system_blocks(
     messages: &[Message],
 ) -> (Vec<String>, Vec<&Message>) {
@@ -133,37 +133,6 @@ pub(crate) fn anthropic_leading_system_blocks(
         i += 1;
     }
     (blocks, messages[i..].iter().collect())
-}
-
-fn apply_anthropic_conversation_user_cache(messages: &mut [Value]) {
-    if messages.len() <= 8 {
-        return;
-    }
-    let mut user_idxs: Vec<usize> = Vec::new();
-    for (idx, m) in messages.iter().enumerate() {
-        if m.get("role").and_then(|x| x.as_str()) != Some("user") {
-            continue;
-        }
-        if let Some(Value::String(_)) = m.get("content") {
-            user_idxs.push(idx);
-        }
-    }
-    if user_idxs.len() < 2 {
-        return;
-    }
-    let target = user_idxs[user_idxs.len() - 2];
-    let m = &mut messages[target];
-    let Some(Value::String(s)) = m.get("content").cloned() else {
-        return;
-    };
-    *m = json!({
-        "role": "user",
-        "content": [{
-            "type": "text",
-            "text": s,
-            "cache_control": { "type": "ephemeral" }
-        }]
-    });
 }
 
 fn tool_message_to_result_block(m: &Message) -> Option<Value> {
@@ -267,7 +236,7 @@ fn build_request_json(
     model: &str,
     system_blocks: &[String],
     messages: Vec<Value>,
-    mut tools: Vec<Value>,
+    tools: Vec<Value>,
     config: &CompletionConfig,
 ) -> Value {
     let mut map = serde_json::Map::new();
@@ -275,6 +244,11 @@ fn build_request_json(
     map.insert("max_tokens".to_string(), json!(config.max_tokens));
     map.insert("stream".to_string(), json!(true));
     map.insert("temperature".to_string(), json!(config.temperature));
+    // Automatic prompt caching (documented): one breakpoint at the last cacheable prefix.
+    map.insert(
+        "cache_control".to_string(),
+        json!({ "type": "ephemeral" }),
+    );
     if !system_blocks.is_empty() {
         let arr: Vec<Value> = system_blocks
             .iter()
@@ -282,7 +256,6 @@ fn build_request_json(
                 json!({
                     "type": "text",
                     "text": text,
-                    "cache_control": { "type": "ephemeral" }
                 })
             })
             .collect();
@@ -290,11 +263,6 @@ fn build_request_json(
     }
     map.insert("messages".to_string(), Value::Array(messages));
     if !tools.is_empty() {
-        if let Some(last) = tools.last_mut()
-            && let Some(obj) = last.as_object_mut()
-        {
-            obj.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
-        }
         map.insert("tools".to_string(), Value::Array(tools));
     }
     Value::Object(map)
@@ -333,13 +301,13 @@ pub(crate) fn build_bedrock_anthropic_invoke_json(
 fn map_anthropic_http_status(status: StatusCode, body: &str, headers: &HeaderMap) -> ModelError {
     match status.as_u16() {
         401 => ModelError::AuthError,
-        429 => ModelError::RateLimited {
+        429 | 529 => ModelError::RateLimited {
             retry_after_secs: headers
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok()),
         },
-        503 | 529 => ModelError::BackendUnavailable {
+        503 => ModelError::BackendUnavailable {
             message: format!("HTTP {status}"),
         },
         _ => ModelError::BackendUnavailable {
@@ -589,32 +557,109 @@ pub(crate) fn apply_anthropic_sse_json(
 
 async fn run_anthropic_stream(
     inner: Arc<AnthropicInner>,
-    body: Value,
+    mut body: Value,
     config: CompletionConfig,
     tx: mpsc::Sender<Result<StreamEvent, ModelError>>,
 ) {
     let url = format!("{base}/v1/messages", base = inner.base_url);
-    let resp = match inner
-        .client
-        .post(&url)
-        .header("x-api-key", inner.api_key.expose_secret().as_str())
-        .header("anthropic-version", "2023-06-01")
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = tx.send(Err(map_reqwest_send_error(e))).await;
-            return;
-        }
-    };
 
-    let status = resp.status();
-    let headers = resp.headers().clone();
-    if !status.is_success() {
+    const RETRY_MAX: u32 = 5;
+    const RETRY_BASE_SECS: u64 = 1;
+    const RETRY_MULTIPLIER: u64 = 2;
+    const RETRY_CAP_SECS: u64 = 60;
+
+    let mut rate_limit_attempts: u32 = 0;
+
+    let resp = loop {
+        let resp = match inner
+            .client
+            .post(&url)
+            .header("x-api-key", inner.api_key.expose_secret().as_str())
+            .header("anthropic-version", "2023-06-01")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(Err(map_reqwest_send_error(e))).await;
+                return;
+            }
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            break resp;
+        }
+
+        let overloaded = status.as_u16() == 529;
+        let rate_limited = status == StatusCode::TOO_MANY_REQUESTS || overloaded;
+
+        if rate_limited {
+            rate_limit_attempts = rate_limit_attempts.saturating_add(1);
+            if rate_limit_attempts > RETRY_MAX {
+                let headers = resp.headers().clone();
+                let body_text = match resp.text().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(ModelError::StreamInterrupted {
+                                message: e.to_string(),
+                            }))
+                            .await;
+                        return;
+                    }
+                };
+                let _ = tx
+                    .send(Err(map_anthropic_http_status(status, &body_text, &headers)))
+                    .await;
+                return;
+            }
+
+            let headers = resp.headers().clone();
+            let header_wait = headers
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+
+            let exp = RETRY_BASE_SECS
+                .saturating_mul(RETRY_MULTIPLIER.pow(rate_limit_attempts.saturating_sub(1)));
+            let mut wait_secs = header_wait.unwrap_or(exp).max(1);
+            wait_secs = wait_secs.min(RETRY_CAP_SECS);
+
+            let _ = resp.text().await;
+
+            if rate_limit_attempts == 4
+                && let Some(ref fb) = config.fallback_model
+                && let Some(obj) = body.as_object_mut()
+            {
+                obj.insert("model".to_string(), json!(fb));
+                let _ = tx
+                    .send(Ok(StreamEvent::StatusHint {
+                        message: format!(
+                            "⟳ rate limited — retrying with fallback model `{fb}` ({rate_limit_attempts}/{RETRY_MAX})"
+                        ),
+                    }))
+                    .await;
+            }
+
+            for remaining in (1..=wait_secs).rev() {
+                let _ = tx
+                    .send(Ok(StreamEvent::StatusHint {
+                        message: format!(
+                            "⟳ rate limited — retrying in {}s ({}/{})",
+                            remaining, rate_limit_attempts, RETRY_MAX
+                        ),
+                    }))
+                    .await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            continue;
+        }
+
+        let headers = resp.headers().clone();
         let body_text = match resp.text().await {
             Ok(t) => t,
             Err(e) => {
@@ -630,7 +675,7 @@ async fn run_anthropic_stream(
             .send(Err(map_anthropic_http_status(status, &body_text, &headers)))
             .await;
         return;
-    }
+    };
 
     let _ = tx
         .send(Ok(StreamEvent::ProviderReady {
@@ -748,14 +793,17 @@ impl LlmProvider for AnthropicBackend {
         self.inner.model.as_str()
     }
 
+    fn estimate_tokens(&self, messages: &[Message]) -> Option<usize> {
+        Some(crate::estimate_messages_tokens(messages))
+    }
+
     async fn complete(
         &self,
         messages: &[Message],
         config: &CompletionConfig,
     ) -> Result<CompletionStream, ModelError> {
         let (system_blocks, rest) = anthropic_leading_system_blocks(messages);
-        let mut api_messages = build_anthropic_api_messages(&rest);
-        apply_anthropic_conversation_user_cache(&mut api_messages);
+        let api_messages = build_anthropic_api_messages(&rest);
         let tools = anthropic_tools_from_config(config);
         let body = build_request_json(
             &self.inner.model,
@@ -857,33 +905,38 @@ mod tests {
     }
 
     #[test]
-    fn request_json_system_is_cached_content_block_array_when_non_empty() {
+    fn request_json_system_is_plain_text_blocks_with_top_level_cache_control() {
         let cfg = CompletionConfig::default();
         let blocks = vec!["system prompt body".into()];
         let body = build_request_json("claude-test", &blocks, vec![], vec![], &cfg);
+        assert_eq!(
+            body.get("cache_control"),
+            Some(&json!({ "type": "ephemeral" }))
+        );
         let sys = body.get("system").expect("system key");
         let arr = sys.as_array().expect("system must be array");
         assert_eq!(arr.len(), 1);
         let block = &arr[0];
         assert_eq!(block.get("type"), Some(&json!("text")));
         assert_eq!(block.get("text"), Some(&json!("system prompt body")));
-        assert_eq!(
-            block.get("cache_control"),
-            Some(&json!({ "type": "ephemeral" }))
-        );
+        assert!(block.get("cache_control").is_none());
     }
 
     #[test]
-    fn request_json_splits_multiple_system_blocks_with_separate_cache() {
+    fn request_json_splits_multiple_system_blocks_without_per_block_cache() {
         let cfg = CompletionConfig::default();
         let blocks = vec!["base".into(), "project".into()];
         let body = build_request_json("claude-test", &blocks, vec![], vec![], &cfg);
+        assert_eq!(
+            body.get("cache_control"),
+            Some(&json!({ "type": "ephemeral" }))
+        );
         let arr = body["system"].as_array().expect("system array");
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["text"], json!("base"));
         assert_eq!(arr[1]["text"], json!("project"));
-        assert!(arr[0].get("cache_control").is_some());
-        assert!(arr[1].get("cache_control").is_some());
+        assert!(arr[0].get("cache_control").is_none());
+        assert!(arr[1].get("cache_control").is_none());
     }
 
     #[test]
@@ -891,10 +944,14 @@ mod tests {
         let cfg = CompletionConfig::default();
         let body = build_request_json("m", &[], vec![], vec![], &cfg);
         assert!(body.get("system").is_none());
+        assert_eq!(
+            body.get("cache_control"),
+            Some(&json!({ "type": "ephemeral" }))
+        );
     }
 
     #[test]
-    fn request_json_tools_have_cache_control_on_last_only() {
+    fn request_json_tools_have_no_tool_level_cache_control() {
         let cfg = CompletionConfig::default();
         let tools = vec![
             json!({
@@ -916,9 +973,6 @@ mod tests {
             .expect("tools array");
         assert_eq!(arr.len(), 2);
         assert!(arr[0].get("cache_control").is_none());
-        assert_eq!(
-            arr[1].get("cache_control"),
-            Some(&json!({ "type": "ephemeral" }))
-        );
+        assert!(arr[1].get("cache_control").is_none());
     }
 }

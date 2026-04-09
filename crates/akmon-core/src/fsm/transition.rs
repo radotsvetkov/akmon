@@ -54,6 +54,17 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
         (AgentState::ToolExecution { .. }, AgentEvent::StatusInfo { .. }) => Ok(()),
         (AgentState::Summarizing { .. }, AgentEvent::StatusInfo { .. }) => Ok(()),
 
+        // Microcompact estimate (token hygiene; no state change)
+        (AgentState::Idle, AgentEvent::MicrocompactEstimate { .. }) => Ok(()),
+        (AgentState::Planning { .. }, AgentEvent::MicrocompactEstimate { .. }) => Ok(()),
+        (AgentState::Thinking { .. }, AgentEvent::MicrocompactEstimate { .. }) => Ok(()),
+        (AgentState::ToolExecution { .. }, AgentEvent::MicrocompactEstimate { .. }) => Ok(()),
+        (AgentState::Summarizing { .. }, AgentEvent::MicrocompactEstimate { .. }) => Ok(()),
+        (
+            AgentState::AwaitingConfirmation { .. },
+            AgentEvent::MicrocompactEstimate { .. },
+        ) => Ok(()),
+
         // Planning / Thinking → Summarizing (context compaction)
         (AgentState::Planning { .. }, AgentEvent::SummarizationStarted) => Ok(()),
         (AgentState::Thinking { .. }, AgentEvent::SummarizationStarted) => Ok(()),
@@ -101,6 +112,9 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
 
         // ToolExecution → Thinking or Failed (tool finished or errored)
         (AgentState::ToolExecution { .. }, AgentEvent::ToolCallCompleted { .. }) => Ok(()), // success or failure both legal events
+
+        // ask_followup: UI prompt before the tool row is finalized
+        (AgentState::ToolExecution { .. }, AgentEvent::QuestionRequired { .. }) => Ok(()),
 
         // Additional dispatches in the same parallel tool batch (session tracks outstanding completions)
         (AgentState::ToolExecution { .. }, AgentEvent::ToolCallDispatched { .. }) => Ok(()),
@@ -403,6 +417,19 @@ mod tests {
                         message: "confirmation timeout".into(),
                     },
                     recoverable: false,
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn legal_awaiting_confirmation_microcompact_estimate() {
+        assert!(
+            validate_transition(
+                &AgentState::AwaitingConfirmation { iteration: 0 },
+                &AgentEvent::MicrocompactEstimate {
+                    estimated_tokens_cleared: 100,
                 }
             )
             .is_ok()

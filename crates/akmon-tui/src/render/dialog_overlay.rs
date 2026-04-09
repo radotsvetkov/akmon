@@ -19,6 +19,64 @@ pub fn shell_prefix_hint(cmd: &str) -> String {
     cmd.split_whitespace().next().unwrap_or("").to_string()
 }
 
+/// Centered modal for `ask_followup`: question text + optional suggestions + live draft preview.
+pub fn render_question_overlay(
+    f: &mut ratatui::Frame<'_>,
+    viewport: Rect,
+    question: &str,
+    suggestions: &[String],
+    draft: &str,
+) {
+    let modal_w = viewport.width.saturating_sub(4).max(44);
+    let modal_h = viewport.height.saturating_sub(4).max(10);
+    let r = centered_rect(viewport, modal_w, modal_h);
+    f.render_widget(Clear, r);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(AMBER))
+        .title(Span::styled(
+            " Question ",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(Span::styled(
+            "The assistant asks:",
+            Style::default().fg(GREY),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            question.to_string(),
+            Style::default().fg(GREY),
+        )),
+    ];
+    if !suggestions.is_empty() {
+        lines.push(Line::from(""));
+        for (i, s) in suggestions.iter().take(6).enumerate() {
+            lines.push(Line::from(Span::styled(
+                format!("  {}. {s}", i + 1),
+                Style::default().fg(GREY),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    let draft_line = if draft.is_empty() {
+        "(type your answer in the bar below — Enter to send, Esc to send empty)"
+    } else {
+        draft
+    };
+    lines.push(Line::from(Span::styled(
+        format!("Your reply: {draft_line}"),
+        Style::default().fg(AMBER),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Enter — submit · Esc — empty reply · typing goes to the compose bar",
+        Style::default().fg(ratatui::style::Color::DarkGray),
+    )));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 /// Draws the centered permission window inside `viewport` bounds (choices + Enter to confirm).
 pub fn render_confirmation_overlay(
     f: &mut ratatui::Frame<'_>,

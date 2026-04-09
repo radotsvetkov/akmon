@@ -28,57 +28,39 @@ who take security seriously.**
 `single binary` · `no subscription`
 
 [![CI](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml/badge.svg)](https://github.com/radotsvetkov/akmon/actions)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![Tests](https://img.shields.io/badge/tests-345%2B_passing-brightgreen.svg)](https://github.com/radotsvetkov/akmon/actions)
+
+**Website & documentation (GitHub Pages):** [radotsvetkov.github.io/akmon](https://radotsvetkov.github.io/akmon/)
 
 </div>
 
 ---
 
-## What’s new in 1.5
+## What’s new in 1.7.0
 
-- **Incremental writing** — system guidance and a per-turn cap on `write_file` bursts; large writes get an in-tool reminder; successful `edit` results include a colored unified diff in the TUI.
-- **`apply_patch` tool** — single-file unified diff application (alongside multi-file `patch`).
-- **Language-specific rules** — when the project language is detected, a separate system block adds verify commands (e.g. `cargo check`) and skeleton patterns for that stack.
+- **Documentation & tutorials** — step-by-step guides (Rust, Go, Python Flask/FastAPI, Elixir), multi-agent/automation patterns, architecture trade-offs, a **capabilities reference**, and new examples (Flask/FastAPI, Phoenix). See the [hosted book](https://radotsvetkov.github.io/akmon/docs/).
+- **Provider resolution** — explicit `ProviderError` when a backend cannot be used (for example Claude-family models without API keys); no silent fallback to the wrong provider.
+- **CLI JSON mode** — early configuration failures print structured JSON on stdout when `--output json` is set, so scripts and CI parsers stay reliable.
+- **License** — **Apache 2.0 only** (see [LICENSE](LICENSE)); suited to redistributing agent tooling and integrations.
 
 ---
 
 ## Why Akmon
 
-Most hosted coding agents ask you to hand over trust by default: your 
-repo, your keys, and your workflow ride inside someone else’s product, 
-pricing, and uptime. We think you should **see** what happened, **own** 
-the binary, and **choose** who gets paid—not rent the forge.
+Akmon is for people who want **one small binary**, **bring-your-own model**,
+and a **clear record** of what the agent did (JSONL audit), without living
+inside a vendor’s IDE or subscription.
 
-Akmon is different by design:
+- **Auditable** — policy decisions and tool calls can be logged per session.
+- **Sandboxed** — paths stay in the repo; optional web fetch is SSRF-aware.
+- **Portable** — SSH, Docker, CI; works offline with Ollama.
+- **Open source** — Apache 2.0.
 
-| | Akmon | Typical agents |
-| --- | :---: | :---: |
-| **Full JSONL audit trail** (policy, tools, outcomes) | ✅ | ❌ |
-| **Explicit policy engine** + confirm/deny path | ✅ | ⚠️ varies |
-| **Sandboxed to your git root** (path hardening) | ✅ | ⚠️ varies |
-| **SSRF-hardened** optional web fetch | ✅ | ⚠️ varies |
-| **Secrets as `Secret<T>`** (zeroized, not logged) | ✅ | ❌ |
-| **Single static binary** — no extra runtime | ✅ | ❌ |
-| **Runs offline** (local model runtime) | ✅ | ❌ |
-| **Bring your own keys / endpoints** | ✅ | ⚠️ often tied to vendor |
-| **Open source** — build, fork, pin your version | ✅ | ❌ |
-| **No product subscription** for the agent itself | ✅ | ❌ |
-
-**Every action is audited.** Every tool call, permission decision, and 
-model turn can land in a timestamped JSONL file—so we can answer 
-“what ran, why was it allowed, and what changed?” long after the session.
-
-**Nothing leaves your machine without your rules.** Paths are resolved 
-against the repo sandbox; network fetch is off until you opt in and 
-still blocks common abuse targets. The policy layer is part of the 
-product, not an afterthought.
-
-**You keep the keys and the binary.** Point Akmon at the APIs or 
-compatible endpoints you already pay for, use a model router with one 
-key, plug in cloud inference, or stay entirely on a local stack—one 
-forge you can ship, script, and run in CI, under your control.
+For a short “other tools vs us” page (kept out of the marketing landing),
+see [docs/src/comparison.md](docs/src/comparison.md) or the book:
+[Other tools vs Akmon](https://radotsvetkov.github.io/akmon/docs/comparison.html).
 
 ---
 
@@ -147,7 +129,7 @@ akmon config
 <table>
 <tr>
 <td>
-akmon v1.6.0  │  project: my-app  │  your-model  │  INTERACTIVE
+akmon v1.7.0  │  project: my-app  │  your-model  │  INTERACTIVE
 ──────────────────────────────────────────────────────────────────
 You: find the auth code and explain how tokens work
 → semantic_search
@@ -181,7 +163,7 @@ context. We surface that number so you can see what the session saved.
 # Run a task
 akmon --yes --task "add error handling to the fetch function"
 
-# JSON output for scripting
+# JSON output for scripting (including structured early errors in JSON mode)
 akmon --yes --output json --task "list all TODO comments" | jq .result
 
 # Plan before implementing
@@ -247,8 +229,7 @@ cat .akmon/audit/$(ls .akmon/audit | tail -1) | jq .
 ```
 
 Every policy decision. Every tool call. Every permission grant or denial. 
-Logged, timestamped, machine-readable. This is what compliance teams need 
-and what no other tool provides.
+Logged, timestamped, machine-readable—useful when you must show what ran.
 
 ---
 
@@ -375,6 +356,16 @@ Project memory: [`AKMON.md`](AKMON.md)
 
 ---
 
+## Contributing
+
+We welcome issues and pull requests on [GitHub](https://github.com/radotsvetkov/akmon).
+
+- **Book:** [Development setup](https://radotsvetkov.github.io/akmon/docs/contributing/setup.html) (clone, build, test, crate map).
+- **Expectations:** clear description, tests where feasible, no `unwrap` in library crates, `rustdoc` on new public APIs.
+- **Scope:** keep changes focused; match existing style and abstractions.
+
+---
+
 ## Building from source
 
 ```bash
@@ -392,9 +383,7 @@ cargo test --workspace
 
 ## License
 
-Licensed under [MIT](LICENSE-MIT) or 
-[Apache 2.0](LICENSE-APACHE) at your option — 
-the standard Rust ecosystem dual license.
+Licensed under the [Apache License, Version 2.0](LICENSE).
 
 ---
 

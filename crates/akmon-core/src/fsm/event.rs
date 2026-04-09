@@ -36,6 +36,15 @@ pub enum AgentEvent {
         /// Human-readable outcome (error text when `success` is `false`, optional detail when `true`).
         message: String,
     },
+    /// Interactive UI must prompt the user (e.g. `ask_followup`) before the tool result is finalized.
+    QuestionRequired {
+        /// Same id as the pending tool call.
+        id: String,
+        /// Prompt shown to the user.
+        question: String,
+        /// Optional quick-reply hints.
+        suggestions: Vec<String>,
+    },
     /// User must confirm before a sensitive or destructive step proceeds.
     ConfirmationRequired {
         /// Short description shown in the transparency strip / headless error text.
@@ -56,6 +65,11 @@ pub enum AgentEvent {
     StatusInfo {
         /// Short message for transcript / activity line.
         message: String,
+    },
+    /// Best-effort estimate of input tokens removed by clearing stale tool outputs in history.
+    MicrocompactEstimate {
+        /// Rough token delta reclaimed (for footer / diagnostics only).
+        estimated_tokens_cleared: u32,
     },
     /// Marks the start of iteration `n` of at most `max` (inclusive ceiling check uses `max`).
     IterationStarted {
@@ -109,8 +123,12 @@ impl fmt::Display for AgentEvent {
                 f,
                 "ToolCallCompleted({name}, success={success}, message={message})"
             ),
+            AgentEvent::QuestionRequired { .. } => write!(f, "QuestionRequired"),
             AgentEvent::ConfirmationRequired { .. } => write!(f, "ConfirmationRequired"),
             AgentEvent::StatusInfo { message } => write!(f, "StatusInfo({message})"),
+            AgentEvent::MicrocompactEstimate {
+                estimated_tokens_cleared,
+            } => write!(f, "MicrocompactEstimate({estimated_tokens_cleared})"),
             AgentEvent::SummarizationStarted => write!(f, "SummarizationStarted"),
             AgentEvent::ContextSummarized { .. } => write!(f, "ContextSummarized"),
             AgentEvent::IterationStarted { n, max } => {

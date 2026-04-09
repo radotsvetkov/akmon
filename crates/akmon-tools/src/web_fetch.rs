@@ -335,6 +335,7 @@ mod tests {
                 assert!(message.contains("localhost"), "{message}");
             }
             ToolOutput::Success { .. } => panic!("expected error"),
+            ToolOutput::Question { .. } => panic!("unexpected question"),
         }
     }
 
@@ -367,6 +368,7 @@ mod tests {
                 "{message}"
             ),
             ToolOutput::Success { .. } => panic!("expected error"),
+            ToolOutput::Question { .. } => panic!("unexpected question"),
         }
     }
 
@@ -376,6 +378,7 @@ mod tests {
         match e {
             ToolOutput::Error { message, .. } => assert!(message.contains("metadata"), "{message}"),
             ToolOutput::Success { .. } => panic!("expected error"),
+            ToolOutput::Question { .. } => panic!("unexpected question"),
         }
     }
 
@@ -385,6 +388,7 @@ mod tests {
         match e {
             ToolOutput::Error { message, .. } => assert!(message.contains("scheme"), "{message}"),
             ToolOutput::Success { .. } => panic!("expected error"),
+            ToolOutput::Question { .. } => panic!("unexpected question"),
         }
     }
 

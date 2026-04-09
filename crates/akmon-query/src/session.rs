@@ -1,5 +1,6 @@
 //! Agent session: owns FSM state, provider, tools, and the main query loop.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use akmon_core::{
     AgentConfig, AgentError, AgentEvent, AgentState, AuditEvent, InteractivePolicyReply,
     Permission, PolicyEngineError, PolicyEngineMode, PolicyVerdict, Sandbox, check_iteration_limit,
-    validate_transition,
+    estimate_cost_usd, validate_transition,
 };
 use akmon_models::{
     CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
@@ -22,9 +23,17 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::context::{build_followup_messages, build_messages};
+use crate::context::{
+    build_followup_messages, build_messages, build_subagent_followup_messages,
+    build_subagent_task_messages, context_limit_for_model,
+};
+use crate::specs_and_handoff;
 use crate::context_manager::ContextManager;
-use crate::tools_filter::tools_for_model_id;
+use crate::microcompact::{
+    MICROCOMPACT_KEEP_RECENT_DEFAULT, MICROCOMPACT_KEEP_RECENT_GROQ,
+    apply_microcompact_context,
+};
+use crate::tools_filter::{filter_tools_for_model, tools_for_model_id};
 
 /// One finished tool invocation recorded for machine-readable run summaries (CLI `--output json`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -35,6 +44,16 @@ pub struct ToolCallSummary {
     pub success: bool,
     /// Short, user-facing result or error message.
     pub message: String,
+}
+
+/// Why [`AgentSession::run`] stopped successfully (when [`Result`] is [`Ok`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRunExit {
+    /// Normal completion (including iteration exhaustion surfaced as [`Err`] elsewhere).
+    Completed,
+    /// Headless `--max-budget-usd` cap tripped after the last completed model round.
+    BudgetLimit,
 }
 
 /// One model tool call after policy approval, ready for [`execute_single_tool_call`].
@@ -67,6 +86,9 @@ pub struct ToolCallResult {
 fn completion_config_for_tools(
     tools: &[Arc<dyn Tool>],
     provider: &dyn LlmProvider,
+    session_id: uuid::Uuid,
+    max_completion_tokens: Option<u32>,
+    fallback_model: Option<String>,
 ) -> CompletionConfig {
     let defs: Vec<ToolDefinition> = tools
         .iter()
@@ -76,9 +98,13 @@ fn completion_config_for_tools(
             parameters: t.as_ref().parameters_schema(),
         })
         .collect();
+    let defs = filter_tools_for_model(provider.completion_model_id(), defs);
     let mut cfg = CompletionConfig {
         tools: defs,
-        max_tokens: max_tokens_for_model(provider.completion_model_id()),
+        max_tokens: max_completion_tokens
+            .unwrap_or_else(|| max_tokens_for_model(provider.completion_model_id())),
+        session_id: Some(session_id.to_string()),
+        fallback_model,
         ..CompletionConfig::default()
     };
     if provider.name() == "ollama" {
@@ -86,6 +112,29 @@ fn completion_config_for_tools(
             ollama_first_token_deadline_ms(provider.completion_model_id());
     }
     cfg
+}
+
+/// Keeps all leading system messages and only the last `context_limit_for_model` non-system rows.
+fn trim_messages_for_model(model_id: &str, messages: Vec<Message>) -> Vec<Message> {
+    let limit = context_limit_for_model(model_id);
+    if limit == usize::MAX {
+        return messages;
+    }
+    let n_system = messages
+        .iter()
+        .take_while(|m| m.role == MessageRole::System)
+        .count();
+    if n_system >= messages.len() {
+        return messages;
+    }
+    let prefix: Vec<Message> = messages[..n_system].to_vec();
+    let rest = &messages[n_system..];
+    if rest.len() <= limit {
+        return messages;
+    }
+    let mut out = prefix;
+    out.extend_from_slice(&rest[rest.len() - limit..]);
+    out
 }
 
 /// Owns one running agent: configuration, FSM state, policy, model backend, tool registry, chat
@@ -118,6 +167,12 @@ pub struct AgentSession {
     total_cache_read_tokens: u32,
     /// Sum of `output_tokens` from each [`StreamEvent::UsageReport`] in this run.
     total_output_tokens: u32,
+    /// Heuristic cumulative USD for this [`Self::run`] (see [`akmon_core::estimate_cost_usd`]).
+    total_cost_usd: f64,
+    /// When set, the next model iteration must not start (headless budget cap).
+    budget_stop_before_next_iteration: bool,
+    /// Outcome of the last finished [`Self::run`].
+    last_run_exit: SessionRunExit,
     /// When `true`, project system prompts are read-only (plan mode); tools should match.
     plan_mode: bool,
     /// Permissions the user allowed with “remember for session”; matched exactly before interactive prompts.
@@ -128,6 +183,14 @@ pub struct AgentSession {
     permission_shell_prefixes: Vec<String>,
     /// How many automatic max-token continuations have run this turn (reset on EndTurn, ToolUse, new user turn).
     pub continuation_count: u32,
+    /// Per-tool invocation counts for the current user task (reset in [`AgentSession::prepare_for_new_user_turn`]).
+    pub tool_call_counts: HashMap<String, u32>,
+    /// Successful [`Self::run`] completions since this session was constructed.
+    pub user_turns_finished: u32,
+    /// Sandbox-relative paths touched after successful file-changing tools (for handoff).
+    pub modified_paths: Vec<PathBuf>,
+    /// Truncated assistant text from the last finished run (`HANDOFF.md`).
+    pub last_assistant_snippet: Option<String>,
 }
 
 impl AgentSession {
@@ -169,11 +232,156 @@ impl AgentSession {
             total_input_tokens: 0,
             total_cache_read_tokens: 0,
             total_output_tokens: 0,
+            total_cost_usd: 0.0,
+            budget_stop_before_next_iteration: false,
+            last_run_exit: SessionRunExit::Completed,
             plan_mode,
             permission_session_allowlist: Vec::new(),
             permission_allow_all_writes: false,
             permission_shell_prefixes: Vec::new(),
             continuation_count: 0,
+            tool_call_counts: HashMap::new(),
+            user_turns_finished: 0,
+            modified_paths: Vec::new(),
+            last_assistant_snippet: None,
+        }
+    }
+
+    /// Clears chat context and per-turn counters; optionally deletes `.akmon/specs/*.md`.
+    ///
+    /// Does not reload `AKMON.md` or change the tool registry.
+    pub fn clear_transcript_soft(
+        &mut self,
+        project_root: &Path,
+        delete_specs: bool,
+    ) -> std::io::Result<()> {
+        self.context.clear();
+        self.result_text.clear();
+        self.tool_call_summaries.clear();
+        self.continuation_count = 0;
+        self.tool_call_counts.clear();
+        self.modified_paths.clear();
+        self.last_assistant_snippet = None;
+        self.user_turns_finished = 0;
+        if delete_specs {
+            specs_and_handoff::clear_specs_dir(project_root)?;
+        }
+        Ok(())
+    }
+
+    fn record_run_finished_success(&mut self) {
+        self.user_turns_finished = self.user_turns_finished.saturating_add(1);
+        let s = self.result_text();
+        self.last_assistant_snippet = if s.is_empty() {
+            None
+        } else if s.len() > 2000 {
+            Some(s[..2000].to_string())
+        } else {
+            Some(s.to_string())
+        };
+    }
+
+    fn note_successful_file_tool_for_handoff(&mut self, r: &ToolCallResult) {
+        if !r.success {
+            return;
+        }
+        let rel: Option<PathBuf> = match r.tool_name.as_str() {
+            "write_file" | "edit" => r
+                .arguments
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from),
+            "write_spec" => r
+                .arguments
+                .get("name")
+                .and_then(|v| v.as_str())
+                .and_then(akmon_tools::relative_markdown_path_for_spec_name)
+                .map(PathBuf::from),
+            "apply_patch" => r
+                .arguments
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from),
+            _ => None,
+        };
+        if let Some(pb) = rel && !self.modified_paths.contains(&pb) {
+            self.modified_paths.push(pb);
+        }
+    }
+
+    fn compose_model_messages(
+        &self,
+        task: &str,
+        user_line_committed: bool,
+        project_root: &str,
+        tool_names: &[&str],
+        model_id: &str,
+    ) -> Vec<Message> {
+        let root_path = self.sandbox.primary_root();
+        let specs_owned = specs_and_handoff::load_specs_block_for_prompt(root_path);
+        let handoff_owned = if self.config.subagent_style {
+            None
+        } else {
+            specs_and_handoff::load_handoff_block_for_prompt(root_path)
+        };
+        let specs_ref = specs_owned.as_deref();
+        let handoff_ref = handoff_owned.as_deref();
+        let extras: Vec<String> = {
+            let mut v = Vec::new();
+            if let Some(s) = akmon_tools::format_active_tasks_block(root_path, self.config.session_id)
+            {
+                v.push(s);
+            }
+            if let Some(s) = akmon_tools::format_relevant_memories_block(root_path, task) {
+                v.push(s);
+            }
+            v
+        };
+        if self.config.subagent_style {
+            if user_line_committed {
+                build_subagent_followup_messages(
+                    self.akmon_md.as_deref(),
+                    &self.context,
+                    project_root,
+                    tool_names,
+                    specs_ref,
+                    model_id,
+                )
+            } else {
+                build_subagent_task_messages(
+                    self.akmon_md.as_deref(),
+                    task,
+                    project_root,
+                    tool_names,
+                    specs_ref,
+                    model_id,
+                )
+            }
+        } else if user_line_committed {
+            build_followup_messages(
+                self.akmon_md.as_deref(),
+                &self.context,
+                project_root,
+                tool_names,
+                self.plan_mode,
+                model_id,
+                specs_ref,
+                handoff_ref,
+                &extras,
+            )
+        } else {
+            build_messages(
+                self.akmon_md.as_deref(),
+                &self.context,
+                task,
+                project_root,
+                tool_names,
+                self.plan_mode,
+                model_id,
+                specs_ref,
+                handoff_ref,
+                &extras,
+            )
         }
     }
 
@@ -217,6 +425,21 @@ impl AgentSession {
         &self.state
     }
 
+    /// Shared sandbox handle (project root, path resolution).
+    pub fn sandbox_arc(&self) -> Arc<Sandbox> {
+        Arc::clone(&self.sandbox)
+    }
+
+    /// Model provider used for completions in this session.
+    pub fn provider_arc(&self) -> Arc<dyn LlmProvider> {
+        Arc::clone(&self.provider)
+    }
+
+    /// Copy of loaded `AKMON.md` text, if any.
+    pub fn akmon_md_cloned(&self) -> Option<String> {
+        self.akmon_md.clone()
+    }
+
     /// Last [`UsageReport`] from the most recent model completion in this run, if the provider emitted one.
     pub fn last_usage(&self) -> Option<&UsageReport> {
         self.last_usage.as_ref()
@@ -235,6 +458,26 @@ impl AgentSession {
     /// Total output tokens accumulated from all [`StreamEvent::UsageReport`] events this run.
     pub fn total_output_tokens(&self) -> u32 {
         self.total_output_tokens
+    }
+
+    /// Heuristic cumulative USD spend this [`Self::run`] (zero for unknown pricing or local/Ollama).
+    pub fn total_cost_usd(&self) -> f64 {
+        self.total_cost_usd
+    }
+
+    /// Success reason for the last finished [`Self::run`] (see [`SessionRunExit`]).
+    pub fn last_run_exit(&self) -> SessionRunExit {
+        self.last_run_exit
+    }
+
+    /// Replaces model-visible transcript rows (e.g. after loading a saved session file).
+    pub fn restore_context_from_messages(&mut self, messages: Vec<Message>) {
+        self.context = messages;
+    }
+
+    /// Current model-visible transcript (for persisting `~/.akmon/sessions/*.json`).
+    pub fn context_messages(&self) -> &[Message] {
+        &self.context
     }
 
     /// Allows a follow-up [`run`] after [`AgentState::Complete`] or [`AgentState::Failed`] by
@@ -257,6 +500,10 @@ impl AgentSession {
         self.result_text.clear();
         self.tool_call_summaries.clear();
         self.continuation_count = 0;
+        self.tool_call_counts.clear();
+        self.total_cost_usd = 0.0;
+        self.budget_stop_before_next_iteration = false;
+        self.last_run_exit = SessionRunExit::Completed;
         Ok(())
     }
 
@@ -284,6 +531,7 @@ impl AgentSession {
         task: String,
         event_tx: mpsc::Sender<AgentEvent>,
         interactive_policy_rx: &mut Option<mpsc::Receiver<InteractivePolicyReply>>,
+        question_answer_rx: &mut Option<mpsc::Receiver<String>>,
         interrupt_after_current_tools: Option<Arc<AtomicBool>>,
     ) -> Result<(), AgentError> {
         self.prepare_for_new_user_turn()?;
@@ -306,6 +554,45 @@ impl AgentSession {
 
             check_iteration_limit(iteration, &self.config)?;
 
+            if self.budget_stop_before_next_iteration {
+                self.apply_event(
+                    &event_tx,
+                    AgentEvent::StatusInfo {
+                        message: "Headless budget limit reached — stopping before another model call."
+                            .into(),
+                    },
+                    &task,
+                )
+                .await?;
+                self.apply_event(&event_tx, AgentEvent::Done, &task).await?;
+                self.last_run_exit = SessionRunExit::BudgetLimit;
+                self.record_run_finished_success();
+                return Ok(());
+            }
+
+            let keep_tail = if self
+                .provider
+                .name()
+                .to_lowercase()
+                .starts_with("groq/")
+            {
+                MICROCOMPACT_KEEP_RECENT_GROQ
+            } else {
+                MICROCOMPACT_KEEP_RECENT_DEFAULT
+            };
+            let est_cleared = apply_microcompact_context(&mut self.context, keep_tail);
+            if est_cleared > 0 {
+                tracing::debug!("microcompact: ~{} tokens cleared", est_cleared);
+                self.apply_event(
+                    &event_tx,
+                    AgentEvent::MicrocompactEstimate {
+                        estimated_tokens_cleared: est_cleared,
+                    },
+                    &task,
+                )
+                .await?;
+            }
+
             if matches!(self.state, AgentState::Idle) {
                 self.apply_event(
                     &event_tx,
@@ -319,31 +606,20 @@ impl AgentSession {
             }
 
             let project_root = self.sandbox.primary_root().display().to_string();
-            let model_id = self.provider.completion_model_id();
-            let tools_for_call = tools_for_model_id(model_id, &self.tools);
+            let model_id = self.provider.completion_model_id().to_string();
+            let tools_for_call = tools_for_model_id(model_id.as_str(), &self.tools);
             let tool_name_strings: Vec<String> = tools_for_call
                 .iter()
                 .map(|t| t.as_ref().name().to_string())
                 .collect();
             let tool_names: Vec<&str> = tool_name_strings.iter().map(|s| s.as_str()).collect();
-            let messages = if user_line_committed {
-                build_followup_messages(
-                    self.akmon_md.as_deref(),
-                    &self.context,
-                    project_root.as_str(),
-                    &tool_names,
-                    self.plan_mode,
-                )
-            } else {
-                build_messages(
-                    self.akmon_md.as_deref(),
-                    &self.context,
-                    task.as_str(),
-                    project_root.as_str(),
-                    &tool_names,
-                    self.plan_mode,
-                )
-            };
+            let messages = self.compose_model_messages(
+                task.as_str(),
+                user_line_committed,
+                project_root.as_str(),
+                &tool_names,
+                model_id.as_str(),
+            );
 
             let mut messages = messages;
             let mut sum_round = 0u32;
@@ -361,25 +637,16 @@ impl AgentSession {
                 )
                 .await?;
                 let tool_names: Vec<&str> = tool_name_strings.iter().map(|s| s.as_str()).collect();
-                messages = if user_line_committed {
-                    build_followup_messages(
-                        self.akmon_md.as_deref(),
-                        &self.context,
-                        project_root.as_str(),
-                        &tool_names,
-                        self.plan_mode,
-                    )
-                } else {
-                    build_messages(
-                        self.akmon_md.as_deref(),
-                        &self.context,
-                        task.as_str(),
-                        project_root.as_str(),
-                        &tool_names,
-                        self.plan_mode,
-                    )
-                };
+                messages = self.compose_model_messages(
+                    task.as_str(),
+                    user_line_committed,
+                    project_root.as_str(),
+                    &tool_names,
+                    model_id.as_str(),
+                );
             }
+
+            let messages = trim_messages_for_model(model_id.as_str(), messages);
 
             if std::env::var_os("AKMON_DEBUG_CACHE").as_deref() == Some(std::ffi::OsStr::new("1")) {
                 let sys = anthropic_system_block_text(&messages);
@@ -390,8 +657,18 @@ impl AgentSession {
                 );
             }
 
-            let completion_config =
-                completion_config_for_tools(&tools_for_call, self.provider.as_ref());
+            let completion_config = completion_config_for_tools(
+                &tools_for_call,
+                self.provider.as_ref(),
+                self.config.session_id,
+                self.config.max_completion_tokens,
+                self.config.fallback_model.clone(),
+            );
+            tracing::debug!(
+                "tools for {}: {}",
+                model_id.as_str(),
+                completion_config.tools.len()
+            );
             let mut stream: CompletionStream =
                 match self.provider.complete(&messages, &completion_config).await {
                     Ok(s) => s,
@@ -514,6 +791,7 @@ impl AgentSession {
                                         &event_tx,
                                         &task,
                                         interactive_policy_rx,
+                                        question_answer_rx,
                                     )
                                     .await?;
                                     self.apply_event(
@@ -615,6 +893,7 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                         &event_tx,
                                         &task,
                                         interactive_policy_rx,
+                                        question_answer_rx,
                                     )
                                     .await?;
                                     if interrupt_after_current_tools
@@ -623,6 +902,12 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                     {
                                         self.apply_event(&event_tx, AgentEvent::Done, &task)
                                             .await?;
+                                        self.record_run_finished_success();
+                                        self.last_run_exit = if self.budget_stop_before_next_iteration {
+                                            SessionRunExit::BudgetLimit
+                                        } else {
+                                            SessionRunExit::Completed
+                                        };
                                         return Ok(());
                                     }
                                     iteration = iteration.saturating_add(1);
@@ -641,6 +926,12 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                     role: MessageRole::Assistant,
                                     content: accumulated,
                                 });
+                                self.record_run_finished_success();
+                                self.last_run_exit = if self.budget_stop_before_next_iteration {
+                                    SessionRunExit::BudgetLimit
+                                } else {
+                                    SessionRunExit::Completed
+                                };
                                 return Ok(());
                             }
                             StopReason::ToolUse => {
@@ -685,6 +976,7 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                     &event_tx,
                                     &task,
                                     interactive_policy_rx,
+                                    question_answer_rx,
                                 )
                                 .await?;
 
@@ -693,6 +985,12 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                     .is_some_and(|f| f.load(Ordering::SeqCst))
                                 {
                                     self.apply_event(&event_tx, AgentEvent::Done, &task).await?;
+                                    self.record_run_finished_success();
+                                    self.last_run_exit = if self.budget_stop_before_next_iteration {
+                                        SessionRunExit::BudgetLimit
+                                    } else {
+                                        SessionRunExit::Completed
+                                    };
                                     return Ok(());
                                 }
 
@@ -733,6 +1031,7 @@ Resume from the mid-sentence or mid-block point where the response was cut."
         event_tx: &mpsc::Sender<AgentEvent>,
         task: &str,
         interactive_policy_rx: &mut Option<mpsc::Receiver<InteractivePolicyReply>>,
+        question_answer_rx: &mut Option<mpsc::Receiver<String>>,
     ) -> Result<(), AgentError> {
         let n = tool_calls.len();
         let mut slots: Vec<Option<ToolCallResult>> = vec![None; n];
@@ -807,6 +1106,57 @@ Complete and verify the current file(s), then continue in the next turn.";
                     });
                     continue;
                 }
+            }
+
+            const TOOL_REPEAT_LIMIT: u32 = 5;
+            if (name == "list_directory" || name == "read_file")
+                && self
+                    .tool_call_counts
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(0)
+                    >= TOOL_REPEAT_LIMIT
+            {
+                let call_count = self
+                    .tool_call_counts
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(0);
+                let msg = format!(
+                    "You have called {name} {call_count} times already. \
+                     Stop exploring and start building. \
+                     Use write_file to create the files needed \
+                     for this task. Make your best attempt now."
+                );
+                self.apply_event(
+                    event_tx,
+                    AgentEvent::ToolCallCompleted {
+                        id: id.clone(),
+                        name: name.clone(),
+                        success: true,
+                        message: msg.clone(),
+                    },
+                    task,
+                )
+                .await?;
+                self.apply_event(
+                    event_tx,
+                    AgentEvent::StatusInfo {
+                        message: format!(
+                            "─ {name} called {call_count} times, nudging agent to act ─"
+                        ),
+                    },
+                    task,
+                )
+                .await?;
+                slots[idx] = Some(ToolCallResult {
+                    call_id: id.clone(),
+                    tool_name: name.clone(),
+                    output: ToolOutput::Success { content: msg },
+                    success: true,
+                    arguments: args.clone(),
+                });
+                continue;
             }
 
             // Resolve policy before dispatch so confirmations stay in Thinking and parallel
@@ -1085,6 +1435,8 @@ Complete and verify the current file(s), then continue in the next turn.";
 
             let sandbox = Arc::clone(&self.sandbox);
             let policy = Arc::clone(&self.policy);
+            let session_id = self.config.session_id;
+            let interactive_tools = question_answer_rx.is_some();
 
             let mut unordered: FuturesUnordered<_> = FuturesUnordered::new();
             for a in approved {
@@ -1099,16 +1451,72 @@ Complete and verify the current file(s), then continue in the next turn.";
                 let sandbox_c = Arc::clone(&sandbox);
                 let policy_c = Arc::clone(&policy);
                 unordered.push(async move {
-                    let ctx = ToolContext::new((*sandbox_c).clone(), policy_c);
+                    let ctx = ToolContext::new((*sandbox_c).clone(), policy_c)
+                        .with_session(session_id, interactive_tools);
                     let result = execute_single_tool_call(&pending, tool.as_ref(), &ctx).await;
                     (orig, result)
                 });
             }
 
-            while let Some((orig_idx, tool_result)) = unordered.next().await {
+            let mut collected: Vec<(usize, ToolCallResult)> = Vec::new();
+            while let Some(pair) = unordered.next().await {
+                collected.push(pair);
+            }
+            collected.sort_by_key(|(i, _)| *i);
+
+            for (orig_idx, mut tool_result) in collected {
+                *self
+                    .tool_call_counts
+                    .entry(tool_result.tool_name.clone())
+                    .or_insert(0) += 1;
+
+                if let ToolOutput::Question {
+                    question,
+                    suggestions,
+                } = &tool_result.output
+                {
+                    let q = question.clone();
+                    let sug = suggestions.clone();
+                    if let Some(rx) = question_answer_rx.as_mut() {
+                        self.apply_event(
+                            event_tx,
+                            AgentEvent::QuestionRequired {
+                                id: tool_result.call_id.clone(),
+                                question: q,
+                                suggestions: sug,
+                            },
+                            task,
+                        )
+                        .await?;
+                        let answer = match rx.recv().await {
+                            Some(a) => a,
+                            None => {
+                                return Err(AgentError::SessionFailed {
+                                    message: "question answer channel closed".into(),
+                                });
+                            }
+                        };
+                        tool_result.output = ToolOutput::Success { content: answer };
+                        tool_result.success = true;
+                    } else {
+                        tool_result.output = ToolOutput::Error {
+                            code: akmon_tools::ToolErrorCode::PermissionDenied,
+                            message: "ask_followup requires an interactive session with a TUI answer channel"
+                                .into(),
+                        };
+                        tool_result.success = false;
+                    }
+                }
+
+                self.note_successful_file_tool_for_handoff(&tool_result);
                 let message = match &tool_result.output {
                     ToolOutput::Success { content } => content.clone(),
                     ToolOutput::Error { message, .. } => message.clone(),
+                    ToolOutput::Question { .. } => {
+                        return Err(AgentError::SessionFailed {
+                            message: "internal: unresolved Question tool output".into(),
+                        });
+                    }
                 };
                 self.apply_event(
                     event_tx,
@@ -1438,11 +1846,44 @@ Complete and verify the current file(s), then continue in the next turn.";
                     iteration: *iteration,
                 })
             }
+            (AgentState::ToolExecution { iteration }, AgentEvent::QuestionRequired { .. }) => {
+                Ok(AgentState::ToolExecution {
+                    iteration: *iteration,
+                })
+            }
             (AgentState::Summarizing { iteration }, AgentEvent::StatusInfo { .. }) => {
                 Ok(AgentState::Summarizing {
                     iteration: *iteration,
                 })
             }
+            (AgentState::Idle, AgentEvent::MicrocompactEstimate { .. }) => Ok(AgentState::Idle),
+            (AgentState::Planning { task, iteration }, AgentEvent::MicrocompactEstimate { .. }) => {
+                Ok(AgentState::Planning {
+                    task: task.clone(),
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Thinking { iteration }, AgentEvent::MicrocompactEstimate { .. }) => {
+                Ok(AgentState::Thinking {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::ToolExecution { iteration }, AgentEvent::MicrocompactEstimate { .. }) => {
+                Ok(AgentState::ToolExecution {
+                    iteration: *iteration,
+                })
+            }
+            (AgentState::Summarizing { iteration }, AgentEvent::MicrocompactEstimate { .. }) => {
+                Ok(AgentState::Summarizing {
+                    iteration: *iteration,
+                })
+            }
+            (
+                AgentState::AwaitingConfirmation { iteration },
+                AgentEvent::MicrocompactEstimate { .. },
+            ) => Ok(AgentState::AwaitingConfirmation {
+                iteration: *iteration,
+            }),
             (AgentState::Thinking { .. }, AgentEvent::Done) => Ok(AgentState::Complete),
             (AgentState::Thinking { iteration }, AgentEvent::ToolCallDispatched { .. }) => {
                 Ok(AgentState::ToolExecution {
@@ -1524,6 +1965,30 @@ Complete and verify the current file(s), then continue in the next turn.";
         }
     }
 
+    fn accumulate_usage_cost(&mut self, input_tokens: u32, output_tokens: u32, cache_read_tokens: u32) {
+        if self.config.max_budget_usd.is_none() {
+            return;
+        }
+        let free = self.provider.name().eq_ignore_ascii_case("ollama");
+        let openrouter = self.provider.name() == "OpenRouter";
+        let est = estimate_cost_usd(
+            u64::from(input_tokens),
+            u64::from(output_tokens),
+            u64::from(cache_read_tokens),
+            self.provider.completion_model_id(),
+            openrouter,
+            free,
+        );
+        if let Some(d) = est {
+            self.total_cost_usd += d;
+            if let Some(max) = self.config.max_budget_usd
+                && self.total_cost_usd >= max
+            {
+                self.budget_stop_before_next_iteration = true;
+            }
+        }
+    }
+
     async fn apply_event(
         &mut self,
         tx: &mpsc::Sender<AgentEvent>,
@@ -1563,6 +2028,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                 .total_cache_read_tokens
                 .saturating_add(*cache_read_tokens);
             self.total_output_tokens = self.total_output_tokens.saturating_add(*output_tokens);
+            self.accumulate_usage_cost(*input_tokens, *output_tokens, *cache_read_tokens);
         }
         self.state = self.next_state_after(&event, task)?;
         self.audit_log.push(AuditEvent::AgentStep {
@@ -1586,6 +2052,7 @@ fn summarize_tool_output(output: &ToolOutput) -> (bool, String) {
     match output {
         ToolOutput::Success { content } => (true, content.clone()),
         ToolOutput::Error { message, .. } => (false, message.clone()),
+        ToolOutput::Question { question, .. } => (false, question.clone()),
     }
 }
 
@@ -1623,6 +2090,14 @@ async fn file_change_diff_preview(
     args: &Value,
 ) -> Option<String> {
     match tool_name {
+        "write_spec" => {
+            let name = args.get("name").and_then(|v| v.as_str())?;
+            let new_c = args.get("content").and_then(|v| v.as_str())?;
+            let path = akmon_tools::relative_markdown_path_for_spec_name(name)?;
+            let full = sandbox.resolve(&path).ok()?;
+            let old = tokio::fs::read_to_string(&full).await.unwrap_or_default();
+            Some(unified_diff_text(&old, new_c, &path))
+        }
         "write_file" => {
             let path = args.get("path").and_then(|v| v.as_str())?;
             let new_c = args.get("content").and_then(|v| v.as_str())?;
@@ -1781,6 +2256,36 @@ fn concrete_permissions(
                 path: PathBuf::from("."),
             }]
         }
+        "write_spec" => {
+            if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                if let Some(rel) = akmon_tools::relative_markdown_path_for_spec_name(name) {
+                    vec![Permission::WriteFile {
+                        path: PathBuf::from(rel),
+                    }]
+                } else {
+                    tool.required_permissions().to_vec()
+                }
+            } else {
+                tool.required_permissions().to_vec()
+            }
+        }
+        "read_spec" => {
+            if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
+                let t = name.trim().trim_end_matches(".md");
+                if !t.is_empty() && !t.contains('/') && !t.contains('\\') {
+                    vec![Permission::ReadFile {
+                        path: PathBuf::from(format!(".akmon/specs/{t}.md")),
+                    }]
+                } else {
+                    tool.required_permissions().to_vec()
+                }
+            } else {
+                vec![Permission::ListDirectory {
+                    path: PathBuf::from(".akmon/specs"),
+                }]
+            }
+        }
+        "spawn_subagent" => vec![],
         "git" => git_concrete_permissions(args),
         _ => tool.required_permissions().to_vec(),
     }
@@ -1810,6 +2315,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(StubProvider::empty_end_turn()),
@@ -1828,6 +2337,10 @@ mod tests {
             confirmation_timeout_secs: 30,
             session_id: Uuid::nil(),
             auto_commit: false,
+            max_completion_tokens: None,
+            subagent_style: false,
+            max_budget_usd: None,
+            fallback_model: None,
         };
         assert!(check_iteration_limit(0, &config).is_ok());
         assert_eq!(
@@ -1941,6 +2454,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -1952,7 +2469,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
-        let r = session.run("task".into(), tx, &mut no_policy, None).await;
+        let r = session.run("task".into(), tx, &mut no_policy, &mut None, None).await;
         assert!(r.is_ok(), "{r:?}");
         assert!(
             session.result_text().contains("partial"),
@@ -1962,10 +2479,11 @@ mod tests {
 
         let mut saw_trunc_status = false;
         while let Ok(e) = rx.try_recv() {
-            if let AgentEvent::StatusInfo { message } = e {
-                if message.contains("truncated, continuing") && message.contains("(1/3)") {
-                    saw_trunc_status = true;
-                }
+            if let AgentEvent::StatusInfo { message } = e
+                && message.contains("truncated, continuing")
+                && message.contains("(1/3)")
+            {
+                saw_trunc_status = true;
             }
         }
         assert!(saw_trunc_status, "expected continuation StatusInfo");
@@ -1990,6 +2508,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2002,7 +2524,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         let err = session
-            .run("t".into(), tx, &mut no_policy, None)
+            .run("t".into(), tx, &mut no_policy, &mut None, None)
             .await
             .expect_err("expected model error");
         assert!(matches!(err, AgentError::ModelError { .. }), "got {err:?}");
@@ -2033,6 +2555,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2044,7 +2570,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
-        let r = session.run("task".into(), tx, &mut no_policy, None).await;
+        let r = session.run("task".into(), tx, &mut no_policy, &mut None, None).await;
         assert!(r.is_ok());
 
         let mut names = Vec::new();
@@ -2092,6 +2618,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2104,7 +2634,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         let err = session
-            .run("t".into(), tx, &mut no_policy, None)
+            .run("t".into(), tx, &mut no_policy, &mut None, None)
             .await
             .expect_err("expected iteration error");
         assert!(
@@ -2138,6 +2668,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2150,7 +2684,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("hi".into(), tx, &mut no_policy, None)
+            .run("hi".into(), tx, &mut no_policy, &mut None, None)
             .await
             .expect("run");
 
@@ -2162,10 +2696,10 @@ mod tests {
                 name,
                 ..
             } = e
+                && name == "nope"
+                && message.contains("tool not found")
             {
-                if name == "nope" && message.contains("tool not found") {
-                    saw = true;
-                }
+                saw = true;
             }
         }
         assert!(saw, "expected failed ToolCallCompleted for unknown tool");
@@ -2246,6 +2780,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -2260,7 +2798,7 @@ mod tests {
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("x".into(), ev_tx, &mut no_policy, None)
+            .run("x".into(), ev_tx, &mut no_policy, &mut None, None)
             .await
             .expect("run");
 
@@ -2321,6 +2859,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -2335,7 +2877,7 @@ mod tests {
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("task".into(), ev_tx, &mut no_policy, None)
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
             .await
             .expect("run");
 
@@ -2380,6 +2922,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -2404,7 +2950,7 @@ mod tests {
         let mut no_policy = None;
         let t0 = Instant::now();
         session
-            .run("x".into(), ev_tx, &mut no_policy, None)
+            .run("x".into(), ev_tx, &mut no_policy, &mut None, None)
             .await
             .expect("run");
         let elapsed = t0.elapsed();
@@ -2449,6 +2995,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: false,
@@ -2466,7 +3016,7 @@ mod tests {
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("x".into(), ev_tx, &mut no_policy, None)
+            .run("x".into(), ev_tx, &mut no_policy, &mut None, None)
             .await
             .expect("run");
 
@@ -2522,6 +3072,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -2545,7 +3099,7 @@ mod tests {
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("x".into(), ev_tx, &mut no_policy, None)
+            .run("x".into(), ev_tx, &mut no_policy, &mut None, None)
             .await
             .expect("run");
 
@@ -2615,6 +3169,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
             Arc::new(seq),
@@ -2627,7 +3185,7 @@ mod tests {
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut policy_opt = Some(policy_rx);
         session
-            .run("x".into(), ev_tx, &mut policy_opt, None)
+            .run("x".into(), ev_tx, &mut policy_opt, &mut None, None)
             .await
             .expect("run");
 
@@ -2682,6 +3240,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
             Arc::new(seq),
@@ -2694,7 +3256,7 @@ mod tests {
         let (ev_tx, _ev_rx) = mpsc::channel(64);
         let mut policy_opt = Some(policy_rx);
         session
-            .run("read".into(), ev_tx, &mut policy_opt, None)
+            .run("read".into(), ev_tx, &mut policy_opt, &mut None, None)
             .await
             .expect("run");
 
@@ -2727,6 +3289,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2739,7 +3305,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("t".into(), tx, &mut no_policy, None)
+            .run("t".into(), tx, &mut no_policy, &mut None, None)
             .await
             .expect("run");
         assert_eq!(session.result_text(), "hello");
@@ -2762,6 +3328,10 @@ mod tests {
                 confirmation_timeout_secs: 30,
                 session_id: Uuid::nil(),
                 auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2774,7 +3344,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
-            .run("t".into(), tx, &mut no_policy, None)
+            .run("t".into(), tx, &mut no_policy, &mut None, None)
             .await
             .expect("run");
 
@@ -2788,5 +3358,96 @@ mod tests {
                 serde_json::from_str(line).expect("valid AuditEvent JSONL line");
             assert!(parsed.to_json().is_ok());
         }
+    }
+
+    #[test]
+    fn concrete_permissions_write_spec_matches_sanitized_file() {
+        let tool = akmon_tools::WriteSpecTool::new();
+        let root = std::path::Path::new("/tmp");
+        let p = concrete_permissions(
+            &tool,
+            "write_spec",
+            &json!({ "name": "My Spec", "content": "x" }),
+            root,
+        );
+        assert_eq!(
+            p,
+            vec![Permission::WriteFile {
+                path: PathBuf::from(".akmon/specs/My-Spec.md"),
+            }]
+        );
+    }
+
+    #[test]
+    fn concrete_permissions_write_spec_unsafe_name_falls_back() {
+        let tool = akmon_tools::WriteSpecTool::new();
+        let root = std::path::Path::new("/tmp");
+        let p = concrete_permissions(
+            &tool,
+            "write_spec",
+            &json!({ "name": "../../etc", "content": "x" }),
+            root,
+        );
+        assert_eq!(p, tool.required_permissions().to_vec());
+    }
+
+    #[test]
+    fn should_write_handoff_requires_min_turns_and_signal() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut s = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+        );
+        assert!(!crate::specs_and_handoff::should_write_handoff(&s));
+        s.user_turns_finished = crate::specs_and_handoff::MIN_USER_TURNS_FOR_HANDOFF;
+        assert!(!crate::specs_and_handoff::should_write_handoff(&s));
+        s.last_assistant_snippet = Some("done".into());
+        assert!(crate::specs_and_handoff::should_write_handoff(&s));
+    }
+
+    #[test]
+    fn write_handoff_file_writes_when_eligible() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut s = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+        );
+        s.user_turns_finished = crate::specs_and_handoff::MIN_USER_TURNS_FOR_HANDOFF;
+        s.last_assistant_snippet = Some("summary".into());
+        crate::specs_and_handoff::write_handoff_file(&s, tmp.path(), "test-model")
+            .expect("handoff");
+        let body =
+            std::fs::read_to_string(crate::specs_and_handoff::handoff_path(tmp.path()))
+                .expect("read");
+        assert!(body.contains("test-model"));
+        assert!(body.contains("summary"));
     }
 }

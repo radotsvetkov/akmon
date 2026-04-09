@@ -1,6 +1,6 @@
 //! Execute parsed slash commands against [`TuiApp`] and shared launch configuration.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use akmon_models::{OllamaProbe, probe_ollama};
@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::agent::AgentTurn;
 use crate::app::{ExternalEditTarget, Overlay, TuiApp};
+use crate::command::SessionSideEffect;
 use crate::config::TuiLaunchConfig;
 use crate::model_picker::build_model_picker_rows;
 use crate::session_persist::{
@@ -37,6 +38,28 @@ pub struct SlashEnv {
 
 fn nonempty_cfg(s: &Option<String>) -> bool {
     s.as_ref().is_some_and(|x| !x.trim().is_empty())
+}
+
+/// Human-readable cost hint for `AKMON.md` size (`/doctor`).
+fn akmon_md_efficiency_line(project_root: &Path) -> String {
+    let path = project_root.join("AKMON.md");
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return "AKMON.md: not found".into();
+    };
+    if !meta.is_file() {
+        return "AKMON.md: not found".into();
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return "AKMON.md: unreadable".into();
+    };
+    let est = content.len() / 4;
+    if est <= 500 {
+        format!("✓  AKMON.md: ~{est} tokens  (efficient)")
+    } else if est < 4500 {
+        format!("⚠  AKMON.md: ~{est} tokens  (consider trimming — adds cost)")
+    } else {
+        format!("✗  AKMON.md: ~{est} tokens  (costs more than it saves)")
+    }
 }
 
 fn probe_ollama_blocking(url: &str) -> OllamaProbe {
@@ -92,9 +115,19 @@ fn dispatch(
             SlashHandled::Continue
         }
         "clear" => {
+            let hard_specs = matches!(arg, Some(a) if a.trim() == "--hard");
             app.messages.clear();
             app.scroll_offset = 0;
-            app.push_system_info("Session cleared. History hidden but context preserved.".into());
+            if let Some(tx) = app.session_effect_tx.as_ref() {
+                let _ = tx.send(SessionSideEffect::ClearAgentContext { hard_specs });
+            }
+            app.push_system_info(if hard_specs {
+                "Cleared on-screen history. Requested agent context clear and `.akmon/specs/*.md` deletion (AKMON.md kept)."
+                    .into()
+            } else {
+                "Cleared on-screen history. Requested agent context clear; AKMON.md and specs on disk preserved."
+                    .into()
+            });
             app.overlay = Overlay::None;
             SlashHandled::Continue
         }
@@ -130,6 +163,7 @@ fn dispatch(
             app.total_cache_read_tokens = 0;
             app.total_cache_write_tokens = 0;
             app.total_output_tokens = 0;
+            app.total_microcompact_cleared = 0;
             app.current_iteration = 0;
             app.session_started_at = Utc::now();
             app.session_instant = std::time::Instant::now();
@@ -360,6 +394,7 @@ fn dispatch(
                     app.push_system_info(format!("{}   {}", m.name, m.display_size()));
                 }
             }
+            app.push_system_info(akmon_md_efficiency_line(&app.project_root));
             app.overlay = Overlay::None;
             SlashHandled::Continue
         }
@@ -598,6 +633,7 @@ fn apply_loaded_session(
     app.total_cache_read_tokens = 0;
     app.total_cache_write_tokens = 0;
     app.total_output_tokens = 0;
+    app.total_microcompact_cleared = 0;
     app.current_iteration = 0;
     app.session_started_at = loaded.started_at;
     app.scroll_offset = 0;
@@ -698,6 +734,10 @@ pub fn cost_summary_lines(app: &TuiApp) -> Vec<String> {
         format!("Cache hits:         {}", app.total_cache_read_tokens),
         format!("Cache writes:       {}", app.total_cache_write_tokens),
         format!("Output tokens:      {}", app.total_output_tokens),
+        format!(
+            "Microcompact (~saved): {}",
+            app.total_microcompact_cleared
+        ),
         "─────────────────────────".to_string(),
     ];
     let est = estimate_cost_usd(app);

@@ -15,16 +15,18 @@ members = [
 crossterm = "0.27"
 ratatui = "0.26"
 serde_json = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [workspace.package]
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 rust-version = "1.88"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/akmon-dev/akmon"
-homepage = "https://github.com/akmon-dev/akmon"
+license = "Apache-2.0"
+repository = "https://github.com/radotsvetkov/akmon"
+homepage = "https://radotsvetkov.github.io/akmon/"
 description = "Local-first, trust-first Rust AI coding agent"
 keywords = ["ai", "agent", "coding", "llm", "cli"]
 categories = ["command-line-utilities", "development-tools"]

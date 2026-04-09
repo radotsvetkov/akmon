@@ -61,7 +61,7 @@ pub(crate) fn forward_cli_for_child_process(cmd: &mut Command, cli: &Cli, auto_c
     if let Some(ref p) = cli.audit_log {
         cmd.arg("--audit-log").arg(p);
     }
-    if let Some(sid) = cli.session {
-        cmd.arg("--session").arg(sid.to_string());
+    if let Some(ref s) = cli.resume_session {
+        cmd.arg("--session").arg(s);
     }
 }

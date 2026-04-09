@@ -274,6 +274,28 @@ pub fn latest_dot_akmon_plan(project_root: &Path) -> Option<PathBuf> {
     newest.map(|(_, p)| p)
 }
 
+fn transcript_messages(app: &TuiApp) -> Vec<PersistedMessage> {
+    let mut out = Vec::new();
+    for m in &app.messages {
+        match m {
+            TuiMessage::User { content } => out.push(PersistedMessage {
+                role: "user".into(),
+                content: content.clone(),
+            }),
+            TuiMessage::Assistant { content, complete } => {
+                if *complete {
+                    out.push(PersistedMessage {
+                        role: "assistant".into(),
+                        content: content.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +346,8 @@ mod tests {
             auto_commit: false,
             planner_model: "llama3.2".into(),
             display_theme: akmon_config::TerminalTheme::default(),
+            session_display_name: None,
+            resume_messages: None,
         });
         let cfg = crate::TuiLaunchConfig {
             version: "t".into(),
@@ -358,6 +382,8 @@ mod tests {
             auto_commit: false,
             planner_model: "llama3.2".into(),
             display_theme: akmon_config::TerminalTheme::default(),
+            session_display_name: None,
+            resume_messages: None,
         };
         let path = save_session_snapshot(&app, &cfg, Utc::now(), Some(&sessions)).expect("save");
         assert_eq!(
@@ -388,26 +414,4 @@ mod tests {
         let p = latest_dot_akmon_plan(root.path()).expect("plan");
         assert!(p.ends_with("new.md"));
     }
-}
-
-fn transcript_messages(app: &TuiApp) -> Vec<PersistedMessage> {
-    let mut out = Vec::new();
-    for m in &app.messages {
-        match m {
-            TuiMessage::User { content } => out.push(PersistedMessage {
-                role: "user".into(),
-                content: content.clone(),
-            }),
-            TuiMessage::Assistant { content, complete } => {
-                if *complete {
-                    out.push(PersistedMessage {
-                        role: "assistant".into(),
-                        content: content.clone(),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-    out
 }

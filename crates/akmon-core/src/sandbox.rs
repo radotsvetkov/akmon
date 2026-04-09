@@ -68,10 +68,19 @@ impl Sandbox {
         primary_root: impl Into<PathBuf>,
         additional_roots: Vec<PathBuf>,
     ) -> Self {
+        Self::with_additional_roots_git(primary_root, additional_roots, true)
+    }
+
+    /// Like [`Self::with_additional_roots`] but preserves [`Self::has_git_root`] from discovery.
+    pub fn with_additional_roots_git(
+        primary_root: impl Into<PathBuf>,
+        additional_roots: Vec<PathBuf>,
+        has_git_root: bool,
+    ) -> Self {
         Self {
             primary_root: primary_root.into(),
             additional_roots,
-            has_git_root: true,
+            has_git_root,
         }
     }
 

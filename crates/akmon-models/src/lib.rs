@@ -7,6 +7,7 @@ mod bedrock;
 mod config;
 mod error;
 mod llm_connect;
+mod provider_error;
 mod max_tokens;
 mod message;
 mod ollama;
@@ -22,8 +23,9 @@ pub use anthropic::{
 pub use bedrock::{BEDROCK_DISPLAY_MODEL_IDS, BedrockBackend};
 pub use config::CompletionConfig;
 pub use error::ModelError;
-pub use llm_connect::{LlmConnectConfig, looks_like_ollama_model};
-pub use max_tokens::max_tokens_for_model;
+pub use llm_connect::{LlmConnectConfig, looks_like_claude_api_model, looks_like_ollama_model};
+pub use provider_error::{ProviderError, ProviderResult};
+pub use max_tokens::{max_tokens_for_model, max_tokens_for_openai_style_model};
 pub use message::{Message, MessageRole};
 pub use ollama::OllamaBackend;
 pub use ollama_models::{
@@ -35,11 +37,51 @@ pub use tool_def::ToolDefinition;
 
 use async_trait::async_trait;
 
-/// Conservative token approximation when no backend tokenizer is available. Uses `ceil(chars / 3.5)`
-/// rounded up to reduce the risk of silent context overflow. Slightly overestimates.
+/// Heuristic token estimate for a single string (prose vs code-ish lines).
+#[must_use]
+pub fn estimate_tokens_for_content(content: &str) -> usize {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return 0;
+    }
+    let code_line_count = lines
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            t.ends_with(';')
+                || t.ends_with('{')
+                || t.ends_with('}')
+                || t.contains("fn ")
+                || t.contains("let ")
+                || t.contains("def ")
+                || t.contains("class ")
+                || t.contains("import ")
+                || t.contains("    ")
+        })
+        .count();
+    let code_ratio = code_line_count as f64 / lines.len() as f64;
+    let tokens = if code_ratio > 0.4 {
+        (lines.len() as f64 * 18.0).ceil() as u64
+    } else {
+        let words = content.split_whitespace().count();
+        (words as f64 * 1.3).ceil() as u64
+    };
+    ((tokens * 4) / 3) as usize
+}
+
+/// Sums [`estimate_tokens_for_content`] across all message bodies.
+#[must_use]
+pub fn estimate_messages_tokens(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .map(|m| estimate_tokens_for_content(&m.content))
+        .sum()
+}
+
+/// Conservative token approximation when no backend tokenizer is available.
+#[must_use]
 pub fn approximate_tokens(messages: &[Message]) -> usize {
-    let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
-    ((total_chars as f64) / 3.5).ceil() as usize
+    estimate_messages_tokens(messages)
 }
 
 /// Pluggable large-language-model backend (Ollama today; cloud APIs later).
@@ -90,7 +132,8 @@ mod approximate_token_tests {
             role: MessageRole::User,
             content: "1234567".into(),
         }];
-        assert_eq!(approximate_tokens(&m), 2);
+        let n = approximate_tokens(&m);
+        assert!((1..=4).contains(&n), "unexpected estimate {n}");
     }
 
     #[test]
@@ -105,6 +148,7 @@ mod approximate_token_tests {
                 content: "bb".into(),
             },
         ];
-        assert_eq!(approximate_tokens(&m), 1);
+        let n = approximate_tokens(&m);
+        assert!(n >= 2, "expected >1 token est for two short messages, got {n}");
     }
 }

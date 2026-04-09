@@ -143,14 +143,25 @@ pub fn try_auto_commit_after_file_tool(
     tool_name: &str,
     args: &JsonValue,
 ) -> Option<AuditEvent> {
-    if !matches!(tool_name, "edit" | "write_file" | "apply_patch") {
+    if !matches!(
+        tool_name,
+        "edit" | "write_file" | "apply_patch" | "write_spec"
+    ) {
         return None;
     }
-    let path = if tool_name == "apply_patch" {
-        args.get("file_path")?.as_str()?
+    let path_storage: String = if tool_name == "apply_patch" {
+        args.get("file_path")?.as_str()?.to_string()
+    } else if tool_name == "write_spec" {
+        let name = args.get("name")?.as_str()?;
+        let base = name.trim().trim_end_matches(".md");
+        if base.is_empty() || base.contains('/') || base.contains('\\') {
+            return None;
+        }
+        format!(".akmon/specs/{base}.md")
     } else {
-        args.get("path")?.as_str()?
+        args.get("path")?.as_str()?.to_string()
     };
+    let path = path_storage.as_str();
     let old_str = args.get("old_str").and_then(|v| v.as_str());
     let snippet = old_str.map(collapse_for_message).unwrap_or_default();
     let file_part = Path::new(path)

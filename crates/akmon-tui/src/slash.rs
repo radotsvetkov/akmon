@@ -24,8 +24,8 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "clear",
         aliases: &[],
-        description: "Clear on-screen history (agent context unchanged)",
-        takes_arg: false,
+        description: "Clear UI + agent chat context; add `--hard` to delete `.akmon/specs/*.md`",
+        takes_arg: true,
     },
     SlashCommand {
         name: "reset",

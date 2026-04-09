@@ -43,6 +43,13 @@ pub fn render_status_bar(f: &mut ratatui::Frame<'_>, area: Rect, parts: StatusPa
             parts.cache_style,
         ));
     }
+    if parts.cleared > 0 {
+        spans.push(Span::styled("  │  ", sep));
+        spans.push(Span::styled(
+            format!("cleared:~{}", fmt_u32_commas(parts.cleared)),
+            dg,
+        ));
+    }
     if let Some(cost) = parts.cost_line {
         spans.push(Span::styled("  │  ", sep));
         spans.push(Span::styled(cost.text, cost.style));
@@ -85,6 +92,8 @@ pub struct StatusParts {
     pub output_tokens: u32,
     /// Cache read tokens.
     pub cache: u32,
+    /// Estimated input tokens cleared by micro-compaction (dim when shown).
+    pub cleared: u32,
     /// Style for cache field.
     pub cache_style: Style,
     /// Optional cost segment.

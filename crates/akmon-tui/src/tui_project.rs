@@ -168,8 +168,8 @@ async fn run_init_job(cfg: &TuiLaunchConfig) -> (Vec<String>, bool) {
     let title = suggested_akmon_title(&summary);
     let provider = match cfg.llm_connect_for_model(cfg.model_name.clone()).resolve() {
         Ok(p) => p,
-        Err(msg) => {
-            lines.push(format!("Model provider error: {msg}"));
+        Err(e) => {
+            lines.push(format!("Model provider error: {}", e));
             return (lines, false);
         }
     };
@@ -249,8 +249,8 @@ async fn run_new_job(cfg: &TuiLaunchConfig, name: &str) -> (Vec<String>, bool) {
     let title = suggested_akmon_title(&summary);
     let provider = match cfg.llm_connect_for_model(cfg.model_name.clone()).resolve() {
         Ok(p) => p,
-        Err(msg) => {
-            lines.push(format!("Model provider error: {msg}"));
+        Err(e) => {
+            lines.push(format!("Model provider error: {}", e));
             return (lines, false);
         }
     };

@@ -44,6 +44,10 @@ mod tests {
             confirmation_timeout_secs: 30,
             session_id: Uuid::nil(),
             auto_commit: false,
+            max_completion_tokens: None,
+            subagent_style: false,
+            max_budget_usd: None,
+            fallback_model: None,
         };
         assert!(check_iteration_limit(0, &config).is_ok());
         assert!(check_iteration_limit(24, &config).is_ok());
@@ -56,6 +60,10 @@ mod tests {
             confirmation_timeout_secs: 30,
             session_id: Uuid::nil(),
             auto_commit: false,
+            max_completion_tokens: None,
+            subagent_style: false,
+            max_budget_usd: None,
+            fallback_model: None,
         };
         assert_eq!(
             check_iteration_limit(25, &config),
@@ -70,6 +78,10 @@ mod tests {
             confirmation_timeout_secs: 30,
             session_id: Uuid::nil(),
             auto_commit: false,
+            max_completion_tokens: None,
+            subagent_style: false,
+            max_budget_usd: None,
+            fallback_model: None,
         };
         assert!(check_iteration_limit(100, &config).is_err());
     }

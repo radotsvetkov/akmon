@@ -8,6 +8,8 @@ use crate::tool_def::ToolDefinition;
 pub struct CompletionConfig {
     /// Maximum number of tokens the model may generate for this completion.
     pub max_tokens: u32,
+    /// Optional session id (e.g. OpenRouter `prompt_cache_key` for sticky routing).
+    pub session_id: Option<String>,
     /// Sampling temperature (higher = more random).
     pub temperature: f32,
     /// Wall-clock budget from request start until the **first** streamed chunk must arrive.
@@ -18,6 +20,8 @@ pub struct CompletionConfig {
     pub stream: bool,
     /// Tool definitions passed to backends that support function calling (e.g. Ollama `tools`).
     pub tools: Vec<ToolDefinition>,
+    /// On repeated HTTP 429/529 responses, later retries may use this model id instead (Anthropic / OpenAI-compatible).
+    pub fallback_model: Option<String>,
 }
 
 impl Default for CompletionConfig {
@@ -26,10 +30,12 @@ impl Default for CompletionConfig {
     fn default() -> Self {
         Self {
             max_tokens: max_tokens_for_model(""),
+            session_id: None,
             temperature: 0.7,
             first_token_deadline_ms: 5000,
             stream: true,
             tools: Vec::new(),
+            fallback_model: None,
         }
     }
 }

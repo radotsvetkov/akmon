@@ -44,6 +44,15 @@ pub enum ToolOutput {
         /// Explanation safe to log (no secrets).
         message: String,
     },
+    /// Interactive-only: ask the user a question and block until the UI supplies an answer.
+    ///
+    /// The session layer turns this into [`ToolOutput::Success`] after the answer is received.
+    Question {
+        /// Question body shown to the user.
+        question: String,
+        /// Optional quick-reply hints (UI may show as numbered options).
+        suggestions: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -70,6 +79,17 @@ mod tests {
         assert_eq!(v["status"], "error");
         assert_eq!(v["code"], "invalid_args");
         assert_eq!(v["message"], "missing path");
+    }
+
+    #[test]
+    fn tool_output_question_json_shape() {
+        let o = ToolOutput::Question {
+            question: "Which port?".into(),
+            suggestions: vec!["3000".into()],
+        };
+        let v = serde_json::to_value(&o).expect("serialize");
+        assert_eq!(v["status"], "question");
+        assert_eq!(v["question"], "Which port?");
     }
 
     #[test]

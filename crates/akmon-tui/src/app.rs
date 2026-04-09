@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
-use crate::command::UiCommand;
+use crate::command::{SessionSideEffect, UiCommand};
 use crate::config::TuiLaunchConfig;
 use crate::layout::LayoutRects;
 use crate::message::TuiMessage;
@@ -87,6 +87,17 @@ pub enum Overlay {
     },
 }
 
+/// State for an `ask_followup` prompt (user types the reply in the compose area).
+#[derive(Debug, Clone)]
+pub struct QuestionPromptState {
+    /// Tool call id matching the transcript row.
+    pub call_id: String,
+    /// Question body from the model.
+    pub question: String,
+    /// Optional quick replies.
+    pub suggestions: Vec<String>,
+}
+
 /// Primary application state for the interactive terminal UI.
 pub struct TuiApp {
     /// Last known full-terminal bounds (updated each frame and on resize).
@@ -111,6 +122,8 @@ pub struct TuiApp {
     pub auto_scroll: bool,
     /// Session identifier (shown truncated in the status bar).
     pub session_id: Uuid,
+    /// Optional session label from `--name` / `/name` (status line).
+    pub session_display_name: Option<String>,
     /// Sandbox / project root.
     pub project_root: PathBuf,
     /// Last path segment of [`Self::project_root`] for branding (e.g. welcome screen).
@@ -149,14 +162,22 @@ pub struct TuiApp {
     pub index_enabled: bool,
     /// When `true`, only confirmation keys are accepted in the input handler.
     pub awaiting_confirmation: bool,
+    /// When `true`, the user is answering an `ask_followup` prompt.
+    pub awaiting_question: bool,
+    /// Pending question UI state.
+    pub question_prompt: Option<QuestionPromptState>,
     /// Channel to the agent task (confirm / interrupt).
     pub ui_command_tx: Option<UnboundedSender<UiCommand>>,
+    /// Slash `/clear` and similar session maintenance handled on the agent task.
+    pub session_effect_tx: Option<UnboundedSender<SessionSideEffect>>,
     /// Wall-clock start for session snapshot metadata.
     pub session_started_at: DateTime<Utc>,
     /// Active full-screen or picker overlay (slash-driven).
     pub overlay: Overlay,
     /// Cumulative prompt-cache **write** (creation) tokens from usage reports.
     pub total_cache_write_tokens: u32,
+    /// Rough input tokens reclaimed by clearing stale tool outputs (see [`AgentEvent::MicrocompactEstimate`]).
+    pub total_microcompact_cleared: u32,
     /// Resolved audit JSONL path for this session (updated on `/reset` and `/resume`).
     pub audit_log_path: PathBuf,
     /// Selected row in [`Overlay::SlashAutocomplete`]; persisted while the prefix is stable.
@@ -224,6 +245,7 @@ impl TuiApp {
         let free_local_inference = config.is_free_local_inference();
         let light_body_text = config.light_body_text();
         let session_id = config.session_id;
+        let session_display_name = config.session_display_name.clone();
         let started = Utc::now();
         let project_name = config
             .project_root
@@ -232,6 +254,21 @@ impl TuiApp {
             .unwrap_or(".")
             .to_string();
         let context_scan = scan_context_files(&config.project_root);
+        const AKMON_MD_LARGE_CHARS: usize = 2000;
+        let mut messages: Vec<TuiMessage> = config.resume_messages.unwrap_or_default();
+        let has_sent_first_message = messages
+            .iter()
+            .any(|m| matches!(m, TuiMessage::User { .. }));
+        if let Some(ref md) = config.akmon_md
+            && md.len() > AKMON_MD_LARGE_CHARS
+        {
+            let est = md.len() / 4;
+            messages.push(TuiMessage::SystemInfo {
+                content: format!(
+                    "⚠ AKMON.md is large (~{est} tokens) — consider trimming; it is sent on every model call."
+                ),
+            });
+        }
         Self {
             terminal_size: Rect::default(),
             layout_rects: LayoutRects {
@@ -245,12 +282,13 @@ impl TuiApp {
             confirmation_dialog: None,
             status_flash: None,
             agent_display: AgentDisplayState::Idle,
-            messages: Vec::new(),
+            messages,
             input_buffer: String::new(),
             input_cursor: 0,
             scroll_offset: 0,
             auto_scroll: true,
             session_id,
+            session_display_name,
             project_root: config.project_root,
             project_name,
             model_name: config.model_name,
@@ -270,10 +308,14 @@ impl TuiApp {
             stream_cursor_visible: true,
             index_enabled: config.index_enabled,
             awaiting_confirmation: false,
+            awaiting_question: false,
+            question_prompt: None,
             ui_command_tx: None,
+            session_effect_tx: None,
             session_started_at: started,
             overlay: Overlay::None,
             total_cache_write_tokens: 0,
+            total_microcompact_cleared: 0,
             audit_log_path: config.audit_log_path.clone(),
             slash_ac_selected: 0,
             slash_ac_sig: String::new(),
@@ -289,7 +331,7 @@ impl TuiApp {
             pending_plan: None,
             latest_plan_path: None,
             session_instant: std::time::Instant::now(),
-            has_sent_first_message: false,
+            has_sent_first_message,
             message_count: 0,
             total_tool_calls: 0,
             successful_tool_calls: 0,
@@ -435,6 +477,7 @@ impl TuiApp {
                     "shell" => "Shell command — approval required before run",
                     "web_fetch" => "Web request — approval may be required",
                     "git" => "Git operation — approval may be required",
+                    "ask_followup" => "Waiting for your answer…",
                     _ => "Running tool…",
                 }
                 .into();
@@ -490,6 +533,22 @@ impl TuiApp {
                     *st = Some(success);
                 }
             }
+            AgentEvent::QuestionRequired {
+                id,
+                question,
+                suggestions,
+            } => {
+                self.agent_activity_line = "Answer the question below — Enter to submit, Esc to skip"
+                    .into();
+                self.awaiting_question = true;
+                self.input_buffer.clear();
+                self.input_cursor = 0;
+                self.question_prompt = Some(QuestionPromptState {
+                    call_id: id,
+                    question,
+                    suggestions,
+                });
+            }
             AgentEvent::ConfirmationRequired {
                 description,
                 diff_preview,
@@ -523,6 +582,13 @@ impl TuiApp {
                 } else if message.starts_with('⟳') {
                     self.agent_activity_line = message.clone();
                 }
+            }
+            AgentEvent::MicrocompactEstimate {
+                estimated_tokens_cleared,
+            } => {
+                self.total_microcompact_cleared = self
+                    .total_microcompact_cleared
+                    .saturating_add(estimated_tokens_cleared);
             }
             AgentEvent::SummarizationStarted => {
                 self.push_system_info("Context summarization started…".into());
@@ -830,6 +896,8 @@ mod tests {
             auto_commit: false,
             planner_model: "llama3.2".into(),
             display_theme: akmon_config::TerminalTheme::default(),
+            session_display_name: None,
+            resume_messages: None,
         }
     }
 
@@ -909,7 +977,7 @@ mod tests {
         assert_eq!(app.messages.len(), 1);
         assert!(matches!(
             &app.messages[0],
-            TuiMessage::SystemInfo { content } if content.contains("Session cleared")
+            TuiMessage::SystemInfo { content } if content.contains("on-screen history")
         ));
     }
 

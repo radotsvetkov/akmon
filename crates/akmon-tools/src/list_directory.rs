@@ -224,6 +224,7 @@ mod tests {
                 assert!(names.contains(&"sub"));
             }
             ToolOutput::Error { message, .. } => panic!("unexpected error: {message}"),
+            ToolOutput::Question { .. } => panic!("unexpected question"),
         }
     }
 

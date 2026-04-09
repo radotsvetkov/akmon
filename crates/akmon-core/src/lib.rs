@@ -17,6 +17,7 @@
 #![warn(missing_docs)]
 
 pub mod audit;
+pub mod cost_estimate;
 pub mod context_import;
 pub mod fsm;
 /// Stack detection and capped “project intelligence” snippets for model context.
@@ -31,6 +32,7 @@ pub mod secret;
 pub use audit::{
     AuditEvent, InteractivePolicyReply, PolicyVerdict, ToolOutcomeKind, write_audit_jsonl,
 };
+pub use cost_estimate::estimate_cost_usd;
 pub use context_import::{
     CONTEXT_FILE_MAX_BYTES, ContextFile, ContextScan, ToolOrigin, primary_tool_from_files,
     scan_context_files, strip_mdc_style_frontmatter,

@@ -4,6 +4,19 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-04-08
+
+### Added
+
+- **Documentation:** tutorials (step-by-step for Rust, Go, Python Flask/FastAPI, Elixir), multi-agent/automation patterns, architecture trade-offs; **capabilities** reference page; new examples for Flask/FastAPI and Elixir/Phoenix.
+- **Site:** landing page refresh (live demo preview, community links) and book cross-links.
+
+### Changed
+
+- **License:** Apache-2.0 **only** (MIT option removed). Full text in repository `LICENSE`.
+- **Provider resolution:** `LlmConnectConfig::resolve()` returns explicit `ProviderError` when a backend cannot be used (for example Claude-family models without API keys) instead of falling through to an unintended provider.
+- **CLI:** with `--output json`, early configuration errors emit JSON on stdout for consistent automation parsing.
+
 ## [1.6.0] - 2026-04-08
 
 ### Added

@@ -28,6 +28,7 @@ docs/
   src/
     SUMMARY.md       Table of contents — defines navigation
     introduction.md  Landing page
+    comparison.md    Short “other tools vs Akmon” (not on the marketing page)
     getting-started/ Installation, quickstart, providers
     usage/           Interactive, headless, plan, spec modes
     project/         init, AKMON.md, import, export

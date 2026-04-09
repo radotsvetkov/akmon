@@ -15,6 +15,8 @@ semantic-index = ["dep:akmon-index", "dep:fastembed", "akmon-index/semantic-inde
 [dependencies]
 akmon-core = { path = "../akmon-core" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+dirs = "5"
+sha2 = "0.10"
 akmon-index = { path = "../akmon-index", optional = true }
 fastembed = { version = "5", default-features = true, optional = true }
 async-trait = "0.1"
@@ -27,6 +29,7 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 
 [dev-dependencies]

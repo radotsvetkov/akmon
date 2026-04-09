@@ -2,6 +2,17 @@
 
 [Introduction](./introduction.md)
 
+- [Other tools vs Akmon](./comparison.md)
+
+---
+
+# Tutorials
+
+- [Tutorials overview](./tutorials/overview.md)
+- [Step-by-step (Rust, Go, Python, Elixir)](./tutorials/step-by-step.md)
+- [Multi-agent & automation](./tutorials/multi-agent-automation.md)
+- [Architecture patterns](./tutorials/architecture-patterns.md)
+
 ---
 
 # Getting Started
@@ -46,6 +57,8 @@
 
 - [Build a REST API — Rust + Axum](./examples/rust-axum-api.md)
 - [Build a CLI tool — Python](./examples/python-cli.md)
+- [Python — Flask & FastAPI](./examples/python-flask-fastapi.md)
+- [Elixir / Phoenix](./examples/elixir-phoenix.md)
 - [Build a Next.js app — TypeScript](./examples/typescript-nextjs.md)
 - [Refactor an existing project](./examples/refactoring.md)
 - [Analyze a codebase](./examples/codebase-analysis.md)
@@ -78,6 +91,7 @@
 
 # Reference
 
+- [Capabilities](./reference/capabilities.md)
 - [CLI Reference](./reference/cli.md)
 - [Slash Commands](./reference/slash-commands.md)
 - [Configuration Reference](./reference/config.md)

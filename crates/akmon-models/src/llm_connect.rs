@@ -4,18 +4,43 @@ use std::sync::Arc;
 
 use akmon_core::Secret;
 
-use crate::{AnthropicBackend, BedrockBackend, LlmProvider, OllamaBackend, OpenAiCompatBackend};
+use crate::{
+    AnthropicBackend, BedrockBackend, LlmProvider, OllamaBackend, OpenAiCompatBackend, ProviderError,
+};
 
 fn nonempty(opt: Option<String>) -> Option<String> {
     opt.filter(|s| !s.trim().is_empty())
 }
 
+/// Anthropic API model ids (`claude-…`); checked before Ollama heuristics so `claude-*` never routes to Ollama.
+pub fn looks_like_claude_api_model(model: &str) -> bool {
+    let lower = model.trim().to_lowercase();
+    lower.starts_with("claude-") || lower == "claude"
+}
+
+fn looks_like_openai_chat_model(model: &str) -> bool {
+    let lower = model.trim().to_lowercase();
+    lower.starts_with("gpt-")
+        || lower.starts_with("chatgpt-")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+}
+
+fn looks_like_groq_hosted_model(model: &str) -> bool {
+    let lower = model.trim().to_lowercase();
+    lower.starts_with("llama") || lower.starts_with("mixtral")
+}
+
 /// Heuristic for Ollama-style local model ids (`:` tags or common local prefixes).
 pub fn looks_like_ollama_model(model: &str) -> bool {
+    let lower = model.trim().to_lowercase();
+    if looks_like_claude_api_model(model) {
+        return false;
+    }
     if model.contains(':') {
         return true;
     }
-    let lower = model.to_lowercase();
     const PREFIXES: &[&str] = &[
         "llama",
         "qwen",
@@ -91,9 +116,8 @@ impl LlmConnectConfig {
     /// Human-readable backend label for status bars (matches [`Self::resolve`] priority).
     pub fn inferred_backend_name(&self) -> &'static str {
         let model = self.model.trim();
-        let lower = model.to_lowercase();
-        // Claude ids are always Anthropic-class in the product UI, even if routing falls through.
-        if lower.starts_with("claude") {
+
+        if looks_like_claude_api_model(model) {
             return "Anthropic";
         }
         let aws_key_present = std::env::var("AWS_ACCESS_KEY_ID")
@@ -129,6 +153,7 @@ impl LlmConnectConfig {
             .openai_api_key
             .as_ref()
             .is_some_and(|s| !s.trim().is_empty())
+            && looks_like_openai_chat_model(model)
         {
             return "OpenAI";
         }
@@ -137,6 +162,7 @@ impl LlmConnectConfig {
             .groq_api_key
             .as_ref()
             .is_some_and(|s| !s.trim().is_empty())
+            && looks_like_groq_hosted_model(model)
         {
             return "Groq";
         }
@@ -160,9 +186,10 @@ impl LlmConnectConfig {
         "Ollama"
     }
 
-    /// Resolves a provider using priority order: Bedrock → OpenRouter (`org/model`) → Anthropic (Claude + key) → Claude via OpenRouter → Azure → OpenAI → Groq → custom URL → Ollama heuristics → Ollama default.
-    pub fn resolve(self) -> Result<Arc<dyn LlmProvider>, String> {
+    /// Resolves a provider using priority order: Bedrock → native `claude-*` (Anthropic / OpenRouter) → OpenRouter (`org/model`) → Azure → OpenAI (gpt/o\* only) → Groq (llama/mixtral only) → custom URL → Ollama heuristics → Ollama default.
+    pub fn resolve(self) -> Result<Arc<dyn LlmProvider>, ProviderError> {
         let model = self.model;
+        let model_trim = model.trim();
         let aws_key_present = std::env::var("AWS_ACCESS_KEY_ID")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -170,30 +197,26 @@ impl LlmConnectConfig {
         if self.bedrock_explicit || aws_key_present {
             return match BedrockBackend::from_env(self.aws_region, model.clone()) {
                 Some(b) => Ok(Arc::new(b)),
-                None => Err(String::from(
-                    "AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars.",
-                )),
+                None => Err(ProviderError::AwsCredentialsNotFound),
             };
         }
 
-        if model.contains('/') {
-            let key = nonempty(self.openrouter_api_key).ok_or_else(|| {
-                String::from(
-                    "OpenRouter model id contains '/' — set OPENROUTER_API_KEY or --openrouter-key.",
-                )
-            })?;
-            return Ok(Arc::new(OpenAiCompatBackend::openrouter(key, model)));
-        }
-
-        let lower = model.to_lowercase();
-        if lower.starts_with("claude") {
+        // Native Anthropic API ids (`claude-haiku-…`) before OpenRouter slash slugs and Ollama.
+        if looks_like_claude_api_model(model_trim) && !model_trim.contains('/') {
             if let Some(key) = nonempty(self.anthropic_api_key) {
                 return Ok(Arc::new(AnthropicBackend::new(Secret::new(key), model)));
             }
             if let Some(key) = nonempty(self.openrouter_api_key) {
-                let or_id = format!("anthropic/{model}");
+                let or_id = format!("anthropic/{model_trim}");
                 return Ok(Arc::new(OpenAiCompatBackend::openrouter(key, or_id)));
             }
+            return Err(ProviderError::ClaudeModelsRequireApiKey);
+        }
+
+        if model_trim.contains('/') {
+            let key = nonempty(self.openrouter_api_key)
+                .ok_or(ProviderError::OpenRouterKeyRequiredForSlashModel)?;
+            return Ok(Arc::new(OpenAiCompatBackend::openrouter(key, model)));
         }
 
         if let (Some(ep), Some(k)) = (
@@ -207,20 +230,21 @@ impl LlmConnectConfig {
             )));
         }
 
-        if let Some(key) = nonempty(self.openai_api_key) {
+        if let Some(key) = nonempty(self.openai_api_key)
+            && looks_like_openai_chat_model(model_trim)
+        {
             return Ok(Arc::new(OpenAiCompatBackend::openai(key, model)));
         }
 
-        if let Some(key) = nonempty(self.groq_api_key) {
+        if let Some(key) = nonempty(self.groq_api_key)
+            && looks_like_groq_hosted_model(model_trim)
+        {
             return Ok(Arc::new(OpenAiCompatBackend::groq(key, model)));
         }
 
         if let Some(url) = nonempty(self.openai_compatible_url) {
-            let key = nonempty(self.openai_compatible_api_key).ok_or_else(|| {
-                String::from(
-                    "Set --openai-compatible-key (or config) for the custom OpenAI-compatible URL.",
-                )
-            })?;
+            let key = nonempty(self.openai_compatible_api_key)
+                .ok_or(ProviderError::OpenAiCompatibleKeyRequired)?;
             return Ok(Arc::new(OpenAiCompatBackend::custom(url, key, model)));
         }
 
@@ -243,7 +267,10 @@ mod tests {
             ..Default::default()
         }
         .resolve();
-        assert!(r.is_err());
+        match r {
+            Err(e) => assert_eq!(e, ProviderError::OpenRouterKeyRequiredForSlashModel),
+            Ok(p) => panic!("expected OpenRouter key error, got provider {}", p.name()),
+        }
     }
 
     #[test]
@@ -293,6 +320,55 @@ mod tests {
     }
 
     #[test]
+    fn claude_model_without_keys_errors_not_ollama() {
+        if std::env::var("AWS_ACCESS_KEY_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_some()
+        {
+            return;
+        }
+        let r = LlmConnectConfig {
+            model: "claude-haiku-4-5-20251001".into(),
+            ..Default::default()
+        }
+        .resolve();
+        let e = match r {
+            Err(e) => e,
+            Ok(p) => panic!("expected configuration error, got provider {}", p.name()),
+        };
+        assert_eq!(e, ProviderError::ClaudeModelsRequireApiKey);
+        let msg = e.to_string();
+        assert!(
+            msg.contains("ANTHROPIC") && msg.contains("OPENROUTER"),
+            "{msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("ollama"),
+            "must not route Claude to Ollama: {msg}"
+        );
+    }
+
+    #[test]
+    fn llama_with_only_openai_key_uses_ollama_not_openai() {
+        if std::env::var("AWS_ACCESS_KEY_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_some()
+        {
+            return;
+        }
+        let r = LlmConnectConfig {
+            model: "llama3.2".into(),
+            openai_api_key: Some("sk-openai".into()),
+            ..Default::default()
+        }
+        .resolve()
+        .expect("ollama");
+        assert_eq!(r.name(), "ollama");
+    }
+
+    #[test]
     fn bedrock_flag_without_env_errors() {
         let r = LlmConnectConfig {
             model: "anthropic.claude-3-5-haiku-20241022-v1:0".into(),
@@ -300,6 +376,9 @@ mod tests {
             ..Default::default()
         }
         .resolve();
-        assert!(r.is_err());
+        match r {
+            Err(e) => assert_eq!(e, ProviderError::AwsCredentialsNotFound),
+            Ok(p) => panic!("expected AWS credentials error, got provider {}", p.name()),
+        }
     }
 }

@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use crate::TuiApp;
 use crate::agent::{AgentTurn, BridgeMsg, run_agent_loop};
 use crate::app::{ExternalEditTarget, Overlay};
-use crate::command::UiCommand;
+use crate::command::{SessionSideEffect, UiCommand};
 use crate::config::TuiLaunchConfig;
 use crate::cost_estimate::estimate_cost_usd;
 use crate::layout::{self, rect_contains};
@@ -37,7 +37,7 @@ use crate::overlay::{
 };
 use crate::render::{
     CostFrag, StatusParts, flatten_transcript, paint_message_viewport, paint_terminal_too_small,
-    render_confirmation_overlay, render_header_bar, render_status_bar,
+    render_confirmation_overlay, render_header_bar, render_question_overlay, render_status_bar,
 };
 use crate::session_persist::{save_session_snapshot, saved_sessions_directory_empty};
 use crate::slash::{matching_commands, slash_command_name_prefix};
@@ -67,12 +67,14 @@ fn input_inner_rows_wrapped(buffer: &str, term_width: u16) -> u16 {
 }
 
 fn compose_stack_inputs(app: &TuiApp, term_width: u16) -> (u16, u16) {
-    let input_inner = if app.awaiting_confirmation || app.agent_running {
+    let input_inner = if app.awaiting_question {
+        input_inner_rows_wrapped(&app.input_buffer, term_width)
+    } else if app.awaiting_confirmation || app.agent_running {
         3
     } else {
         input_inner_rows_wrapped(&app.input_buffer, term_width)
     };
-    let ac = if app.awaiting_confirmation {
+    let ac = if app.awaiting_confirmation || app.awaiting_question {
         0
     } else {
         slash_autocomplete_row_count(app)
@@ -133,6 +135,7 @@ pub async fn run_interactive(config: TuiLaunchConfig) -> Result<(), TuiRunError>
     let (bridge_tx, bridge_rx) = std::sync::mpsc::sync_channel::<BridgeMsg>(512);
     let (task_tx, task_rx) = mpsc::unbounded_channel::<AgentTurn>();
     let (ui_cmd_tx, ui_cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+    let (session_effect_tx, session_effect_rx) = mpsc::unbounded_channel::<SessionSideEffect>();
     let interrupt = Arc::new(AtomicBool::new(false));
 
     let ollama_bridge = bridge_tx.clone();
@@ -153,6 +156,7 @@ pub async fn run_interactive(config: TuiLaunchConfig) -> Result<(), TuiRunError>
         notify_for_agent,
         task_rx,
         ui_cmd_rx,
+        session_effect_rx,
         bridge_for_agent,
         int_for_agent,
     ));
@@ -180,6 +184,7 @@ pub async fn run_interactive(config: TuiLaunchConfig) -> Result<(), TuiRunError>
             bridge_rx,
             task_tx,
             ui_clone,
+            session_effect_tx,
             interrupt,
             shared_block,
             notify_block,
@@ -209,12 +214,14 @@ fn run_terminal_loop(
     bridge_rx: std::sync::mpsc::Receiver<BridgeMsg>,
     task_tx: mpsc::UnboundedSender<AgentTurn>,
     ui_cmd_tx: mpsc::UnboundedSender<UiCommand>,
+    session_effect_tx: mpsc::UnboundedSender<SessionSideEffect>,
     interrupt: Arc<AtomicBool>,
     shared_config: Arc<Mutex<TuiLaunchConfig>>,
     reload_notify: Arc<Notify>,
     project_tx: mpsc::UnboundedSender<ProjectUiJob>,
 ) -> Result<(), TuiRunError> {
     let mut app = TuiApp::new(config.clone());
+    app.session_effect_tx = Some(session_effect_tx);
     app.set_ui_command_tx(ui_cmd_tx);
     app.attach_runtime_handles(Arc::clone(&shared_config), Arc::clone(&reload_notify));
     let stdout_h = stdout();
@@ -681,6 +688,36 @@ fn handle_key(
     let is_ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
     if !is_ctrl_c {
         app.status_flash = None;
+    }
+
+    if app.awaiting_question {
+        match key.code {
+            KeyCode::Enter => {
+                let answer = std::mem::take(&mut app.input_buffer);
+                app.input_cursor = 0;
+                if let Some(tx) = app.ui_command_tx.as_ref() {
+                    let _ = tx.send(UiCommand::QuestionAnswer { answer });
+                }
+                app.awaiting_question = false;
+                app.question_prompt = None;
+                app.recompute_scroll_after_append(msg_h, term_width);
+                return Ok(true);
+            }
+            KeyCode::Esc => {
+                if let Some(tx) = app.ui_command_tx.as_ref() {
+                    let _ = tx.send(UiCommand::QuestionAnswer {
+                        answer: String::new(),
+                    });
+                }
+                app.input_buffer.clear();
+                app.input_cursor = 0;
+                app.awaiting_question = false;
+                app.question_prompt = None;
+                app.recompute_scroll_after_append(msg_h, term_width);
+                return Ok(true);
+            }
+            _ => {}
+        }
     }
 
     if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1151,7 +1188,13 @@ fn show_help(app: &mut TuiApp) {
 }
 
 fn status_bar_parts(app: &TuiApp) -> StatusParts {
-    let sid: String = app.session_id.to_string().chars().take(8).collect();
+    let mut sid: String = app.session_id.to_string().chars().take(8).collect();
+    if let Some(ref n) = app.session_display_name {
+        let t = n.trim();
+        if !t.is_empty() {
+            sid = format!("{t} · {sid}");
+        }
+    }
     let cache_style = if app.total_cache_read_tokens > 0 {
         Style::default().fg(OK_GREEN)
     } else {
@@ -1209,6 +1252,7 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
         input_tokens: app.total_input_tokens,
         output_tokens: app.total_output_tokens,
         cache: app.total_cache_read_tokens,
+        cleared: app.total_microcompact_cleared,
         cache_style,
         cost_line,
         hint,
@@ -1257,7 +1301,8 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
         Vec::new()
     };
 
-    let show_welcome = app.messages.is_empty() && !app.awaiting_confirmation;
+    let show_welcome =
+        app.messages.is_empty() && !app.awaiting_confirmation && !app.awaiting_question;
     let first_session_ever = saved_sessions_directory_empty();
     paint_message_viewport(
         f,
@@ -1279,6 +1324,17 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
         draw_transcript_dim_layer(f, vp);
         if let Some(ref dlg) = app.confirmation_dialog {
             render_confirmation_overlay(f, vp, dlg);
+        }
+    } else if app.awaiting_question {
+        draw_transcript_dim_layer(f, vp);
+        if let Some(ref q) = app.question_prompt {
+            render_question_overlay(
+                f,
+                vp,
+                &q.question,
+                &q.suggestions,
+                app.input_buffer.as_str(),
+            );
         }
     }
 
@@ -1307,6 +1363,22 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
                 .border_style(Style::default().fg(WARN)),
         );
         f.render_widget(hint, inp);
+    } else if app.awaiting_question {
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(WARN))
+            .title(Span::styled(
+                " your answer ",
+                Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
+            ));
+        app.input_body_inner = Some(input_block.clone().inner(inp));
+        let input_text = build_input_widget(app);
+        f.render_widget(
+            Paragraph::new(input_text)
+                .block(input_block)
+                .wrap(Wrap { trim: false }),
+            inp,
+        );
     } else if app.agent_running {
         app.input_body_inner = None;
         let thinking = Paragraph::new(Line::from(vec![
@@ -1351,7 +1423,7 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
 }
 
 fn handle_input_left_click(app: &mut TuiApp, column: u16, row: u16) {
-    if app.awaiting_confirmation || app.agent_running {
+    if app.awaiting_confirmation || (app.agent_running && !app.awaiting_question) {
         return;
     }
     let Some(inner) = app.input_body_inner else {
@@ -1464,6 +1536,7 @@ fn print_exit_summary(app: &TuiApp) {
     let in_t = u64::from(app.total_input_tokens);
     let out_t = u64::from(app.total_output_tokens);
     let cache = u64::from(app.total_cache_read_tokens);
+    let micro = u64::from(app.total_microcompact_cleared);
 
     let total_cost_usd = estimate_cost_usd(
         in_t,
@@ -1522,6 +1595,13 @@ fn print_exit_summary(app: &TuiApp) {
             exit_format_tokens(cache),
             pct,
             reset
+        );
+    }
+    if micro > 0 {
+        println!(
+            "  {:<22} {}",
+            "Microcompact (~saved)",
+            exit_format_tokens(micro)
         );
     }
 
@@ -1708,6 +1788,8 @@ mod input_mouse_tests {
             auto_commit: false,
             planner_model: "llama3.2".into(),
             display_theme: akmon_config::TerminalTheme::default(),
+            session_display_name: None,
+            resume_messages: None,
         }
     }
 

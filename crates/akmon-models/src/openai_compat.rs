@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use crate::LlmProvider;
 use crate::config::CompletionConfig;
 use crate::error::ModelError;
+use crate::max_tokens::max_tokens_for_openai_style_model;
 use crate::message::{Message, MessageRole};
 use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 use crate::tool_def::ToolDefinition;
@@ -535,12 +536,7 @@ fn apply_openai_sse_line(
     let mut out: Vec<StreamEvent> = Vec::new();
 
     if let Some(u) = v.get("usage") {
-        *usage_acc = Some(UsageReport {
-            input_tokens: u32_from(u.get("prompt_tokens")),
-            output_tokens: u32_from(u.get("completion_tokens")),
-            cache_creation_tokens: 0,
-            cache_read_tokens: 0,
-        });
+        *usage_acc = Some(usage_report_from_openai_json(u));
     }
 
     let choice = v
@@ -632,13 +628,56 @@ fn u32_from(v: Option<&Value>) -> u32 {
         .unwrap_or(0)
 }
 
-async fn run_openai_stream(
-    inner: Arc<OpenAiCompatInner>,
-    body: Value,
-    config: CompletionConfig,
-    stream_footer_label: String,
-    tx: mpsc::Sender<Result<StreamEvent, ModelError>>,
-) {
+/// Maps OpenAI `usage` object to [`UsageReport`], including `prompt_tokens_details.cached_tokens`.
+fn usage_report_from_openai_json(u: &Value) -> UsageReport {
+    let cached = u
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    UsageReport {
+        input_tokens: u32_from(u.get("prompt_tokens")),
+        output_tokens: u32_from(u.get("completion_tokens")),
+        cache_creation_tokens: 0,
+        cache_read_tokens: cached.min(u64::from(u32::MAX)) as u32,
+    }
+}
+
+/// Warn in debug builds if the combined system string looks dynamically generated (hurts OpenAI prefix caching).
+fn validate_openai_system_prefix_stability(system: &str) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let low = system.to_lowercase();
+    const INDICATORS: &[&str] = &[
+        "current time:",
+        "today is",
+        "session id:",
+        "turn:",
+        "timestamp:",
+        "date:",
+    ];
+    for ind in INDICATORS {
+        if low.contains(ind) {
+            tracing::warn!(
+                indicator = ind,
+                "OpenAI system prompt may contain per-request dynamic text; automatic prompt caching needs a byte-stable system prefix — move volatile context into the user message"
+            );
+        }
+    }
+}
+
+#[must_use]
+fn jittered_wait_secs(base: u64) -> u64 {
+    let nano = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let jitter = ((nano % 2001) as f64 / 1000.0 - 1.0) * 0.2 * (base as f64);
+    (base as f64 + jitter).round().max(1.0) as u64
+}
+
+fn openai_post_request(inner: &OpenAiCompatInner, body: &Value) -> reqwest::RequestBuilder {
     let mut req = inner
         .client
         .post(inner.post_url.clone())
@@ -665,21 +704,110 @@ async fn run_openai_stream(
             req = req.header(name, val);
         }
     }
+    req.json(body)
+}
 
-    let resp = match req.json(&body).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = tx.send(Err(map_send_err(e))).await;
-            return;
+async fn run_openai_stream(
+    inner: Arc<OpenAiCompatInner>,
+    mut body: Value,
+    config: CompletionConfig,
+    stream_footer_label: String,
+    tx: mpsc::Sender<Result<StreamEvent, ModelError>>,
+) {
+    const RETRY_MAX: u32 = 5;
+    const RETRY_BASE_SECS: u64 = 1;
+    const RETRY_MULT: u64 = 2;
+    const RETRY_CAP_SECS: u64 = 60;
+
+    let mut rate_attempts: u32 = 0;
+    let resp = loop {
+        let resp = match openai_post_request(&inner, &body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(Err(map_send_err(e))).await;
+                return;
+            }
+        };
+
+        if resp.status().is_success() {
+            break resp;
         }
-    };
 
-    if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let _ = tx.send(Err(map_http_status(status, &body))).await;
+        let overloaded = status.as_u16() == 529;
+        let rate_limited = status == StatusCode::TOO_MANY_REQUESTS || overloaded;
+
+        if rate_limited {
+            rate_attempts = rate_attempts.saturating_add(1);
+            if rate_attempts > RETRY_MAX {
+                let body_txt = match resp.text().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(ModelError::StreamInterrupted {
+                                message: e.to_string(),
+                            }))
+                            .await;
+                        return;
+                    }
+                };
+                let _ = tx.send(Err(map_http_status(status, &body_txt))).await;
+                return;
+            }
+
+            let headers = resp.headers().clone();
+            let header_wait = headers
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok());
+
+            let exp = RETRY_BASE_SECS.saturating_mul(RETRY_MULT.pow(rate_attempts.saturating_sub(1)));
+            let base_wait = header_wait.unwrap_or(exp).max(1);
+            let wait_secs = jittered_wait_secs(base_wait).min(RETRY_CAP_SECS);
+
+            let _ = resp.text().await;
+
+            if rate_attempts == 4
+                && let Some(ref fb) = config.fallback_model
+                && let Some(obj) = body.as_object_mut()
+            {
+                obj.insert("model".to_string(), json!(fb));
+                let _ = tx
+                    .send(Ok(StreamEvent::StatusHint {
+                        message: format!(
+                            "⟳ rate limited — retrying with fallback model `{fb}` ({rate_attempts}/{RETRY_MAX})"
+                        ),
+                    }))
+                    .await;
+            }
+
+            for remaining in (1..=wait_secs).rev() {
+                let _ = tx
+                    .send(Ok(StreamEvent::StatusHint {
+                        message: format!(
+                            "⟳ rate limited — retrying in {remaining}s ({rate_attempts}/{RETRY_MAX})"
+                        ),
+                    }))
+                    .await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            continue;
+        }
+
+        let body_txt = match resp.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = tx
+                    .send(Err(ModelError::StreamInterrupted {
+                        message: e.to_string(),
+                    }))
+                    .await;
+                return;
+            }
+        };
+        let _ = tx.send(Err(map_http_status(status, &body_txt))).await;
         return;
-    }
+    };
 
     let _ = tx
         .send(Ok(StreamEvent::ProviderReady {
@@ -808,13 +936,38 @@ impl LlmProvider for OpenAiCompatBackend {
         config: &CompletionConfig,
     ) -> Result<CompletionStream, ModelError> {
         let msgv = build_openai_messages(messages)?;
+        if let Some(first) = msgv.first()
+            && first.get("role") == Some(&json!("system"))
+            && let Some(Value::String(s)) = first.get("content")
+        {
+            validate_openai_system_prefix_stability(s);
+        }
         let tools = openai_tools(config);
         let mut body_map = serde_json::Map::new();
         body_map.insert("model".into(), json!(self.inner.model));
         body_map.insert("messages".into(), Value::Array(msgv));
         body_map.insert("stream".into(), json!(true));
         body_map.insert("temperature".into(), json!(config.temperature));
-        body_map.insert("max_tokens".into(), json!(config.max_tokens));
+        let max_out = if config.max_tokens == 0 {
+            max_tokens_for_openai_style_model(&self.inner.model)
+        } else {
+            config.max_tokens
+        };
+        body_map.insert("max_tokens".into(), json!(max_out));
+        body_map.insert(
+            "stream_options".into(),
+            json!({ "include_usage": true }),
+        );
+        if self.inner.post_url.contains("api.openai.com") {
+            body_map.insert("store".into(), json!(false));
+        }
+        if self.inner.post_url.contains("openrouter.ai")
+            && let Some(ref sid) = config.session_id
+            && !sid.is_empty()
+        {
+            let key: String = sid.chars().take(16).collect();
+            body_map.insert("prompt_cache_key".into(), json!(key));
+        }
         if !tools.is_empty() {
             body_map.insert(
                 "tools".into(),
@@ -902,10 +1055,16 @@ mod tests {
                 "delta": {},
                 "finish_reason": "stop"
             }],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 2}
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 2,
+                "prompt_tokens_details": {"cached_tokens": 40}
+            }
         });
         let ev2 = apply_openai_sse_line(&v2, &mut tools, &mut usage).expect("ok");
         assert!(ev2.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if *stop_reason == StopReason::EndTurn)));
+        let snap = usage.expect("usage");
+        assert_eq!(snap.cache_read_tokens, 40);
     }
 
     #[test]

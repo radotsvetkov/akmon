@@ -9,7 +9,7 @@ use akmon_core::project::{
     detect_project, format_project_context_for_init, scaffold_project, suggested_akmon_title,
 };
 use akmon_core::scan_context_files;
-use akmon_models::LlmProvider;
+use akmon_models::{LlmProvider, ProviderError};
 use akmon_query::generate_akmon_md_markdown;
 use clap::Args;
 use clap::ValueEnum;
@@ -89,7 +89,7 @@ fn load_global_config() -> akmon_config::AkmonGlobalConfig {
         .unwrap_or_default()
 }
 
-pub(crate) fn resolve_provider(cli: &Cli) -> Result<Arc<dyn LlmProvider>, String> {
+pub(crate) fn resolve_provider(cli: &Cli) -> Result<Arc<dyn LlmProvider>, ProviderError> {
     let global = load_global_config();
     crate::llm_connect_from_cli(cli, &global, cli.model.clone()).resolve()
 }

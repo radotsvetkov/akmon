@@ -10,7 +10,8 @@ mod viewport_paint;
 mod wrap;
 
 pub use dialog_overlay::{
-    dialog_from_confirmation, render_confirmation_overlay, shell_prefix_hint,
+    dialog_from_confirmation, render_confirmation_overlay, render_question_overlay,
+    shell_prefix_hint,
 };
 pub use flatten::{flatten_transcript, message_line_count, message_to_lines};
 pub use header_bar::render_header_bar;

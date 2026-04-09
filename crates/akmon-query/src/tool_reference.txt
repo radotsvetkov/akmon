@@ -8,6 +8,7 @@ GENERAL OUTPUT SHAPE
 ------------------
 Success: {"status":"success","content":"<string>"}  (content may embed JSON as text)
 Error: {"status":"error","code":"<snake_case>","message":"<string>"}
+Question (interactive UI only; the runtime replaces this with Success after the user answers): {"status":"question","question":"<string>","suggestions":["..."]}
 
 ---
 TOOL: list_directory
@@ -136,6 +137,41 @@ Arguments:
 
 Returns JSON with query, results: [{file, start_line, end_line, score, preview}, ...].
 If index is still building: error message "indexing in progress". If embedding model failed to load: unavailable message.
+
+---
+TOOL: ask_followup (interactive TUI only; headless `--task` returns permission_denied)
+--------------------------------------------------------------------------------------
+Purpose: Ask the user a clarifying question and wait for a typed answer without ending the session.
+
+Arguments:
+  question (string, required)
+  suggestions (array of strings, optional)
+
+Example: {"question":"Which port should the dev server use?","suggestions":["3000","5173"]}
+
+The UI turns the reply into a normal success tool result for the model.
+
+---
+TOOL: todo_write
+----------------
+Purpose: Replace the session todo list stored under `.akmon/todos/<session_id_short>.json`.
+
+Arguments:
+  todos (array, required): items with id (string), task (string), status: pending | in_progress | completed
+
+Success: summary counts. Active todos may appear in the system prompt on later turns.
+
+---
+TOOL: memory_write
+------------------
+Purpose: Save durable project notes under `~/.akmon/memory/<project_hash>/<type>__<slug>.md`.
+
+Arguments:
+  type (string, required): project | user | pattern | decision
+  title (string, required)
+  content (string, required)
+
+Matching memories and all `user__*` files may be injected into the system prompt (capped).
 
 ---
 WORKFLOW HINTS

@@ -749,6 +749,8 @@ async fn run_mcp(args: &ConfigArgs, m: &McpCmd) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use std::path::Path;
     use std::process::ExitCode;
@@ -895,8 +897,10 @@ mod tests {
 
     #[test]
     fn show_masks_api_key_in_toml() {
-        let mut cfg = AkmonGlobalConfig::default();
-        cfg.anthropic_api_key = Some("sk-ant-api03-secretvaluehere".into());
+        let cfg = AkmonGlobalConfig {
+            anthropic_api_key: Some("sk-ant-api03-secretvaluehere".into()),
+            ..Default::default()
+        };
         let toml = cfg.display_masked_toml();
         assert!(!toml.contains("secretvaluehere"));
         assert!(toml.contains("sk-ant-a"));

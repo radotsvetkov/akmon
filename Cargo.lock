@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-cli"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "akmon-config",
  "akmon-core",
@@ -43,7 +43,9 @@ dependencies = [
  "akmon-tools",
  "akmon-tui",
  "anyhow",
+ "chrono",
  "clap",
+ "dirs 6.0.0",
  "dunce",
  "fastembed",
  "futures-util",
@@ -52,12 +54,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "akmon-config"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -68,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-core"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -85,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-index"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "akmon-core",
  "bincode",
@@ -102,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-models"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "akmon-core",
  "async-trait",
@@ -121,12 +124,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tracing",
  "urlencoding",
 ]
 
 [[package]]
 name = "akmon-query"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "akmon-core",
  "akmon-models",
@@ -139,34 +143,38 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "akmon-tools"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "akmon-core",
  "akmon-index",
  "async-trait",
  "chrono",
  "diffy",
+ "dirs 5.0.1",
  "fastembed",
  "glob",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "url",
+ "uuid",
  "walkdir",
 ]
 
 [[package]]
 name = "akmon-tui"
-version = "1.6.0"
+version = "1.7.0"
 dependencies = [
  "akmon-config",
  "akmon-core",
@@ -3455,7 +3463,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
  "pin-project-lite",
+ "tracing-attributes",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-attributes"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

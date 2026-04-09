@@ -54,3 +54,5 @@ cargo build --release
 - Clear description + tests where feasible
 - No unwrap in library crates
 - `rustdoc` on new public APIs
+
+Akmon is distributed under the **Apache License 2.0** (see repository `LICENSE`).

@@ -149,17 +149,6 @@ pub fn draw_slash_autocomplete(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 
-#[cfg(test)]
-mod slash_ac_tests {
-    use super::slash_ac_outer_height;
-
-    #[test]
-    fn outer_height_reserves_border_rows() {
-        assert_eq!(slash_ac_outer_height(8), 10);
-        assert_eq!(slash_ac_outer_height(1), 3);
-    }
-}
-
 /// Draws transcript-blocking overlays (help, session picker, audit, cost).
 pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
     match &app.overlay {
@@ -415,4 +404,15 @@ pub fn draw_transcript_dim_layer(f: &mut Frame<'_>, msg_area: Rect) {
         ),
         msg_area,
     );
+}
+
+#[cfg(test)]
+mod slash_ac_tests {
+    use super::slash_ac_outer_height;
+
+    #[test]
+    fn outer_height_reserves_border_rows() {
+        assert_eq!(slash_ac_outer_height(8), 10);
+        assert_eq!(slash_ac_outer_height(1), 3);
+    }
 }

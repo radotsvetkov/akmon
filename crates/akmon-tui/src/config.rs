@@ -89,6 +89,10 @@ pub struct TuiLaunchConfig {
     pub planner_model: String,
     /// TUI contrast (`~/.akmon/config.toml` `[display]`).
     pub display_theme: TerminalTheme,
+    /// Optional label for the status line / session prefix (`--name` / `/name`).
+    pub session_display_name: Option<String>,
+    /// When resuming, prefill transcript from a saved `~/.akmon/sessions/*.json` snapshot.
+    pub resume_messages: Option<Vec<crate::message::TuiMessage>>,
 }
 
 impl TuiLaunchConfig {
@@ -159,6 +163,7 @@ impl std::fmt::Debug for TuiLaunchConfig {
             .field("auto_commit", &self.auto_commit)
             .field("planner_model", &self.planner_model)
             .field("display_theme", &self.display_theme)
+            .field("session_display_name", &self.session_display_name)
             .finish_non_exhaustive()
     }
 }

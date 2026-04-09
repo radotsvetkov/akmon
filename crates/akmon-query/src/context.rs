@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use akmon_models::{Message, MessageRole};
+use akmon_models::{Message, MessageRole, looks_like_ollama_model};
 
 /// Delimiters wrapping `AKMON.md` so the block reads as **data**, not as hidden instructions.
 ///
@@ -23,6 +23,83 @@ pub const PROJECT_CONTEXT_END: &str = "<<<PROJECT_CONTEXT_END>>>";
 /// the prompt-cache minimum for **`claude-haiku-4-5-20251001`** (4096+ tokens in the cached block
 /// per Anthropic documentation).
 const TOOL_REFERENCE: &str = include_str!("tool_reference.txt");
+
+/// Compact system prompt for local/Ollama models — short, direct; long rule blocks hurt small models.
+pub const LOCAL_MODEL_SYSTEM_PROMPT: &str = r#"You are Akmon, an AI coding assistant.
+
+Rules:
+- Read files before editing them. Use read_file first.
+- Write complete working files. Never truncate code.
+- Use edit for existing files, write_file for new files.
+- After writing code run shell to verify it compiles or runs.
+- For HTML/CSS: write HTML first, then add CSS separately.
+- Complete the full task. Do not stop after one file.
+- When done, show the user how to run what you built.
+- Be brief in prose: no preamble, no rehashing tool output; finish with Done. To run: …
+"#;
+
+/// Caps how many recent non-system messages are sent to the model (local models only).
+#[must_use]
+pub fn context_limit_for_model(model: &str) -> usize {
+    if looks_like_ollama_model(model) {
+        8
+    } else {
+        usize::MAX
+    }
+}
+
+/// OpenAI API applies automatic prefix caching when the prompt is large enough — the combined
+/// **system** block must stay byte-stable across turns. Models routed here move volatile project
+/// scans into the user turn instead of the system preamble.
+#[must_use]
+pub fn is_openai_native_chat_model(model_id: &str) -> bool {
+    let m = model_id.to_lowercase();
+    if m.starts_with("gpt-")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+    {
+        return true;
+    }
+    m.starts_with("openai/gpt")
+        || m.starts_with("openai/o1")
+        || m.starts_with("openai/o3")
+        || m.starts_with("openai/o4")
+}
+
+/// Picks a short base system block for Ollama and merges optional project text; cloud models should
+/// rely on [`build_messages`] / [`format_project_context`] instead.
+#[must_use]
+pub fn system_prompt_for_model(model: &str, project_context: &str) -> String {
+    if !looks_like_ollama_model(model) {
+        return project_context.to_string();
+    }
+    if project_context.is_empty() {
+        LOCAL_MODEL_SYSTEM_PROMPT.to_string()
+    } else {
+        format!("{LOCAL_MODEL_SYSTEM_PROMPT}\n\n=== Project ===\n{project_context}")
+    }
+}
+
+fn format_local_project_context(
+    project_root: &str,
+    tool_names: &[&str],
+    plan_mode: bool,
+) -> String {
+    let tools_line = tool_names.join(", ");
+    let plan = if plan_mode {
+        "\n\nPLAN MODE (read-only): you cannot write files or run shell. Produce a markdown plan only.\n"
+    } else {
+        ""
+    };
+    format!(
+        "{PROJECT_CONTEXT_START}\n{LOCAL_MODEL_SYSTEM_PROMPT}\n\n\
+Working directory: {project_root}\n\
+Available tools: {tools_line}\
+{plan}\
+\n{PROJECT_CONTEXT_END}"
+    )
+}
 
 /// File-writing discipline for implementation mode (injected into [`format_project_context`] when not in plan mode).
 ///
@@ -106,6 +183,44 @@ AUTONOMOUS TASK COMPLETION:\n\
   Right: write app.py → write models.py → write routes.py → bash verify\n\
   Then final text only: 'Done. To run: flask run'\n";
 
+/// Three-phase workflow for large or cross-cutting work (injected with implementation-mode project context).
+pub const RESEARCH_PLAN_IMPLEMENT_WORKFLOW: &str = "\
+LARGE-TASK WORKFLOW — RESEARCH → PLAN → IMPLEMENT:\n\
+\n\
+- RESEARCH: Understand the codebase with read/search (and semantic_search when available).\n\
+  Use `spawn_subagent` for deep, narrow exploration so the main context stays small.\n\
+  Persist durable decisions in `.akmon/specs/` via `write_spec` / `read_spec`.\n\
+\n\
+- PLAN: Before large edits, outline files to touch, risks, and ordering.\n\
+  Put stable requirements and checklists in specs, not only in chat.\n\
+\n\
+- IMPLEMENT: Make small, verifiable edits; run shell checks when appropriate.\n\
+  After substantive progress, the session may write `.akmon/HANDOFF.md` for the next run.\n";
+
+/// Compact system instructions for nested `spawn_subagent` runs (short; full TOOL_REFERENCE omitted).
+pub const SUBAGENT_SYSTEM_PROMPT: &str = "\
+You are Akmon’s nested research agent. You share the project sandbox and tools with the parent session,\n\
+but start with a fresh transcript. Your job: answer the given research task concisely using tools.\n\
+\n\
+Rules:\n\
+- Prefer read_file, search, list_directory, semantic_search when present.\n\
+- Do not call spawn_subagent (you are already nested).\n\
+- Return a dense factual summary the parent agent can act on; no filler.\n\
+- If you change specs under `.akmon/specs/`, keep them accurate and minimal.\n";
+
+/// Steers models toward shorter replies — output tokens dominate cloud cost.
+pub const OUTPUT_BREVITY: &str = "\
+OUTPUT BREVITY — CRITICAL FOR COST:\n\
+- Never explain what you are about to do. Do it.\n\
+- Never summarize what you just did in prose.\n\
+  Show the user: Done. To run: {command}\n\
+- Never add preamble. Start with the action.\n\
+- Never add 'I hope this helps' or similar.\n\
+- Tool call results are already visible in the TUI.\n\
+  Do not re-describe them in text.\n\
+- Code only needs comments when the logic is non-obvious.\n\
+  Do not add comments that restate what the code does.\n";
+
 /// Markdown-style instructions injected when the session is in read-only plan mode (`--plan`, `/plan`).
 pub const PLAN_MODE_SYSTEM_ADDON: &str = "\n\
 PLAN MODE ACTIVE.\n\
@@ -158,6 +273,7 @@ fn format_project_context_plan_mode(
     tool_names: &[&str],
     has_semantic: bool,
     has_web_fetch: bool,
+    include_project_intelligence: bool,
 ) -> String {
     let tools_line = tool_names.join(", ");
     let step1 = if has_semantic {
@@ -191,7 +307,11 @@ Examples of bad semantic_search queries (use search instead):\n\
         ""
     };
 
-    let intelligence = project_intelligence_for_prompt(project_root);
+    let intel_block = if include_project_intelligence {
+        format!("{}\n", project_intelligence_for_prompt(project_root))
+    } else {
+        String::new()
+    };
 
     format!(
         "{PROJECT_CONTEXT_START}\n\
@@ -214,12 +334,13 @@ To work on this project in PLAN MODE:\n\
 {step_web}\
 RULES:\n\
   - Produce a written plan only; do not propose tool calls that modify the repository.\n\
+  - read_spec / spawn_subagent are read-oriented: use them to inspect `.akmon/specs/` or run a nested exploration pass.\n\
   - read_file only after locating paths via semantic_search or search.\n\
   - NEVER guess file paths.\n\
 {semantic_block}\
 All paths must be relative to the working directory shown above.\n\
 \n\
-{intelligence}\
+{intel_block}\
 <<<TOOL_REFERENCE_START>>>\n\
 {TOOL_REFERENCE}\
 <<<TOOL_REFERENCE_END>>>\n\
@@ -227,7 +348,12 @@ All paths must be relative to the working directory shown above.\n\
     )
 }
 
-fn format_project_context(project_root: &str, tool_names: &[&str], plan_mode: bool) -> String {
+fn format_project_context(
+    project_root: &str,
+    tool_names: &[&str],
+    plan_mode: bool,
+    include_project_intelligence: bool,
+) -> String {
     let has_semantic = tool_names.contains(&"semantic_search");
     let has_web_fetch = tool_names.contains(&"web_fetch");
     if plan_mode {
@@ -236,6 +362,7 @@ fn format_project_context(project_root: &str, tool_names: &[&str], plan_mode: bo
             tool_names,
             has_semantic,
             has_web_fetch,
+            include_project_intelligence,
         );
     }
     let tools_line = tool_names.join(", ");
@@ -343,7 +470,11 @@ Examples of bad semantic_search queries\n\
         ""
     };
 
-    let intelligence = project_intelligence_for_prompt(project_root);
+    let intel_block = if include_project_intelligence {
+        format!("{}\n", project_intelligence_for_prompt(project_root))
+    } else {
+        String::new()
+    };
 
     format!(
         "{PROJECT_CONTEXT_START}\n\
@@ -356,6 +487,10 @@ Available tools: {tools_line}\n\
 {FILE_WRITING_STRATEGY}\n\
 \n\
 {AUTONOMOUS_TASK_COMPLETION}\n\
+\n\
+{OUTPUT_BREVITY}\n\
+\n\
+{RESEARCH_PLAN_IMPLEMENT_WORKFLOW}\n\
 \n\
 To work on this project:\n\
 {step1}\
@@ -414,7 +549,7 @@ working directory shown above.\n\
 Absolute paths and paths with ../ \n\
 will be rejected by the sandbox.\n\
 \n\
-{intelligence}\
+{intel_block}\
 <<<TOOL_REFERENCE_START>>>\n\
 {TOOL_REFERENCE}\
 <<<TOOL_REFERENCE_END>>>\n\
@@ -425,6 +560,11 @@ will be rejected by the sandbox.\n\
 /// Builds the message list for one model call: optional system block from `AKMON.md`, a fixed
 /// project-context system message, prior [`Message`] history in order, then the current user task
 /// as the final message.
+///
+/// `specs_block` and `handoff_block` are injected as extra system content every turn when `Some`.
+///
+/// `extra_system_blocks` are appended after specs/handoff (e.g. active todos, project memory).
+#[allow(clippy::too_many_arguments)]
 pub fn build_messages(
     akmon_md: Option<&str>,
     history: &[Message],
@@ -432,6 +572,10 @@ pub fn build_messages(
     project_root: &str,
     tool_names: &[&str],
     plan_mode: bool,
+    model_id: &str,
+    specs_block: Option<&str>,
+    handoff_block: Option<&str>,
+    extra_system_blocks: &[String],
 ) -> Vec<Message> {
     let mut out = Vec::new();
 
@@ -444,12 +588,46 @@ pub fn build_messages(
         });
     }
 
+    let include_intel_in_system = !is_openai_native_chat_model(model_id);
+    let main_system = if looks_like_ollama_model(model_id) {
+        format_local_project_context(project_root, tool_names, plan_mode)
+    } else {
+        format_project_context(
+            project_root,
+            tool_names,
+            plan_mode,
+            include_intel_in_system,
+        )
+    };
     out.push(Message {
         role: MessageRole::System,
-        content: format_project_context(project_root, tool_names, plan_mode),
+        content: main_system,
     });
 
-    if let Some(block) = language_rules_system_block(project_root) {
+    if let Some(extra) = specs_block.filter(|s| !s.trim().is_empty()) {
+        out.push(Message {
+            role: MessageRole::System,
+            content: extra.to_string(),
+        });
+    }
+    if let Some(extra) = handoff_block.filter(|s| !s.trim().is_empty()) {
+        out.push(Message {
+            role: MessageRole::System,
+            content: extra.to_string(),
+        });
+    }
+    for block in extra_system_blocks {
+        if !block.trim().is_empty() {
+            out.push(Message {
+                role: MessageRole::System,
+                content: block.clone(),
+            });
+        }
+    }
+
+    if !looks_like_ollama_model(model_id)
+        && let Some(block) = language_rules_system_block(project_root)
+    {
         out.push(Message {
             role: MessageRole::System,
             content: block,
@@ -458,9 +636,19 @@ pub fn build_messages(
 
     out.extend(history.iter().cloned());
 
+    let user_body = if include_intel_in_system {
+        task.to_string()
+    } else {
+        let intel = project_intelligence_for_prompt(project_root);
+        if intel.trim().is_empty() {
+            task.to_string()
+        } else {
+            format!("[Context for this turn]\n{intel}\n\n{task}")
+        }
+    };
     out.push(Message {
         role: MessageRole::User,
-        content: task.to_string(),
+        content: user_body,
     });
 
     out
@@ -470,12 +658,17 @@ pub fn build_messages(
 ///
 /// Use after the first turn once [`MessageRole::User`] / assistant / tool rows are already in
 /// `history`.
+#[allow(clippy::too_many_arguments)]
 pub fn build_followup_messages(
     akmon_md: Option<&str>,
     history: &[Message],
     project_root: &str,
     tool_names: &[&str],
     plan_mode: bool,
+    model_id: &str,
+    specs_block: Option<&str>,
+    handoff_block: Option<&str>,
+    extra_system_blocks: &[String],
 ) -> Vec<Message> {
     let mut out = Vec::new();
 
@@ -488,12 +681,46 @@ pub fn build_followup_messages(
         });
     }
 
+    let include_intel_in_system = !is_openai_native_chat_model(model_id);
+    let main_system = if looks_like_ollama_model(model_id) {
+        format_local_project_context(project_root, tool_names, plan_mode)
+    } else {
+        format_project_context(
+            project_root,
+            tool_names,
+            plan_mode,
+            include_intel_in_system,
+        )
+    };
     out.push(Message {
         role: MessageRole::System,
-        content: format_project_context(project_root, tool_names, plan_mode),
+        content: main_system,
     });
 
-    if let Some(block) = language_rules_system_block(project_root) {
+    if let Some(extra) = specs_block.filter(|s| !s.trim().is_empty()) {
+        out.push(Message {
+            role: MessageRole::System,
+            content: extra.to_string(),
+        });
+    }
+    if let Some(extra) = handoff_block.filter(|s| !s.trim().is_empty()) {
+        out.push(Message {
+            role: MessageRole::System,
+            content: extra.to_string(),
+        });
+    }
+    for block in extra_system_blocks {
+        if !block.trim().is_empty() {
+            out.push(Message {
+                role: MessageRole::System,
+                content: block.clone(),
+            });
+        }
+    }
+
+    if !looks_like_ollama_model(model_id)
+        && let Some(block) = language_rules_system_block(project_root)
+    {
         out.push(Message {
             role: MessageRole::System,
             content: block,
@@ -504,9 +731,103 @@ pub fn build_followup_messages(
     out
 }
 
+/// First-turn messages for a nested subagent (compact system text, no full tool reference file).
+#[must_use]
+pub fn build_subagent_task_messages(
+    akmon_md: Option<&str>,
+    task: &str,
+    project_root: &str,
+    tool_names: &[&str],
+    specs_block: Option<&str>,
+    model_id: &str,
+) -> Vec<Message> {
+    let tools_line = tool_names.join(", ");
+    let spec_inject = specs_block
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("\n{s}\n"))
+        .unwrap_or_default();
+    let md_block = if let Some(md) = akmon_md {
+        format!("Project configuration (AKMON.md):\n{AKMON_MD_START}\n{md}\n{AKMON_MD_END}\n\n")
+    } else {
+        String::new()
+    };
+    let system = format!(
+        "{SUBAGENT_SYSTEM_PROMPT}\n\
+Working directory: {project_root}\n\
+Available tools: {tools_line}\n\
+{spec_inject}\
+{md_block}\
+Use tools to complete the research task. When finished, reply with findings only.\n"
+    );
+    let mut out = vec![Message {
+        role: MessageRole::System,
+        content: system,
+    }];
+    if !looks_like_ollama_model(model_id)
+        && let Some(block) = language_rules_system_block(project_root)
+    {
+        out.push(Message {
+            role: MessageRole::System,
+            content: block,
+        });
+    }
+    out.push(Message {
+        role: MessageRole::User,
+        content: task.to_string(),
+    });
+    out
+}
+
+/// Follow-up model call messages for a nested subagent (compact system; no trailing user line).
+#[must_use]
+pub fn build_subagent_followup_messages(
+    akmon_md: Option<&str>,
+    history: &[Message],
+    project_root: &str,
+    tool_names: &[&str],
+    specs_block: Option<&str>,
+    model_id: &str,
+) -> Vec<Message> {
+    let tools_line = tool_names.join(", ");
+    let spec_inject = specs_block
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("\n{s}\n"))
+        .unwrap_or_default();
+    let md_block = if let Some(md) = akmon_md {
+        format!("Project configuration (AKMON.md):\n{AKMON_MD_START}\n{md}\n{AKMON_MD_END}\n\n")
+    } else {
+        String::new()
+    };
+    let system = format!(
+        "{SUBAGENT_SYSTEM_PROMPT}\n\
+Working directory: {project_root}\n\
+Available tools: {tools_line}\n\
+{spec_inject}\
+{md_block}\
+Use tools to continue. When finished, reply with findings only.\n"
+    );
+    let mut out = vec![Message {
+        role: MessageRole::System,
+        content: system,
+    }];
+    if !looks_like_ollama_model(model_id)
+        && let Some(block) = language_rules_system_block(project_root)
+    {
+        out.push(Message {
+            role: MessageRole::System,
+            content: block,
+        });
+    }
+    out.extend(history.iter().cloned());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Model id without Ollama heuristics — exercises full cloud-sized system prompt + language rules.
+    const CLOUD_MODEL: &str = "claude-haiku-4-5-20251001";
 
     #[test]
     fn build_messages_includes_language_rules_after_project_context_for_rust_repo() {
@@ -516,7 +837,18 @@ mod tests {
             .expect("workspace root")
             .to_str()
             .expect("utf8");
-        let msgs = build_messages(None, &[], "task", repo, &["read_file"], false);
+        let msgs = build_messages(
+            None,
+            &[],
+            "task",
+            repo,
+            &["read_file"],
+            false,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
+        );
         assert!(
             msgs.iter().any(|m| {
                 m.role == MessageRole::System
@@ -533,7 +865,18 @@ mod tests {
 
     #[test]
     fn build_messages_with_akmon_md_starts_with_delimited_system() {
-        let msgs = build_messages(Some("rules"), &[], "do it", "/repo", &["read_file"], false);
+        let msgs = build_messages(
+            Some("rules"),
+            &[],
+            "do it",
+            "/repo",
+            &["read_file"],
+            false,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
+        );
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, MessageRole::System);
         assert!(
@@ -562,7 +905,12 @@ mod tests {
             .parent()
             .and_then(|p| p.parent())
             .expect("workspace root from crates/akmon-query");
-        let ctx = format_project_context(repo.to_str().expect("utf8 path"), &["read_file"], false);
+        let ctx = format_project_context(
+            repo.to_str().expect("utf8 path"),
+            &["read_file"],
+            false,
+            true,
+        );
         assert!(ctx.contains("=== Project intelligence ==="));
         assert!(ctx.contains("Rust"));
     }
@@ -586,6 +934,10 @@ mod tests {
                 "patch",
             ],
             false,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
         );
         let mut joined_len = 0usize;
         let mut n_sys = 0usize;
@@ -607,7 +959,18 @@ mod tests {
 
     #[test]
     fn project_context_alone_meets_haiku_45_cache_char_threshold_without_akmon_md() {
-        let msgs = build_messages(None, &[], "t", "/wd", &["read_file"], false);
+        let msgs = build_messages(
+            None,
+            &[],
+            "t",
+            "/wd",
+            &["read_file"],
+            false,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
+        );
         let sys = msgs
             .iter()
             .find(|m| m.role == MessageRole::System)
@@ -622,7 +985,18 @@ mod tests {
 
     #[test]
     fn build_messages_without_akmon_md_still_injects_project_context() {
-        let msgs = build_messages(None, &[], "task", "/wd", &["a", "b"], false);
+        let msgs = build_messages(
+            None,
+            &[],
+            "task",
+            "/wd",
+            &["a", "b"],
+            false,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
+        );
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, MessageRole::System);
         assert!(msgs[0].content.contains(PROJECT_CONTEXT_START));
@@ -638,7 +1012,18 @@ mod tests {
             role: MessageRole::Assistant,
             content: "prev".into(),
         }];
-        let msgs = build_messages(None, &hist, "final ask", "/", &[], false);
+        let msgs = build_messages(
+            None,
+            &hist,
+            "final ask",
+            "/",
+            &[],
+            false,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
+        );
         let last = msgs
             .last()
             .expect("build_messages always ends with the user task");
@@ -648,7 +1033,18 @@ mod tests {
 
     #[test]
     fn project_context_mentions_web_fetch_when_tool_enabled() {
-        let msgs = build_messages(None, &[], "t", "/repo", &["read_file", "web_fetch"], false);
+        let msgs = build_messages(
+            None,
+            &[],
+            "t",
+            "/repo",
+            &["read_file", "web_fetch"],
+            false,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
+        );
         let ctx = msgs
             .iter()
             .find(|m| m.role == MessageRole::System && m.content.contains("web_fetch url="))
@@ -666,6 +1062,10 @@ mod tests {
             "/repo",
             &["read_file", "semantic_search"],
             false,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
         );
         let ctx = msgs
             .iter()
@@ -696,6 +1096,10 @@ mod tests {
             "/repo",
             &["read_file", "search", "semantic_search"],
             false,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
         );
         let ctx = msgs
             .iter()
@@ -723,6 +1127,10 @@ mod tests {
             "/r",
             &["read_file", "search", "list_directory"],
             true,
+            CLOUD_MODEL,
+            None,
+            None,
+            &[],
         );
         let ctx = msgs
             .iter()
@@ -730,5 +1138,67 @@ mod tests {
             .expect("ctx");
         assert!(ctx.content.contains("PLAN MODE ACTIVE."));
         assert!(!ctx.content.contains("STEP 5 — Edit existing files"));
+    }
+
+    #[test]
+    fn build_messages_ollama_model_uses_compact_system_without_tool_reference() {
+        let msgs = build_messages(
+            None,
+            &[],
+            "task",
+            "/tmp/wd",
+            &["read_file", "write_file"],
+            false,
+            "qwen3.5:9b",
+            None,
+            None,
+            &[],
+        );
+        let ctx = msgs
+            .iter()
+            .find(|m| m.role == MessageRole::System)
+            .expect("system");
+        assert!(ctx.content.contains("You are Akmon"));
+        assert!(!ctx.content.contains("<<<TOOL_REFERENCE_START>>>"));
+        assert!(!msgs.iter().any(|m| {
+            m.role == MessageRole::System && m.content.contains("=== Language-specific rules ===")
+        }));
+    }
+
+    #[test]
+    fn plan_mode_compact_for_ollama_includes_read_only_banner() {
+        let msgs = build_messages(
+            None,
+            &[],
+            "task",
+            "/r",
+            &["read_file", "search"],
+            true,
+            "qwen2.5:7b",
+            None,
+            None,
+            &[],
+        );
+        let ctx = msgs
+            .iter()
+            .find(|m| m.role == MessageRole::System)
+            .expect("ctx");
+        assert!(ctx.content.contains("PLAN MODE (read-only)"));
+    }
+
+    #[test]
+    fn system_prompt_for_model_merges_project_for_ollama() {
+        let s = system_prompt_for_model("mistral:7b", "note");
+        assert!(s.contains("note"));
+        assert!(s.contains("=== Project ==="));
+    }
+
+    #[test]
+    fn context_limit_is_small_for_ollama_only() {
+        assert_eq!(context_limit_for_model("qwen3.5:9b"), 8);
+        assert_eq!(
+            context_limit_for_model("claude-haiku-4-5-20251001"),
+            usize::MAX
+        );
     }
 }

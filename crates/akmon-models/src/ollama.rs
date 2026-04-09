@@ -13,6 +13,7 @@ use pin_project_lite::pin_project;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use serde::Serialize;
+use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
 use crate::LlmProvider;
@@ -400,10 +401,27 @@ async fn process_json_line(
     pending_tool_calls: &mut Vec<ModelToolCall>,
     first_token: Option<&Arc<AtomicBool>>,
 ) -> Result<(), ModelError> {
-    let parsed: OllamaChatLine =
-        serde_json::from_str(line).map_err(|e| ModelError::StreamInterrupted {
-            message: format!("invalid JSON line: {e}"),
-        })?;
+    let v: JsonValue = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => {
+            let peek: String = line.chars().take(100).collect();
+            tracing::debug!("Ollama: skipping unparseable line: {peek:?}");
+            return Ok(());
+        }
+    };
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(ModelError::BackendUnavailable {
+            message: format!("Ollama error: {err}"),
+        });
+    }
+    let parsed: OllamaChatLine = match serde_json::from_value(v) {
+        Ok(p) => p,
+        Err(_) => {
+            let peek: String = line.chars().take(100).collect();
+            tracing::debug!("Ollama: skipping line that is not a chat chunk: {peek:?}");
+            return Ok(());
+        }
+    };
 
     if let Some(msg) = &parsed.message
         && !msg.content.is_empty()
@@ -575,39 +593,48 @@ async fn run_streaming(
 
     let mut done_sent = false;
     let mut pending_tool_calls: Vec<ModelToolCall> = Vec::new();
-    if let Err(e) = process_json_line(
-        &first_line,
-        &tx,
-        &mut done_sent,
-        &mut pending_tool_calls,
-        Some(&first_token_received),
-    )
-    .await
-    {
-        let _ = tx.send(Err(e)).await;
-        return;
-    }
-
-    while let Some(item) = lines.next().await {
-        match item {
-            Err(e) => {
-                let _ = tx.send(Err(e)).await;
-                return;
-            }
-            Ok(line) => {
-                if let Err(e) = process_json_line(
-                    &line,
-                    &tx,
-                    &mut done_sent,
-                    &mut pending_tool_calls,
-                    Some(&first_token_received),
-                )
-                .await
-                {
-                    let _ = tx.send(Err(e)).await;
+    let mut first = true;
+    loop {
+        let line = if first {
+            first = false;
+            first_line.clone()
+        } else {
+            match tokio::time::timeout(Duration::from_secs(60), lines.next()).await {
+                Err(_) => {
+                    let _ = tx
+                        .send(Err(ModelError::BackendUnavailable {
+                            message: "Ollama stream timeout: no response for 60 seconds. \
+                                      The model may have crashed. Try: ollama ps"
+                                .into(),
+                        }))
+                        .await;
                     return;
                 }
+                Ok(next) => match next {
+                    None => break,
+                    Some(Err(e)) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                    Some(Ok(line)) => line,
+                },
             }
+        };
+
+        if let Err(e) = process_json_line(
+            &line,
+            &tx,
+            &mut done_sent,
+            &mut pending_tool_calls,
+            Some(&first_token_received),
+        )
+        .await
+        {
+            let _ = tx.send(Err(e)).await;
+            return;
+        }
+        if done_sent {
+            break;
         }
     }
 
@@ -730,12 +757,31 @@ async fn run_buffered(
         }
     };
 
-    let parsed: OllamaChatLine = match serde_json::from_str(&text) {
+    let v: JsonValue = match serde_json::from_str(&text) {
         Ok(v) => v,
         Err(e) => {
             let _ = tx
                 .send(Err(ModelError::StreamInterrupted {
                     message: format!("invalid JSON body: {e}"),
+                }))
+                .await;
+            return;
+        }
+    };
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        let _ = tx
+            .send(Err(ModelError::BackendUnavailable {
+                message: format!("Ollama error: {err}"),
+            }))
+            .await;
+        return;
+    }
+    let parsed: OllamaChatLine = match serde_json::from_value(v) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = tx
+                .send(Err(ModelError::StreamInterrupted {
+                    message: format!("invalid chat response JSON: {e}"),
                 }))
                 .await;
             return;

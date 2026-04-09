@@ -28,7 +28,7 @@ mod welcome;
 
 pub use agent::{AgentTurn, BridgeMsg};
 pub use app::{ExternalEditTarget, TuiApp};
-pub use command::UiCommand;
+pub use command::{SessionSideEffect, UiCommand};
 #[cfg(feature = "semantic-index")]
 pub use config::SemanticIndexSlot;
 pub use config::TuiLaunchConfig;

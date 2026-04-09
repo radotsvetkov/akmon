@@ -1,5 +1,15 @@
 //! Messages sent from the TUI to the agent task (policy verdicts and flow control).
 
+/// Session maintenance from slash commands (handled on the agent task where [`AgentSession`] lives).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionSideEffect {
+    /// Clear chat context; optionally wipe `.akmon/specs/*.md` (hard clear).
+    ClearAgentContext {
+        /// When `true`, delete `*.md` under `.akmon/specs/`.
+        hard_specs: bool,
+    },
+}
+
 /// User-driven control sent asynchronously to the agent orchestrator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiCommand {
@@ -16,4 +26,9 @@ pub enum UiCommand {
     },
     /// Request a graceful stop after the in-flight tool batch completes.
     Interrupt,
+    /// Answer a pending `ask_followup` tool (interactive TUI only).
+    QuestionAnswer {
+        /// User reply text sent back as the tool result.
+        answer: String,
+    },
 }

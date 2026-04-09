@@ -4,38 +4,50 @@
 #![warn(missing_docs)]
 
 mod apply_patch;
+mod ask_followup;
 mod context;
 mod diff_render;
 mod edit;
 mod git;
 mod list_directory;
+mod memory_write;
 mod mcp_client;
 mod output;
 mod patch;
 mod read_file;
+mod read_spec;
 mod search;
 #[cfg(feature = "semantic-index")]
 mod semantic_search;
 mod shell;
+mod todo_write;
 mod web_fetch;
 mod write_file;
+mod write_spec;
 
 pub use apply_patch::ApplyPatchTool;
-pub use context::ToolContext;
+pub use ask_followup::AskFollowupTool;
+pub use context::{ToolContext, project_hash_for_root};
 pub use diff_render::{colorize_unified_diff, render_diff, unified_diff_text};
 pub use edit::EditTool;
 pub use git::{GitTool, try_auto_commit_after_file_tool};
 pub use list_directory::ListDirectoryTool;
+pub use memory_write::{MemoryWriteTool, format_relevant_memories_block, load_relevant_memories};
 pub use mcp_client::{McpTool, discover_mcp_tools};
 pub use output::{ToolErrorCode, ToolOutput};
 pub use patch::{PatchTool, patch_write_relative_paths};
 pub use read_file::{DEFAULT_MAX_READ_BYTES, ReadFileTool};
+pub use read_spec::ReadSpecTool;
 pub use search::{DEFAULT_MAX_SEARCH_FILE_BYTES, DEFAULT_MAX_SEARCH_RESULTS, SearchTool};
 #[cfg(feature = "semantic-index")]
 pub use semantic_search::SemanticSearchTool;
 pub use shell::ShellTool;
+pub use todo_write::{
+    TodoItem, TodoStatus, TodoWriteTool, format_active_tasks_block, load_session_todos,
+};
 pub use web_fetch::{WebFetchTool, validate_url};
 pub use write_file::WriteFileTool;
+pub use write_spec::{relative_markdown_path_for_spec_name, WriteSpecTool};
 
 use akmon_core::Permission;
 use async_trait::async_trait;
