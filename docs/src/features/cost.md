@@ -1,34 +1,64 @@
-# Cost Transparency
+# Cost guide
 
-Akmon surfaces **tokens**, **cache hits**, and **heuristic USD** estimates so you are not flying blind.
+Akmon is explicit about token usage and estimated spend so you can manage AI work as an engineering budget, not a surprise invoice.
 
-## TUI status bar
+## What actually drives costs
 
-You typically see:
+For coding agents, the largest cost driver is usually cumulative **input** tokens, not output tokens. Each model call resends core context plus recent conversation history.
 
-- **Tokens** — cumulative usage for the session
-- **Cache** — prompt-cache read tokens (when applicable)
-- **~$x.xx** — estimate from bundled pricing tables (unknown models may show `~$?`)
-- **Free / local** — omitted when running local-only inference profiles
+Real session example:
 
-## Cache savings
+- 35 API calls
+- 672k input tokens
+- 35k output tokens
+- 258k cache-read tokens
+- total around $0.68
 
-Providers that support **prompt caching** (notably Anthropic-class flows) bill cached input at a fraction of fresh prompt tokens. High cache hit rates dramatically lower cost.
+Using Haiku rates:
 
-## `/cost` overlay
+- input: 672000 * $0.80 / 1M = $0.5376
+- output: 35000 * $4.00 / 1M = $0.1400
+- cache reads: 258000 * $0.08 / 1M = $0.0206
 
-```
-/cost
-```
+## Prompt caching and why it matters
 
-Shows a textual breakdown mid-session.
+Cached prompt reads are much cheaper than fresh prompt tokens. Akmon surfaces cache usage in the footer and session summary so you can see when repeated context is becoming efficient.
 
-## Exit summary
+Interpretation:
 
-On `/exit`, **Ctrl+D**, or idle **Ctrl+C**, a plaintext summary may include token totals, cache notes, estimated cost, and the audit path.
+- high cache read ratio often means repeated shared context is being billed at discount rates,
+- low cache ratio with high input often indicates noisy/volatile context.
 
-## Pricing reality
+## Cost by task type
 
-Tables are **heuristic** and lag market changes. For billing, trust your provider’s dashboard.
+| Task | Model | Typical cost | Notes |
+| --- | --- | --- | --- |
+| Single-file edit | Haiku | $0.01-$0.03 | few turns |
+| 3-5 file feature | Haiku | $0.05-$0.20 | moderate context |
+| Build small app from scratch | Haiku | $0.30-$0.80 | many turns |
+| Complex refactor | Haiku | $0.20-$0.50 | exploration heavy |
+| Architecture design | Sonnet | $0.50-$2.00 | stronger reasoning |
 
-Provider overview: [Provider setup](../getting-started/providers.md).
+## Model selection strategy
+
+- **Haiku:** default for most implementation work.
+- **Sonnet:** architecture and hard reasoning spikes.
+- **GPT-4o-mini:** strong budget option if OpenAI is preferred.
+- **Ollama local models:** free token cost, but lower capability and potentially higher latency.
+
+## Practical cost controls
+
+Use multiple levers together:
+
+- `--max-budget-usd` for hard stop,
+- plan/spec workflow to avoid repeated exploratory context,
+- smaller focused tasks,
+- context hygiene (`/clear` when a session gets noisy),
+- use `/context` and `/cost` during long runs.
+
+## Common mistakes and troubleshooting
+
+- **Mistake:** using premium models for trivial edits.
+- **Mistake:** allowing sessions to drift into repeated read loops.
+- **Mistake:** ignoring cache/read metrics and only watching final cost.
+- **Fix:** split work by phase and use cheaper models for discovery.

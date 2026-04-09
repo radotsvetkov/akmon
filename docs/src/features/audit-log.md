@@ -1,44 +1,68 @@
-# Audit Log
+# Audit log
 
-Every Akmon session can write a **JSONL audit log** under `.akmon/audit/` for traceability and compliance-oriented workflows.
+Akmon can emit per-session JSONL audit logs for traceability, debugging, and compliance-oriented workflows.
 
-## What is logged
+## Why this matters
 
-Each line is one JSON value. Event kinds vary by version but commonly include policy decisions, tool lifecycle, usage summaries, and errors.
+For AI-assisted development, "it changed some files" is not enough. Teams need to know:
 
-Example shape (illustrative):
+- what the model requested,
+- what the policy allowed or denied,
+- what commands/files were executed,
+- when and why a session stopped.
+
+Audit logs provide this evidence trail.
+
+## Log location
+
+Typical path:
+
+```text
+.akmon/audit/<session-id>.jsonl
+```
+
+The session id is shown in UI/session output and links runtime behavior to log artifacts.
+
+## Typical event categories
+
+- policy decisions (`allow`, `deny`, `prompted`),
+- tool lifecycle (requested/executed/completed/failed),
+- usage and cost-related summaries,
+- session lifecycle transitions (start/done/error).
+
+Example lines:
 
 ```json
 {"timestamp":"2026-04-06T14:23:11Z","event_kind":"policy_evaluation","permission":"write_file","path":"src/main.rs","verdict":"allow","reason":"user confirmed"}
-{"timestamp":"2026-04-06T14:23:15Z","event_kind":"usage","input_tokens":4821,"output_tokens":342,"cache_read_tokens":8779}
+{"timestamp":"2026-04-06T14:23:15Z","event_kind":"tool_call","tool":"shell","args":{"command":"cargo check"},"result":"ok"}
 ```
 
-## Location
-
-```
-.akmon/audit/{session-id}.jsonl
-```
-
-The session id appears in the TUI status area and in the **exit summary**.
-
-## Reading logs
+## Useful queries
 
 ```bash
-# Pretty-print one file
-cat .akmon/audit/<session>.jsonl | jq .
+# show only denied actions
+jq 'select(.verdict? == "deny")' .akmon/audit/*.jsonl
 
-# Filter lines with jq (examples — adapt keys to your build)
-cat .akmon/audit/*.jsonl | jq 'select(.verdict == "deny")'
+# list all file-write decisions
+jq 'select(.permission? == "write_file")' .akmon/audit/*.jsonl
 ```
 
-## Retention
+## Retention and operations
 
-Rotate or delete like any operational log:
+- treat audit logs as operational artifacts,
+- rotate or archive old logs,
+- avoid committing logs to git unless policy requires it.
+
+Example retention sweep:
 
 ```bash
-find .akmon/audit -mtime +30 -print
+find .akmon/audit -type f -mtime +30 -delete
 ```
 
-Add `.akmon/audit/` to **`.gitignore`** if logs should not be committed.
+## Common mistakes and troubleshooting
 
-See [Security model](./security.md) for what is *never* written (secrets).
+- **Missing logs:** verify audit logging is enabled in your workflow/config.
+- **Unparsable lines:** use line-by-line JSON parser (`jq -c`) and detect malformed rows early.
+- **Secrets concern:** logs should not contain API keys; if they appear, rotate keys and report immediately.
+
+See also [security model](./security.md) and [cost guide](./cost.md).

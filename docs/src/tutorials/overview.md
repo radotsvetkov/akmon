@@ -1,17 +1,53 @@
 # Tutorials overview
 
-These tutorials assume you have [installed](../getting-started/installation.md) Akmon and completed [Quick start](../getting-started/quickstart.md) or run `akmon config` once.
+These tutorials are written for experienced developers who want production-style usage, not toy prompts.
 
-| Tutorial | You will |
+## Before you start
+
+Complete:
+
+- [Installation](../getting-started/installation.md)
+- [Quick start](../getting-started/quickstart.md)
+- optional provider setup for your preferred model
+
+Recommended baseline command:
+
+```bash
+akmon --version
+```
+
+## Learning path
+
+| Tutorial | Outcome |
 | --- | --- |
-| [Step-by-step by language](./step-by-step.md) | Walk through the same “first hour” workflow in Rust, Go, Python (Flask & FastAPI), and Elixir |
-| [Multi-agent & automation](./multi-agent-automation.md) | Combine headless mode, JSON output, CI, and orchestration patterns |
-| [Architecture patterns](./architecture-patterns.md) | Choose planner/implementer splits, plan mode, spec workflow, and documentation strategy |
+| [Step-by-step](./step-by-step.md) | Build real projects in Rust, Python, TypeScript, and refactoring flows |
+| [Multi-agent automation](./multi-agent-automation.md) | Use phased workflows and context discipline at scale |
+| [Architecture patterns](./architecture-patterns.md) | Select plan/architect/spec patterns by task shape |
 
-## Recommended order
+## Suggested order by role
 
-1. Pick your stack in [Step-by-step](./step-by-step.md) and run the **same** high-level task: generate `AKMON.md`, run one `--plan` pass, then one `--yes` implementation pass.
-2. Read [Multi-agent & automation](./multi-agent-automation.md) before wiring Akmon into cron, GitHub Actions, or multi-repo scripts.
-3. Use [Architecture patterns](./architecture-patterns.md) when a single interactive session is not enough—e.g. large refactors, regulated audit trails, or team-wide conventions.
+### Individual developer
 
-Related book sections: [Language guides](../languages/rust.md), [Plan mode](../usage/plan-mode.md), [Architect mode](../usage/architect-mode.md), [Headless mode](../usage/headless.md).
+1. `step-by-step`,
+2. `architecture-patterns`,
+3. `multi-agent-automation`.
+
+### Platform/DevOps engineer
+
+1. `step-by-step` (one stack),
+2. `multi-agent-automation`,
+3. [headless mode](../usage/headless.md).
+
+### Maintainer handling large refactors
+
+1. `architecture-patterns`,
+2. `step-by-step` tutorial 4 (existing codebase refactor),
+3. [audit log](../features/audit-log.md).
+
+## Troubleshooting prerequisites
+
+- If provider calls fail, verify keys and model names first.
+- If sessions drift, create/update `AKMON.md` before continuing.
+- If costs rise unexpectedly, use phased workflow and watch `/context` + `/cost`.
+
+Related: [language guides](../languages/rust.md), [plan mode](../usage/plan-mode.md), [architect mode](../usage/architect-mode.md), [headless mode](../usage/headless.md).

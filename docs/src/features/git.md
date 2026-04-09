@@ -1,36 +1,54 @@
-# Git Integration
+# Git integration
 
-Git operations are exposed as **tools** with policy + approval semantics.
+Akmon uses git context to improve planning and verification, and can perform git operations under policy controls.
 
-## Typical operations
+## What git-aware workflows unlock
 
-| Area | Examples |
-| --- | --- |
-| Read-only | `status`, `diff`, `log`, `show` |
-| Writes | `add`, `commit`, `stash`, `restore`, … |
+- better change understanding (`diff`, `log`, `status`),
+- safer review loops (small commits per step),
+- easier rollback when automation goes wrong.
 
-Read-only operations are easier to auto-approve under `--yes`; mutating commands require explicit consent.
+## Operation classes
 
-## Auto-commit mode
+| Class | Examples | Typical approval posture |
+| --- | --- | --- |
+| Read-only | `status`, `diff`, `log`, `show` | often auto-approved in `--yes` mode |
+| Mutating | `add`, `commit`, `stash`, `restore`, branch operations | explicit confirmation or stricter policy |
+
+## Auto-commit strategy
 
 ```bash
-akmon --auto-commit --task "fix clippy issues file by file"
+akmon --auto-commit --task "Fix clippy warnings file by file and verify after each change"
 ```
 
-Each approved write may become its **own commit**, simplifying review and `git revert`.
+When used correctly, this creates small auditable commits that are easier to review and revert.
 
-## Prompts that pair well with git
+## Prompt patterns that work well
 
-```
-summarize git diff HEAD~1
-```
-
-```
-draft a Conventional Commit message for staged changes
+```text
+Summarize git diff HEAD~1 in terms of behavior changes and test risk.
 ```
 
-```
-compare this branch to main — risks and test gaps
+```text
+Draft a Conventional Commit message for currently staged changes.
 ```
 
-Git context helps Akmon reason about **what changed** and **what to test next**.
+```text
+Compare this branch to main and list missing tests.
+```
+
+## Recommended safety flow
+
+1. ask for analysis (`status`, `diff`),
+2. apply focused edits,
+3. run verification commands,
+4. commit only after green checks.
+
+## Common mistakes and troubleshooting
+
+- **Mistake:** one huge commit for many unrelated edits.
+  - **Fix:** split by concern and verify each.
+- **Mistake:** running destructive git commands without review.
+  - **Fix:** keep interactive approval on for mutating commands.
+- **Mistake:** trusting commit message generation without diff review.
+  - **Fix:** always inspect final staged diff before commit.

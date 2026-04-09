@@ -1,41 +1,57 @@
-# Security Model
+# Security model
 
-Akmon is built to make **approvals, sandboxes, and evidence** first-class.
+Akmon treats side-effect control as a core system, not a UI option.
 
-## Sandbox
+## Threat model in plain terms
 
-File tools operate inside the **repository root** (git-aware). Attempts to escape the sandbox fail and are audited.
+The main risk is not "model output text." The risk is model-triggered side effects:
 
-## Permission levels (conceptual)
+- writing files,
+- running shell commands,
+- accessing network resources,
+- mutating git state.
 
-| Class | Examples | Notes |
+Akmon addresses this with sandboxing, typed permissions, and audit logs.
+
+## Sandbox boundaries
+
+File operations are constrained to project boundaries. Path traversal attempts are blocked. This prevents prompt-driven writes to unrelated filesystem locations in normal operation.
+
+## Permission classes
+
+| Class | Typical actions | Default posture |
 | --- | --- | --- |
-| Reads | list, read, search | Often auto-approved with `--yes` |
-| Writes | write, edit, patch | User confirmation + diff preview |
-| Git writes | add, commit | Confirmed per policy |
-| Shell | arbitrary commands | Requires `--shell-allow` patterns |
-| Network fetch | HTTP(S) | Requires `--yes-web` where applicable |
+| Read | list/read/search | easier to auto-approve (`--yes`) |
+| Write | write/edit/patch | requires explicit confirmation/policy allow |
+| Shell | command execution | allowlisted/confirmed paths |
+| Network | web fetch/MCP-backed actions | policy-checked and traceable |
+| Git mutating | add/commit/restore/etc. | confirmed or explicitly policy-approved |
 
-Exact behavior follows the **policy engine** for your CLI mode.
+## Diff-first approvals
 
-## Diff preview
+For file changes, Akmon can present unified diffs before final approval. This gives human review at the moment side effects happen, not only at the end.
 
-File mutations show a **unified diff** before confirmation so you can reject accidental edits.
+## Network and SSRF posture
 
-## SSRF protections
+`web_fetch` applies protections against common private-address and metadata endpoint abuse patterns. This reduces risk from prompt injection that tries to exfiltrate internal data.
 
-`web_fetch` blocks common private / metadata / loopback targets. This reduces prompt-injection data exfiltration via URLs.
+## Secrets handling
 
-## Secrets
+Operational guidance:
 
-API keys use hardened storage types where implemented; they must not appear in logs, debug output, or user-visible errors. **Never** paste production keys into prompts.
+- keep keys in environment or secured config paths,
+- never paste production credentials into prompts,
+- rotate credentials immediately if leakage is suspected.
 
-## Prompt injection hygiene
+## What `--yes` is and is not
 
-File bodies are framed so project content cannot trivially override system instructions (delimiter-style wrapping).
+`--yes` is a productivity flag, not a blanket "do anything" bypass. It primarily streamlines read-oriented operations; mutating actions remain policy-gated.
 
-## What `--yes` does
+## Common mistakes and troubleshooting
 
-`--yes` speeds up **reads** and safe operations; **writes and destructive git** still require explicit approval in interactive / policy configurations.
-
-For a deeper threat model review, read the source policy and sandbox crates — this page is an operator overview.
+- **Mistake:** enabling broad shell access in unattended workflows.
+  - **Fix:** restrict with precise allow patterns.
+- **Mistake:** assuming audit logs replace code review.
+  - **Fix:** use logs plus normal review/CI controls.
+- **Mistake:** storing sensitive logs in version control.
+  - **Fix:** keep `.akmon/` artifacts out of source control unless required.

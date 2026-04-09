@@ -1,52 +1,76 @@
 # Capabilities reference
 
-This page is a **map** of what Akmon can do; deep dives live in linked chapters.
+This page is a practical map of what Akmon can do and how to choose the right mode.
 
-## Runtime & packaging
+## Runtime and packaging
 
-| Capability | Notes |
+| Capability | Why it matters |
 | --- | --- |
-| Single static binary | No Node/Python runtime required to run the CLI |
-| Optional semantic index | Smaller build with `--no-default-features` ([Semantic search](../features/semantic-search.md)) |
-| SSH / Docker / CI | Same binary; configure via env and flags |
+| Single Rust binary | predictable behavior across laptop, SSH host, CI runner |
+| Optional feature set | choose slim or full builds by environment needs |
+| Terminal-first UX | works where editor plugins are unavailable |
 
-## Modes of operation
+## Operating modes
 
-| Mode | Entry | Best for |
+| Mode | Command | Best use case |
 | --- | --- | --- |
-| Interactive TUI | `akmon chat` | Exploration, diffs before writes, slash commands ([Interactive](../usage/interactive.md)) |
-| Headless | `akmon --yes --task "…"` | Scripts, batch refactors ([Headless](../usage/headless.md)) |
-| JSON output | `--output json` | Pipelines; structured early errors when config is invalid |
-| Plan | `--plan` | Analysis and written plans only ([Plan mode](../usage/plan-mode.md)) |
-| Architect | `--architect`, `--planner-model` | Planner/implementer split ([Architect](../usage/architect-mode.md)) |
-| Spec workflow | `akmon spec …` | Requirements → design → tasks ([Spec](../usage/spec-workflow.md)) |
+| Interactive | `akmon chat` | supervised iterative implementation |
+| Headless | `akmon --yes --task "..."` | CI and automation |
+| JSON reporting | `--output json` | machine-readable orchestration |
+| Plan-only | `--plan` | read-only scoping before edits |
+| Architect | `--architect` | plan+implement with model split |
+| Spec workflow | `akmon spec ...` | structured requirements/design/tasks |
 
-## Providers (BYOK)
+## Model/provider support
 
-Ollama (local), Anthropic, OpenRouter, OpenAI, Groq, Azure OpenAI, Amazon Bedrock, and OpenAI-compatible endpoints. Configuration and env vars: [Provider setup](../getting-started/providers.md) and [Providers](../providers/ollama.md) chapters.
+Akmon supports local and cloud providers, including:
 
-## Tools (built-in)
+- Ollama (offline/local),
+- Anthropic,
+- OpenAI-compatible providers,
+- OpenRouter, Groq, Azure, Bedrock.
 
-File read/write, `edit`, unified `patch` / `apply_patch`, regex `search`, optional `semantic_search`, git (status/diff/log and mutating commands where allowed), allowlisted `shell`, SSRF-aware `web_fetch`, plus [MCP](../features/mcp.md) tools when configured.
+Model selection is per-task, enabling cost/capability optimization.
 
-Permissions default to **confirm writes** even with `--yes` (reads can be auto-approved—see [Security](../features/security.md)).
+## Core tooling capabilities
 
-## Project intelligence
+- file ops (read/write/edit/patch),
+- search (text and optional semantic),
+- git context and git actions,
+- shell commands (policy constrained),
+- network fetch with protections,
+- MCP integrations for external systems.
 
-Language and framework hints are detected and injected into context (Rust, Go, Python, TypeScript, Elixir, and more). You steer with `AKMON.md` ([Project setup](../project/init.md)).
+## Policy and safety capabilities
 
-## Audit & cost visibility
+- permission-gated side effects,
+- write diff confirmation flows,
+- sandboxed filesystem boundaries,
+- auditable tool + policy events.
 
-JSONL audit logs, session summaries, token and cache display in the TUI, estimated USD—see [Audit log](../features/audit-log.md) and [Cost](../features/cost.md).
+## Context and memory capabilities
 
-## Interop
+- `AKMON.md` project steering,
+- `.akmon/specs` persistent plan artifacts,
+- session continuation (`-c`) with resumable context,
+- todo and memory primitives for multi-turn continuity.
 
-`akmon import` / `akmon export` sync steering files with other AI tools ([Import](../project/import.md), [Export](../project/export.md)).
+## Cost and observability capabilities
 
-## When something is *not* built in
+- token and cache visibility in UI,
+- cost estimates and run summaries,
+- JSONL audit trail for runtime evidence.
 
-- **No hosted multi-tenant service** — you run the binary.
-- **No automatic code review** — you review diffs and plans.
-- **No guarantee** that cloud APIs stay available — that is between you and the provider.
+## Automation capabilities
 
-For tutorials that combine these pieces, start with [Tutorials overview](../tutorials/overview.md).
+- headless runs with budget caps,
+- structured JSON run output,
+- script-friendly command model for batch operations.
+
+## Known non-goals
+
+- no hosted SaaS runtime (you run it),
+- no mandatory IDE dependency,
+- no guarantee that third-party model APIs are available.
+
+Next steps: [tutorials overview](../tutorials/overview.md), [headless mode](../usage/headless.md), [security model](../features/security.md).

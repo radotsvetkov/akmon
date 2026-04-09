@@ -1,167 +1,214 @@
-# Step-by-step: first hour with Akmon
+# Step-by-step: real workflows from zero to shipped
 
-Every path below follows the same rhythm so you can compare stacks:
+This page walks through four complete tutorials with concrete commands, expected outputs, common failures, and resulting files.
 
-1. **Enter the repo** and run `akmon init` (or create `AKMON.md` by hand).
-2. **Plan only** — `akmon --plan --task "…"` — verify `.akmon/plans/` output.
-3. **Implement once** — `akmon --yes --task "…"` or interactive `akmon chat`.
-4. **Inspect audit** — `ls .akmon/audit/` and skim the latest JSONL.
+## Tutorial 1: Rust + Axum REST API from scratch
 
-Use `--output json` with `--yes` when you need machine-readable results for scripts ([Headless mode](../usage/headless.md)).
-
----
-
-## Rust (workspace or single crate)
+### Setup
 
 ```bash
-cd my-rust-service
-akmon init
+mkdir -p ~/projects/bookshelf-api
+cd ~/projects/bookshelf-api
+git init
+export ANTHROPIC_API_KEY=sk-ant-...
+akmon chat
 ```
 
-In `AKMON.md`, fill **Current sprint** with one sentence (e.g. “Add idempotency keys to the payment command”).
+Create `AKMON.md` (via `/init` or manually):
 
-**Plan:**
+```markdown
+# Bookshelf API
+
+Rust + Axum + SQLite REST API for managing books.
+
+## Stack
+- Language: Rust 1.75+
+- Framework: Axum 0.7
+- Database: SQLite via rusqlite
+- Auth: JWT with jsonwebtoken
+
+## Conventions
+- Error type: AppError implementing IntoResponse
+- Database: connection pool via r2d2
+- Verify: cargo check 2>&1 | head -20
+```
+
+### Session flow
+
+Prompts to send in order:
+
+1. `Initialize the project with Cargo.toml and basic dependencies`
+2. `Create src/main.rs with Axum app bootstrap and health endpoint`
+3. `Create src/models/book.rs with CRUD model operations`
+4. `Create src/routes/books.rs with GET /books and POST /books`
+5. `Wire routes into main and add minimal integration tests`
+
+What you should see:
+
+- tool calls to `write_file` for `Cargo.toml` and `src/*`,
+- permission dialog per write (press `y` once or `s` for session allowance),
+- verification shell commands (`cargo check`) after write batches,
+- final `Done` plus cost/token summary.
+
+Expected output tree:
+
+```text
+bookshelf-api/
+  Cargo.toml
+  src/
+    main.rs
+    error.rs
+    routes/
+      mod.rs
+      books.rs
+    models/
+      mod.rs
+      book.rs
+  tests/
+    books_api.rs
+```
+
+### If something goes wrong
+
+- **`cargo check` fails:** ask `Fix compile errors only, no refactor`.
+- **Agent loops on reads:** ask `Stop exploration and implement from current context`.
+- **Rate limited:** run `akmon -c` to continue.
+
+## Tutorial 2: Python FastAPI + PostgreSQL
+
+### Setup
 
 ```bash
-akmon --plan --task "List files to touch for idempotency keys in the payment flow and outline test commands"
+mkdir -p ~/projects/users-api
+cd ~/projects/users-api
+git init
+python -m venv .venv
+source .venv/bin/activate
+akmon chat
 ```
 
-**Implement (headless):**
+Use explicit 3-phase flow:
+
+1. **Research:** `Explore this repo and propose FastAPI + SQLAlchemy layout`
+2. **Plan:** `/plan` then `Write a step-by-step implementation plan`
+3. **Implement:** `/implement`
+
+Prompt examples:
+
+- `Create pyproject.toml, app entrypoint, and dependency set`
+- `Add SQLAlchemy models for users table and repository layer`
+- `Add FastAPI routers for GET /users and POST /users`
+- `Add pytest tests for validation and database behavior`
+
+Expected files:
+
+```text
+users-api/
+  pyproject.toml
+  app/
+    main.py
+    db.py
+    models.py
+    schemas.py
+    repository.py
+    routes/users.py
+  tests/
+    test_users.py
+```
+
+Troubleshooting:
+
+- **DB connection error:** provide a local `DATABASE_URL` in `.env`.
+- **pytest import errors:** ask agent to fix Python path/package init files only.
+
+## Tutorial 3: TypeScript/Next.js full-stack app
+
+### Setup
 
 ```bash
-akmon --yes --task "Implement idempotency key storage using the project's existing DB layer; add tests"
+mkdir -p ~/projects/notes-web
+cd ~/projects/notes-web
+git init
+akmon chat --model anthropic/claude-haiku-4-5
 ```
 
-**Verify:**
+Use architect mode for split reasoning:
 
 ```bash
-cargo test
+akmon --architect \
+  --planner-model llama3.2 \
+  --model anthropic/claude-haiku-4-5 \
+  --task "Create a Next.js notes app with API routes and sqlite persistence"
 ```
 
-**Why this works:** Akmon’s project intelligence injects Rust-oriented hints (see [Rust projects](../languages/rust.md)) so the model reaches for `cargo test` / `cargo clippy`-style checks without you repeating them every prompt.
+What this demonstrates:
 
----
+- planner creates architecture first,
+- implementer executes files in focused steps,
+- context remains cleaner than one long free-form run.
 
-## Go (module under `go.mod`)
+Expected files:
+
+```text
+notes-web/
+  package.json
+  app/
+    page.tsx
+    api/notes/route.ts
+  lib/
+    db.ts
+    notes.ts
+  tests/
+    notes.test.ts
+```
+
+Troubleshooting:
+
+- **Type errors:** ask `Run tsc and fix only reported errors`.
+- **Next route mismatch:** ask `Align route handler signatures with Next version in package.json`.
+
+## Tutorial 4: Refactoring an existing codebase
+
+### Setup
 
 ```bash
-cd my-go-api
-akmon init
+cd ~/projects/existing-service
+akmon --plan --task "Analyze auth module and propose OAuth migration plan"
 ```
 
-**Plan:**
+Then:
+
+1. review generated plan,
+2. run implementation in focused steps,
+3. continue with `akmon -c` if interrupted/rate-limited.
+
+Recommended prompts:
+
+- `Implement step 1 only from the plan; run tests`
+- `Implement next unchecked step and verify`
+- `Summarize changed files and remaining plan items`
+
+Audit review:
 
 ```bash
-akmon --plan --task "Propose package layout for a new /v2 health handler with structured logging"
+ls .akmon/audit/
+jq . .akmon/audit/<latest>.jsonl | head -40
 ```
 
-**Implement:**
+What you should see:
 
-```bash
-akmon --yes --task "Add GET /v2/health returning JSON; use existing logger; add table-driven test"
-```
+- policy decisions per write/shell call,
+- tool outputs tied to each step,
+- clear trail of refactor sequence.
 
-**Verify:**
+## Common mistakes
 
-```bash
-go test ./...
-```
-
-See [Go projects](../languages/go.md) for conventions the agent tends to follow once `AKMON.md` names your module boundaries.
-
----
-
-## Python — Flask
-
-```bash
-cd my-flask-app
-akmon init
-```
-
-Describe in `AKMON.md` how you run the app (e.g. `flask run` or `gunicorn`).
-
-**Plan:**
-
-```bash
-akmon --plan --task "Plan adding a /api/ready endpoint that checks DB connectivity without exposing secrets"
-```
-
-**Implement:**
-
-```bash
-akmon --yes --task "Implement /api/ready in the existing Flask app factory; add a small test using the project's test client"
-```
-
-**Verify:**
-
-```bash
-pytest   # or python -m pytest, matching your repo
-```
-
----
-
-## Python — FastAPI
-
-```bash
-cd my-fastapi-service
-akmon init
-```
-
-**Plan:**
-
-```bash
-akmon --plan --task "Sketch router changes for JWT-protected /users/me using existing auth dependencies"
-```
-
-**Implement:**
-
-```bash
-akmon --yes --task "Add GET /users/me with existing JWT dependency; return 401 when missing; add async test"
-```
-
-**Verify:**
-
-```bash
-pytest
-```
-
-Tip: put **one** canonical test command in `AKMON.md` so plan and implement steps stay consistent across sessions.
-
----
-
-## Elixir (Mix / Phoenix)
-
-```bash
-cd my_phoenix_app
-akmon init
-```
-
-Mention `mix` tasks you use (`mix test`, `mix format`, Dialyzer if applicable) in **Conventions**.
-
-**Plan:**
-
-```bash
-akmon --plan --task "Plan a LiveView or controller change for an admin-only settings page; list contexts to touch"
-```
-
-**Implement:**
-
-```bash
-akmon --yes --task "Implement the settings page per plan; add ExUnit tests for the context"
-```
-
-**Verify:**
-
-```bash
-mix test
-```
-
-Akmon still benefits even when BEAM conventions are niche: explicit **Architecture** and **Conventions** sections in `AKMON.md` reduce hallucinated module names.
-
----
+- Asking for "build everything" in one turn.
+- Missing `AKMON.md` conventions (verification commands, architecture boundaries).
+- Running in headless mode without budget limits.
 
 ## Next steps
 
-- Automate the same flow in CI: [Multi-agent & automation](./multi-agent-automation.md)
-- Scale planning across roles (cheap planner model + strong implementer): [Architecture patterns](./architecture-patterns.md)
-- Deep dive: [Examples](../examples/rust-axum-api.md), [Spec workflow](../usage/spec-workflow.md)
+- Multi-agent patterns: [multi-agent automation](./multi-agent-automation.md)
+- Headless CI workflows: [headless mode](../usage/headless.md)
+- Project context quality: [AKMON.md guide](../project/akmon-md.md)

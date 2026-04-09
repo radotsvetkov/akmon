@@ -1,69 +1,111 @@
-# Multi-agent setups & automation
+# Multi-agent automation in practice
 
-“Multi-agent” here means **multiple Akmon processes or roles cooperating**—not a single monolithic chat. Akmon is a **CLI**: you compose it with shells, schedulers, CI, and other agents.
+Multi-agent in Akmon means decomposing work into multiple focused sessions instead of one giant context-heavy loop.
 
-## Headless JSON for glue code
+## The problem with single-agent sessions
 
-Use `--output json` with `--yes` so scripts get structured errors and results:
+If you ask one session to both explore and implement a large subsystem, context fills with stale file reads and old reasoning. By the time code generation starts, the model is paying token/cognitive budget for irrelevant history.
 
-```bash
-akmon --yes --output json --task "Summarize TODO comments in src/" | jq .
+Typical failure pattern:
+
+1. reads 10-20 files,
+2. repeats exploration because context is noisy,
+3. implementation quality drops,
+4. token cost rises.
+
+## How `spawn_subagent` helps
+
+A subagent run is a fresh focused session. It performs exploration and returns a compact summary to the main session. The main implementation session does not carry every exploratory file read in its context.
+
+Net effect:
+
+- smaller implementation context,
+- fewer repeated reads,
+- clearer plan/spec handoff,
+- lower token waste.
+
+## Three-phase pattern
+
+### Phase 1: Research (subagent)
+
+Goal: understand codebase boundaries and constraints.
+
+Prompt:
+
+```text
+Explore authentication flow and summarize entry points, middleware, data models, and tests. Return only structured findings.
 ```
 
-If configuration is invalid (missing API key, bad model name), recent releases surface a **JSON error on stdout** in JSON mode so parsers do not have to scrape stderr.
+### Phase 2: Specification (main session)
 
-## Pattern: planner + implementer (single machine)
+Goal: persist plan to disk.
 
-1. **Planner** (fast/local model):
+```bash
+akmon --plan --task "Write implementation plan for OAuth integration using research summary"
+```
 
-   ```bash
-   akmon --plan --task "Break down feature X" --model llama3.2
-   ```
+Creates `.akmon/specs` or plan artifacts that survive compaction/restart.
 
-2. Human or script reviews `.akmon/plans/*.md`.
+### Phase 3: Implementation (main session)
 
-3. **Implementer** (stronger model):
+Goal: execute one checked step at a time with verification.
 
-   ```bash
-   akmon --yes --task "Implement the plan in .akmon/plans/ for feature X" \
-     --model claude-haiku-4-5-20251001
-   ```
+Prompt style:
 
-For built-in two-phase routing, see [Architect mode](../usage/architect-mode.md) (`--architect`, `--planner-model`).
+```text
+Implement step 1 only, run verification commands, then stop.
+```
 
-## Pattern: CI agent
+Repeat for each step.
 
-Typical GitHub Actions job:
+## Real example: adding a payment system
 
-1. Checkout
-2. Install Akmon binary from Releases
-3. Export provider key as secret
-4. Run `akmon --yes --task "run tests and fix obvious failures"` with a **narrow** task scope, or only static checks
+Research prompt:
 
-Keep CI tasks **read-biased**: rely on `--yes` auto-approving reads; writes still prompt unless you use dedicated automation branches and review policies.
+```text
+Find existing payment-related code, billing models, and webhook endpoints. Summarize what exists and what is missing.
+```
 
-## Pattern: audit trail across runs
+Plan file example:
 
-Every session can write JSONL under `.akmon/audit/`. For compliance:
+```markdown
+# Plan: Stripe Payment Integration
 
-- Treat the audit directory as **evidence**, not scratch space—back it up or export to your log stack.
-- Use consistent repo roots so paths in the log stay stable.
+## Research findings
+- Current payment code: none
+- User model in src/models/user.rs has email field
+- API is Axum with JWT auth in src/middleware/auth.rs
 
-See [Audit log](../features/audit-log.md).
+## Implementation steps
+- [ ] Add stripe dependency to Cargo.toml
+- [ ] Create src/payments/mod.rs with Stripe client setup
+- [ ] Create src/payments/checkout.rs with create_session
+- [ ] Create src/payments/webhook.rs with event handling
+- [ ] Add POST /payments/checkout route
+- [ ] Add POST /payments/webhook route
+- [ ] Add payment_status to user model
+- [ ] Write integration tests
+```
 
-## Integrating with other tools
+Implementation run:
 
-- **MCP**: expose extra tools via [MCP Tools](../features/mcp.md); combine with IDE-hosted MCP servers carefully (trust boundary).
-- **Import/export**: sync `AKMON.md` with Claude Code, Cursor, Codex, etc. ([Import](../project/import.md), [Export](../project/export.md)).
-- **Semantic search**: optional indexing for large repos ([Semantic search](../features/semantic-search.md)).
+```text
+Implement the next unchecked payment step. Run tests relevant to touched files.
+```
 
-## Scaling concerns
+## Parallel research strategy for large monorepos
 
-| Concern | Approach |
-| --- | --- |
-| Cost | Use plan mode first; local Ollama for exploration; watch cache/token lines in the TUI |
-| Reliability | Narrow `--task` strings; avoid “fix everything” in one headless shot |
-| Safety | Default policy still confirms writes; use allowlists for repeated shell patterns |
-| Observability | JSON output + JSONL audit + session summaries |
+For very large repositories:
 
-When multiple humans **and** automations touch the same repo, standardize `AKMON.md` **Current sprint** so every agent run shares the same intent.
+1. run multiple research tasks by domain (auth, billing, API, infra),
+2. produce short summaries per domain,
+3. merge into one implementation plan.
+
+This is more reliable than one massive exploratory session.
+
+## Common mistakes and troubleshooting
+
+- **Skipping written plan:** always persist to spec/plan before implementation.
+- **Research summary too verbose:** ask for bullet-point outputs with file paths only.
+- **Main session still bloated:** reset implementation session and re-run from plan.
+- **Unclear ownership in automation:** assign per-phase prompts and expected outputs explicitly.

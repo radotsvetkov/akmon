@@ -1,48 +1,63 @@
-# Plan Mode
+# Plan mode
 
-Plan mode analyzes your codebase and produces a written
-implementation plan without touching any files (write tools are not registered).
+Plan mode performs read-only analysis and produces implementation plans without changing files.
 
 ```bash
 akmon --plan --task "your task"
 ```
 
-## How it works
+## Why plan mode exists
 
-In plan mode:
+Large tasks fail when implementation starts before scope is understood. Plan mode separates discovery from execution:
 
-- Only **read** tools are available (read, search, list; semantic search when `--index`).
-- **Write** tools are absent from the tool registry — not merely disabled.
-- The model produces a detailed plan.
-- Plans are saved under **`.akmon/plans/`** when persistence succeeds.
+1. map relevant files and constraints,
+2. produce ordered implementation steps,
+3. define verification per step,
+4. execute later with lower risk.
 
-## Using plan mode
+## What is allowed in plan mode
+
+- read/list/search tools,
+- optional semantic search when enabled,
+- no write/edit/patch tool registration.
+
+This is structural read-only behavior, not just "please don't write."
+
+## Recommended workflow
 
 ```bash
-# Generate a plan
 akmon --plan \
   --model claude-haiku-4-5-20251001 \
-  --task "add rate limiting to all API endpoints"
+  --task "Design migration from sqlite auth sessions to redis-backed sessions with rollback strategy"
 ```
 
-Typical CLI footer after a successful save:
+Then:
 
-```
-Plan saved to .akmon/plans/...
-
-Review:  cat path/to/plan.md
-Edit:    $EDITOR path/to/plan.md
-Implement: akmon --task 'implement the plan in ...'
+```bash
+ls .akmon/plans
+$EDITOR .akmon/plans/<latest>.md
+akmon --task "Implement the approved plan in .akmon/plans/<latest>.md step by step"
 ```
 
-## In the TUI
+## What a good plan should contain
 
-```
-/plan
-```
+- target files/modules,
+- ordered steps,
+- risk notes and migration impact,
+- verification commands after each step,
+- rollback hints.
 
-Then send your task message. Use **`/implement`** to run the stored plan, **`/edit-plan`** to open it in `$EDITOR`, or **`/view-plan`** to preview in the UI.
+## TUI usage
 
-## Why plan first?
+- run `/plan`,
+- submit task,
+- review plan,
+- run `/implement` when approved.
 
-Planning up front reduces thrash: the model maps the full scope before edits land in your tree. Pair with [Architect mode](./architect-mode.md) when you want an automatic plan→implement pipeline.
+## Common mistakes and troubleshooting
+
+- **Mistake:** skipping plan review before implementation.
+- **Mistake:** one giant implementation step instead of checkpoints.
+- **Mistake:** missing verification commands in plan.
+
+Plan mode pairs naturally with [architect mode](./architect-mode.md) and [spec workflow](./spec-workflow.md).

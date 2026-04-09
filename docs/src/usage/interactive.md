@@ -1,88 +1,74 @@
-# Interactive Mode
+# Interactive mode
+
+Interactive mode is the default way to work with Akmon when you want close control over prompts, permissions, and step-by-step execution.
 
 ```bash
 akmon chat
 ```
 
-Opens the terminal TUI — a full-screen interface for conversational
-AI-assisted development.
+## What the UI is showing you
 
-## Interface layout
+The TUI is designed around operational awareness:
 
-```
-┌─ akmon · v1.6.x  │  INTERACTIVE ─────────────────────────────────────┐
-│                                                                        │
-│  You: find where authentication tokens are validated                   │
-│                                                                        │
-│  → semantic_search                                                     │
-│  ✓ semantic_search  "token validation"          [Tab to expand]        │
-│  → read_file                                                           │
-│  ✓ read_file  src/auth/middleware.rs                                   │
-│                                                                        │
-│  Akmon: Token validation happens in src/auth/middleware.rs.            │
-│  The `validate_jwt` function on line 47 decodes the Bearer             │
-│  token using the HS256 algorithm and checks expiry...                  │
-│                                                                        │
-├─ cwd · model · provider ────────────────────────────────────────────────┤
-├─ session · tokens · cache · ~$cost · step ────────────────────────────┤
-│  ↳ context: file1  file2  +N more                                       │
-│ > type a message or / for commands                                     │
-└────────────────────────────────────────────────────────────────────────┘
-```
+- conversation transcript and tool calls,
+- approval prompts for side effects,
+- session/provider/model identity,
+- context/token/cache/cost signals.
 
-(Layout evolves between versions; two-line status bar, context row, and diff confirmations are typical.)
+It is not just chat; it is a control surface for autonomous execution.
 
-## Status bar
+## Typical interaction pattern
 
-The status area shows:
+1. give focused task,
+2. review tool calls and approvals,
+3. inspect diffs before writes,
+4. run verification commands,
+5. iterate until completion.
 
-- **Session ID** (short prefix) — matches audit log filename
-- **Tokens** — cumulative input/output usage for the session
-- **Cache** — prompt cache read tokens when using providers that support it (green when non-zero)
-- **Cost** — heuristic USD estimate when not on a free local profile
-- **Step** — current agent step when a turn is running
+Example starting prompt:
 
-A **top status line** usually shows shortened **working directory**, **model**, and **provider** name.
-
-## Context bar
-
-When Akmon has read or written files, a context line may appear above
-the input showing active paths (e.g. first two basenames plus `+N more`).
-
-## Tool cards
-
-Each tool call appears as a card. Press **Tab** to expand:
-
-```
-✓ read_file  src/auth/middleware.rs    [Tab to expand]
+```text
+Add input validation to user registration, update tests, and run verification commands after each file change.
 ```
 
-Expanded (example):
+## Status and context indicators
 
-```
-✓ read_file  src/auth/middleware.rs
-  args: { "path": "..." }
-  result: ...
-```
+Key footer/top indicators usually include:
 
-## Confirmation prompts
+- session id,
+- model/provider,
+- cumulative input/output tokens,
+- cache read tokens,
+- cost estimate,
+- context usage bar/percentage.
 
-Before file writes, Akmon shows a **unified diff** preview. Approve or deny with **`y`** / **`n`** (or **`N`**) as prompted.
+For long runs, monitor context percentage and compact/reset before quality drifts.
 
-## Starting a session in a specific directory
+## Slash commands that matter most
 
-```bash
-akmon chat /path/to/project
-# or
-cd /path/to/project && akmon chat
-```
+- `/model` switch model mid-session,
+- `/plan` create plan-only turn,
+- `/context` view context budget and thresholds,
+- `/cost` inspect usage/cost breakdown,
+- `/copy` copy latest assistant response.
 
-## Switching models mid-session
+## Approval flow
 
-```
-/model
-```
+When the model requests writes or command execution:
 
-Opens a picker showing available models by provider. Choose a row and confirm.
+1. inspect proposed action/diff,
+2. approve once or for session where appropriate,
+3. deny if scope drifts.
 
-See also [Slash commands](../reference/slash-commands.md).
+Use session-wide allowances carefully; they trade control for speed.
+
+## Common mistakes and troubleshooting
+
+- **Mistake:** broad vague prompts ("fix everything").
+  - **Fix:** split by subsystem and expected verification.
+- **Mistake:** ignoring context/cost indicators in long sessions.
+  - **Fix:** use `/context` and continue in focused phases.
+- **Mistake:** approving shell writes blindly.
+  - **Fix:** check command intent and command scope before allow.
+
+See also [slash commands](../reference/slash-commands.md), [plan mode](./plan-mode.md), and [headless mode](./headless.md).

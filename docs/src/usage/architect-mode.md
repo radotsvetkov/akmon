@@ -1,33 +1,51 @@
-# Architect Mode
+# Architect mode
 
-Two-phase workflow: a **planner** model produces a plan, then your **main** model implements it.
+Architect mode runs a planner phase and implementation phase in one command.
 
-## CLI
+## Why use architect mode
+
+It is useful when you want:
+
+- cheap/fast planning model,
+- stronger implementation model,
+- less manual handoff between plan and execution.
+
+## Basic command
 
 ```bash
 akmon --architect \
   --planner-model llama3.2 \
   --model claude-haiku-4-5-20251001 \
-  --task "refactor the database layer to use connection pooling"
+  --task "Refactor database layer to use connection pooling with migration-safe rollout"
 ```
 
-- **`--planner-model`** — cheap or fast model for the plan (default often `llama3.2` in config).
-- **`--model`** — main model for implementation.
+## How the phases differ
 
-Planner output is captured and passed to the implementation phase. Plans can be saved under `.akmon/plans/` like plan mode.
+| Phase | Model | Tool scope | Output |
+| --- | --- | --- | --- |
+| Planner | `--planner-model` | read-oriented analysis | ordered plan |
+| Implementer | `--model` | full policy-checked tool set | code + verification |
 
-## When to use it
+## Practical model strategy
 
-- Large refactors where a written plan reduces wasted edits.
-- When you want a smaller model to outline steps before spending tokens on a frontier model.
+- use low-cost local/cloud model for planning,
+- use Haiku/Sonnet-class model for implementation complexity,
+- reserve expensive models for hard reasoning bottlenecks.
 
-## Compared to plan mode
+## Suggested usage pattern
 
-| | Plan mode (`--plan`) | Architect (`--architect`) |
-| --- | --- | --- |
-| Goal | Read-only analysis + saved plan | Plan then **run** implementation |
-| Tools in plan phase | Read/search only | Planner uses read-only tools; main run gets full tool set after |
+1. run architect command,
+2. inspect generated plan artifacts,
+3. review first implementation diff before broad approvals,
+4. continue in focused increments.
 
-## Configuration
+## Common mistakes and troubleshooting
 
-`[architect]` in `~/.akmon/config.toml` can set the default planner model. See [Configuration](./../getting-started/configuration.md).
+- **Mistake:** planner model too weak to map architecture.
+  - **Fix:** upgrade planner model for complex repos.
+- **Mistake:** no budget cap in long implement phases.
+  - **Fix:** combine with `--max-budget-usd`.
+- **Mistake:** skipping post-plan review.
+  - **Fix:** verify plan assumptions before writes.
+
+Related: [plan mode](./plan-mode.md), [headless mode](./headless.md), [configuration](../getting-started/configuration.md).

@@ -1,29 +1,51 @@
 # Semantic search
 
-Akmon can optionally use **semantic (embedding) search** over your codebase when built with the semantic index feature and started with **`--index`**.
+Semantic search lets Akmon find relevant code by meaning, not only exact keyword matches.
 
-## Enable
+## When to use it
 
-Build the full binary (with indexing dependencies), then:
+Use semantic search for questions like:
+
+- "where do we validate JWTs?",
+- "what code handles retry/backoff?",
+- "where is this business rule enforced?"
+
+It is especially useful when symbols are named inconsistently across a large codebase.
+
+## Enabling semantic search
+
+Run Akmon with indexing enabled:
 
 ```bash
 akmon chat --index
 ```
 
-A binary index is stored under `.akmon/` (for example `.akmon/index.bin`). The first run may take time to embed files.
+On first run, the index build may take time depending on repository size.
 
-## What it does
+## Practical workflow
 
-- **`semantic_search` tool** — finds code or docs by meaning, not only exact text.
-- Complements **text search** (`grep`-style) for exploration and large repos.
+1. ask a high-level question,
+2. review candidate files from semantic results,
+3. use exact text search/read tools to verify before editing.
 
-## Without `--index`
+Semantic search should guide exploration, not replace source validation.
 
-The slim build or runs without `--index` omit the semantic search tool; **read**, **search**, and **list** tools still work.
+## Cost and context implications
 
-## Tips
+Semantic search can reduce wasted context by narrowing file reads to likely matches instead of broad brute-force scans.
 
-- Regenerate or refresh index when you change many files (behavior depends on version; check CLI help).
-- Add huge generated dirs to `.gitignore`; indexing usually respects project boundaries.
+Best practice:
 
-See [CLI reference](../reference/cli.md) for flags and [Development setup](../contributing/setup.md) for full vs slim builds.
+- use semantic search for discovery,
+- follow with targeted file reads and scoped edits.
+
+## Common mistakes and troubleshooting
+
+- **Mistake:** treating semantic results as ground truth.
+  - **Fix:** always confirm by reading source files.
+- **Mistake:** expecting semantic indexing in slim builds.
+  - **Fix:** verify your build/runtime mode and `--index` usage.
+- **Mistake:** indexing generated/vendor directories.
+  - **Fix:** ensure ignore files exclude noisy paths.
+
+See also [CLI reference](../reference/cli.md) and [Capabilities](../reference/capabilities.md).

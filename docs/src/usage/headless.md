@@ -1,100 +1,136 @@
-# Headless Mode
+# Headless mode
 
-Run Akmon from scripts, CI pipelines, or shell one-liners.
+Headless mode runs Akmon without interactive supervision and is ideal for CI/CD, scripted maintenance, and batch repository automation.
+
+## When to use headless mode
+
+Use headless mode when you need repeatable automated execution:
+
+- pull-request checks,
+- scheduled maintenance tasks,
+- org-wide refactoring runs,
+- scriptable JSON output for downstream tooling.
+
+## Basic command pattern
 
 ```bash
-akmon --task "your task here" [flags]
-```
-
-## Basic usage
-
-```bash
-# Simple task
-akmon --yes --task "list all TODO comments in the codebase"
-
-# With a specific model
-ANTHROPIC_API_KEY=key akmon --yes \
+akmon \
   --model claude-haiku-4-5-20251001 \
-  --task "add error handling to src/api.rs"
-
-# JSON output for scripting
-akmon --yes --output json \
-  --task "count functions in each file" \
-  | jq '.result'
+  --yes \
+  --max-budget-usd 2.00 \
+  --output json \
+  --task "Run cargo clippy and fix warnings without changing behavior"
 ```
 
-## Auto-approval flags
+## Complete GitHub Actions example
 
-```bash
-# --yes approves read operations automatically
-# File writes still prompt for confirmation (TTY) or follow policy in CI
-akmon --yes --task "analyze the codebase structure"
+```yaml
+name: AI-powered lint fix
 
-# --auto-commit commits each approved write (when git integration is used)
-akmon --yes --auto-commit \
-  --task "add rustdoc comments to all public functions in scope"
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  ai-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Akmon
+        run: |
+          curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64.tar.gz | tar xz
+          sudo mv akmon /usr/local/bin/
+
+      - name: Run Akmon
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          akmon \
+            --model claude-haiku-4-5-20251001 \
+            --yes \
+            --max-budget-usd 2.00 \
+            --output json \
+            --task "Run cargo clippy and fix warnings. Run cargo test after each change." \
+          | tee akmon-result.json
+
+      - name: Check exit
+        run: |
+          status=$(jq -r '.exit_reason' akmon-result.json)
+          test "$status" = "completed"
 ```
 
-## Common CI patterns
+## JSON output fields
 
-```bash
-# Summarize test failures
-akmon --yes --output json \
-  --task "run cargo test and summarize any failures" \
-  | jq -r '.result'
-
-# Code review
-akmon --yes \
-  --task "review the changes in git diff HEAD~1 \
-          and identify any security issues"
-
-# Documentation generation
-akmon --yes --auto-commit \
-  --task "add doc comments to all public items \
-          that are missing them"
-
-# Dependency audit
-akmon --yes --output json \
-  --task "run cargo audit and explain any vulnerabilities" \
-  | jq -r '.result'
-```
-
-## Shell allow list
-
-By default, shell commands require explicit allow patterns:
-
-```bash
-# Allow only cargo commands
-akmon --yes \
-  --shell-allow "cargo *" \
-  --task "run tests and fix any compilation errors"
-
-# Allow cargo and git
-akmon --yes \
-  --shell-allow "cargo *" \
-  --shell-allow "git *" \
-  --task "run tests, fix failures, and commit changes"
-```
-
-## JSON output format
-
-Shape is versioned; approximate example:
+Typical run report:
 
 ```json
 {
-  "task": "count TODO comments",
-  "result": "Found 14 TODO comments across 8 files...",
-  "session_id": "a1b2c3d4-...",
-  "tokens": {
-    "input": 12847,
-    "output": 423,
-    "cache_read": 8200
+  "session_id": "d329615d-...",
+  "status": "completed",
+  "exit_reason": "completed",
+  "result": "Fixed 14 clippy warnings across 6 files",
+  "tool_calls": 28,
+  "files_written": ["src/main.rs", "src/auth.rs"],
+  "usage": {
+    "total_input_tokens": 145000,
+    "total_output_tokens": 8200,
+    "total_cache_read_tokens": 98000
   },
-  "cost_usd": 0.012,
-  "tool_calls": 6,
-  "files_read": ["src/main.rs", "src/lib.rs"],
-  "files_written": []
+  "cost_usd": 0.18
 }
 ```
 
-Use `akmon --help` and [CLI reference](../reference/cli.md) for the exact fields your build prints.
+Practical interpretation:
+
+- `exit_reason` gates CI behavior,
+- `files_written` can trigger selective test/deploy logic,
+- `usage` and `cost_usd` feed budget reporting.
+
+## Budget control in production
+
+Recommended patterns:
+
+- per-run cap: `--max-budget-usd 1.00`,
+- fail CI when `exit_reason != completed`,
+- aggregate daily spend via scheduled job reading JSON outputs.
+
+Example shell budget gate:
+
+```bash
+result=$(akmon --yes --output json --max-budget-usd 1.5 --task "...")
+cost=$(echo "$result" | jq -r '.cost_usd')
+echo "run cost: $cost"
+```
+
+## Batch processing multiple repositories
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+repos=(
+  ~/services/auth-service
+  ~/services/payment-service
+  ~/services/notification-service
+)
+
+for repo in "${repos[@]}"; do
+  echo "Processing $repo"
+  cd "$repo"
+  result=$(akmon \
+    --model claude-haiku-4-5-20251001 \
+    --yes \
+    --max-budget-usd 3.00 \
+    --output json \
+    --task "Update dependencies to latest compatible versions and run tests")
+  echo "$result" | jq -r '"\(.session_id) \(.exit_reason) $\( .cost_usd )"'
+done
+```
+
+## Common mistakes and troubleshooting
+
+- **No budget cap:** always set `--max-budget-usd` in unattended runs.
+- **Overly broad task:** split "fix everything" into narrower tasks.
+- **Missing provider key in CI:** verify env injection before run.
+- **Non-zero exit from incomplete runs:** parse `exit_reason`, do not assume success from process completion alone.

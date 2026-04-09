@@ -1,29 +1,58 @@
-# Other tools vs Akmon
+# Akmon vs other coding agents
 
-This page is intentionally short. Products change quickly—always check vendor docs for the latest.
+Most tools in this space are good. The real question is what tradeoffs fit your environment.
 
-## The idea
+## What Akmon optimizes for
 
-**Typical coding agents** (editor extensions, hosted terminals, bundled stacks) optimize for speed and integration inside a vendor’s world—subscriptions, credits, and their chosen runtime.
+Akmon is built for:
 
-**Akmon** optimizes for **control**: one binary you own, **bring-your-own model**, an **explicit permission layer**, and a **JSONL audit log** of what happened in each session.
+- terminal portability (single binary, SSH/CI friendly),
+- provider independence (BYOK/BYOM),
+- explicit permission boundaries for side effects,
+- auditable execution traces.
 
-Neither is “better” everywhere—it depends whether you care more about seamless IDE glue or about a small, inspectable tool you can run in CI, over SSH, or air‑gapped with Ollama.
+It is not trying to replicate full IDE-native UX.
 
-## Side-by-side (rough)
+## Comparison matrix
 
-| | Typical agents | Akmon |
-| --- | --- | --- |
-| **Shape** | Often an app + runtime (e.g. Node), or IDE‑bound | Single static binary (Rust), optional features at compile time |
-| **Subscription** | Common for hosted products | No subscription for the agent; you pay APIs you choose |
-| **Audit trail** | Varies; rarely a full per-session JSONL of policy + tools | Designed around JSONL audit events |
-| **Models** | Often tied to one vendor or plan | Ollama locally; Anthropic, OpenAI‑compat, OpenRouter, Bedrock, etc. |
-| **Trust boundaries** | Varies | Repo sandbox, typed permissions, SSRF‑aware optional `web_fetch` |
+| Dimension | Akmon | IDE-first tools | Provider-native terminal tools |
+| --- | --- | --- | --- |
+| Primary surface | Terminal CLI/TUI | Editor integration | Terminal |
+| Deployment shape | Single Rust binary | Editor + extensions/runtime | Usually tied to specific provider stack |
+| Model strategy | Bring your own model/key | Mixed (varies by product) | Often vendor-coupled |
+| Auditability | JSONL-oriented run evidence | Varies widely | Varies |
+| Automation mode | Strong headless/JSON flow | Usually possible but less central | Depends on product |
+| Best fit | CI, SSH, controlled environments | IDE-centric interactive coding | Deep single-provider workflows |
 
-## Examples people compare us to
+## Common scenarios
 
-Names like **Claude Code**, **Cursor**, **Cline**, and **Aider** solve overlapping problems with different tradeoffs (IDE vs terminal, bundled vs BYOK, multi-file UX, etc.). Use what fits your workflow; use Akmon when you want the **forge** to be **yours**.
+### Choose Akmon when
 
----
+- you need to run in CI, remote shells, or locked-down environments,
+- you need provider flexibility over time,
+- your team requires clear policy and audit trails for AI side effects.
+
+### Choose IDE-first tools when
+
+- your priority is inline coding UX and editor-native interaction speed.
+
+### Choose provider-native terminal tools when
+
+- you are intentionally standardizing on one provider and want its most optimized interaction model.
+
+## Practical guidance
+
+Many teams mix tools:
+
+- use Akmon for automation, refactors, and auditable changes,
+- use IDE tooling for day-to-day interactive editing.
+
+The best stack is often hybrid, not exclusive.
+
+## Common mistakes
+
+- Treating this as a winner-takes-all decision.
+- Ignoring compliance and deployment constraints until late adoption.
+- Evaluating only "response quality" and not operational fit (auditability, portability, budget controls).
 
 [← Introduction](./introduction.md) · [Security model →](./features/security.md)
