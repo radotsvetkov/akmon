@@ -649,6 +649,10 @@ impl TuiApp {
                 self.agent_activity_line = format!("Step {n}/{max} · contacting model…");
             }
             AgentEvent::Done => {
+                // Fallback guard: the runner also flips this on RunFinished, but
+                // setting it here keeps input unblocked if Done arrives early.
+                self.agent_running = false;
+                self.agent_activity_line.clear();
                 if let Some(TuiMessage::Assistant { complete, .. }) = self
                     .messages
                     .iter_mut()

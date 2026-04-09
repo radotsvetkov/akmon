@@ -137,3 +137,18 @@ pub fn ollama_first_token_deadline_ms(model: &str) -> u64 {
         };
     (base_secs.saturating_add(30)).saturating_mul(1000)
 }
+
+/// Maximum silence between streamed lines from Ollama before considering the stream stalled.
+#[must_use]
+pub fn ollama_stream_idle_timeout_secs(model: &str) -> u64 {
+    let m = model.to_lowercase();
+    if m.contains("27b") || m.contains("32b") {
+        180
+    } else if m.contains("14b") || m.contains("13b") {
+        120
+    } else if m.contains("9b") || m.contains("7b") {
+        90
+    } else {
+        60
+    }
+}

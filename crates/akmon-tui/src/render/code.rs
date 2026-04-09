@@ -79,7 +79,7 @@ pub fn highlight_line(line: &str, lang: &str) -> Vec<Span<'static>> {
 /// Background fill for code blocks.
 #[must_use]
 pub fn code_block_bg() -> Color {
-    Color::Rgb(30, 30, 30)
+    Color::Rgb(25, 25, 30)
 }
 
 fn highlight_rust_line(line: &str) -> Vec<Span<'static>> {

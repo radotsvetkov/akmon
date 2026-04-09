@@ -22,6 +22,7 @@ use crate::error::ModelError;
 use crate::message::{Message, MessageRole};
 use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent};
 use crate::tool_def::ToolDefinition;
+use crate::ollama_stream_idle_timeout_secs;
 
 /// JSON line from Ollama's NDJSON chat stream (or the single JSON body when `stream: false`).
 #[derive(Debug, serde::Deserialize)]
@@ -609,13 +610,15 @@ async fn run_streaming(
             first = false;
             first_line.clone()
         } else {
-            match tokio::time::timeout(Duration::from_secs(60), lines.next()).await {
+            let idle_timeout = ollama_stream_idle_timeout_secs(backend.model.as_str());
+            match tokio::time::timeout(Duration::from_secs(idle_timeout), lines.next()).await {
                 Err(_) => {
                     let _ = tx
                         .send(Err(ModelError::BackendUnavailable {
-                            message: "Ollama stream timeout: no response for 60 seconds. \
+                            message: format!(
+                                "Ollama stream timeout: no response for {idle_timeout} seconds. \
                                       The model may have crashed. Try: ollama ps"
-                                .into(),
+                            ),
                         }))
                         .await;
                     return;

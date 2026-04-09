@@ -345,6 +345,10 @@ fn run_loop(
                     if !app.mouse_capture_enabled {
                         continue;
                     }
+                    // Shift+click/drag should pass through for native terminal selection.
+                    if m.modifiers.contains(KeyModifiers::SHIFT) {
+                        continue;
+                    }
                     let area_sz = Rect::new(0, 0, size.width, size.height);
                     let show_ctx = !app.session_touched_files.is_empty();
                     let (ii, ac) = compose_stack_inputs(app, size.width);
@@ -1594,7 +1598,8 @@ fn print_exit_summary(app: &TuiApp) {
     println!("  {:<22} {}", "Input", exit_format_tokens(in_t));
     println!("  {:<22} {}", "Output", exit_format_tokens(out_t));
     if cache > 0 {
-        let pct = (cache * 100) / in_t.max(1);
+        let denom = in_t.saturating_add(cache).max(1);
+        let pct = (cache * 100) / denom;
         println!(
             "  {:<22} {green}{}  ({}% cache savings){}",
             "Cache hit",

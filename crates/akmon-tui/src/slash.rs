@@ -100,6 +100,12 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "copy",
+        aliases: &[],
+        description: "Copy last assistant response to clipboard",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "plan",
         aliases: &[],
         description: "Next message: read-only plan (no writes)",
@@ -334,6 +340,13 @@ mod tests {
     fn parse_models_alias_maps_to_model() {
         let (c, a) = parse_slash_input("/models").expect("parse");
         assert_eq!(c.name, "model");
+        assert!(a.is_none());
+    }
+
+    #[test]
+    fn parse_copy_no_arg() {
+        let (c, a) = parse_slash_input("/copy").expect("parse");
+        assert_eq!(c.name, "copy");
         assert!(a.is_none());
     }
 

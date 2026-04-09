@@ -4,6 +4,16 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.3] - 2026-04-09
+
+### Fixed
+
+- **Rate-limit handling:** avoid re-entering the outer session loop after provider-level `RateLimited`, including summarization paths, so exhausted retries surface cleanly.
+- **Retry UX consistency:** preserve provider-owned Anthropic retry countdown semantics and prevent session-level swallowing of terminal rate-limit errors.
+- **TUI usability:** added `/copy` to copy the latest assistant response to clipboard (with `.akmon/last_response.txt` fallback) and allowed `Shift+drag` native terminal selection passthrough.
+- **Ollama resiliency:** added model-size-aware stream idle timeouts and aggressive context trimming for local models with an explicit status hint.
+- **Session restore accounting:** resume now restores persisted cumulative token totals instead of resetting counters.
+
 ## [1.7.2] - 2026-04-09
 
 ### Changed

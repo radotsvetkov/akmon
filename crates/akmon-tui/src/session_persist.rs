@@ -50,6 +50,12 @@ struct SessionFile {
     model: String,
     started_at: String,
     messages: Vec<SessionFileMsg>,
+    #[serde(default)]
+    total_input_tokens: u32,
+    #[serde(default)]
+    total_cache_read_tokens: u32,
+    #[serde(default)]
+    total_output_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +151,12 @@ pub struct LoadedSession {
     pub started_at: DateTime<Utc>,
     /// Transcript rows deserialized into UI messages.
     pub messages: Vec<TuiMessage>,
+    /// Cumulative billed input tokens from the saved snapshot.
+    pub total_input_tokens: u32,
+    /// Cumulative prompt-cache read tokens from the saved snapshot.
+    pub total_cache_read_tokens: u32,
+    /// Cumulative output tokens from the saved snapshot.
+    pub total_output_tokens: u32,
 }
 
 /// Loads a session JSON file into UI messages and metadata.
@@ -172,6 +184,9 @@ pub fn load_session_file(path: &Path) -> Result<LoadedSession, String> {
         model_name: doc.model,
         started_at,
         messages,
+        total_input_tokens: doc.total_input_tokens,
+        total_cache_read_tokens: doc.total_cache_read_tokens,
+        total_output_tokens: doc.total_output_tokens,
     })
 }
 

@@ -13,7 +13,7 @@ use akmon_core::{
 use akmon_models::{
     CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
     ModelToolCall, StopReason, StreamEvent, ToolDefinition, UsageReport,
-    anthropic_system_block_text, approximate_tokens, max_tokens_for_model,
+    anthropic_system_block_text, approximate_tokens, looks_like_ollama_model, max_tokens_for_model,
     ollama_first_token_deadline_ms,
 };
 use akmon_tools::{Tool, ToolContext, ToolOutput, unified_diff_text};
@@ -115,6 +115,21 @@ fn completion_config_for_tools(
 
 /// Keeps all leading system messages and only the last `context_limit_for_model` non-system rows.
 fn trim_messages_for_model(model_id: &str, messages: Vec<Message>) -> Vec<Message> {
+    if looks_like_ollama_model(model_id) {
+        let mut out: Vec<Message> = Vec::new();
+        if let Some(first_system) = messages.iter().find(|m| m.role == MessageRole::System) {
+            out.push(first_system.clone());
+        }
+        let non_system: Vec<Message> = messages
+            .iter()
+            .filter(|m| m.role != MessageRole::System)
+            .cloned()
+            .collect();
+        let keep = 6usize;
+        let start = non_system.len().saturating_sub(keep);
+        out.extend(non_system[start..].iter().cloned());
+        return out;
+    }
     let limit = context_limit_for_model(model_id);
     if limit == usize::MAX {
         return messages;
@@ -303,8 +318,6 @@ impl AgentSession {
     ) -> Result<Option<AgentError>, AgentError> {
         if matches!(err, ModelError::RateLimited { .. }) {
             let resume = "Rate limit exhausted after 5 retries.\nWait a few minutes then continue with: akmon -c";
-            self.result_text.push_str(resume);
-            self.result_text.push('\n');
             self.apply_event(
                 event_tx,
                 AgentEvent::StatusInfo {
@@ -313,11 +326,10 @@ impl AgentSession {
                 task,
             )
             .await?;
-            self.apply_event(event_tx, AgentEvent::Done, task).await?;
-            self.last_run_exit = SessionRunExit::Completed;
-            self.record_run_finished_success();
             self.write_rate_limit_handoff_note(task);
-            return Ok(None);
+            return Ok(Some(AgentError::ModelError {
+                message: resume.into(),
+            }));
         }
 
         let context_hint = match &err {
@@ -719,7 +731,19 @@ impl AgentSession {
                 );
             }
 
+            let before_trim_len = messages.len();
             let messages = trim_messages_for_model(model_id.as_str(), messages);
+            if looks_like_ollama_model(model_id.as_str()) && messages.len() < before_trim_len {
+                self.apply_event(
+                    &event_tx,
+                    AgentEvent::StatusInfo {
+                        message: "Trimmed Ollama context to system + last 6 messages for faster first token."
+                            .into(),
+                    },
+                    &task,
+                )
+                .await?;
+            }
 
             if std::env::var_os("AKMON_DEBUG_CACHE").as_deref() == Some(std::ffi::OsStr::new("1")) {
                 let sys = anthropic_system_block_text(&messages);
@@ -1689,7 +1713,13 @@ Complete and verify the current file(s), then continue in the next turn.";
 
         let mut stream = match self.provider.complete(&summary_msgs, &sum_config).await {
             Ok(s) => s,
-            Err(_) => {
+            Err(e) => {
+                if matches!(e, ModelError::RateLimited { .. }) {
+                    match self.handle_model_error_for_run(event_tx, task, e).await? {
+                        Some(ae) => return Err(ae),
+                        None => return Ok(()),
+                    }
+                }
                 self.restore_state_after_summarization_abort();
                 self.trim_oldest_non_system_fraction_of_context(0.2);
                 return Ok(());
@@ -1707,7 +1737,13 @@ Complete and verify the current file(s), then continue in the next turn.";
                 break;
             };
             match item {
-                Err(_) => {
+                Err(e) => {
+                    if matches!(e, ModelError::RateLimited { .. }) {
+                        match self.handle_model_error_for_run(event_tx, task, e).await? {
+                            Some(ae) => return Err(ae),
+                            None => return Ok(()),
+                        }
+                    }
                     self.restore_state_after_summarization_abort();
                     self.trim_oldest_non_system_fraction_of_context(0.2);
                     return Ok(());
@@ -1716,7 +1752,13 @@ Complete and verify the current file(s), then continue in the next turn.";
                 Ok(StreamEvent::UsageReport(_)) => {}
                 Ok(StreamEvent::ProviderReady { .. }) => {}
                 Ok(StreamEvent::StatusHint { .. }) => {}
-                Ok(StreamEvent::Error { .. }) => {
+                Ok(StreamEvent::Error { error }) => {
+                    if matches!(error, ModelError::RateLimited { .. }) {
+                        match self.handle_model_error_for_run(event_tx, task, error).await? {
+                            Some(ae) => return Err(ae),
+                            None => return Ok(()),
+                        }
+                    }
                     self.restore_state_after_summarization_abort();
                     self.trim_oldest_non_system_fraction_of_context(0.2);
                     return Ok(());

@@ -499,6 +499,29 @@ Autocompact at: {}% ({} tokens remaining)",
             app.overlay = Overlay::None;
             SlashHandled::Continue
         }
+        "copy" => {
+            let text = app.messages.iter().rev().find_map(|m| match m {
+                crate::message::TuiMessage::Assistant { content, .. } => Some(content.clone()),
+                _ => None,
+            });
+            match text {
+                None => app.push_system_info("Nothing to copy — no assistant message yet.".into()),
+                Some(content) => {
+                    if copy_to_clipboard(&content) {
+                        app.push_system_info("✓ Copied to clipboard".into());
+                    } else {
+                        let path = app.project_root.join(".akmon/last_response.txt");
+                        let _ = std::fs::create_dir_all(app.project_root.join(".akmon"));
+                        let _ = std::fs::write(&path, &content);
+                        app.push_system_info(
+                            "Clipboard unavailable. Saved to .akmon/last_response.txt".into(),
+                        );
+                    }
+                }
+            }
+            app.overlay = Overlay::None;
+            SlashHandled::Continue
+        }
         "plan" => {
             app.plan_only_next_turn = true;
             app.push_system_info(
@@ -656,8 +679,18 @@ fn apply_loaded_session(
     env: &SlashEnv,
     loaded: crate::session_persist::LoadedSession,
 ) {
-    let audit = default_audit_log_path(&loaded.project_root, loaded.session_id);
-    let ak_path = loaded.project_root.join("AKMON.md");
+    let crate::session_persist::LoadedSession {
+        session_id,
+        project_root,
+        model_name,
+        started_at,
+        messages,
+        total_input_tokens,
+        total_cache_read_tokens,
+        total_output_tokens,
+    } = loaded;
+    let audit = default_audit_log_path(&project_root, session_id);
+    let ak_path = project_root.join("AKMON.md");
     let (has_akmon_md, akmon_md) = match std::fs::read_to_string(&ak_path) {
         Ok(s) => (true, Some(s)),
         Err(_) => (false, None),
@@ -667,22 +700,22 @@ fn apply_loaded_session(
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
-        g.session_id = loaded.session_id;
-        g.project_root = loaded.project_root.clone();
-        g.model_name = loaded.model_name.clone();
+        g.session_id = session_id;
+        g.project_root = project_root.clone();
+        g.model_name = model_name.clone();
         g.audit_log_path = audit.clone();
         g.akmon_md = akmon_md;
         g.has_akmon_md = has_akmon_md;
     }
-    app.session_id = loaded.session_id;
-    app.project_root = loaded.project_root;
+    app.session_id = session_id;
+    app.project_root = project_root;
     app.project_name = app
         .project_root
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(".")
         .to_string();
-    app.model_name = loaded.model_name;
+    app.model_name = model_name;
     app.audit_log_path = audit;
     app.has_akmon_md = has_akmon_md;
     app.akmon_md_loaded = has_akmon_md;
@@ -692,16 +725,16 @@ fn apply_loaded_session(
             rd.flatten()
                 .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
         });
-    app.messages = loaded.messages;
-    app.total_input_tokens = 0;
-    app.total_cache_read_tokens = 0;
+    app.messages = messages;
+    app.total_input_tokens = total_input_tokens;
+    app.total_cache_read_tokens = total_cache_read_tokens;
     app.total_cache_write_tokens = 0;
-    app.total_output_tokens = 0;
+    app.total_output_tokens = total_output_tokens;
     app.total_microcompact_cleared = 0;
     app.context_warn_80_shown = false;
     app.context_warn_90_shown = false;
     app.current_iteration = 0;
-    app.session_started_at = loaded.started_at;
+    app.session_started_at = started_at;
     app.scroll_offset = 0;
     app.overlay = Overlay::None;
     env.reload_notify.notify_one();
@@ -823,6 +856,47 @@ fn estimate_cost_usd(app: &TuiApp) -> String {
     ) {
         Some(total) => format!("~${total:.4}"),
         None => "rate unknown".to_string(),
+    }
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
+            if let Some(stdin) = child.stdin.as_mut() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            return child.wait().map(|s| s.success()).unwrap_or(false);
+        }
+        false
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        for cmd in &["xclip", "xsel"] {
+            let args: &[&str] = if *cmd == "xclip" {
+                &["-selection", "clipboard"]
+            } else {
+                &["--clipboard", "--input"]
+            };
+            if let Ok(mut child) = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn() {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                if child.wait().map(|s| s.success()).unwrap_or(false) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = text;
+        false
     }
 }
 
