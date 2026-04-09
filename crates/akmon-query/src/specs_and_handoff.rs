@@ -40,7 +40,8 @@ pub fn load_specs_block_for_prompt(project_root: &Path) -> Option<String> {
     for p in entries {
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         let body = fs::read_to_string(&p).unwrap_or_default();
-        out.push_str(&format!("### {}\n\n{}\n\n", name, body.trim_end()));
+        let trimmed = body.trim_end();
+        out.push_str(&format!("### {name}\n\n{trimmed}\n\n"));
     }
     Some(out)
 }
@@ -53,9 +54,9 @@ pub fn load_handoff_block_for_prompt(project_root: &Path) -> Option<String> {
     if s.trim().is_empty() {
         return None;
     }
+    let trimmed = s.trim_end();
     Some(format!(
-        "## Previous session handoff (.akmon/HANDOFF.md)\n\n{}\n",
-        s.trim_end()
+        "## Previous session handoff (.akmon/HANDOFF.md)\n\n{trimmed}\n",
     ))
 }
 
@@ -82,15 +83,16 @@ pub fn write_handoff_file(
     fs::create_dir_all(&dir)?;
     let path = handoff_path(project_root);
     let mut body = String::new();
-    body.push_str(&format!("**Model:** {}\n\n", model_label));
+    body.push_str(&format!("**Model:** {model_label}\n\n"));
+    let user_turns = session.user_turns_finished;
     body.push_str(&format!(
-        "**Completed user turns this session:** {}\n\n",
-        session.user_turns_finished
+        "**Completed user turns this session:** {user_turns}\n\n",
     ));
     if !session.modified_paths.is_empty() {
         body.push_str("**Files touched:**\n");
         for p in &session.modified_paths {
-            body.push_str(&format!("- {}\n", p.display()));
+            let path = p.display();
+            body.push_str(&format!("- {path}\n"));
         }
         body.push('\n');
     }
