@@ -151,7 +151,11 @@ Real session example:
 ## Contributing
 
 - Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Code of Conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Security policy: [SECURITY.md](SECURITY.md)
 - Developer docs: [docs/src/contributing/setup.md](docs/src/contributing/setup.md)
+
+Community practices align with [Open Source Guides](https://opensource.guide/) (documentation, security reporting, and welcoming contributions).
 
 ## License
 

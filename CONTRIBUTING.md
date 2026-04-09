@@ -4,6 +4,8 @@ Thanks for your interest in improving Akmon.
 
 This guide explains how to contribute code, docs, and bug reports in a way that is easy to review and ship.
 
+All participants must follow the **[Code of Conduct](CODE_OF_CONDUCT.md)**. Report **security** issues per **[SECURITY.md](SECURITY.md)** (do not file public issues for undisclosed vulnerabilities).
+
 ## Ways to contribute
 
 - Report bugs and UX issues.

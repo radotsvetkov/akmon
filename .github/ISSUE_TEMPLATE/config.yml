@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://radotsvetkov.github.io/akmon/docs/
+    about: User guide, tutorials, and reference for Akmon
+  - name: Contributing guide
+    url: https://github.com/radotsvetkov/akmon/blob/main/CONTRIBUTING.md
+    about: How to set up locally, run tests, and open PRs

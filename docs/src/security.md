@@ -1,5 +1,7 @@
 # Security Policy
 
+The same reporting rules and scope are maintained in the repository root as [`SECURITY.md`](https://github.com/radotsvetkov/akmon/blob/main/SECURITY.md) for GitHub’s security features.
+
 ## Reporting vulnerabilities
 
 **Do not** open public issues for undisclosed security problems.
