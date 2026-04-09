@@ -282,6 +282,7 @@ fn tool_card(
     body_paint: ratatui::style::Color,
 ) -> Vec<Line<'static>> {
     let summary = args_summary(name, args);
+    let inline_diff = result.and_then(extract_file_edit_diff);
     let status = match (success, result.as_ref()) {
         (Some(true), _) => ("✓", GREEN),
         (Some(false), _) => ("✗", RED),
@@ -296,8 +297,11 @@ fn tool_card(
             Style::default().fg(status.1).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("  {summary}  "), Style::default().fg(DIM)),
-        Span::styled("[Tab]", Style::default().fg(DIM)),
+        Span::styled("[Tab full]", Style::default().fg(DIM)),
     ])];
+    if !expanded && let Some(diff) = inline_diff.as_deref() {
+        append_inline_diff_preview(&mut v, diff, w);
+    }
     if expanded {
         v.push(Line::from(vec![
             Span::styled("┌─ ", Style::default().fg(BORDER)),
@@ -387,6 +391,78 @@ fn append_colored_unified_diff_lines(
             ]));
         }
     }
+}
+
+fn append_inline_diff_preview(v: &mut Vec<Line<'static>>, diff: &str, w: u16) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    let mut shown = 0usize;
+    let max_lines = 12usize;
+    let col_w = w.saturating_sub(6).max(12);
+
+    v.push(Line::from(vec![
+        Span::styled("│ ", Style::default().fg(BORDER)),
+        Span::styled(
+            "Changed code preview",
+            Style::default().fg(AMBER).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    for raw in diff.lines() {
+        if raw.starts_with("+++") || raw.starts_with("---") {
+            continue;
+        }
+        if raw.starts_with('+') && !raw.starts_with("+++") {
+            added = added.saturating_add(1);
+        } else if raw.starts_with('-') && !raw.starts_with("---") {
+            removed = removed.saturating_add(1);
+        }
+        if shown >= max_lines {
+            continue;
+        }
+        if raw.starts_with("@@")
+            || raw.starts_with('+')
+            || raw.starts_with('-')
+            || raw.starts_with(' ')
+        {
+            let style = if raw.starts_with('+') {
+                Style::default().fg(GREEN)
+            } else if raw.starts_with('-') {
+                Style::default().fg(RED)
+            } else if raw.starts_with("@@") {
+                Style::default().fg(DIFF_HEADER)
+            } else {
+                Style::default().fg(FG)
+            };
+            for line in wrap_text(raw, col_w) {
+                v.push(Line::from(vec![
+                    Span::styled("│ ", Style::default().fg(BORDER)),
+                    Span::styled(line, style),
+                ]));
+            }
+            shown = shown.saturating_add(1);
+        }
+    }
+
+    let mut trailer = format!("+{added}  -{removed}");
+    if shown >= max_lines {
+        trailer.push_str("  (Tab for full diff)");
+    }
+    v.push(Line::from(vec![
+        Span::styled("│ ", Style::default().fg(BORDER)),
+        Span::styled(trailer, Style::default().fg(DIM)),
+    ]));
+}
+
+fn extract_file_edit_diff(result: &str) -> Option<String> {
+    let val = serde_json::from_str::<JsonValue>(result).ok()?;
+    if val.get("type").and_then(|x| x.as_str()) == Some("file_edit_diff") {
+        return val
+            .get("diff")
+            .and_then(|x| x.as_str())
+            .map(std::string::ToString::to_string);
+    }
+    None
 }
 
 fn args_summary(name: &str, args: &serde_json::Value) -> String {

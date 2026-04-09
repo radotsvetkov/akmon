@@ -360,7 +360,9 @@ impl TuiApp {
             session_touched_files: Vec::new(),
             pending_external_edit: None,
             spinner_frame: 0,
-            mouse_capture_enabled: true,
+            // Default OFF so native mouse/trackpad text selection works out of the box.
+            // Users can enable wheel capture with Ctrl+M when they prefer mouse scrolling.
+            mouse_capture_enabled: false,
             mouse_capture_applied: false,
             ollama_probe: OllamaProbe {
                 reachable: false,
@@ -627,7 +629,11 @@ impl TuiApp {
                 self.total_cache_write_tokens = self
                     .total_cache_write_tokens
                     .saturating_add(cache_creation_tokens);
-                let pct = context_usage_percent(self.total_input_tokens, &self.model_name);
+                let pct = context_usage_percent(
+                    self.total_input_tokens,
+                    self.total_cache_read_tokens,
+                    &self.model_name,
+                );
                 if pct >= 90 && !self.context_warn_90_shown {
                     self.status_flash =
                         Some("─ context at 90% — auto-compact will trigger soon ─".into());

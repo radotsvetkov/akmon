@@ -1193,7 +1193,11 @@ fn show_help(app: &mut TuiApp) {
 }
 
 fn status_bar_parts(app: &TuiApp) -> StatusParts {
-    let context_pct = context_usage_percent(app.total_input_tokens, &app.model_name);
+    let context_pct = context_usage_percent(
+        app.total_input_tokens,
+        app.total_cache_read_tokens,
+        &app.model_name,
+    );
     let (context_bar, context_color) = render_context_bar(context_pct);
 
     let mut sid: String = app.session_id.to_string().chars().take(8).collect();

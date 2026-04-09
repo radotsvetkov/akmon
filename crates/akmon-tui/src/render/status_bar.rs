@@ -37,9 +37,11 @@ pub fn context_window_for_model(model: &str) -> u64 {
 }
 
 #[must_use]
-pub fn context_usage_percent(input_tokens: u32, model: &str) -> u8 {
+pub fn context_usage_percent(input_tokens: u32, cache_read_tokens: u32, model: &str) -> u8 {
     let window = context_window_for_model(model);
-    let used = u64::from(input_tokens);
+    // Anthropic cache-read tokens still represent prompt tokens processed by the API.
+    // Include them so the context/rate-pressure indicator matches provider-reported usage.
+    let used = u64::from(input_tokens).saturating_add(u64::from(cache_read_tokens));
     ((used as f64 / window as f64 * 100.0).min(100.0)) as u8
 }
 
