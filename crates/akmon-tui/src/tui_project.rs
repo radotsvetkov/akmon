@@ -159,9 +159,9 @@ async fn run_init_job(cfg: &TuiLaunchConfig) -> (Vec<String>, bool) {
         }
     };
 
+    let detected = project_type_label(&summary);
     lines.push(format!(
-        "Detected: {} (markers at project root).",
-        project_type_label(&summary)
+        "Detected: {detected} (markers at project root).",
     ));
 
     let ctx = format_project_context_for_init(&summary);
@@ -169,7 +169,7 @@ async fn run_init_job(cfg: &TuiLaunchConfig) -> (Vec<String>, bool) {
     let provider = match cfg.llm_connect_for_model(cfg.model_name.clone()).resolve() {
         Ok(p) => p,
         Err(e) => {
-            lines.push(format!("Model provider error: {}", e));
+            lines.push(format!("Model provider error: {e}"));
             return (lines, false);
         }
     };
@@ -187,7 +187,8 @@ async fn run_init_job(cfg: &TuiLaunchConfig) -> (Vec<String>, bool) {
         return (lines, false);
     }
 
-    lines.push(format!("AKMON.md written ({} bytes).", body.len()));
+    let n = body.len();
+    lines.push(format!("AKMON.md written ({n} bytes)."));
     lines.push("AKMON.md created and loaded.".to_string());
     (lines, true)
 }
@@ -201,7 +202,8 @@ async fn run_new_job(cfg: &TuiLaunchConfig, name: &str) -> (Vec<String>, bool) {
 
     let dest = cfg.project_root.join(name);
     if dest.exists() {
-        lines.push(format!("Directory already exists: {}", dest.display()));
+        let path = dest.display();
+        lines.push(format!("Directory already exists: {path}"));
         return (lines, false);
     }
 
@@ -250,7 +252,7 @@ async fn run_new_job(cfg: &TuiLaunchConfig, name: &str) -> (Vec<String>, bool) {
     let provider = match cfg.llm_connect_for_model(cfg.model_name.clone()).resolve() {
         Ok(p) => p,
         Err(e) => {
-            lines.push(format!("Model provider error: {}", e));
+            lines.push(format!("Model provider error: {e}"));
             return (lines, false);
         }
     };
@@ -268,7 +270,8 @@ async fn run_new_job(cfg: &TuiLaunchConfig, name: &str) -> (Vec<String>, bool) {
         return (lines, false);
     }
 
-    lines.push(format!("AKMON.md in {name}/ ({} bytes).", body.len()));
+    let n = body.len();
+    lines.push(format!("AKMON.md in {name}/ ({n} bytes)."));
     lines.push(format!(
         "cd {name} and run akmon chat to start working in the new project."
     ));
