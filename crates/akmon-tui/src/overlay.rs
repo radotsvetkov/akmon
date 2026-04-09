@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::app::{Overlay, TuiApp};
 use crate::slash::{COMMANDS, slash_command_name_prefix};
 use crate::slash_exec::{cost_summary_lines, format_session_list_row};
+use crate::state::{ConfigTab, ESTIMATE_ROW_CANCEL, ESTIMATE_ROW_SAVE, SettingsOverlayState};
 use crate::theme::{
     ACCENT, ACCENT_DIM, BORDER, FG_MUTED, FG_ON_SELECT, FG_PRIMARY, OK_GREEN, SELECT_BG,
 };
@@ -443,7 +444,183 @@ pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
                 r,
             );
         }
+        Overlay::Settings(st) => {
+            draw_settings_panel(f, app, msg_area, st);
+        }
     }
+}
+
+fn draw_settings_panel(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect, st: &SettingsOverlayState) {
+    let inner_h = msg_area.height.saturating_sub(2).max(12);
+    let w = msg_area.width.saturating_sub(4).max(50).min(96);
+    let r = centered_rect(msg_area, w, inner_h);
+    f.render_widget(Clear, r);
+    let mut lines: Vec<Line> = Vec::new();
+    let tab_line: String = [
+        ConfigTab::Model,
+        ConfigTab::Providers,
+        ConfigTab::Estimates,
+        ConfigTab::Permissions,
+        ConfigTab::About,
+    ]
+    .iter()
+    .map(|t| {
+        let mark = if *t == st.tab { "›" } else { " " };
+        format!("{mark}{}", t.label())
+    })
+    .collect::<Vec<_>>()
+    .join("  ");
+    lines.push(Line::from(vec![Span::styled(
+        tab_line,
+        Style::default().fg(ACCENT_DIM).add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(""));
+    match st.tab {
+        ConfigTab::Model => {
+            lines.push(Line::from(Span::styled(
+                "Active model (this session):",
+                Style::default().fg(FG_MUTED),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", app.model_name),
+                Style::default().fg(FG_PRIMARY).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Change with /model or:  akmon config model set <id>",
+                Style::default().fg(FG_MUTED),
+            )));
+        }
+        ConfigTab::Providers => {
+            lines.push(Line::from(Span::styled(
+                "Provider keys & URLs live in ~/.akmon/config.toml.",
+                Style::default().fg(FG_MUTED),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  akmon config key set   ·   akmon config show",
+                Style::default().fg(FG_PRIMARY),
+            )));
+        }
+        ConfigTab::Permissions => {
+            lines.push(Line::from(Span::styled(
+                "Tool permissions use the policy you started with (e.g. interactive vs auto).",
+                Style::default().fg(FG_MUTED),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Tighter defaults: see CLI flags and project setup in the README.",
+                Style::default().fg(FG_MUTED),
+            )));
+        }
+        ConfigTab::About => {
+            lines.push(Line::from(Span::styled(
+                format!("Akmon {}", app.version),
+                Style::default().fg(FG_PRIMARY).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!("Project root: {}", app.project_root.display()),
+                Style::default().fg(FG_MUTED),
+            )));
+            lines.push(Line::from(Span::styled(
+                "User config: ~/.akmon/config.toml",
+                Style::default().fg(FG_MUTED),
+            )));
+        }
+        ConfigTab::Estimates => {
+            let hint = st.estimate.builtin_context_hint(app);
+            lines.push(Line::from(Span::styled(
+                format!("Current model: {}", app.model_name),
+                Style::default().fg(FG_MUTED),
+            )));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "If context field empty, status bar uses built-in hint: {} tokens",
+                    hint
+                ),
+                Style::default().fg(FG_MUTED),
+            )));
+            lines.push(Line::from(Span::styled(
+                "USD fields optional — blank uses built-in table where available (rough est. only).",
+                Style::default().fg(FG_MUTED),
+            )));
+            lines.push(Line::from(""));
+            let est = &st.estimate;
+            let rows: [(usize, &'static str, &str); 8] = [
+                (0, "Pattern (substring match)", &est.pattern),
+                (1, "Context window (tokens)", &est.context_window),
+                (2, "Input USD / 1M tok", &est.input_m),
+                (3, "Output USD / 1M tok", &est.output_m),
+                (4, "Cache-read USD / 1M tok", &est.cache_read_m),
+                (5, "Note (e.g. rate limits)", &est.note),
+                (ESTIMATE_ROW_SAVE, "[ Save to ~/.akmon/config.toml ]", ""),
+                (ESTIMATE_ROW_CANCEL, "[ Cancel ]", ""),
+            ];
+            for (idx, label, val) in rows {
+                let is_action = idx >= ESTIMATE_ROW_SAVE;
+                let is_sel = idx == est.selected;
+                let edit_mark = if est.editing && is_sel && !is_action {
+                    " ✎"
+                } else {
+                    ""
+                };
+                let style = if is_sel {
+                    Style::default()
+                        .bg(SELECT_BG)
+                        .fg(FG_ON_SELECT)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_action {
+                    Style::default().fg(ACCENT)
+                } else {
+                    Style::default().fg(FG_PRIMARY)
+                };
+                let line = if is_action {
+                    format!("{label}{edit_mark}")
+                } else {
+                    let max_val = ((w as usize).saturating_sub(8))
+                        .saturating_sub(label.len())
+                        .max(16);
+                    let shown = if val.is_empty() {
+                        "—".to_string()
+                    } else {
+                        clamp_chars(val, max_val)
+                    };
+                    format!("{label}: {shown}{edit_mark}")
+                };
+                lines.push(Line::from(Span::styled(line, style)));
+            }
+            if let Some(ref msg) = est.status_line {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    msg.clone(),
+                    Style::default().fg(OK_GREEN),
+                )));
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Tab / Shift+Tab · ←→ tabs when not editing  ·  Esc close",
+        Style::default().fg(FG_MUTED),
+    )));
+    if st.tab == ConfigTab::Estimates {
+        lines.push(Line::from(Span::styled(
+            "Estimates: ↑↓ move · Enter edit / save / cancel · typing when line shows ✎",
+            Style::default().fg(FG_MUTED),
+        )));
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(BORDER))
+                    .title(Span::styled(
+                        " settings ",
+                        Style::default().fg(FG_MUTED).add_modifier(Modifier::ITALIC),
+                    )),
+            )
+            .wrap(Wrap { trim: false }),
+        r,
+    );
 }
 
 /// Dims the transcript behind a permission dialog (Claude Code–style focus).

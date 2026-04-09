@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use akmon_config::TerminalTheme;
+use akmon_core::ModelCostEstimateRow;
 #[cfg(feature = "semantic-index")]
 use akmon_index::RepoIndex;
 use akmon_models::LlmConnectConfig;
@@ -93,6 +94,8 @@ pub struct TuiLaunchConfig {
     pub session_display_name: Option<String>,
     /// When resuming, prefill transcript from a saved `~/.akmon/sessions/*.json` snapshot.
     pub resume_messages: Option<Vec<crate::message::TuiMessage>>,
+    /// Per-model context/cost hints from `~/.akmon/config.toml` (`[model_estimates]`).
+    pub model_estimates: Vec<ModelCostEstimateRow>,
 }
 
 impl TuiLaunchConfig {

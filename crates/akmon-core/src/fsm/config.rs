@@ -2,6 +2,8 @@
 
 use uuid::Uuid;
 
+use crate::cost_estimate::ModelCostEstimateRow;
+
 /// Tunables for iteration ceiling, confirmation timeouts, and session identity.
 ///
 /// Values are read by the orchestrator (future slice); this module only holds data.
@@ -31,6 +33,8 @@ pub struct AgentConfig {
     pub max_budget_usd: Option<f64>,
     /// When the cloud API returns repeated rate limits, the last retries may switch to this model id (headless / completion layer).
     pub fallback_model: Option<String>,
+    /// Optional per-model context/cost hints copied from `~/.akmon/config.toml` `[model_estimates]`.
+    pub model_estimates: Vec<ModelCostEstimateRow>,
 }
 
 impl Default for AgentConfig {
@@ -46,6 +50,7 @@ impl Default for AgentConfig {
             subagent_style: false,
             max_budget_usd: None,
             fallback_model: None,
+            model_estimates: Vec::new(),
         }
     }
 }

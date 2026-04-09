@@ -36,7 +36,11 @@ pub use context_import::{
     CONTEXT_FILE_MAX_BYTES, ContextFile, ContextScan, ToolOrigin, primary_tool_from_files,
     scan_context_files, strip_mdc_style_frontmatter,
 };
-pub use cost_estimate::estimate_cost_usd;
+pub use cost_estimate::{
+    ModelCostEstimateRow, TokenPricing, context_window_tokens_hint, estimate_cost_usd,
+    estimate_cost_usd_from_pricing, estimate_cost_usd_with_rows, match_model_cost_row,
+    pricing_for_model, resolve_token_pricing_merged,
+};
 pub use fsm::{
     AgentConfig, AgentError, AgentEvent, AgentState, check_iteration_limit, validate_transition,
 };

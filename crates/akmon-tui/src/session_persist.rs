@@ -363,6 +363,7 @@ mod tests {
             display_theme: akmon_config::TerminalTheme::default(),
             session_display_name: None,
             resume_messages: None,
+            model_estimates: Vec::new(),
         });
         let cfg = crate::TuiLaunchConfig {
             version: "t".into(),
@@ -399,6 +400,7 @@ mod tests {
             display_theme: akmon_config::TerminalTheme::default(),
             session_display_name: None,
             resume_messages: None,
+            model_estimates: Vec::new(),
         };
         let path = save_session_snapshot(&app, &cfg, Utc::now(), Some(&sessions)).expect("save");
         assert_eq!(

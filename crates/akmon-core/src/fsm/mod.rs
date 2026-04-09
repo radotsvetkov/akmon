@@ -48,6 +48,7 @@ mod tests {
             subagent_style: false,
             max_budget_usd: None,
             fallback_model: None,
+            model_estimates: Vec::new(),
         };
         assert!(check_iteration_limit(0, &config).is_ok());
         assert!(check_iteration_limit(24, &config).is_ok());
@@ -64,6 +65,7 @@ mod tests {
             subagent_style: false,
             max_budget_usd: None,
             fallback_model: None,
+            model_estimates: Vec::new(),
         };
         assert_eq!(
             check_iteration_limit(25, &config),
@@ -82,6 +84,7 @@ mod tests {
             subagent_style: false,
             max_budget_usd: None,
             fallback_model: None,
+            model_estimates: Vec::new(),
         };
         assert!(check_iteration_limit(100, &config).is_err());
     }

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use akmon_config::{AkmonGlobalConfig, McpScope};
+use akmon_core::match_model_cost_row;
 use akmon_models::{OllamaProbe, probe_ollama};
 use chrono::{DateTime, Utc};
 use tokio::sync::{Notify, mpsc};
@@ -13,6 +14,7 @@ use crate::agent::AgentTurn;
 use crate::app::{ExternalEditTarget, Overlay, TuiApp};
 use crate::command::SessionSideEffect;
 use crate::config::TuiLaunchConfig;
+use crate::cost_estimate::estimate_cost_usd_with_rows;
 use crate::model_picker::build_model_picker_rows;
 use crate::render::{context_usage_percent, context_window_for_model, render_context_bar};
 use crate::session_persist::{
@@ -20,7 +22,47 @@ use crate::session_persist::{
     load_session_summaries, resolve_session_id, save_session_snapshot, sessions_directory,
 };
 use crate::slash::{SlashCommand, parse_slash_input};
+use crate::state::{
+    ModelEstimateEditorState, SettingsOverlayState, merge_model_estimate_into_global,
+};
 use crate::tui_project::ProjectUiJob;
+
+/// Persists the estimates form to `~/.akmon/config.toml` and syncs the agent config.
+pub(crate) fn commit_model_estimate_editor(
+    model_estimates_out: &mut Vec<akmon_core::ModelCostEstimateRow>,
+    estimate: &mut ModelEstimateEditorState,
+    env: &SlashEnv,
+) {
+    match try_commit_model_estimate_editor(model_estimates_out, estimate, env) {
+        Ok(()) => {
+            estimate.status_line = Some("Saved to ~/.akmon/config.toml".into());
+        }
+        Err(e) => estimate.status_line = Some(format!("Error: {e}")),
+    }
+}
+
+fn try_commit_model_estimate_editor(
+    model_estimates_out: &mut Vec<akmon_core::ModelCostEstimateRow>,
+    estimate: &mut ModelEstimateEditorState,
+    env: &SlashEnv,
+) -> Result<(), String> {
+    let row = estimate.parse_row()?;
+    let (_, mut global) = akmon_config::load_user_config().map_err(|e| e.to_string())?;
+    merge_model_estimate_into_global(
+        &mut global,
+        estimate.original_pattern.as_deref(),
+        row.clone(),
+    );
+    akmon_config::save_user_config(&global).map_err(|e| e.to_string())?;
+    let est_vec = global.model_estimates.clone();
+    if let Ok(mut g) = env.shared_config.lock() {
+        g.model_estimates = est_vec.clone();
+    }
+    *model_estimates_out = est_vec;
+    env.reload_notify.notify_one();
+    estimate.original_pattern = Some(row.pattern);
+    Ok(())
+}
 
 /// Environment handles required to run slash commands that touch disk or the agent.
 pub struct SlashEnv {
@@ -455,14 +497,19 @@ fn dispatch(
             app.overlay = Overlay::CostSummary;
             SlashHandled::Continue
         }
+        "config" => {
+            app.overlay = Overlay::Settings(SettingsOverlayState::open_estimates(app));
+            SlashHandled::Continue
+        }
         "context" => {
-            let window = context_window_for_model(&app.model_name);
+            let window = context_window_for_model(&app.model_name, &app.model_estimates);
             let used = u64::from(app.total_input_tokens)
                 .saturating_add(u64::from(app.total_cache_read_tokens));
             let pct = context_usage_percent(
                 app.total_input_tokens,
                 app.total_cache_read_tokens,
                 &app.model_name,
+                &app.model_estimates,
             );
             let (bar, _) = render_context_bar(pct);
             let baseline_system_and_tools = 5000u64;
@@ -476,10 +523,12 @@ fn dispatch(
             } else {
                 ((free as f64 / window as f64) * 100.0).round() as u8
             };
-            let breakdown = format!(
+            let cfg_note = match_model_cost_row(&app.model_name, &app.model_estimates)
+                .and_then(|r| r.note.clone());
+            let mut breakdown = format!(
                 "Context Usage\n\
 {bar}\n\
-Model: {} · {}/{} tokens ({}%)\n\
+Model: {} · {}/{} context-window tokens ({}% of configured window)\n\
 \n\
 Breakdown (estimated)\n\
 System prompt:  ~{}k tokens\n\
@@ -489,7 +538,11 @@ Specs loaded:   {}\n\
 AKMON.md:       {}\n\
 \n\
 Free space:     ~{}k tokens ({}%)\n\
-Autocompact at: {}% ({} tokens remaining)",
+Autocompact at: {}% ({} tokens remaining)\n\
+\n\
+The % bar measures prompt fill vs the configured context window only.\n\
+Provider TPM/RPM rate limits are separate — you can hit 429s while this stays low.\n\
+Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon/config.toml.",
                 app.model_name,
                 used / 1000,
                 window / 1000,
@@ -504,6 +557,9 @@ Autocompact at: {}% ({} tokens remaining)",
                 compact_at_pct,
                 until_compact,
             );
+            if let Some(n) = cfg_note {
+                breakdown.push_str(&format!("\nConfig note: {n}\n"));
+            }
             app.push_system_info(breakdown);
             app.overlay = Overlay::None;
             SlashHandled::Continue
@@ -869,7 +925,8 @@ fn apply_loaded_session(
     app.context_warn_90_shown = false;
     app.current_iteration = 0;
     app.session_started_at = started_at;
-    app.scroll_offset = 0;
+    app.resume_pin_bottom = true;
+    app.auto_scroll = true;
     app.overlay = Overlay::None;
     env.reload_notify.notify_one();
     let short: String = app.session_id.to_string().chars().take(8).collect();
@@ -974,19 +1031,22 @@ pub fn cost_summary_lines(app: &TuiApp) -> Vec<String> {
         format!("Microcompact (~saved): {}", app.total_microcompact_cleared),
         "─────────────────────────".to_string(),
     ];
-    let est = estimate_cost_usd(app);
-    lines.push(format!("Estimated cost:     {est}"));
+    let est = estimate_cost_usd_line(app);
+    lines.push(format!(
+        "Estimated cost:     {est} (rough — see pricing table / [model_estimates])"
+    ));
     lines
 }
 
-fn estimate_cost_usd(app: &TuiApp) -> String {
-    match akmon_core::estimate_cost_usd(
+fn estimate_cost_usd_line(app: &TuiApp) -> String {
+    match estimate_cost_usd_with_rows(
         u64::from(app.total_input_tokens),
         u64::from(app.total_output_tokens),
         u64::from(app.total_cache_read_tokens),
         &app.model_name,
         app.uses_openrouter,
         app.free_local_inference,
+        &app.model_estimates,
     ) {
         Some(total) => format!("~${total:.4}"),
         None => "rate unknown".to_string(),

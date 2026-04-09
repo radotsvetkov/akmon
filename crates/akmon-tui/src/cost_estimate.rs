@@ -1,6 +1,6 @@
 //! Heuristic USD cost estimates (delegates to [`akmon_core::estimate_cost_usd`]).
 
-pub use akmon_core::estimate_cost_usd;
+pub use akmon_core::{estimate_cost_usd, estimate_cost_usd_with_rows};
 
 #[cfg(test)]
 mod tests {

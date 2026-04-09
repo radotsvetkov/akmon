@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Load and save ~/.akmon/config.toml for Akmon CLI."
 
 [dependencies]
+akmon-core = { path = "../akmon-core" }
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

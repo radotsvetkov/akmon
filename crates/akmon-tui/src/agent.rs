@@ -241,6 +241,7 @@ async fn build_agent_session(
         subagent_style: false,
         max_budget_usd: None,
         fallback_model: None,
+        model_estimates: config.model_estimates.clone(),
     };
 
     let session = AgentSession::new(

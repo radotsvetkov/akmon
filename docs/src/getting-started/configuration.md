@@ -54,6 +54,30 @@ default = "anthropic/claude-haiku-4-5"
 openrouter_key = "sk-or-..."
 ```
 
+## Model context window and cost estimate (`[model_estimates]`)
+
+The TUI’s **context % bar** reflects **model context window** usage from reported token counts. **Rate limits** (requests/minute, tokens/minute, spend caps) are enforced by your provider and are **independent** of that percentage—you can be low on context and still hit a limit.
+
+Akmon’s **USD session cost** is a **rough estimate** from usage tokens and optional price tables (not a bill from your provider).
+
+Optional rows match the **current model id** (substring match, first match wins). If you omit `context_window_tokens`, a built-in hint may still apply for common ids.
+
+In the **TUI**, use **`/config`** (or **Ctrl+S**) → **Estimates** to edit these fields for the current model without hand-editing TOML.
+
+```toml
+[[model_estimates]]
+pattern = "haiku-4-5"
+context_window_tokens = 200_000
+# Optional: USD per 1M tokens (override built-in defaults when you know list pricing)
+input_per_million_usd = 1.0
+output_per_million_usd = 5.0
+cache_read_per_million_usd = 0.1
+# Shown in /context as a reminder (not enforced by Akmon)
+note = "Check Anthropic console for RPM/TPM and tier limits."
+```
+
+The same table is used by the headless CLI for cost accumulation. Changes saved from the TUI apply immediately; if you edit `config.toml` by hand, restart Akmon to pick them up.
+
 ## Editor integration
 
 Set `EDITOR` (or rely on the default) for `/edit-plan` and `/update-context` in the TUI:

@@ -28,7 +28,7 @@ use crate::agent::{AgentTurn, BridgeMsg, run_agent_loop};
 use crate::app::{ExternalEditTarget, Overlay};
 use crate::command::{SessionSideEffect, UiCommand};
 use crate::config::TuiLaunchConfig;
-use crate::cost_estimate::estimate_cost_usd;
+use crate::cost_estimate::estimate_cost_usd_with_rows;
 use crate::layout::{self, rect_contains};
 use crate::message::TuiMessage;
 use crate::overlay::{
@@ -43,9 +43,13 @@ use crate::render::{
 use crate::session_persist::{save_session_snapshot, saved_sessions_directory_empty};
 use crate::slash::{matching_commands, slash_command_name_prefix};
 use crate::slash_exec::{
-    SlashEnv, SlashHandled, handle_slash_line, model_picker_enter, session_list_enter,
+    SlashEnv, SlashHandled, commit_model_estimate_editor, handle_slash_line, model_picker_enter,
+    session_list_enter,
 };
-use crate::state::{AgentDisplayState, ConfirmChoice, OperationType};
+use crate::state::{
+    AgentDisplayState, ConfigTab, ConfirmChoice, ESTIMATE_ROW_CANCEL, ESTIMATE_ROW_SAVE,
+    OperationType, SettingsOverlayState,
+};
 use crate::theme::{
     ACCENT, ACCENT_DIM, BORDER, ERR, FG_MUTED, FG_PRIMARY, OK_GREEN, SELECT_BG, WARN,
 };
@@ -360,13 +364,15 @@ fn run_loop(
                         MouseEventKind::ScrollUp => {
                             if rect_contains(lay.viewport, m.column, m.row) {
                                 let ev_msg_h = lay.viewport.height as usize;
-                                app.scroll_up(3, ev_msg_h, size.width);
+                                let step = (ev_msg_h / 4).max(3).min(24);
+                                app.scroll_up(step, ev_msg_h, size.width);
                             }
                         }
                         MouseEventKind::ScrollDown => {
                             if rect_contains(lay.viewport, m.column, m.row) {
                                 let ev_msg_h = lay.viewport.height as usize;
-                                app.scroll_down(3, ev_msg_h, size.width);
+                                let step = (ev_msg_h / 4).max(3).min(24);
+                                app.scroll_down(step, ev_msg_h, size.width);
                             }
                         }
                         _ => {}
@@ -524,6 +530,7 @@ fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
             | Overlay::AuditLog { .. }
             | Overlay::ScrollText { .. }
             | Overlay::CostSummary
+            | Overlay::Settings(_)
     ) {
         return;
     }
@@ -730,10 +737,17 @@ fn handle_key(
     if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.mouse_capture_enabled = !app.mouse_capture_enabled;
         app.push_system_info(if app.mouse_capture_enabled {
-            "Mouse wheel ON — scrolls transcript. In many terminals hold Shift while dragging to select text.".into()
+            "Mouse wheel ON — scrolls transcript. Hold Shift while dragging if your terminal needs it for text selection.".into()
         } else {
-            "Mouse wheel OFF — click/drag selects text; use ↑↓ PgUp/PgDn to scroll. Ctrl+M enables wheel again.".into()
+            "Mouse wheel OFF — use ↑↓ PgUp/PgDn to scroll; Ctrl+M enables wheel routing again.".into()
         });
+        return Ok(true);
+    }
+
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if !app.awaiting_confirmation && !app.awaiting_question {
+            app.overlay = Overlay::Settings(SettingsOverlayState::open_estimates(app));
+        }
         return Ok(true);
     }
 
@@ -971,6 +985,80 @@ fn handle_key(
         return Ok(true);
     }
 
+    if let Overlay::Settings(ref mut st) = app.overlay {
+        if st.tab != ConfigTab::Estimates {
+            st.estimate.editing = false;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                app.overlay = Overlay::None;
+            }
+            KeyCode::Tab => {
+                if !st.estimate.editing {
+                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        st.tab = st.tab.prev();
+                    } else {
+                        st.tab = st.tab.next();
+                    }
+                }
+            }
+            KeyCode::Left => {
+                if !st.estimate.editing {
+                    st.tab = st.tab.prev();
+                }
+            }
+            KeyCode::Right => {
+                if !st.estimate.editing {
+                    st.tab = st.tab.next();
+                }
+            }
+            KeyCode::Up if st.tab == ConfigTab::Estimates && !st.estimate.editing => {
+                st.estimate.selected = st.estimate.selected.saturating_sub(1);
+            }
+            KeyCode::Down if st.tab == ConfigTab::Estimates && !st.estimate.editing => {
+                if st.estimate.selected < ESTIMATE_ROW_CANCEL {
+                    st.estimate.selected += 1;
+                }
+            }
+            KeyCode::Enter if st.tab == ConfigTab::Estimates => {
+                let sel = st.estimate.selected;
+                if sel <= 5 {
+                    st.estimate.editing = !st.estimate.editing;
+                    if st.estimate.editing {
+                        st.estimate.status_line = None;
+                    }
+                } else if sel == ESTIMATE_ROW_SAVE {
+                    let env = SlashEnv {
+                        shared_config: Arc::clone(shared_config),
+                        reload_notify: app
+                            .reload_notify
+                            .clone()
+                            .unwrap_or_else(|| Arc::new(Notify::new())),
+                        index_enabled_flag: app.index_enabled,
+                        index_bin_path: app.project_root.join(".akmon").join("index.bin"),
+                        project_job_tx: project_tx.clone(),
+                        agent_task_tx: task_tx.clone(),
+                    };
+                    commit_model_estimate_editor(&mut app.model_estimates, &mut st.estimate, &env);
+                } else if sel == ESTIMATE_ROW_CANCEL {
+                    app.overlay = Overlay::None;
+                }
+            }
+            KeyCode::Backspace if st.tab == ConfigTab::Estimates && st.estimate.editing => {
+                st.estimate.backspace();
+            }
+            KeyCode::Char(c)
+                if st.tab == ConfigTab::Estimates
+                    && st.estimate.editing
+                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+            {
+                st.estimate.insert_char(c);
+            }
+            _ => {}
+        }
+        return Ok(true);
+    }
+
     if let Overlay::AuditLog { lines, scroll } | Overlay::ScrollText { lines, scroll, .. } =
         &mut app.overlay
     {
@@ -1198,9 +1286,9 @@ fn handle_key(
 fn show_help(app: &mut TuiApp) {
     app.push_system_info(
         "Keys: Enter submit  ·  Shift+Enter newline  ·  ←→ caret  ·  Tab expand tool\n\
-         Scroll: PgUp/PgDn  ·  ↑↓ when input empty  ·  Ctrl+↑↓ always  ·  mouse wheel on transcript  ·  End = latest\n\
+         Scroll: Home/End = transcript top/bottom  ·  PgUp/PgDn  ·  ↑↓ when input empty  ·  Ctrl+↑↓  ·  mouse wheel (Ctrl+M toggles)\n\
          Approvals: Tab / ←→  ·  Enter  ·  y once  ·  2/s session  ·  p all writes  ·  r shell prefix  ·  n/Esc deny\n\
-         Ctrl+C (running)=interrupt  ·  Ctrl+D / q exit  ·  Ctrl+/ this help"
+         Ctrl+S or /config = settings (context window & cost)  ·  Ctrl+C (running)=interrupt  ·  Ctrl+D / q exit  ·  Ctrl+/ this help"
             .into(),
     );
 }
@@ -1210,6 +1298,7 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
         app.total_input_tokens,
         app.total_cache_read_tokens,
         &app.model_name,
+        &app.model_estimates,
     );
     let (context_bar, context_color) = render_context_bar(context_pct);
 
@@ -1231,19 +1320,20 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
             text: "free".into(),
             style: Style::default().fg(FG_MUTED),
         })
-    } else if let Some(est) = estimate_cost_usd(
+    } else if let Some(est) = estimate_cost_usd_with_rows(
         u64::from(app.total_input_tokens),
         u64::from(app.total_output_tokens),
         u64::from(app.total_cache_read_tokens),
         &app.model_name,
         app.uses_openrouter,
         app.free_local_inference,
+        &app.model_estimates,
     ) {
         let (text, style) = session_cost_style(est);
         Some(CostFrag { text, style })
     } else if app.total_input_tokens > 0 || app.total_output_tokens > 0 {
         Some(CostFrag {
-            text: "~$?".into(),
+            text: "~$? est".into(),
             style: Style::default().fg(FG_MUTED),
         })
     } else {
@@ -1319,7 +1409,13 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     );
     let viewport_h = vp.height as usize;
     let max_off = flat.len().saturating_sub(viewport_h);
-    app.scroll_offset = app.scroll_offset.min(max_off);
+    if app.resume_pin_bottom {
+        app.scroll_offset = max_off;
+        app.resume_pin_bottom = false;
+        app.auto_scroll = true;
+    } else {
+        app.scroll_offset = app.scroll_offset.min(max_off);
+    }
     let scroll = app.scroll_offset;
     let end = (scroll + viewport_h).min(flat.len());
     let visible: Vec<Line<'static>> = if scroll < flat.len() {
@@ -1472,15 +1568,15 @@ fn handle_input_left_click(app: &mut TuiApp, column: u16, row: u16) {
 fn session_cost_style(cost: f64) -> (String, Style) {
     if cost < 0.01 {
         (
-            "~$0.00".into(),
+            "~$0.00 est".into(),
             Style::default().fg(FG_MUTED).add_modifier(Modifier::DIM),
         )
     } else if cost < 0.10 {
-        (format!("~${cost:.2}"), Style::default().fg(FG_PRIMARY))
+        (format!("~${cost:.2} est"), Style::default().fg(FG_PRIMARY))
     } else if cost < 1.0 {
-        (format!("~${cost:.2}"), Style::default().fg(WARN))
+        (format!("~${cost:.2} est"), Style::default().fg(WARN))
     } else {
-        (format!("~${cost:.2}"), Style::default().fg(ERR))
+        (format!("~${cost:.2} est"), Style::default().fg(ERR))
     }
 }
 
@@ -1565,13 +1661,14 @@ fn print_exit_summary(app: &TuiApp) {
     let cache = u64::from(app.total_cache_read_tokens);
     let micro = u64::from(app.total_microcompact_cleared);
 
-    let total_cost_usd = estimate_cost_usd(
+    let total_cost_usd = estimate_cost_usd_with_rows(
         in_t,
         out_t,
         cache,
         &app.model_name,
         app.uses_openrouter,
         app.free_local_inference,
+        &app.model_estimates,
     )
     .unwrap_or(0.0);
 
@@ -1636,7 +1733,7 @@ fn print_exit_summary(app: &TuiApp) {
     let cost_line = if total_cost_usd < 0.0001 {
         format!("{green}free (local model){reset}")
     } else {
-        format!("~${total_cost_usd:.4}")
+        format!("~${total_cost_usd:.4} {dim}(rough est.){reset}")
     };
     println!("  {:<22} {}", "Est. cost", cost_line);
 
@@ -1818,6 +1915,7 @@ mod input_mouse_tests {
             display_theme: akmon_config::TerminalTheme::default(),
             session_display_name: None,
             resume_messages: None,
+            model_estimates: Vec::new(),
         }
     }
 

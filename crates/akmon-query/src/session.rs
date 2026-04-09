@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use akmon_core::{
     AgentConfig, AgentError, AgentEvent, AgentState, AuditEvent, InteractivePolicyReply,
     Permission, PolicyEngineError, PolicyEngineMode, PolicyVerdict, Sandbox, check_iteration_limit,
-    estimate_cost_usd, validate_transition,
+    estimate_cost_usd_with_rows, validate_transition,
 };
 use akmon_models::{
     CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
@@ -2074,13 +2074,14 @@ Complete and verify the current file(s), then continue in the next turn.";
         }
         let free = self.provider.name().eq_ignore_ascii_case("ollama");
         let openrouter = self.provider.name() == "OpenRouter";
-        let est = estimate_cost_usd(
+        let est = estimate_cost_usd_with_rows(
             u64::from(input_tokens),
             u64::from(output_tokens),
             u64::from(cache_read_tokens),
             self.provider.completion_model_id(),
             openrouter,
             free,
+            &self.config.model_estimates,
         );
         if let Some(d) = est {
             self.total_cost_usd += d;
@@ -2422,6 +2423,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(StubProvider::empty_end_turn()),
@@ -2444,6 +2446,7 @@ mod tests {
             subagent_style: false,
             max_budget_usd: None,
             fallback_model: None,
+            model_estimates: Vec::new(),
         };
         assert!(check_iteration_limit(0, &config).is_ok());
         assert_eq!(
@@ -2561,6 +2564,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2617,6 +2621,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2664,6 +2669,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2729,6 +2735,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2779,6 +2786,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -2891,6 +2899,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -2970,6 +2979,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -3033,6 +3043,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -3106,6 +3117,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: false,
@@ -3183,6 +3195,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
                 confirm_writes: true,
@@ -3280,6 +3293,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
             Arc::new(seq),
@@ -3351,6 +3365,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
             Arc::new(seq),
@@ -3400,6 +3415,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -3439,6 +3455,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(seq),
@@ -3511,6 +3528,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(StubProvider::empty_end_turn()),
@@ -3539,6 +3557,7 @@ mod tests {
                 subagent_style: false,
                 max_budget_usd: None,
                 fallback_model: None,
+                model_estimates: Vec::new(),
             },
             Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
             Arc::new(StubProvider::empty_end_turn()),

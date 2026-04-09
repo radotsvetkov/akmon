@@ -65,7 +65,7 @@ pub struct DisplayConfig {
 }
 
 /// Serializable contents of `~/.akmon/config.toml`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AkmonGlobalConfig {
     /// Default model id (Ollama tag or Claude id).
     #[serde(default)]
@@ -106,6 +106,9 @@ pub struct AkmonGlobalConfig {
     /// TUI typography / contrast (`[display]`).
     #[serde(default)]
     pub display: DisplayConfig,
+    /// Optional per-model context-window and USD hints for status bars, `/context`, and headless budget math.
+    #[serde(default)]
+    pub model_estimates: Vec<akmon_core::ModelCostEstimateRow>,
 }
 
 impl AkmonGlobalConfig {
@@ -310,5 +313,25 @@ mod tests {
         let s = c.display_masked_toml();
         assert!(!s.contains("abcdef123456"));
         assert!(s.contains("sk-ant-a"));
+    }
+
+    #[test]
+    fn model_estimates_roundtrip_in_toml() {
+        let dir = tempdir().expect("tmp");
+        let path = dir.path().join("config.toml");
+        let mut c = AkmonGlobalConfig::default();
+        c.model_estimates.push(akmon_core::ModelCostEstimateRow {
+            pattern: "claude-haiku".into(),
+            context_window_tokens: Some(200_000),
+            input_per_million_usd: Some(0.9),
+            output_per_million_usd: None,
+            cache_read_per_million_usd: None,
+            note: Some("Context % is not a rate limit meter.".into()),
+        });
+        save_config_to(&path, &c).expect("save");
+        let l = load_config_from(&path).expect("load");
+        assert_eq!(l.model_estimates.len(), 1);
+        assert_eq!(l.model_estimates[0].pattern, "claude-haiku");
+        assert_eq!(l.model_estimates[0].context_window_tokens, Some(200_000));
     }
 }

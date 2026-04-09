@@ -1219,6 +1219,7 @@ async fn main() -> ExitCode {
             display_theme: global.display.theme,
             session_display_name: cli.session_name.clone(),
             resume_messages,
+            model_estimates: global.model_estimates.clone(),
         };
         let tui_outcome = akmon_tui::run_interactive(tui_config).await;
         if let Some(handle) = index_thread {
@@ -1277,15 +1278,16 @@ async fn main() -> ExitCode {
         Vec::new()
     };
 
+    let audit_log_path = resolve_audit_log_path(&project_root, session_id, cli.audit_log.clone());
+    let global = load_user_global_config();
     let agent_config = AgentConfig {
         session_id,
         auto_commit: cli.auto_commit,
         max_budget_usd: cli.max_budget_usd,
         fallback_model: cli.fallback_model.clone(),
+        model_estimates: global.model_estimates.clone(),
         ..Default::default()
     };
-    let audit_log_path = resolve_audit_log_path(&project_root, session_id, cli.audit_log.clone());
-    let global = load_user_global_config();
 
     let policy_mode = if cli.yes {
         if cli.web_fetch && cli.yes_web {

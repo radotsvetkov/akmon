@@ -20,6 +20,25 @@ Prefer environment variables or `akmon config key` for secrets so they are not c
 | --- | --- |
 | `planner_model` | Default model id for `--architect` planning phase. |
 
+## `[[model_estimates]]`
+
+Optional rows for **context-window %** and **rough USD cost** from usage. Each row:
+
+| Key | Meaning |
+| --- | --- |
+| `pattern` | Substring matched against the **current** model id (first match wins). |
+| `context_window_tokens` | Context window size in tokens for % in the TUI status bar. |
+| `input_per_million_usd` | Optional USD per 1M input tokens (merges with built-in defaults if only one side is set). |
+| `output_per_million_usd` | Optional USD per 1M output tokens. |
+| `cache_read_per_million_usd` | Optional USD per 1M cache-read tokens. |
+| `note` | Free text (e.g. rate-limit reminder); shown in `/context`. |
+
+In the **TUI**, **`/config`** (or **Ctrl+S**) → **Estimates** edits the row for the active model and writes `~/.akmon/config.toml`.
+
+Cost display is **not** a billing statement. **Rate limits** are not modeled in-app; set expectations with `note` or your provider’s dashboard.
+
+See [Getting started → Configuration](../getting-started/configuration.md#model-context-window-and-cost-estimate-model_estimates).
+
 ## MCP servers
 
 Configured as tables under `mcp` / `[[mcp.servers]]` (see [MCP](../features/mcp.md)):

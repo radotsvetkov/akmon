@@ -92,6 +92,7 @@ impl Tool for SpawnSubagentTool {
             subagent_style: true,
             max_budget_usd: None,
             fallback_model: None,
+            model_estimates: Vec::new(),
         };
 
         let (seed_tx, seed_rx) = mpsc::channel::<InteractivePolicyReply>(256);

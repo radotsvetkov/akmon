@@ -124,6 +124,8 @@ akmon --architect --planner-model llama3.2 --task "add OAuth2 login"
 
 Akmon surfaces cumulative token usage, cache hits, and cost estimates.
 
+In the interactive TUI, run **`/config`** or press **Ctrl+S** to open **settings** and, on the **Estimates** tab, tune **context window** and optional **USD-per-million** overrides for the active model (stored under **`[[model_estimates]]`** in `~/.akmon/config.toml`). Numbers are **rough estimates**, not a bill; the context **%** bar measures prompt fill versus window size, not provider RPM/TPM limits.
+
 Real session example:
 
 - input: 672k tokens @ $0.80/M

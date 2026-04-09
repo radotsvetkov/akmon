@@ -18,10 +18,15 @@ const RED: ratatui::style::Color = ratatui::style::Color::Rgb(239, 68, 68);
 const DIFF_HEADER: ratatui::style::Color = ratatui::style::Color::Rgb(100, 100, 120);
 const ERR: ratatui::style::Color = ratatui::style::Color::Rgb(248, 113, 113);
 
-/// Total lines one message occupies at `width`.
+/// Total lines one message occupies at `width` (must match [`flatten_transcript`] for the same blink phase).
 #[must_use]
-pub fn message_line_count(msg: &TuiMessage, width: u16, light_body_text: bool) -> usize {
-    flatten_message(msg, width, true, light_body_text).len()
+pub fn message_line_count(
+    msg: &TuiMessage,
+    width: u16,
+    stream_cursor_visible: bool,
+    light_body_text: bool,
+) -> usize {
+    flatten_message(msg, width, stream_cursor_visible, light_body_text).len()
 }
 
 /// Back-compat: synonym for [`flatten_message`] with streaming cursor support.
@@ -543,7 +548,7 @@ mod tests {
         let m = TuiMessage::User {
             content: "a b c d e f g h i j".into(),
         };
-        assert!(message_line_count(&m, 12, false) >= 2);
+        assert!(message_line_count(&m, 12, true, false) >= 2);
     }
 
     #[test]

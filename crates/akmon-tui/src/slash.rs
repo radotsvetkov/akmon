@@ -94,6 +94,12 @@ pub const COMMANDS: &[SlashCommand] = &[
         takes_arg: false,
     },
     SlashCommand {
+        name: "config",
+        aliases: &[],
+        description: "Settings UI — context window & cost for current model",
+        takes_arg: false,
+    },
+    SlashCommand {
         name: "context",
         aliases: &[],
         description: "Show context window usage breakdown",

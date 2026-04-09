@@ -1,5 +1,6 @@
 //! Bottom status strip: session, tokens, cache, cost, hint.
 
+use akmon_core::{ModelCostEstimateRow, context_window_tokens_hint};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -20,27 +21,23 @@ fn fmt_u32_commas(n: u32) -> String {
     out.into_iter().rev().collect()
 }
 
-/// Returns a conservative context window size for UI usage indicators.
+/// Context window used **only for the % bar** ([`context_usage_percent`]); optional overrides come from config.
 #[must_use]
-pub fn context_window_for_model(model: &str) -> u64 {
-    if model.contains("claude") {
-        200_000
-    } else if model.starts_with("gpt-4.1") {
-        1_047_576
-    } else if model.starts_with("gpt-4o") {
-        128_000
-    } else if model.starts_with("o1") || model.starts_with("o3") {
-        200_000
-    } else {
-        8_192
-    }
+pub fn context_window_for_model(model: &str, model_estimates: &[ModelCostEstimateRow]) -> u64 {
+    context_window_tokens_hint(model, model_estimates)
 }
 
+/// Percent of configured context window consumed by **reported prompt tokens** (input + cache reads).
+///
+/// This does **not** reflect provider TPM/RPM rate limits — those are independent quotas.
 #[must_use]
-pub fn context_usage_percent(input_tokens: u32, cache_read_tokens: u32, model: &str) -> u8 {
-    let window = context_window_for_model(model);
-    // Anthropic cache-read tokens still represent prompt tokens processed by the API.
-    // Include them so the context/rate-pressure indicator matches provider-reported usage.
+pub fn context_usage_percent(
+    input_tokens: u32,
+    cache_read_tokens: u32,
+    model: &str,
+    model_estimates: &[ModelCostEstimateRow],
+) -> u8 {
+    let window = context_window_tokens_hint(model, model_estimates).max(1);
     let used = u64::from(input_tokens).saturating_add(u64::from(cache_read_tokens));
     ((used as f64 / window as f64 * 100.0).min(100.0)) as u8
 }
@@ -49,7 +46,7 @@ pub fn context_usage_percent(input_tokens: u32, cache_read_tokens: u32, model: &
 pub fn render_context_bar(pct: u8) -> (String, Color) {
     let filled = (usize::from(pct) * 20 / 100).min(20);
     let empty = 20usize.saturating_sub(filled);
-    let bar = format!("[{}{}] {pct}%", "█".repeat(filled), "░".repeat(empty));
+    let bar = format!("[{}{}] {pct}% win", "█".repeat(filled), "░".repeat(empty));
     let color = match pct {
         0..=60 => Color::Green,
         61..=80 => Color::Yellow,

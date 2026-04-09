@@ -4,6 +4,22 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.7] - 2026-04-10
+
+### Added
+
+- **TUI `/config` and Ctrl+S:** full-screen **settings** overlay with an **Estimates** tab to edit **`[[model_estimates]]`** for the current model (context window tokens, optional USD per 1M input/output/cache-read, note). Saves to `~/.akmon/config.toml` and reloads in-session estimates for the agent.
+- **Configurable model estimates:** `[[model_estimates]]` in user config for context-window % and rough USD cost; documented in getting started and configuration reference.
+
+### Changed
+
+- **Cost estimate behavior:** `free_local` / Ollama-style sessions return **$0** without requiring a built-in pricing row for the model id.
+- **Documentation:** clarifies that context **window %** is separate from provider **rate limits**; cost display is explicitly a rough estimate. README links TUI settings to cost transparency.
+
+### Fixed
+
+- **Docs:** `[[model_estimates]]` TOML examples and reference table use the correct field names (`input_per_million_usd`, etc.).
+
 ## [1.7.6] - 2026-04-09
 
 ### Added

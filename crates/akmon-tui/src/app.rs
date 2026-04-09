@@ -19,7 +19,7 @@ use crate::message::TuiMessage;
 use crate::render::context_usage_percent;
 use crate::session_persist::SessionSummary;
 use crate::slash::SlashCommand;
-use crate::state::{AgentDisplayState, ConfirmationDialog};
+use crate::state::{AgentDisplayState, ConfirmationDialog, SettingsOverlayState};
 
 /// Target file to open in the user's `EDITOR` outside the alternate-screen TUI.
 #[derive(Debug, Clone)]
@@ -95,6 +95,8 @@ pub enum Overlay {
         /// Highlighted match index.
         selected: usize,
     },
+    /// `/config` or Ctrl+S — tabs for estimates and pointer text for other panels.
+    Settings(SettingsOverlayState),
 }
 
 /// State for an `ask_followup` prompt (user types the reply in the compose area).
@@ -242,6 +244,10 @@ pub struct TuiApp {
     pub files_written: Vec<String>,
     /// Union of read/write/edit paths for the context bar (deduplicated, recent-first awareness via order).
     pub session_touched_files: Vec<String>,
+    /// [`TuiLaunchConfig::model_estimates`] — context bar % and USD hints.
+    pub model_estimates: Vec<akmon_core::ModelCostEstimateRow>,
+    /// After `/resume`, pin the viewport to the newest line on the next redraw.
+    pub resume_pin_bottom: bool,
     /// When set, the input loop opens an external editor before the next redraw.
     pub pending_external_edit: Option<ExternalEditTarget>,
     /// Rotating braille spinner frame (0..SPINNER_LEN) for the activity indicator.
@@ -367,11 +373,13 @@ impl TuiApp {
             files_read: Vec::new(),
             files_written: Vec::new(),
             session_touched_files: Vec::new(),
+            model_estimates: config.model_estimates.clone(),
+            resume_pin_bottom: false,
             pending_external_edit: None,
             spinner_frame: 0,
-            // Default OFF so native mouse/trackpad text selection works out of the box.
-            // Users can enable wheel capture with Ctrl+M when they prefer mouse scrolling.
-            mouse_capture_enabled: false,
+            // Default ON so the wheel reaches the full transcript; Shift+drag still selects text in many terminals.
+            // Ctrl+M toggles if you prefer native selection without wheel routing.
+            mouse_capture_enabled: true,
             mouse_capture_applied: false,
             ollama_probe: OllamaProbe {
                 reachable: false,
@@ -642,6 +650,7 @@ impl TuiApp {
                     self.total_input_tokens,
                     self.total_cache_read_tokens,
                     &self.model_name,
+                    &self.model_estimates,
                 );
                 if pct >= 90 && !self.context_warn_90_shown {
                     self.status_flash =
@@ -723,7 +732,14 @@ impl TuiApp {
     pub fn total_message_lines(&self, width: u16) -> usize {
         self.messages
             .iter()
-            .map(|m| crate::render::message_line_count(m, width, self.light_body_text))
+            .map(|m| {
+                crate::render::message_line_count(
+                    m,
+                    width,
+                    self.stream_cursor_visible,
+                    self.light_body_text,
+                )
+            })
             .sum()
     }
 
@@ -946,6 +962,7 @@ mod tests {
             display_theme: akmon_config::TerminalTheme::default(),
             session_display_name: None,
             resume_messages: None,
+            model_estimates: Vec::new(),
         }
     }
 
