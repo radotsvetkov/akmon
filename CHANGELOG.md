@@ -4,6 +4,18 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.5] - 2026-04-10
+
+### Fixed
+
+- **TUI context usage:** context bar and `/context` percent now include cumulative cache-read tokens so usage matches provider-reported prompt pressure (for example Anthropic with heavy caching).
+
+### Changed
+
+- **TUI usability:** mouse capture defaults off so native mouse/trackpad text selection works without toggling; **Ctrl+M** still enables wheel scrolling.
+- **TUI transcript:** inline colored diff preview for `file_edit_diff` tool results before expanding with Tab.
+- **README:** restored anvil header art, passed-tests badge, “what Akmon means” footer, and clarified the live-session example wording.
+
 ## [1.7.4] - 2026-04-09
 
 ### Changed
