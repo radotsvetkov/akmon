@@ -39,9 +39,26 @@ For file changes, Akmon can present unified diffs before final approval. This gi
 - shell command prefixes,
 - network domains,
 - tool names.
+- MCP server names and MCP tool names.
 
 Evaluation is deterministic: explicit deny wins, and the most specific matching
 rule is selected within each rule list.
+
+### MCP governance hardening (fail-closed)
+
+MCP tool calls are now governed by dedicated policy dimensions:
+
+- `mcp.servers.allow` / `mcp.servers.deny`
+- `mcp.tools.allow` / `mcp.tools.deny`
+
+Execution posture is fail-closed:
+
+- missing MCP context (server/tool) denies,
+- ambiguous MCP context denies,
+- parent policy modes without configured MCP rules deny,
+- explicit deny rules win over allow matches.
+
+MCP calls still pass normal permission checks after MCP policy approval (no bypass path).
 
 ## Enterprise policy profiles and packs
 

@@ -4,6 +4,31 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-04-20
+
+### Added
+
+- **Provider operability diagnostics:** `akmon doctor providers` preflight checks with text/JSON output, actionable remediation hints, masked credential checks, endpoint sanity/reachability checks, and non-zero exits for critical provider failures.
+- **Deterministic docs quality gates:** CI `docs-quality` job now enforces mdBook build, local markdown link checks, CLI snippet smoke checks, and JSON snippet sanity with fixture-based pass/fail validation.
+- **Local reliability capability hints:** Ollama model metadata/probe hints are now used (when available) for timeout/context heuristics while preserving safe fallback behavior when probe data is unavailable.
+
+### Changed
+
+- **MCP governance posture:** MCP calls now consistently run through fail-closed server/tool policy evaluation (`mcp.servers`, `mcp.tools`) and emit enriched audit context (`mcp_server`, `mcp_tool`, `decision_reason`).
+- **TUI maintainability (internal only):** `TuiApp` state was decomposed into focused internal modules (`composer`, `overlay_state`, `session_telemetry`, `provider_runtime`) with behavior parity and targeted transition tests; no user-facing UX/command changes.
+- **Ollama status consistency:** streaming and buffered completion paths now share one status-hint scheduling flow for predictable local-model progress messaging.
+
+### Fixed
+
+- **Local timeout/remediation clarity:** first-token timeout, idle-stream timeout, missing-model, and no-output failure modes now return clearer operator guidance (`/clear`, `ollama ps`, warm model, switch model).
+- **Local false-timeout reduction:** adaptive timeout floors for local models reduce cold-start false failures while keeping deterministic bounded behavior.
+
+### Migration / Operator Notes
+
+- No CLI surface or command semantics changes were introduced in this release.
+- For configured-policy environments using MCP, define explicit MCP allow rules before production rollout; ambiguous/missing MCP context remains fail-closed by design.
+- For local-model-heavy workflows, prefer warming models (`ollama run <model>`) before long tasks and use `akmon doctor providers` in CI/host readiness checks.
+
 ## [1.8.0] - 2026-04-20
 
 ### Added
@@ -18,6 +43,7 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Safety defaults hardening:** nested/subagent execution remains constrained by parent policy posture and fails closed for ambiguous side-effect contexts.
+- **MCP governance hardening:** MCP execution now uses explicit fail-closed server/tool policy dimensions (`mcp.servers`, `mcp.tools`), denies ambiguous/malformed MCP context, and records enriched MCP audit context (`mcp_server`, `mcp_tool`, `decision_reason`).
 - **Release/operator docs:** README, CLI/config/security/audit/evidence references, and landing copy now align to trust-runtime workflows and command behavior.
 - **Versioning/package metadata:** workspace version advanced to `1.8.0`; docs and install examples updated accordingly.
 
@@ -27,6 +53,7 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Run report consumers:** treat `replay_metadata` and `reliability_metrics` as additive stable fields in `--output json`.
 - **Evidence consumers:** require `evidence_schema_version` and validate linked audit/session hash consistency.
 - **Policy governance rollout:** effective policy source order is explicit (`profile < packs < local < CLI override`); invalid selected pack inputs fail closed.
+- **MCP operators:** define explicit MCP allow rules before using MCP in configured policy mode; unmanaged/ambiguous MCP context now denies by default.
 
 ### Operator impact
 

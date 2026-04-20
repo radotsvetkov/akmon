@@ -54,6 +54,14 @@ deny_domains = ["169.254.169.254", "*.internal.local"]
 [tools]
 allow = ["read_*", "search", "shell"]
 deny = ["shell_force", "write_secret"]
+
+[mcp.servers]
+allow = ["github-prod", "jira-main"]
+deny = ["*"]
+
+[mcp.tools]
+allow = ["search_*"]
+deny = ["delete_*", "admin_*"]
 ```
 
 Engine behavior is deterministic:
@@ -61,6 +69,26 @@ Engine behavior is deterministic:
 - explicit deny beats allow,
 - most specific rule wins in a rule list,
 - no matching allow means deny.
+
+For MCP actions, fail-closed behavior also applies:
+
+- malformed/missing MCP context denies,
+- ambiguous MCP context denies,
+- parent policy modes without configured MCP rules deny.
+
+## MCP governance example (allow one, deny all others)
+
+```toml
+[mcp.servers]
+allow = ["github-prod"]
+deny = ["*"]
+
+[mcp.tools]
+allow = ["search_issues"]
+deny = ["*"]
+```
+
+This allows only `search_issues` on `github-prod`; every other MCP server/tool is blocked.
 
 ## Reliability defaults (`[slo]`)
 
@@ -85,9 +113,10 @@ min_baseline_samples = 5
 
 CLI overrides take precedence over config.
 
-## Migration notes for v1.8.0 operators
+## Migration notes for v1.8.1 operators
 
 - Audit records are chain-shaped (`schema_version`, `event_index`, `prev_hash`, `event_hash`).
 - Run report JSON now includes additive `replay_metadata` and `reliability_metrics`.
 - Evidence artifacts are versioned (`evidence_schema_version: "evidence.v1"`).
 - Policy governance can now be managed by profile/packs without changing permission classes.
+- MCP configured-mode rollouts should include explicit `[mcp.servers]` + `[mcp.tools]` allow rules to avoid fail-closed denials.

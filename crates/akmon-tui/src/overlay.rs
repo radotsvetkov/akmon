@@ -27,7 +27,7 @@ fn slash_ac_outer_height(content_rows: u16) -> u16 {
 
 /// Vertical rows reserved for [`Overlay::SlashAutocomplete`] (includes border lines).
 pub fn slash_autocomplete_row_count(app: &TuiApp) -> u16 {
-    match &app.overlay {
+    match &app.overlays.overlay {
         Overlay::SlashAutocomplete { matches, .. } => {
             let content = matches.len().clamp(1, SLASH_AC_MAX_VISIBLE) as u16;
             slash_ac_outer_height(content)
@@ -51,10 +51,10 @@ fn clamp_chars(s: &str, max_chars: usize) -> String {
 
 /// Paints the slash command dropdown directly above the input block.
 pub fn draw_slash_autocomplete(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let Overlay::SlashAutocomplete { matches, selected } = &app.overlay else {
+    let Overlay::SlashAutocomplete { matches, selected } = &app.overlays.overlay else {
         return;
     };
-    let filter = slash_command_name_prefix(&app.input_buffer).unwrap_or("");
+    let filter = slash_command_name_prefix(&app.composer.buffer).unwrap_or("");
     let inner_w = area.width.saturating_sub(2) as usize;
     let inner_h = (area.height as usize).saturating_sub(2).max(1);
     let target_h = if matches.is_empty() {
@@ -152,7 +152,7 @@ pub fn draw_slash_autocomplete(f: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 
 /// Draws transcript-blocking overlays (help, session picker, audit, cost).
 pub fn draw_message_overlays(f: &mut Frame<'_>, app: &TuiApp, msg_area: Rect) {
-    match &app.overlay {
+    match &app.overlays.overlay {
         Overlay::None | Overlay::SlashAutocomplete { .. } => {}
         Overlay::Help => {
             let h = (COMMANDS.len() as u16)

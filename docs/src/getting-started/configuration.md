@@ -86,4 +86,46 @@ Set `EDITOR` (or rely on the default) for `/edit-plan` and `/update-context` in 
 export EDITOR="nvim"
 ```
 
+## Local model reliability (Ollama)
+
+Akmon now uses Ollama model metadata (when available) to tune local reliability behavior:
+
+- adaptive first-token deadline (longer for larger local models),
+- adaptive idle-stream timeout (to reduce false failures during cold starts),
+- context-window hints for no-output diagnostics,
+- tool-support expectation hints when a local model is likely not tool-capable.
+
+Probe data is best-effort only. If probing fails, Akmon falls back to deterministic safe defaults and continues.
+
+### What status hints mean
+
+During a slow local first request, you may see status lines such as:
+
+- `Loading <model>…`
+- `Loading model into RAM… first request is slow`
+- `Still loading…`
+
+These hints are emitted consistently in both streaming and buffered response paths.
+
+### Common local failure patterns and recovery
+
+- **Model missing**  
+  Run `ollama pull <model>` and confirm with `ollama ps`.
+- **First-token timeout**  
+  Warm the model once (`ollama run <model>`), then retry.
+- **Idle stream timeout**  
+  Check `ollama ps`; if the model process crashed/unloaded, restart it and retry.
+- **No output / possible context overflow**  
+  Use `/clear`, retry with smaller context, or switch to a model with larger context.
+- **Tool-heavy tasks on weak local models**  
+  Switch to a tool-capable local model (for example `qwen2.5-coder:7b`) if tool calls stall.
+
+### Recommended cold-start workflow
+
+1. Pull and warm your local model:
+   - `ollama pull qwen2.5-coder:7b`
+   - `ollama run qwen2.5-coder:7b`
+2. Start Akmon with that model and keep early turns focused.
+3. If context gets noisy, use `/clear` before retrying long tasks.
+
 See also [Environment variables](../reference/env-vars.md) and [Configuration reference](../reference/config.md).

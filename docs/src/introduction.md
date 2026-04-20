@@ -2,7 +2,7 @@
 
 Akmon is a terminal-native AI coding agent designed for developers who need control, portability, and accountability. It is intentionally built as a small Rust binary with a typed permission model, explicit provider selection, and an auditable execution trail.
 
-As of v1.8.0, Akmon ships a complete trust pipeline:
+As of v1.8.1, Akmon ships a complete trust pipeline:
 
 - policy-as-code controls,
 - tamper-evident audit chains,

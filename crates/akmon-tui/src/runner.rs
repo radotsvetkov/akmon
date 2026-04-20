@@ -72,14 +72,14 @@ fn input_inner_rows_wrapped(buffer: &str, term_width: u16) -> u16 {
 }
 
 fn compose_stack_inputs(app: &TuiApp, term_width: u16) -> (u16, u16) {
-    let input_inner = if app.awaiting_question {
-        input_inner_rows_wrapped(&app.input_buffer, term_width)
-    } else if app.awaiting_confirmation || app.agent_running {
+    let input_inner = if app.overlays.awaiting_question {
+        input_inner_rows_wrapped(&app.composer.buffer, term_width)
+    } else if app.overlays.awaiting_confirmation || app.runtime.agent_running {
         3
     } else {
-        input_inner_rows_wrapped(&app.input_buffer, term_width)
+        input_inner_rows_wrapped(&app.composer.buffer, term_width)
     };
-    let ac = if app.awaiting_confirmation || app.awaiting_question {
+    let ac = if app.overlays.awaiting_confirmation || app.overlays.awaiting_question {
         0
     } else {
         slash_autocomplete_row_count(app)
@@ -89,7 +89,7 @@ fn compose_stack_inputs(app: &TuiApp, term_width: u16) -> (u16, u16) {
 
 fn viewport_msg_h(term_w: u16, term_h: u16, app: &TuiApp) -> usize {
     let area = Rect::new(0, 0, term_w, term_h);
-    let show_ctx = !app.session_touched_files.is_empty();
+    let show_ctx = !app.telemetry.session_touched_files.is_empty();
     let (input_inner, ac) = compose_stack_inputs(app, term_w);
     layout::compute_layout(area, show_ctx, input_inner, ac)
         .viewport
@@ -354,7 +354,7 @@ fn run_loop(
                         continue;
                     }
                     let area_sz = Rect::new(0, 0, size.width, size.height);
-                    let show_ctx = !app.session_touched_files.is_empty();
+                    let show_ctx = !app.telemetry.session_touched_files.is_empty();
                     let (ii, ac) = compose_stack_inputs(app, size.width);
                     let lay = layout::compute_layout(area_sz, show_ctx, ii, ac);
                     match m.kind {
@@ -402,7 +402,7 @@ fn run_loop(
             welcome_accum = 0;
             app.welcome_spark_phase = !app.welcome_spark_phase;
         }
-        if app.agent_running {
+        if app.runtime.agent_running {
             spinner_accum = spinner_accum.saturating_add(POLL_TICK_MS);
             if spinner_accum >= SPINNER_MS {
                 spinner_accum = 0;
@@ -438,8 +438,8 @@ fn drain_bridge_messages(
                 captured_plan,
                 plan_saved_path,
             } => {
-                app.agent_running = false;
-                app.agent_activity_line.clear();
+                app.runtime.agent_running = false;
+                app.runtime.agent_activity_line.clear();
                 interrupt.store(false, Ordering::SeqCst);
                 let cfg = lock_config_clone(shared_config);
                 let _ = save_session_snapshot(app, &cfg, app.session_started_at, None);
@@ -484,7 +484,7 @@ fn drain_bridge_messages(
                 app.recompute_scroll_after_append(msg_h, width);
             }
             BridgeMsg::OllamaCatalog(probe) => {
-                app.ollama_probe = probe;
+                app.runtime.ollama_probe = probe;
             }
         }
     }
@@ -514,7 +514,7 @@ fn slash_env_for(
             .reload_notify
             .clone()
             .unwrap_or_else(|| Arc::new(Notify::new())),
-        index_enabled_flag: app.index_enabled,
+        index_enabled_flag: app.runtime.index_enabled,
         index_bin_path: app.project_root.join(".akmon").join("index.bin"),
         project_job_tx: project_tx,
         agent_task_tx,
@@ -523,7 +523,7 @@ fn slash_env_for(
 
 fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
     if matches!(
-        app.overlay,
+        app.overlays.overlay,
         Overlay::Help
             | Overlay::SessionList { .. }
             | Overlay::ModelPicker { .. }
@@ -534,16 +534,16 @@ fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
     ) {
         return;
     }
-    if app.slash_ac_suppress {
-        if matches!(app.overlay, Overlay::SlashAutocomplete { .. }) {
-            app.overlay = Overlay::None;
+    if app.overlays.slash_ac_suppress {
+        if matches!(app.overlays.overlay, Overlay::SlashAutocomplete { .. }) {
+            app.overlays.overlay = Overlay::None;
         }
         return;
     }
-    match slash_command_name_prefix(&app.input_buffer) {
+    match slash_command_name_prefix(&app.composer.buffer) {
         None => {
-            if matches!(app.overlay, Overlay::SlashAutocomplete { .. }) {
-                app.overlay = Overlay::None;
+            if matches!(app.overlays.overlay, Overlay::SlashAutocomplete { .. }) {
+                app.overlays.overlay = Overlay::None;
             }
         }
         Some(prefix) => {
@@ -553,18 +553,21 @@ fn update_slash_autocomplete_overlay(app: &mut TuiApp) {
                 matches.len(),
                 matches.iter().map(|c| c.name).collect::<Vec<_>>().join(",")
             );
-            if app.slash_ac_sig != sig {
-                app.slash_ac_sig = sig;
-                app.slash_ac_selected = 0;
+            if app.overlays.slash_ac_sig != sig {
+                app.overlays.slash_ac_sig = sig;
+                app.overlays.slash_ac_selected = 0;
             }
             if matches.is_empty() {
-                app.slash_ac_selected = 0;
+                app.overlays.slash_ac_selected = 0;
             } else {
-                app.slash_ac_selected = app.slash_ac_selected.min(matches.len().saturating_sub(1));
+                app.overlays.slash_ac_selected = app
+                    .overlays
+                    .slash_ac_selected
+                    .min(matches.len().saturating_sub(1));
             }
-            app.overlay = Overlay::SlashAutocomplete {
+            app.overlays.overlay = Overlay::SlashAutocomplete {
                 matches,
-                selected: app.slash_ac_selected,
+                selected: app.overlays.slash_ac_selected,
             };
         }
     }
@@ -582,7 +585,7 @@ fn model_picker_clamp(app: &mut TuiApp, visible: usize) {
         selectable,
         selected,
         scroll,
-    } = &mut app.overlay
+    } = &mut app.overlays.overlay
     else {
         return;
     };
@@ -615,7 +618,7 @@ fn session_list_clamp(app: &mut TuiApp, visible: usize) {
         sessions,
         selected,
         scroll,
-    } = &mut app.overlay
+    } = &mut app.overlays.overlay
     else {
         return;
     };
@@ -647,18 +650,20 @@ fn submit_slash_autocomplete_or_line(
     agent_task_tx: mpsc::UnboundedSender<AgentTurn>,
 ) -> Result<bool, TuiRunError> {
     let env = slash_env_for(app, shared_config, project_tx, agent_task_tx);
-    if let Overlay::SlashAutocomplete { matches, .. } = &app.overlay
+    if let Overlay::SlashAutocomplete { matches, .. } = &app.overlays.overlay
         && !matches.is_empty()
     {
-        let sel = app.slash_ac_selected.min(matches.len().saturating_sub(1));
-        app.slash_ac_selected = sel;
+        let sel = app
+            .overlays
+            .slash_ac_selected
+            .min(matches.len().saturating_sub(1));
+        app.overlays.slash_ac_selected = sel;
         let Some(cmd) = matches.get(sel) else {
             return Ok(true);
         };
         let line = format!("/{}", cmd.name);
-        app.input_buffer.clear();
-        app.input_cursor = 0;
-        app.overlay = Overlay::None;
+        app.composer.clear();
+        app.overlays.overlay = Overlay::None;
         if let Some(SlashHandled::Quit) = handle_slash_line(app, &line, &env) {
             save_session_best_effort(app, shared_config);
             return Ok(false);
@@ -666,11 +671,11 @@ fn submit_slash_autocomplete_or_line(
         app.recompute_scroll_after_append(msg_h, term_width);
         return Ok(true);
     }
-    let raw = app.input_buffer.trim();
+    let raw = app.composer.buffer.trim();
     if raw.starts_with('/') {
-        let line = std::mem::take(&mut app.input_buffer);
-        app.input_cursor = 0;
-        app.overlay = Overlay::None;
+        let line = std::mem::take(&mut app.composer.buffer);
+        app.composer.cursor = 0;
+        app.overlays.overlay = Overlay::None;
         if let Some(SlashHandled::Quit) = handle_slash_line(app, line.trim(), &env) {
             save_session_best_effort(app, shared_config);
             return Ok(false);
@@ -704,16 +709,16 @@ fn handle_key(
         app.status_flash = None;
     }
 
-    if app.awaiting_question {
+    if app.overlays.awaiting_question {
         match key.code {
             KeyCode::Enter => {
-                let answer = std::mem::take(&mut app.input_buffer);
-                app.input_cursor = 0;
+                let answer = std::mem::take(&mut app.composer.buffer);
+                app.composer.cursor = 0;
                 if let Some(tx) = app.ui_command_tx.as_ref() {
                     let _ = tx.send(UiCommand::QuestionAnswer { answer });
                 }
-                app.awaiting_question = false;
-                app.question_prompt = None;
+                app.overlays.awaiting_question = false;
+                app.overlays.question_prompt = None;
                 app.recompute_scroll_after_append(msg_h, term_width);
                 return Ok(true);
             }
@@ -723,10 +728,9 @@ fn handle_key(
                         answer: String::new(),
                     });
                 }
-                app.input_buffer.clear();
-                app.input_cursor = 0;
-                app.awaiting_question = false;
-                app.question_prompt = None;
+                app.composer.clear();
+                app.overlays.awaiting_question = false;
+                app.overlays.question_prompt = None;
                 app.recompute_scroll_after_append(msg_h, term_width);
                 return Ok(true);
             }
@@ -745,14 +749,14 @@ fn handle_key(
     }
 
     if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        if !app.awaiting_confirmation && !app.awaiting_question {
-            app.overlay = Overlay::Settings(SettingsOverlayState::open_estimates(app));
+        if !app.overlays.awaiting_confirmation && !app.overlays.awaiting_question {
+            app.overlays.overlay = Overlay::Settings(SettingsOverlayState::open_estimates(app));
         }
         return Ok(true);
     }
 
-    if app.awaiting_confirmation {
-        if app.confirmation_dialog.is_none()
+    if app.overlays.awaiting_confirmation {
+        if app.overlays.confirmation_dialog.is_none()
             && let Some(TuiMessage::Confirmation {
                 description,
                 diff_preview,
@@ -768,7 +772,7 @@ fn handle_key(
                 )
             })
         {
-            app.confirmation_dialog = Some(crate::render::dialog_from_confirmation(
+            app.overlays.confirmation_dialog = Some(crate::render::dialog_from_confirmation(
                 description,
                 diff_preview.as_deref(),
             ));
@@ -787,7 +791,7 @@ fn handle_key(
                 });
             }
         };
-        if let Some(ref mut dlg) = app.confirmation_dialog {
+        if let Some(ref mut dlg) = app.overlays.confirmation_dialog {
             match key.code {
                 KeyCode::Tab => {
                     if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -912,15 +916,15 @@ fn handle_key(
         }
     }
 
-    if matches!(app.overlay, Overlay::Help | Overlay::CostSummary) {
-        app.overlay = Overlay::None;
+    if matches!(app.overlays.overlay, Overlay::Help | Overlay::CostSummary) {
+        app.overlays.overlay = Overlay::None;
         return Ok(true);
     }
 
-    if matches!(app.overlay, Overlay::SessionList { .. }) {
+    if matches!(app.overlays.overlay, Overlay::SessionList { .. }) {
         match key.code {
             KeyCode::Esc => {
-                app.overlay = Overlay::None;
+                app.overlays.overlay = Overlay::None;
             }
             KeyCode::Enter => {
                 let env = slash_env_for(app, shared_config, project_tx.clone(), task_tx.clone());
@@ -928,7 +932,7 @@ fn handle_key(
                 app.recompute_scroll_after_append(msg_h, term_width);
             }
             KeyCode::Up => {
-                if let Overlay::SessionList { selected, .. } = &mut app.overlay
+                if let Overlay::SessionList { selected, .. } = &mut app.overlays.overlay
                     && *selected > 0
                 {
                     *selected -= 1;
@@ -938,7 +942,7 @@ fn handle_key(
             KeyCode::Down => {
                 if let Overlay::SessionList {
                     sessions, selected, ..
-                } = &mut app.overlay
+                } = &mut app.overlays.overlay
                     && *selected + 1 < sessions.len()
                 {
                     *selected += 1;
@@ -950,10 +954,10 @@ fn handle_key(
         return Ok(true);
     }
 
-    if matches!(app.overlay, Overlay::ModelPicker { .. }) {
+    if matches!(app.overlays.overlay, Overlay::ModelPicker { .. }) {
         match key.code {
             KeyCode::Esc => {
-                app.overlay = Overlay::None;
+                app.overlays.overlay = Overlay::None;
             }
             KeyCode::Enter => {
                 let env = slash_env_for(app, shared_config, project_tx.clone(), task_tx.clone());
@@ -961,7 +965,7 @@ fn handle_key(
                 app.recompute_scroll_after_append(msg_h, term_width);
             }
             KeyCode::Up => {
-                if let Overlay::ModelPicker { selected, .. } = &mut app.overlay
+                if let Overlay::ModelPicker { selected, .. } = &mut app.overlays.overlay
                     && *selected > 0
                 {
                     *selected -= 1;
@@ -973,7 +977,7 @@ fn handle_key(
                     selectable,
                     selected,
                     ..
-                } = &mut app.overlay
+                } = &mut app.overlays.overlay
                     && *selected + 1 < selectable.len()
                 {
                     *selected += 1;
@@ -985,13 +989,13 @@ fn handle_key(
         return Ok(true);
     }
 
-    if let Overlay::Settings(ref mut st) = app.overlay {
+    if let Overlay::Settings(ref mut st) = app.overlays.overlay {
         if st.tab != ConfigTab::Estimates {
             st.estimate.editing = false;
         }
         match key.code {
             KeyCode::Esc => {
-                app.overlay = Overlay::None;
+                app.overlays.overlay = Overlay::None;
             }
             KeyCode::Tab => {
                 if !st.estimate.editing {
@@ -1034,14 +1038,14 @@ fn handle_key(
                             .reload_notify
                             .clone()
                             .unwrap_or_else(|| Arc::new(Notify::new())),
-                        index_enabled_flag: app.index_enabled,
+                        index_enabled_flag: app.runtime.index_enabled,
                         index_bin_path: app.project_root.join(".akmon").join("index.bin"),
                         project_job_tx: project_tx.clone(),
                         agent_task_tx: task_tx.clone(),
                     };
                     commit_model_estimate_editor(&mut app.model_estimates, &mut st.estimate, &env);
                 } else if sel == ESTIMATE_ROW_CANCEL {
-                    app.overlay = Overlay::None;
+                    app.overlays.overlay = Overlay::None;
                 }
             }
             KeyCode::Backspace if st.tab == ConfigTab::Estimates && st.estimate.editing => {
@@ -1060,12 +1064,12 @@ fn handle_key(
     }
 
     if let Overlay::AuditLog { lines, scroll } | Overlay::ScrollText { lines, scroll, .. } =
-        &mut app.overlay
+        &mut app.overlays.overlay
     {
         let page = msg_h.saturating_sub(6).max(3);
         match key.code {
             KeyCode::Esc => {
-                app.overlay = Overlay::None;
+                app.overlays.overlay = Overlay::None;
             }
             KeyCode::Up => {
                 *scroll = scroll.saturating_sub(1);
@@ -1088,38 +1092,38 @@ fn handle_key(
         return Ok(true);
     }
 
-    if matches!(app.overlay, Overlay::SlashAutocomplete { .. }) {
+    if matches!(app.overlays.overlay, Overlay::SlashAutocomplete { .. }) {
         match key.code {
             KeyCode::Esc => {
-                app.slash_ac_suppress = true;
-                app.overlay = Overlay::None;
+                app.overlays.slash_ac_suppress = true;
+                app.overlays.overlay = Overlay::None;
                 return Ok(true);
             }
             KeyCode::Up => {
-                if let Overlay::SlashAutocomplete { matches, .. } = &app.overlay {
+                if let Overlay::SlashAutocomplete { matches, .. } = &app.overlays.overlay {
                     if matches.is_empty() {
-                        app.slash_ac_selected = 0;
-                    } else if app.slash_ac_selected == 0 {
-                        app.slash_ac_selected = matches.len() - 1;
+                        app.overlays.slash_ac_selected = 0;
+                    } else if app.overlays.slash_ac_selected == 0 {
+                        app.overlays.slash_ac_selected = matches.len() - 1;
                     } else {
-                        app.slash_ac_selected -= 1;
+                        app.overlays.slash_ac_selected -= 1;
                     }
                 }
-                if let Overlay::SlashAutocomplete { selected, .. } = &mut app.overlay {
-                    *selected = app.slash_ac_selected;
+                if let Overlay::SlashAutocomplete { selected, .. } = &mut app.overlays.overlay {
+                    *selected = app.overlays.slash_ac_selected;
                 }
                 return Ok(true);
             }
             KeyCode::Down => {
-                if let Overlay::SlashAutocomplete { matches, .. } = &app.overlay {
-                    if matches.is_empty() || app.slash_ac_selected + 1 >= matches.len() {
-                        app.slash_ac_selected = 0;
+                if let Overlay::SlashAutocomplete { matches, .. } = &app.overlays.overlay {
+                    if matches.is_empty() || app.overlays.slash_ac_selected + 1 >= matches.len() {
+                        app.overlays.slash_ac_selected = 0;
                     } else {
-                        app.slash_ac_selected += 1;
+                        app.overlays.slash_ac_selected += 1;
                     }
                 }
-                if let Overlay::SlashAutocomplete { selected, .. } = &mut app.overlay {
-                    *selected = app.slash_ac_selected;
+                if let Overlay::SlashAutocomplete { selected, .. } = &mut app.overlays.overlay {
+                    *selected = app.overlays.slash_ac_selected;
                 }
                 return Ok(true);
             }
@@ -1143,24 +1147,24 @@ fn handle_key(
             Ok(false)
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.agent_running {
+            if app.runtime.agent_running {
                 if let Some(tx) = app.ui_command_tx.as_ref() {
                     let _ = tx.send(UiCommand::Interrupt);
                 }
                 app.push_system_info("─ interrupted ───────────────────────────────────".into());
-                app.agent_running = false;
-                app.agent_activity_line.clear();
+                app.runtime.agent_running = false;
+                app.runtime.agent_activity_line.clear();
                 app.recompute_scroll_after_append(msg_h, term_width);
-            } else if !app.input_buffer.is_empty() {
-                app.input_buffer.clear();
-                app.input_cursor = 0;
+            } else if !app.composer.buffer.is_empty() {
+                app.composer.buffer.clear();
+                app.composer.cursor = 0;
             } else {
                 app.status_flash = Some("use /exit to quit".into());
             }
             Ok(true)
         }
-        KeyCode::Char('q') if key.modifiers.is_empty() && app.input_buffer.is_empty() => {
-            if !app.agent_running {
+        KeyCode::Char('q') if key.modifiers.is_empty() && app.composer.buffer.is_empty() => {
+            if !app.runtime.agent_running {
                 save_session_best_effort(app, shared_config);
                 return Ok(false);
             }
@@ -1173,17 +1177,17 @@ fn handle_key(
             Ok(true)
         }
         KeyCode::Left => {
-            app.input_cursor_left();
+            app.composer.cursor_left();
             app.recompute_scroll_after_append(msg_h, term_width);
             Ok(true)
         }
         KeyCode::Right => {
-            app.input_cursor_right();
+            app.composer.cursor_right();
             app.recompute_scroll_after_append(msg_h, term_width);
             Ok(true)
         }
         KeyCode::Up => {
-            if app.input_buffer.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) {
+            if app.composer.buffer.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) {
                 let d = if key.modifiers.contains(KeyModifiers::CONTROL) {
                     3
                 } else {
@@ -1194,7 +1198,7 @@ fn handle_key(
             Ok(true)
         }
         KeyCode::Down => {
-            if app.input_buffer.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) {
+            if app.composer.buffer.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) {
                 let d = if key.modifiers.contains(KeyModifiers::CONTROL) {
                     3
                 } else {
@@ -1240,7 +1244,7 @@ fn handle_key(
             )? {
                 return Ok(false);
             }
-            if !app.agent_running
+            if !app.runtime.agent_running
                 && let Some(task) = app.submit_user_message()
             {
                 interrupt.store(false, Ordering::SeqCst);
@@ -1251,8 +1255,8 @@ fn handle_key(
                     plan_only,
                     architect,
                 });
-                app.agent_running = true;
-                app.agent_activity_line = "Working — contacting model…".into();
+                app.runtime.agent_running = true;
+                app.runtime.agent_activity_line = "Working — contacting model…".into();
                 app.recompute_scroll_after_append(msg_h, term_width);
             }
             Ok(true)
@@ -1295,8 +1299,8 @@ fn show_help(app: &mut TuiApp) {
 
 fn status_bar_parts(app: &TuiApp) -> StatusParts {
     let context_pct = context_usage_percent(
-        app.total_input_tokens,
-        app.total_cache_read_tokens,
+        app.telemetry.total_input_tokens,
+        app.telemetry.total_cache_read_tokens,
         &app.model_name,
         &app.model_estimates,
     );
@@ -1309,29 +1313,29 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
             sid = format!("{t} · {sid}");
         }
     }
-    let cache_style = if app.total_cache_read_tokens > 0 {
+    let cache_style = if app.telemetry.total_cache_read_tokens > 0 {
         Style::default().fg(OK_GREEN)
     } else {
         Style::default().fg(FG_MUTED)
     };
 
-    let cost_line = if app.free_local_inference {
+    let cost_line = if app.runtime.free_local_inference {
         Some(CostFrag {
             text: "free".into(),
             style: Style::default().fg(FG_MUTED),
         })
     } else if let Some(est) = estimate_cost_usd_with_rows(
-        u64::from(app.total_input_tokens),
-        u64::from(app.total_output_tokens),
-        u64::from(app.total_cache_read_tokens),
+        u64::from(app.telemetry.total_input_tokens),
+        u64::from(app.telemetry.total_output_tokens),
+        u64::from(app.telemetry.total_cache_read_tokens),
         &app.model_name,
-        app.uses_openrouter,
-        app.free_local_inference,
+        app.runtime.uses_openrouter,
+        app.runtime.free_local_inference,
         &app.model_estimates,
     ) {
         let (text, style) = session_cost_style(est);
         Some(CostFrag { text, style })
-    } else if app.total_input_tokens > 0 || app.total_output_tokens > 0 {
+    } else if app.telemetry.total_input_tokens > 0 || app.telemetry.total_output_tokens > 0 {
         Some(CostFrag {
             text: "~$? est".into(),
             style: Style::default().fg(FG_MUTED),
@@ -1342,10 +1346,10 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
 
     let mut hint = if let Some(ref s) = app.status_flash {
         s.clone()
-    } else if app.awaiting_confirmation {
+    } else if app.overlays.awaiting_confirmation {
         "Permission: Tab · Enter · y once · s session · p all writes · r shell prefix · n/Esc deny"
             .into()
-    } else if app.agent_running {
+    } else if app.runtime.agent_running {
         if let AgentDisplayState::Streaming { chars_received } = app.agent_display {
             format!("streaming {chars_received} chars")
         } else {
@@ -1357,19 +1361,20 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
         "Ctrl+? help · Ctrl+↑↓ history".into()
     };
 
-    if app.stream_cursor_visible && matches!(app.agent_display, AgentDisplayState::Streaming { .. })
+    if app.runtime.stream_cursor_visible
+        && matches!(app.agent_display, AgentDisplayState::Streaming { .. })
     {
         hint.push_str(" ▊");
     }
 
     StatusParts {
         session_prefix: sid,
-        input_tokens: app.total_input_tokens,
-        output_tokens: app.total_output_tokens,
+        input_tokens: app.telemetry.total_input_tokens,
+        output_tokens: app.telemetry.total_output_tokens,
         context_bar,
         context_bar_style: Style::default().fg(context_color),
-        cache: app.total_cache_read_tokens,
-        cleared: app.total_microcompact_cleared,
+        cache: app.telemetry.total_cache_read_tokens,
+        cleared: app.telemetry.total_microcompact_cleared,
         cache_style,
         cost_line,
         hint,
@@ -1378,7 +1383,7 @@ fn status_bar_parts(app: &TuiApp) -> StatusParts {
 
 fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     app.sync_agent_display();
-    let show_ctx = !app.session_touched_files.is_empty();
+    let show_ctx = !app.telemetry.session_touched_files.is_empty();
     let (input_inner, ac_h) = compose_stack_inputs(app, area.width);
     app.terminal_size = area;
     app.layout_rects = layout::compute_layout(area, show_ctx, input_inner, ac_h);
@@ -1397,15 +1402,15 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
         app.version.as_str(),
         &app.project_root,
         app.model_name.as_str(),
-        app.provider_display_name.as_str(),
+        app.runtime.provider_display_name.as_str(),
     );
 
     let vp = clip(rects.viewport);
     let flat = flatten_transcript(
         &app.messages,
         vp.width,
-        app.stream_cursor_visible,
-        app.light_body_text,
+        app.runtime.stream_cursor_visible,
+        app.runtime.light_body_text,
     );
     let viewport_h = vp.height as usize;
     let max_off = flat.len().saturating_sub(viewport_h);
@@ -1424,8 +1429,9 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
         Vec::new()
     };
 
-    let show_welcome =
-        app.messages.is_empty() && !app.awaiting_confirmation && !app.awaiting_question;
+    let show_welcome = app.messages.is_empty()
+        && !app.overlays.awaiting_confirmation
+        && !app.overlays.awaiting_question;
     let first_session_ever = saved_sessions_directory_empty();
     paint_message_viewport(
         f,
@@ -1443,20 +1449,20 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
 
     draw_message_overlays(f, app, vp);
 
-    if app.awaiting_confirmation {
+    if app.overlays.awaiting_confirmation {
         draw_transcript_dim_layer(f, vp);
-        if let Some(ref dlg) = app.confirmation_dialog {
+        if let Some(ref dlg) = app.overlays.confirmation_dialog {
             render_confirmation_overlay(f, vp, dlg);
         }
-    } else if app.awaiting_question {
+    } else if app.overlays.awaiting_question {
         draw_transcript_dim_layer(f, vp);
-        if let Some(ref q) = app.question_prompt {
+        if let Some(ref q) = app.overlays.question_prompt {
             render_question_overlay(
                 f,
                 vp,
                 &q.question,
                 &q.suggestions,
-                app.input_buffer.as_str(),
+                app.composer.buffer.as_str(),
             );
         }
     }
@@ -1473,7 +1479,7 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
     }
 
     let inp = clip(rects.input);
-    if app.awaiting_confirmation {
+    if app.overlays.awaiting_confirmation {
         app.input_body_inner = None;
         f.render_widget(Clear, inp);
         let hint = Paragraph::new(Line::from(vec![Span::styled(
@@ -1486,7 +1492,7 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
                 .border_style(Style::default().fg(WARN)),
         );
         f.render_widget(hint, inp);
-    } else if app.awaiting_question {
+    } else if app.overlays.awaiting_question {
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(WARN))
@@ -1502,7 +1508,7 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
                 .wrap(Wrap { trim: false }),
             inp,
         );
-    } else if app.agent_running {
+    } else if app.runtime.agent_running {
         app.input_body_inner = None;
         let thinking = Paragraph::new(Line::from(vec![
             Span::styled(
@@ -1514,7 +1520,7 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  {}", app.agent_activity_line),
+                format!("  {}", app.runtime.agent_activity_line),
                 Style::default().fg(FG_MUTED),
             ),
         ]))
@@ -1546,7 +1552,9 @@ fn draw_frame(f: &mut ratatui::Frame<'_>, app: &mut TuiApp, area: Rect) {
 }
 
 fn handle_input_left_click(app: &mut TuiApp, column: u16, row: u16) {
-    if app.awaiting_confirmation || (app.agent_running && !app.awaiting_question) {
+    if app.overlays.awaiting_confirmation
+        || (app.runtime.agent_running && !app.overlays.awaiting_question)
+    {
         return;
     }
     let Some(inner) = app.input_body_inner else {
@@ -1561,8 +1569,8 @@ fn handle_input_left_click(app: &mut TuiApp, column: u16, row: u16) {
     let rel_col = (column - inner.x) as usize;
     let rel_row = (row - inner.y) as usize;
     let b =
-        crate::render::map_input_click_wrapped(&app.input_buffer, inner.width, rel_row, rel_col);
-    app.input_cursor = crate::render::snap_utf8_cursor(&app.input_buffer, b);
+        crate::render::map_input_click_wrapped(&app.composer.buffer, inner.width, rel_row, rel_col);
+    app.composer.cursor = crate::render::snap_utf8_cursor(&app.composer.buffer, b);
 }
 
 fn session_cost_style(cost: f64) -> (String, Style) {
@@ -1581,18 +1589,18 @@ fn session_cost_style(cost: f64) -> (String, Style) {
 }
 
 fn build_context_line(app: &TuiApp, total_width: u16) -> Option<Line<'static>> {
-    if app.session_touched_files.is_empty() {
+    if app.telemetry.session_touched_files.is_empty() {
         return None;
     }
     let mut parts: Vec<String> = Vec::new();
-    for p in app.session_touched_files.iter().take(2) {
+    for p in app.telemetry.session_touched_files.iter().take(2) {
         let name = Path::new(p)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(p.as_str());
         parts.push(name.to_string());
     }
-    let extra = app.session_touched_files.len().saturating_sub(2);
+    let extra = app.telemetry.session_touched_files.len().saturating_sub(2);
     let mut text = format!("↳ context: {}", parts.join("   "));
     if extra > 0 {
         text.push_str(&format!("   +{extra} more"));
@@ -1656,18 +1664,18 @@ fn print_exit_summary(app: &TuiApp) {
     let work_dir = app.project_root.to_string_lossy();
     let work_short = exit_shorten_path(&work_dir);
 
-    let in_t = u64::from(app.total_input_tokens);
-    let out_t = u64::from(app.total_output_tokens);
-    let cache = u64::from(app.total_cache_read_tokens);
-    let micro = u64::from(app.total_microcompact_cleared);
+    let in_t = u64::from(app.telemetry.total_input_tokens);
+    let out_t = u64::from(app.telemetry.total_output_tokens);
+    let cache = u64::from(app.telemetry.total_cache_read_tokens);
+    let micro = u64::from(app.telemetry.total_microcompact_cleared);
 
     let total_cost_usd = estimate_cost_usd_with_rows(
         in_t,
         out_t,
         cache,
         &app.model_name,
-        app.uses_openrouter,
-        app.free_local_inference,
+        app.runtime.uses_openrouter,
+        app.runtime.free_local_inference,
         &app.model_estimates,
     )
     .unwrap_or(0.0);
@@ -1690,18 +1698,25 @@ fn print_exit_summary(app: &TuiApp) {
     println!();
 
     println!("  {bold}Activity{reset}");
-    println!("  {:<22} {}", "Messages", app.message_count);
-    println!("  {:<22} {}", "Tool calls", app.total_tool_calls);
+    println!("  {:<22} {}", "Messages", app.telemetry.message_count);
+    println!("  {:<22} {}", "Tool calls", app.telemetry.total_tool_calls);
     println!(
         "  {:<22} {green}✓ succeeded {}{}",
-        " ", app.successful_tool_calls, reset
+        " ", app.telemetry.successful_tool_calls, reset
     );
-    if app.failed_tool_calls > 0 {
-        println!("    \x1b[31m✗ failed\x1b[0m  {}", app.failed_tool_calls);
+    if app.telemetry.failed_tool_calls > 0 {
+        println!(
+            "    \x1b[31m✗ failed\x1b[0m  {}",
+            app.telemetry.failed_tool_calls
+        );
     }
-    if !app.files_written.is_empty() {
-        println!("  {:<22} {}", "Files written", app.files_written.len());
-        for f in &app.files_written {
+    if !app.telemetry.files_written.is_empty() {
+        println!(
+            "  {:<22} {}",
+            "Files written",
+            app.telemetry.files_written.len()
+        );
+        for f in &app.telemetry.files_written {
             let p = exit_shorten_path(f);
             println!("  {dim}{:<22} → {}{reset}", "", p);
         }
@@ -1832,8 +1847,8 @@ fn span_char_under_caret(ch: char) -> Span<'static> {
 }
 
 fn build_input_widget(app: &TuiApp) -> Text<'static> {
-    let buf = &app.input_buffer;
-    let cur = app.input_cursor.min(buf.len());
+    let buf = &app.composer.buffer;
+    let cur = app.composer.cursor.min(buf.len());
     let mut line_spans: Vec<Span<'static>> = vec![Span::styled(
         "> ",
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -1922,28 +1937,28 @@ mod input_mouse_tests {
     #[test]
     fn mouse_click_column_5_row_0_cursor_3() {
         let mut app = TuiApp::new(cfg());
-        app.input_buffer = "abcdef".into();
+        app.composer.buffer = "abcdef".into();
         app.input_body_inner = Some(Rect::new(0, 0, 80, 8));
         handle_input_left_click(&mut app, 5, 0);
-        assert_eq!(app.input_cursor, 3);
+        assert_eq!(app.composer.cursor, 3);
     }
 
     #[test]
     fn mouse_click_before_prefix_cursor_0() {
         let mut app = TuiApp::new(cfg());
-        app.input_buffer = "abcdef".into();
+        app.composer.buffer = "abcdef".into();
         app.input_body_inner = Some(Rect::new(0, 0, 80, 8));
         handle_input_left_click(&mut app, 0, 0);
-        assert_eq!(app.input_cursor, 0);
+        assert_eq!(app.composer.cursor, 0);
     }
 
     #[test]
     fn mouse_click_past_line_end_clamped() {
         let mut app = TuiApp::new(cfg());
-        app.input_buffer = "ab".into();
+        app.composer.buffer = "ab".into();
         app.input_body_inner = Some(Rect::new(0, 0, 80, 8));
         handle_input_left_click(&mut app, 10, 0);
-        assert_eq!(app.input_cursor, 2);
+        assert_eq!(app.composer.cursor, 2);
     }
 
     #[test]
@@ -1971,7 +1986,8 @@ mod input_mouse_tests {
         use super::build_context_line;
 
         let mut app = TuiApp::new(cfg());
-        app.session_touched_files = vec!["src/x.rs".into(), "src/y.rs".into(), "src/z.rs".into()];
+        app.telemetry.session_touched_files =
+            vec!["src/x.rs".into(), "src/y.rs".into(), "src/z.rs".into()];
         let line = build_context_line(&app, 120).expect("line");
         let flat: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(flat.contains("+1 more"), "{flat}");

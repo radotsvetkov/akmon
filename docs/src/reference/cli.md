@@ -106,6 +106,28 @@ Exit codes:
 - `0`: command succeeded (with or without configured policy sources)
 - `1`: merge/load error (invalid pack, ambiguous local policy, parse failure)
 
+### `akmon doctor providers`
+
+Run provider preflight diagnostics with actionable remediation hints.
+
+```bash
+akmon doctor providers
+akmon --output json doctor providers
+```
+
+Checks include:
+
+- key/env presence (masked),
+- endpoint format sanity,
+- endpoint reachability (where applicable),
+- auth mode mismatch hints,
+- model hint availability probes where feasible.
+
+Exit codes:
+
+- `0`: active/required provider health checks passed
+- `1`: critical misconfiguration or unreachable required provider
+
 ## Headless JSON output shape
 
 Example (`akmon --output json --task "..."`):

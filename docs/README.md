@@ -13,6 +13,14 @@ mdbook serve
 # Open http://localhost:3000
 ```
 
+## Docs quality checks
+
+Run the same docs checks CI runs:
+
+```bash
+bash scripts/docs/run_all.sh
+```
+
 ## Adding a page
 
 1. Create a `.md` file in the appropriate `docs/src/` subdirectory

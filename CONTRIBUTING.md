@@ -57,6 +57,25 @@ If you touched no-default-features behavior, also run:
 cargo build --release --no-default-features
 ```
 
+## Docs checks
+
+When your PR touches documentation, run the same deterministic docs checks used by CI:
+
+```bash
+# Prerequisite: mdbook installed and available on PATH
+bash scripts/docs/run_all.sh
+```
+
+You can also run checks individually:
+
+```bash
+mdbook build docs
+python3 scripts/docs/check_markdown_links.py
+bash scripts/docs/check_cli_smoke.sh
+python3 scripts/docs/check_json_snippets.py
+bash scripts/docs/test_fixtures.sh
+```
+
 ## Coding standards
 
 - Match existing crate boundaries and style.
@@ -65,6 +84,8 @@ cargo build --release --no-default-features
 - Add rustdoc to new public APIs.
 - Do not use `unwrap()` in library code unless failure is truly impossible and documented.
 - Keep user-facing errors actionable.
+
+For TUI changes, place state-transition logic in focused `crates/akmon-tui/src/state/*` modules and keep `TuiApp` as orchestration/composition glue.
 
 ## Commit and PR guidelines
 

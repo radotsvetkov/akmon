@@ -12,7 +12,9 @@ pub enum ModelError {
         message: String,
     },
     /// No first token (or first chunk) arrived before [`crate::CompletionConfig::first_token_deadline_ms`].
-    #[error("first token deadline exceeded")]
+    #[error(
+        "first token deadline exceeded. For local/Ollama models: check `ollama ps`, warm the model with `ollama run <model>`, or retry with a smaller/faster model"
+    )]
     FirstTokenTimeout,
     /// The server asked the client to back off.
     #[error("rate limited")]
@@ -24,7 +26,9 @@ pub enum ModelError {
     #[error("authentication failed")]
     AuthError,
     /// The prompt could not fit in the model's context window.
-    #[error("context window exceeded")]
+    #[error(
+        "context window exceeded. Reduce context with `/clear`, or switch to a model with a larger context window"
+    )]
     ContextWindowExceeded,
     /// The stream ended early, the connection dropped mid-response, or a line could not be parsed.
     #[error("stream interrupted: {message}")]

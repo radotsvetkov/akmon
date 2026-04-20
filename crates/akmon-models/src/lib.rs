@@ -30,8 +30,9 @@ pub use max_tokens::{max_tokens_for_model, max_tokens_for_openai_style_model};
 pub use message::{Message, MessageRole};
 pub use ollama::OllamaBackend;
 pub use ollama_models::{
-    OllamaModel, OllamaProbe, fetch_ollama_models, ollama_first_token_deadline_ms,
-    ollama_stream_idle_timeout_secs, probe_ollama,
+    OllamaCapabilityHint, OllamaModel, OllamaProbe, fetch_ollama_models,
+    infer_ollama_capability_hint, ollama_first_token_deadline_ms, ollama_stream_idle_timeout_secs,
+    probe_ollama,
 };
 pub use openai_compat::{OpenAiCompatBackend, infer_context_window_tokens};
 pub use provider_error::{ProviderError, ProviderResult};

@@ -20,9 +20,9 @@ use crate::LlmProvider;
 use crate::config::CompletionConfig;
 use crate::error::ModelError;
 use crate::message::{Message, MessageRole};
-use crate::ollama_stream_idle_timeout_secs;
 use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent};
 use crate::tool_def::ToolDefinition;
+use crate::{infer_ollama_capability_hint, probe_ollama};
 
 /// JSON line from Ollama's NDJSON chat stream (or the single JSON body when `stream: false`).
 #[derive(Debug, serde::Deserialize)]
@@ -181,11 +181,14 @@ impl OllamaBackend {
             base_url.pop();
         }
         let client = build_http_client();
+        let model = model.into();
+        let context_window_tokens =
+            infer_ollama_capability_hint(&model, None).context_window_tokens_hint;
         Self {
             base_url,
-            model: model.into(),
+            model,
             client,
-            context_window_tokens: 8192,
+            context_window_tokens,
         }
     }
 
@@ -495,9 +498,77 @@ async fn ollama_model_missing_error(base_url: &str, model_name: &str) -> ModelEr
         hint: format!(
             "Model '{model_name}' not found in Ollama.\n\
 To install it: ollama pull {model_name}\n\n\
+If startup looks stuck: ollama ps\n\
+To switch quickly in Akmon: /model qwen2.5-coder:7b\n\n\
 {available_list}",
         ),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OllamaRunMode {
+    Streaming,
+    Buffered,
+}
+
+fn status_hint_schedule_for_mode(mode: OllamaRunMode, model: &str) -> Vec<(Duration, String)> {
+    let _ = mode;
+    vec![
+        (Duration::from_secs(3), format!("⟳ Loading {model}…")),
+        (
+            Duration::from_secs(10),
+            "⟳ Loading model into RAM… first request is slow".into(),
+        ),
+        (
+            Duration::from_secs(25),
+            "⟳ Still loading… M-series loads to unified RAM, subsequent requests will be fast"
+                .into(),
+        ),
+    ]
+}
+
+fn spawn_status_hint_scheduler(
+    mode: OllamaRunMode,
+    tx: mpsc::Sender<Result<StreamEvent, ModelError>>,
+    model: String,
+    first_token_received: Arc<AtomicBool>,
+) {
+    let schedule = status_hint_schedule_for_mode(mode, &model);
+    tokio::spawn(async move {
+        let mut elapsed = Duration::from_secs(0);
+        for (target_delay, message) in schedule {
+            let sleep_for = target_delay.saturating_sub(elapsed);
+            tokio::time::sleep(sleep_for).await;
+            elapsed = target_delay;
+            if first_token_received.load(Ordering::SeqCst) {
+                break;
+            }
+            let _ = tx.send(Ok(StreamEvent::StatusHint { message })).await;
+        }
+    });
+}
+
+fn idle_timeout_remediation_message(model: &str, idle_timeout_secs: u64) -> String {
+    format!(
+        "Ollama stream timeout: no response for {idle_timeout_secs} seconds (model={model}). \
+Try: ollama ps; if unloaded run `ollama run {model}` first; or switch model with `/model qwen2.5-coder:7b`."
+    )
+}
+
+fn no_output_remediation_message(
+    context_window_hint_tokens: usize,
+    tools_requested: bool,
+) -> String {
+    let tool_hint = if tools_requested {
+        " If tools are required, pick a tool-capable local model (for example qwen2.5-coder:7b)."
+    } else {
+        ""
+    };
+    format!(
+        "Model produced no output. This usually means cold-start stall or context overflow \
+(hinted context window ~{context_window_hint_tokens} tokens). Try: /clear, then retry; check `ollama ps`; \
+or switch models with `/model qwen2.5-coder:7b`.{tool_hint}"
+    )
 }
 
 async fn run_streaming(
@@ -558,42 +629,48 @@ async fn run_streaming(
         }))
         .await;
 
+    let probe = tokio::time::timeout(
+        Duration::from_millis(1200),
+        probe_ollama(backend.base_url.as_str()),
+    )
+    .await
+    .ok();
+    let capability_hint = infer_ollama_capability_hint(backend.model.as_str(), probe.as_ref());
+    if !capability_hint.likely_tool_call_support && !config.tools.is_empty() {
+        let _ = tx
+            .send(Ok(StreamEvent::StatusHint {
+                message: "⟳ This local model may ignore tool calls. If it stalls, switch to qwen2.5-coder:7b.".into(),
+            }))
+            .await;
+    }
+
     let first_token_received = Arc::new(AtomicBool::new(false));
-    let tx_hint = tx.clone();
-    let model_hint = backend.model.clone();
-    let first_hint = Arc::clone(&first_token_received);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        if !first_hint.load(Ordering::SeqCst) {
-            let _ = tx_hint
-                .send(Ok(StreamEvent::StatusHint {
-                    message: format!("⟳ Loading {model_hint}…"),
-                }))
-                .await;
-        }
-        tokio::time::sleep(Duration::from_secs(7)).await;
-        if !first_hint.load(Ordering::SeqCst) {
-            let _ = tx_hint
-                .send(Ok(StreamEvent::StatusHint {
-                    message: "⟳ Loading model into RAM… first request is slow".into(),
-                }))
-                .await;
-        }
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        if !first_hint.load(Ordering::SeqCst) {
-            let _ = tx_hint
-                .send(Ok(StreamEvent::StatusHint {
-                    message: "⟳ Still loading… M-series loads to unified RAM, subsequent requests will be fast".into(),
-                }))
-                .await;
-        }
-    });
+    spawn_status_hint_scheduler(
+        OllamaRunMode::Streaming,
+        tx.clone(),
+        backend.model.clone(),
+        Arc::clone(&first_token_received),
+    );
 
     let byte_stream = resp.bytes_stream();
-    let deadline = Duration::from_millis(config.first_token_deadline_ms);
+    let first_token_deadline_ms = config
+        .first_token_deadline_ms
+        .max(capability_hint.first_token_deadline_ms);
+    let deadline = Duration::from_millis(first_token_deadline_ms);
 
     let (first_line, mut lines) = match read_first_line_with_timeout(byte_stream, deadline).await {
         Ok(x) => x,
+        Err(ModelError::StreamInterrupted { message }) if message == "empty response stream" => {
+            let _ = tx
+                .send(Err(ModelError::StreamInterrupted {
+                    message: no_output_remediation_message(
+                        capability_hint.context_window_tokens_hint,
+                        !config.tools.is_empty(),
+                    ),
+                }))
+                .await;
+            return;
+        }
         Err(e) => {
             let _ = tx.send(Err(e)).await;
             return;
@@ -610,14 +687,14 @@ async fn run_streaming(
             first = false;
             first_line.clone()
         } else {
-            let idle_timeout = ollama_stream_idle_timeout_secs(backend.model.as_str());
+            let idle_timeout = capability_hint.idle_stream_timeout_secs;
             match tokio::time::timeout(Duration::from_secs(idle_timeout), lines.next()).await {
                 Err(_) => {
                     let _ = tx
                         .send(Err(ModelError::BackendUnavailable {
-                            message: format!(
-                                "Ollama stream timeout: no response for {idle_timeout} seconds. \
-                                      The model may have crashed. Try: ollama ps"
+                            message: idle_timeout_remediation_message(
+                                backend.model.as_str(),
+                                idle_timeout,
                             ),
                         }))
                         .await;
@@ -656,7 +733,10 @@ async fn run_streaming(
     if !received_content && !received_tool_calls {
         let _ = tx
             .send(Err(ModelError::StreamInterrupted {
-                message: "Model produced no output. The context may be too large for this model. Try /clear to reset context or use a model with a larger context window.".to_string(),
+                message: no_output_remediation_message(
+                    capability_hint.context_window_tokens_hint,
+                    !config.tools.is_empty(),
+                ),
             }))
             .await;
         return;
@@ -691,37 +771,32 @@ async fn run_buffered(
         },
     };
 
-    let deadline = Duration::from_millis(config.first_token_deadline_ms);
+    let probe = tokio::time::timeout(
+        Duration::from_millis(1200),
+        probe_ollama(backend.base_url.as_str()),
+    )
+    .await
+    .ok();
+    let capability_hint = infer_ollama_capability_hint(backend.model.as_str(), probe.as_ref());
+    let first_token_deadline_ms = config
+        .first_token_deadline_ms
+        .max(capability_hint.first_token_deadline_ms);
+    let deadline = Duration::from_millis(first_token_deadline_ms);
+
     let first_token_received = Arc::new(AtomicBool::new(false));
-    let tx_hint = tx.clone();
-    let model_hint = backend.model.clone();
-    let first_hint = Arc::clone(&first_token_received);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        if !first_hint.load(Ordering::SeqCst) {
-            let _ = tx_hint
-                .send(Ok(StreamEvent::StatusHint {
-                    message: format!("⟳ Loading {model_hint}…"),
-                }))
-                .await;
-        }
-        tokio::time::sleep(Duration::from_secs(7)).await;
-        if !first_hint.load(Ordering::SeqCst) {
-            let _ = tx_hint
-                .send(Ok(StreamEvent::StatusHint {
-                    message: "⟳ Loading model into RAM… first request is slow".into(),
-                }))
-                .await;
-        }
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        if !first_hint.load(Ordering::SeqCst) {
-            let _ = tx_hint
-                .send(Ok(StreamEvent::StatusHint {
-                    message: "⟳ Still loading… M-series loads to unified RAM, subsequent requests will be fast".into(),
-                }))
-                .await;
-        }
-    });
+    if !capability_hint.likely_tool_call_support && !config.tools.is_empty() {
+        let _ = tx
+            .send(Ok(StreamEvent::StatusHint {
+                message: "⟳ This local model may ignore tool calls. If it stalls, switch to qwen2.5-coder:7b.".into(),
+            }))
+            .await;
+    }
+    spawn_status_hint_scheduler(
+        OllamaRunMode::Buffered,
+        tx.clone(),
+        backend.model.clone(),
+        Arc::clone(&first_token_received),
+    );
 
     let tx_ok = tx.clone();
     let collect = async {
@@ -835,7 +910,10 @@ async fn run_buffered(
     if !received_content && !received_tool_calls {
         let _ = tx
             .send(Err(ModelError::StreamInterrupted {
-                message: "Model produced no output. The context may be too large for this model. Try /clear to reset context or use a model with a larger context window.".to_string(),
+                message: no_output_remediation_message(
+                    capability_hint.context_window_tokens_hint,
+                    !config.tools.is_empty(),
+                ),
             }))
             .await;
         return;
@@ -885,11 +963,40 @@ impl LlmProvider for OllamaBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream;
 
     #[test]
     fn new_trims_slash_and_stores_fields() {
         let b = OllamaBackend::new("http://127.0.0.1:11434///", "llama3.2");
         assert_eq!(b.base_url(), "http://127.0.0.1:11434");
         assert_eq!(b.model(), "llama3.2");
+    }
+
+    #[test]
+    fn status_hint_schedule_is_shared_for_stream_and_buffered() {
+        let stream = status_hint_schedule_for_mode(OllamaRunMode::Streaming, "qwen2.5-coder:7b");
+        let buffered = status_hint_schedule_for_mode(OllamaRunMode::Buffered, "qwen2.5-coder:7b");
+        assert_eq!(stream, buffered);
+        assert_eq!(stream.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn first_token_timeout_returns_expected_error_and_message() {
+        let pending = stream::pending::<Result<Bytes, reqwest::Error>>();
+        let err = match read_first_line_with_timeout(pending, Duration::from_millis(5)).await {
+            Ok(_) => panic!("timeout expected"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, ModelError::FirstTokenTimeout));
+        assert!(err.to_string().contains("first token deadline exceeded"));
+    }
+
+    #[test]
+    fn no_output_remediation_contains_actionable_steps() {
+        let msg = no_output_remediation_message(8192, true);
+        assert!(msg.contains("/clear"));
+        assert!(msg.contains("ollama ps"));
+        assert!(msg.contains("/model"));
+        assert!(msg.contains("tool-capable"));
     }
 }

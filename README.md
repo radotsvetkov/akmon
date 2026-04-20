@@ -30,15 +30,15 @@ Akmon is a terminal-native AI coding agent built as a single Rust binary for tea
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
-## Why v1.8.0 matters
+## Why v1.8.1 matters
 
-Akmon v1.8.0 turns trust controls into an operator workflow:
+Akmon v1.8.1 is an operability + reliability hardening release:
 
-- policy-as-code with deterministic rule evaluation,
-- tamper-evident audit chains and verification,
-- replay metadata and evidence artifacts for forensic reproducibility,
-- reliability metrics with enforceable SLO and trend regression gates,
-- enterprise policy profiles/packs (`dev`, `staging`, `prod`) with effective-policy inspection.
+- deterministic provider diagnostics (`akmon doctor providers`),
+- fail-closed MCP governance with enriched audit context,
+- deterministic docs quality gates in CI,
+- internal TUI state decomposition with behavior parity (no UX change),
+- stronger Ollama/local timeout and remediation behavior.
 
 ## 5-minute quickstart
 
@@ -94,13 +94,13 @@ Merge precedence is deterministic:
 
 `profile < packs < project-local policy < CLI override`
 
-## What changed in 1.8.0
+## What changed in 1.8.1
 
-- Policy-as-Code: docs [Security model](docs/src/features/security.md), [Configuration reference](docs/src/reference/config.md)
-- Audit chain + verify command: docs [Audit log](docs/src/features/audit-log.md), [CLI reference](docs/src/reference/cli.md)
-- Replay metadata + evidence artifacts: docs [Evidence artifact](docs/src/features/evidence.md)
-- Reliability + SLO + trend checks: docs [Reliability & SLO metrics](docs/src/features/reliability-slos.md)
-- Enterprise policy profiles/packs: docs [Policy profiles & packs](docs/src/features/policy-profiles.md)
+- Provider diagnostics command: docs [CLI reference](docs/src/reference/cli.md), [Provider setup](docs/src/getting-started/providers.md)
+- MCP governance hardening: docs [Security model](docs/src/features/security.md), [MCP guide](docs/src/features/mcp.md), [Configuration reference](docs/src/reference/config.md)
+- Docs quality gates: docs [Contributing guide](CONTRIBUTING.md), [docs/README](docs/README.md)
+- TUI internal refactor (no UX change): docs [Contributing architecture](docs/src/contributing/architecture.md)
+- Local model reliability improvements: docs [Configuration](docs/src/getting-started/configuration.md), [Cost guide](docs/src/features/cost.md)
 
 ## Documentation
 

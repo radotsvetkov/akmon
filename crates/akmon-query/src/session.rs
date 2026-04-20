@@ -9,8 +9,8 @@ use std::time::Instant;
 use akmon_core::{
     AgentConfig, AgentError, AgentEvent, AgentState, AuditEvent, InteractivePolicyReply,
     Permission, PolicyEngineError, PolicyEngineMode, PolicyVerdict, ReplayHashInputs,
-    ReplayMetadata, RunReliabilityMetrics, Sandbox, build_replay_metadata, check_iteration_limit,
-    estimate_cost_usd_with_rows, validate_transition,
+    ReplayMetadata, RunReliabilityMetrics, Sandbox, ToolOutcomeKind, build_replay_metadata,
+    check_iteration_limit, estimate_cost_usd_with_rows, validate_transition,
 };
 use akmon_models::{
     CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
@@ -18,7 +18,7 @@ use akmon_models::{
     anthropic_system_block_text, approximate_tokens, looks_like_ollama_model, max_tokens_for_model,
     ollama_first_token_deadline_ms,
 };
-use akmon_tools::{Tool, ToolContext, ToolOutput, unified_diff_text};
+use akmon_tools::{McpPolicyContext, Tool, ToolContext, ToolOutput, unified_diff_text};
 use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
@@ -113,6 +113,12 @@ pub struct ToolCallResult {
     pub arguments: Value,
     /// Wall-clock duration of this tool call in milliseconds.
     pub latency_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct McpAuditContext {
+    server: String,
+    tool: String,
 }
 
 /// Builds [`CompletionConfig`] with `tools` populated and model-appropriate [`CompletionConfig::max_tokens`].
@@ -248,6 +254,8 @@ pub struct AgentSession {
     reliability_metrics: RunReliabilityMetrics,
     /// Latency samples used to compute p95 cheaply at run scope.
     tool_latency_samples_ms: Vec<u64>,
+    /// MCP context keyed by model tool-call id, for audit enrichment.
+    mcp_call_context_by_id: HashMap<String, McpAuditContext>,
 }
 
 impl AgentSession {
@@ -305,6 +313,7 @@ impl AgentSession {
             prompt_assembly_fingerprint: None,
             reliability_metrics: RunReliabilityMetrics::default(),
             tool_latency_samples_ms: Vec::new(),
+            mcp_call_context_by_id: HashMap::new(),
         }
     }
 
@@ -1308,6 +1317,7 @@ Resume from the mid-sentence or mid-block point where the response was cut."
             name: String,
             arguments: Value,
             tool_idx: usize,
+            mcp_context: Option<McpAuditContext>,
         }
         let mut approved: Vec<ApprovedSlot> = Vec::new();
         let mut write_file_calls_this_message: u32 = 0;
@@ -1317,7 +1327,13 @@ Resume from the mid-sentence or mid-block point where the response was cut."
             let name = call.name.clone();
             let args = call.arguments.clone();
 
-            let Some(tool_idx) = self.tools.iter().position(|t| t.as_ref().name() == name) else {
+            let matching_tool_indices: Vec<usize> = self
+                .tools
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| (t.as_ref().name() == name).then_some(i))
+                .collect();
+            let Some(tool_idx) = matching_tool_indices.first().copied() else {
                 let msg = format!("tool not found: {name}");
                 self.apply_event(
                     event_tx,
@@ -1343,6 +1359,41 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                 });
                 continue;
             };
+            if matching_tool_indices.len() > 1 {
+                let matching_mcp_contexts: Vec<McpPolicyContext> = matching_tool_indices
+                    .iter()
+                    .filter_map(|i| self.tools[*i].mcp_policy_context())
+                    .collect();
+                if matching_mcp_contexts.len() > 1 {
+                    let msg = format!(
+                        "policy denied for tool `{name}`: ambiguous MCP context (multiple servers expose the same tool name)"
+                    );
+                    self.record_policy_denial();
+                    self.apply_event(
+                        event_tx,
+                        AgentEvent::ToolCallCompleted {
+                            id: id.clone(),
+                            name: name.clone(),
+                            success: false,
+                            message: msg.clone(),
+                        },
+                        task,
+                    )
+                    .await?;
+                    slots[idx] = Some(ToolCallResult {
+                        call_id: id.clone(),
+                        tool_name: name.clone(),
+                        output: ToolOutput::Error {
+                            code: akmon_tools::ToolErrorCode::PermissionDenied,
+                            message: msg,
+                        },
+                        success: false,
+                        arguments: args.clone(),
+                        latency_ms: 0,
+                    });
+                    continue;
+                }
+            }
 
             const MAX_WRITE_FILE_CALLS_PER_ASSISTANT_MESSAGE: u32 = 2;
             if name == "write_file" {
@@ -1440,6 +1491,71 @@ Complete and verify the current file(s), then continue in the next turn.";
             let mut policy_denial_message: Option<String> = None;
             let diff_preview =
                 file_change_diff_preview(self.sandbox.as_ref(), name.as_str(), &args).await;
+            let mcp_policy_context =
+                self.tools[tool_idx]
+                    .mcp_policy_context()
+                    .map(|ctx| McpAuditContext {
+                        server: ctx.server,
+                        tool: ctx.tool,
+                    });
+            if let Some(ctx) = &mcp_policy_context {
+                let decision = self.policy.evaluate_mcp_automatic(
+                    session_id.as_str(),
+                    Some(name.as_str()),
+                    Some(ctx.server.as_str()),
+                    Some(ctx.tool.as_str()),
+                );
+                self.audit_log.push(decision.audit.clone());
+                if !decision.allowed {
+                    policy_denial_message = Some(format!(
+                        "policy denied for MCP tool `{name}` (server=`{}`, tool=`{}`): {}",
+                        ctx.server, ctx.tool, decision.reason
+                    ));
+                }
+            } else if name == "mcp_tool" {
+                let decision = self.policy.evaluate_mcp_automatic(
+                    session_id.as_str(),
+                    Some(name.as_str()),
+                    None,
+                    None,
+                );
+                self.audit_log.push(decision.audit.clone());
+                if !decision.allowed {
+                    policy_denial_message = Some(format!(
+                        "policy denied for MCP tool `{name}` due to malformed context: {}",
+                        decision.reason
+                    ));
+                }
+            }
+            if policy_denial_message.is_some() {
+                let deny_message = policy_denial_message
+                    .clone()
+                    .unwrap_or_else(|| "policy denied".to_string());
+                self.record_policy_denial();
+                self.apply_event(
+                    event_tx,
+                    AgentEvent::ToolCallCompleted {
+                        id: id.clone(),
+                        name: name.clone(),
+                        success: false,
+                        message: deny_message.clone(),
+                    },
+                    task,
+                )
+                .await?;
+                slots[idx] = Some(ToolCallResult {
+                    call_id: id.clone(),
+                    tool_name: name.clone(),
+                    output: ToolOutput::Error {
+                        code: akmon_tools::ToolErrorCode::PermissionDenied,
+                        message: deny_message,
+                    },
+                    success: false,
+                    arguments: args.clone(),
+                    latency_ms: 0,
+                });
+                continue;
+            }
 
             for perm in perms {
                 if self.permission_allow_all_writes && matches!(perm, Permission::WriteFile { .. })
@@ -1698,10 +1814,15 @@ Complete and verify the current file(s), then continue in the next turn.";
                 name,
                 arguments: args,
                 tool_idx,
+                mcp_context: mcp_policy_context,
             });
         }
 
         for a in &approved {
+            if let Some(ctx) = &a.mcp_context {
+                self.mcp_call_context_by_id
+                    .insert(a.id.clone(), ctx.clone());
+            }
             self.apply_event(
                 event_tx,
                 AgentEvent::ToolCallDispatched {
@@ -2410,6 +2531,51 @@ Complete and verify the current file(s), then continue in the next turn.";
             timestamp: Utc::now(),
             description: event.to_string(),
         });
+        match &event {
+            AgentEvent::ToolCallDispatched {
+                id,
+                name: _,
+                arguments: _,
+            } => {
+                if let Some(mcp) = self.mcp_call_context_by_id.get(id) {
+                    self.audit_log.push(AuditEvent::ToolDispatch {
+                        session_id: self.config.session_id.to_string(),
+                        timestamp: Utc::now(),
+                        tool_name: "mcp_tool".to_string(),
+                        input_summary: "MCP call arguments redacted".to_string(),
+                        mcp_server: Some(mcp.server.clone()),
+                        mcp_tool: Some(mcp.tool.clone()),
+                        decision_reason: Some(
+                            "mcp dispatch allowed after policy evaluation".to_string(),
+                        ),
+                    });
+                }
+            }
+            AgentEvent::ToolCallCompleted {
+                id,
+                success,
+                message,
+                ..
+            } => {
+                if let Some(mcp) = self.mcp_call_context_by_id.remove(id) {
+                    self.audit_log.push(AuditEvent::ToolOutcome {
+                        session_id: self.config.session_id.to_string(),
+                        timestamp: Utc::now(),
+                        tool_name: "mcp_tool".to_string(),
+                        outcome: if *success {
+                            ToolOutcomeKind::Success
+                        } else {
+                            ToolOutcomeKind::Failure
+                        },
+                        summary: message.clone(),
+                        mcp_server: Some(mcp.server),
+                        mcp_tool: Some(mcp.tool),
+                        decision_reason: None,
+                    });
+                }
+            }
+            _ => {}
+        }
         if let Some(t) = tool_done {
             self.tool_call_summaries.push(t);
         }
@@ -3238,6 +3404,51 @@ mod tests {
         }
     }
 
+    struct TestMcpTool {
+        call_count: Arc<AtomicUsize>,
+        server: String,
+        tool: String,
+    }
+
+    fn test_mcp_perms() -> &'static [Permission] {
+        static CELL: std::sync::OnceLock<Vec<Permission>> = std::sync::OnceLock::new();
+        CELL.get_or_init(|| {
+            vec![Permission::NetworkFetch {
+                url: "https://mcp.example.test".into(),
+            }]
+        })
+        .as_slice()
+    }
+
+    #[async_trait]
+    impl Tool for TestMcpTool {
+        fn name(&self) -> &str {
+            "mcp_tool"
+        }
+
+        fn description(&self) -> &str {
+            "test MCP tool"
+        }
+
+        fn required_permissions(&self) -> &[Permission] {
+            test_mcp_perms()
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> ToolOutput {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            ToolOutput::Success {
+                content: "mcp-ok".into(),
+            }
+        }
+
+        fn mcp_policy_context(&self) -> Option<akmon_tools::McpPolicyContext> {
+            Some(akmon_tools::McpPolicyContext {
+                server: self.server.clone(),
+                tool: self.tool.clone(),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn two_parallel_reads_context_order_matches_request_order() {
         let dir = tempfile::tempdir().expect("tmp");
@@ -3605,6 +3816,339 @@ mod tests {
         assert!(m.tool_latency_ms_p95.is_some());
         let evidence = session.evidence_data();
         assert_eq!(evidence.reliability_metrics.tool_calls_total, 2);
+    }
+
+    fn mcp_single_call_provider() -> SeqProvider {
+        SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "m1".into(),
+                    name: "mcp_tool".into(),
+                    arguments: json!({"q":"x"}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ])
+    }
+
+    fn default_test_agent_config() -> AgentConfig {
+        AgentConfig {
+            max_iterations: 5,
+            confirmation_timeout_secs: 30,
+            session_id: Uuid::nil(),
+            auto_commit: false,
+            max_completion_tokens: None,
+            subagent_style: false,
+            max_budget_usd: None,
+            fallback_model: None,
+            model_estimates: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_server_denied_blocks_call() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let cfg = PolicyConfig {
+            mcp: akmon_core::McpPolicyConfig {
+                servers: PatternRuleSet {
+                    allow: vec!["github".into()],
+                    deny: vec!["github".into()],
+                },
+                tools: PatternRuleSet {
+                    allow: vec!["search_*".into()],
+                    deny: vec![],
+                },
+            },
+            network: akmon_core::NetworkPolicyConfig {
+                allow_domains: vec!["mcp.example.test".into()],
+                deny_domains: vec![],
+            },
+            ..PolicyConfig::default()
+        };
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut session = AgentSession::new(
+            default_test_agent_config(),
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Configured(cfg))),
+            Arc::new(mcp_single_call_provider()),
+            vec![Box::new(TestMcpTool {
+                call_count: Arc::clone(&counter),
+                server: "github".into(),
+                tool: "search_issues".into(),
+            })],
+            sandbox,
+            None,
+            false,
+        );
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_denied_while_server_allowed_blocks_call() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let cfg = PolicyConfig {
+            mcp: akmon_core::McpPolicyConfig {
+                servers: PatternRuleSet {
+                    allow: vec!["github".into()],
+                    deny: vec![],
+                },
+                tools: PatternRuleSet {
+                    allow: vec!["search_*".into()],
+                    deny: vec!["search_issues".into()],
+                },
+            },
+            network: akmon_core::NetworkPolicyConfig {
+                allow_domains: vec!["mcp.example.test".into()],
+                deny_domains: vec![],
+            },
+            ..PolicyConfig::default()
+        };
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut session = AgentSession::new(
+            default_test_agent_config(),
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Configured(cfg))),
+            Arc::new(mcp_single_call_provider()),
+            vec![Box::new(TestMcpTool {
+                call_count: Arc::clone(&counter),
+                server: "github".into(),
+                tool: "search_issues".into(),
+            })],
+            sandbox,
+            None,
+            false,
+        );
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mcp_allowed_server_and_tool_executes_and_audit_is_enriched() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let cfg = PolicyConfig {
+            mcp: akmon_core::McpPolicyConfig {
+                servers: PatternRuleSet {
+                    allow: vec!["github".into()],
+                    deny: vec![],
+                },
+                tools: PatternRuleSet {
+                    allow: vec!["search_*".into()],
+                    deny: vec![],
+                },
+            },
+            network: akmon_core::NetworkPolicyConfig {
+                allow_domains: vec!["mcp.example.test".into()],
+                deny_domains: vec![],
+            },
+            ..PolicyConfig::default()
+        };
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut session = AgentSession::new(
+            default_test_agent_config(),
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Configured(cfg))),
+            Arc::new(mcp_single_call_provider()),
+            vec![Box::new(TestMcpTool {
+                call_count: Arc::clone(&counter),
+                server: "github".into(),
+                tool: "search_issues".into(),
+            })],
+            sandbox,
+            None,
+            false,
+        );
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        let found = session.audit_events().iter().any(|e| match e {
+            AuditEvent::PolicyEvaluation {
+                mcp_server,
+                mcp_tool,
+                decision_reason,
+                ..
+            } => {
+                mcp_server.as_deref() == Some("github")
+                    && mcp_tool.as_deref() == Some("search_issues")
+                    && decision_reason.is_some()
+            }
+            _ => false,
+        });
+        assert!(found, "expected MCP-enriched policy evaluation audit event");
+        let found_outcome = session.audit_events().iter().any(|e| match e {
+            AuditEvent::ToolOutcome {
+                mcp_server,
+                mcp_tool,
+                ..
+            } => {
+                mcp_server.as_deref() == Some("github")
+                    && mcp_tool.as_deref() == Some("search_issues")
+            }
+            _ => false,
+        });
+        assert!(
+            found_outcome,
+            "expected MCP-enriched tool outcome audit event"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_missing_context_fails_closed() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let cfg = PolicyConfig {
+            mcp: akmon_core::McpPolicyConfig {
+                servers: PatternRuleSet {
+                    allow: vec!["github".into()],
+                    deny: vec![],
+                },
+                tools: PatternRuleSet {
+                    allow: vec!["search_*".into()],
+                    deny: vec![],
+                },
+            },
+            network: akmon_core::NetworkPolicyConfig {
+                allow_domains: vec!["mcp.example.test".into()],
+                deny_domains: vec![],
+            },
+            ..PolicyConfig::default()
+        };
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut session = AgentSession::new(
+            default_test_agent_config(),
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Configured(cfg))),
+            Arc::new(mcp_single_call_provider()),
+            vec![Box::new(TestMcpTool {
+                call_count: Arc::clone(&counter),
+                server: String::new(),
+                tool: "search_issues".into(),
+            })],
+            sandbox,
+            None,
+            false,
+        );
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mcp_ambiguous_context_fails_closed_without_execution() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let cfg = PolicyConfig {
+            mcp: akmon_core::McpPolicyConfig {
+                servers: PatternRuleSet {
+                    allow: vec!["*".into()],
+                    deny: vec![],
+                },
+                tools: PatternRuleSet {
+                    allow: vec!["search_*".into()],
+                    deny: vec![],
+                },
+            },
+            network: akmon_core::NetworkPolicyConfig {
+                allow_domains: vec!["mcp.example.test".into()],
+                deny_domains: vec![],
+            },
+            ..PolicyConfig::default()
+        };
+        let c1 = Arc::new(AtomicUsize::new(0));
+        let c2 = Arc::new(AtomicUsize::new(0));
+        let mut session = AgentSession::new(
+            default_test_agent_config(),
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Configured(cfg))),
+            Arc::new(mcp_single_call_provider()),
+            vec![
+                Box::new(TestMcpTool {
+                    call_count: Arc::clone(&c1),
+                    server: "github".into(),
+                    tool: "search_issues".into(),
+                }),
+                Box::new(TestMcpTool {
+                    call_count: Arc::clone(&c2),
+                    server: "jira".into(),
+                    tool: "search_issues".into(),
+                }),
+            ],
+            sandbox,
+            None,
+            false,
+        );
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        assert_eq!(c1.load(Ordering::SeqCst), 0);
+        assert_eq!(c2.load(Ordering::SeqCst), 0);
+        let denied = session
+            .context_messages()
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .any(|m| m.content.contains("ambiguous MCP context"));
+        assert!(
+            denied,
+            "expected explicit ambiguous MCP denial in tool output"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_has_no_bypass_in_autoapprove_reads_and_fetch_mode() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut session = AgentSession::new(
+            default_test_agent_config(),
+            Arc::new(PolicyEngine::new(
+                PolicyEngineMode::AutoApproveReadsAndFetch {
+                    confirm_writes: true,
+                },
+            )),
+            Arc::new(mcp_single_call_provider()),
+            vec![Box::new(TestMcpTool {
+                call_count: Arc::clone(&counter),
+                server: "github".into(),
+                tool: "search_issues".into(),
+            })],
+            sandbox,
+            None,
+            false,
+        );
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "MCP must not bypass fail-closed governance path"
+        );
     }
 
     #[tokio::test]

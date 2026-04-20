@@ -21,7 +21,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [workspace.package]
-version = "1.8.0"
+version = "1.8.1"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"

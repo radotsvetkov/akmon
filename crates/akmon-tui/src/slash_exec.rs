@@ -116,9 +116,9 @@ fn probe_ollama_blocking(url: &str) -> OllamaProbe {
 }
 
 fn refresh_app_provider_labels(app: &mut TuiApp, cfg: &TuiLaunchConfig) {
-    app.provider_display_name = cfg.provider_display_name();
-    app.uses_openrouter = cfg.uses_openrouter();
-    app.free_local_inference = cfg.is_free_local_inference();
+    app.runtime.provider_display_name = cfg.provider_display_name();
+    app.runtime.uses_openrouter = cfg.uses_openrouter();
+    app.runtime.free_local_inference = cfg.is_free_local_inference();
 }
 
 /// Outcome of handling one slash line (buffer already consumed by caller).
@@ -141,7 +141,7 @@ pub fn handle_slash_line(app: &mut TuiApp, line: &str, env: &SlashEnv) -> Option
     let parsed = parse_slash_input(s);
     let Some((cmd, arg)) = parsed else {
         app.push_system_info("Unknown or invalid slash command.".into());
-        app.overlay = Overlay::None;
+        app.overlays.overlay = Overlay::None;
         return Some(SlashHandled::Continue);
     };
     Some(dispatch(app, cmd, arg, env))
@@ -155,7 +155,7 @@ fn dispatch(
 ) -> SlashHandled {
     match cmd.name {
         "help" => {
-            app.overlay = Overlay::Help;
+            app.overlays.overlay = Overlay::Help;
             SlashHandled::Continue
         }
         "clear" => {
@@ -172,11 +172,11 @@ fn dispatch(
                 "Cleared on-screen history. Requested agent context clear; AKMON.md and specs on disk preserved."
                     .into()
             });
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "reset" => {
-            if app.agent_running {
+            if app.runtime.agent_running {
                 app.push_system_info(
                     "Finish or interrupt the current turn before starting a new session.".into(),
                 );
@@ -203,24 +203,24 @@ fn dispatch(
             app.session_id = new_id;
             app.audit_log_path = audit;
             app.messages.clear();
-            app.total_input_tokens = 0;
-            app.total_cache_read_tokens = 0;
-            app.total_cache_write_tokens = 0;
-            app.total_output_tokens = 0;
-            app.total_microcompact_cleared = 0;
-            app.context_warn_80_shown = false;
-            app.context_warn_90_shown = false;
-            app.current_iteration = 0;
+            app.telemetry.total_input_tokens = 0;
+            app.telemetry.total_cache_read_tokens = 0;
+            app.telemetry.total_cache_write_tokens = 0;
+            app.telemetry.total_output_tokens = 0;
+            app.telemetry.total_microcompact_cleared = 0;
+            app.telemetry.context_warn_80_shown = false;
+            app.telemetry.context_warn_90_shown = false;
+            app.runtime.current_iteration = 0;
             app.session_started_at = Utc::now();
             app.session_instant = std::time::Instant::now();
             app.has_sent_first_message = false;
-            app.message_count = 0;
-            app.total_tool_calls = 0;
-            app.successful_tool_calls = 0;
-            app.failed_tool_calls = 0;
-            app.files_read.clear();
-            app.files_written.clear();
-            app.session_touched_files.clear();
+            app.telemetry.message_count = 0;
+            app.telemetry.total_tool_calls = 0;
+            app.telemetry.successful_tool_calls = 0;
+            app.telemetry.failed_tool_calls = 0;
+            app.telemetry.files_read.clear();
+            app.telemetry.files_written.clear();
+            app.telemetry.session_touched_files.clear();
             app.pending_plan = None;
             app.latest_plan_path = None;
             app.scroll_offset = 0;
@@ -230,13 +230,13 @@ fn dispatch(
                     rd.flatten()
                         .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
                 });
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             env.reload_notify.notify_one();
             app.push_system_info("New session started.".into());
             SlashHandled::Continue
         }
         "init" => {
-            if app.agent_running {
+            if app.runtime.agent_running {
                 app.push_system_info(
                     "Finish or interrupt the current turn before running /init.".into(),
                 );
@@ -247,11 +247,11 @@ fn dispatch(
             } else {
                 app.push_system_info("Analyzing project and generating AKMON.md…".into());
             }
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "import" => {
-            if app.agent_running {
+            if app.runtime.agent_running {
                 app.push_system_info(
                     "Finish or interrupt the current turn before running /import.".into(),
                 );
@@ -262,11 +262,11 @@ fn dispatch(
             } else {
                 app.push_system_info("Running akmon import…".into());
             }
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "export" => {
-            if app.agent_running {
+            if app.runtime.agent_running {
                 app.push_system_info(
                     "Finish or interrupt the current turn before running /export.".into(),
                 );
@@ -277,11 +277,11 @@ fn dispatch(
             } else {
                 app.push_system_info("Running akmon export --all…".into());
             }
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "new" => {
-            if app.agent_running {
+            if app.runtime.agent_running {
                 app.push_system_info(
                     "Finish or interrupt the current turn before running /new.".into(),
                 );
@@ -302,7 +302,7 @@ fn dispatch(
             } else {
                 app.push_system_info(format!("Scaffolding {name}/ …"));
             }
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "sessions" => {
@@ -320,7 +320,7 @@ fn dispatch(
                     return SlashHandled::Continue;
                 }
             };
-            if app.agent_running {
+            if app.runtime.agent_running {
                 app.push_system_info(
                     "Finish or interrupt the current turn before resuming a session.".into(),
                 );
@@ -364,14 +364,14 @@ fn dispatch(
                 refresh_app_provider_labels(app, &cfg_snapshot);
                 env.reload_notify.notify_one();
                 app.push_system_info(format!("Model changed to {name}"));
-                app.overlay = Overlay::None;
+                app.overlays.overlay = Overlay::None;
             } else {
                 let cfg_snapshot = match env.shared_config.lock() {
                     Ok(g) => g.clone(),
                     Err(e) => e.into_inner().clone(),
                 };
                 let probe = probe_ollama_blocking(&cfg_snapshot.ollama_url);
-                app.ollama_probe = probe.clone();
+                app.runtime.ollama_probe = probe.clone();
                 let rows = build_model_picker_rows(&cfg_snapshot, &probe, app.model_name.as_str());
                 let selectable: Vec<usize> = rows
                     .iter()
@@ -381,13 +381,13 @@ fn dispatch(
                     .collect();
                 if selectable.is_empty() {
                     app.push_system_info(format!("Current model: {}", app.model_name));
-                    app.overlay = Overlay::None;
+                    app.overlays.overlay = Overlay::None;
                 } else {
                     app.push_system_info(format!(
                         "Pick a model (↑↓ Enter) — current: {}",
                         app.model_name
                     ));
-                    app.overlay = Overlay::ModelPicker {
+                    app.overlays.overlay = Overlay::ModelPicker {
                         rows,
                         selectable,
                         selected: 0,
@@ -403,7 +403,7 @@ fn dispatch(
                 Err(e) => e.into_inner().clone(),
             };
             let probe = probe_ollama_blocking(&cfg_snapshot.ollama_url);
-            app.ollama_probe = probe.clone();
+            app.runtime.ollama_probe = probe.clone();
             app.push_system_info("── Doctor ──".into());
             app.push_system_info(format!(
                 "Model: {} · {}",
@@ -450,7 +450,7 @@ fn dispatch(
                 }
             }
             app.push_system_info(akmon_md_efficiency_line(&app.project_root));
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "index" => {
@@ -484,30 +484,30 @@ fn dispatch(
                         .into(),
                 );
             }
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "audit" => {
             let path = app.audit_log_path.clone();
             let lines = read_audit_overlay_lines(&path);
-            app.overlay = Overlay::AuditLog { lines, scroll: 0 };
+            app.overlays.overlay = Overlay::AuditLog { lines, scroll: 0 };
             SlashHandled::Continue
         }
         "cost" => {
-            app.overlay = Overlay::CostSummary;
+            app.overlays.overlay = Overlay::CostSummary;
             SlashHandled::Continue
         }
         "config" => {
-            app.overlay = Overlay::Settings(SettingsOverlayState::open_estimates(app));
+            app.overlays.overlay = Overlay::Settings(SettingsOverlayState::open_estimates(app));
             SlashHandled::Continue
         }
         "context" => {
             let window = context_window_for_model(&app.model_name, &app.model_estimates);
-            let used = u64::from(app.total_input_tokens)
-                .saturating_add(u64::from(app.total_cache_read_tokens));
+            let used = u64::from(app.telemetry.total_input_tokens)
+                .saturating_add(u64::from(app.telemetry.total_cache_read_tokens));
             let pct = context_usage_percent(
-                app.total_input_tokens,
-                app.total_cache_read_tokens,
+                app.telemetry.total_input_tokens,
+                app.telemetry.total_cache_read_tokens,
                 &app.model_name,
                 &app.model_estimates,
             );
@@ -561,7 +561,7 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
                 breakdown.push_str(&format!("\nConfig note: {n}\n"));
             }
             app.push_system_info(breakdown);
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "copy" => {
@@ -584,7 +584,7 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
                     }
                 }
             }
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "plan" => {
@@ -592,7 +592,7 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
             app.push_system_info(
                 "Next message runs in read-only plan mode (no file edits, shell, or git).".into(),
             );
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "architect" => {
@@ -601,11 +601,11 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
                 "Next message uses architect mode: planner model first, then your main model."
                     .into(),
             );
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "edit-plan" => {
-            if app.agent_running {
+            if app.runtime.agent_running {
                 app.push_system_info("Finish or interrupt the current turn first.".into());
                 return SlashHandled::Continue;
             }
@@ -624,7 +624,7 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
                     "No plan file found. Run /plan with a task message first.".into(),
                 ),
             }
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "view-plan" => {
@@ -638,7 +638,7 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
                         let lines: Vec<String> =
                             body.lines().map(std::string::ToString::to_string).collect();
                         let leaf = p.file_name().and_then(|s| s.to_str()).unwrap_or("plan");
-                        app.overlay = Overlay::ScrollText {
+                        app.overlays.overlay = Overlay::ScrollText {
                             title: format!("Plan — {leaf}"),
                             lines,
                             scroll: 0,
@@ -646,12 +646,12 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
                     }
                     Err(e) => {
                         app.push_system_info(format!("Could not read plan: {e}"));
-                        app.overlay = Overlay::None;
+                        app.overlays.overlay = Overlay::None;
                     }
                 },
                 _ => {
                     app.push_system_info("No plan file found.".into());
-                    app.overlay = Overlay::None;
+                    app.overlays.overlay = Overlay::None;
                 }
             }
             SlashHandled::Continue
@@ -660,7 +660,7 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
             match akmon_config::load_user_config() {
                 Ok((_, cfg)) => {
                     let lines = build_mcp_overlay_lines(&cfg);
-                    app.overlay = Overlay::ScrollText {
+                    app.overlays.overlay = Overlay::ScrollText {
                         title: "MCP servers".into(),
                         lines,
                         scroll: 0,
@@ -684,7 +684,7 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
             SlashHandled::Continue
         }
         "implement" => {
-            if app.agent_running {
+            if app.runtime.agent_running {
                 app.push_system_info(
                     "Finish or interrupt the current turn before /implement.".into(),
                 );
@@ -711,10 +711,10 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
                 app.push_system_info("Agent task channel closed.".into());
                 return SlashHandled::Continue;
             }
-            app.agent_running = true;
-            app.agent_activity_line = "Working — contacting model…".into();
+            app.runtime.agent_running = true;
+            app.runtime.agent_activity_line = "Working — contacting model…".into();
             app.push_system_info("Implementation run queued.".into());
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "spec" => {
@@ -723,7 +723,7 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
                 app.push_system_info(
                     "No .akmon/specs yet. CLI: akmon spec <name> \"description\"".into(),
                 );
-                app.overlay = Overlay::None;
+                app.overlays.overlay = Overlay::None;
                 return SlashHandled::Continue;
             };
             let mut names: Vec<String> = rd
@@ -740,21 +740,21 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
             } else {
                 app.push_system_info(format!("Specs: {}", names.join(", ")));
             }
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "update-context" => {
             let path = app.project_root.join("AKMON.md");
             if !path.is_file() {
                 app.push_system_info("AKMON.md not found in project root.".into());
-                app.overlay = Overlay::None;
+                app.overlays.overlay = Overlay::None;
                 return SlashHandled::Continue;
             }
             app.pending_external_edit = Some(ExternalEditTarget::AkmonMd(path));
             app.push_system_info(
                 "Opening AKMON.md in $EDITOR — save and exit to return to Akmon.".into(),
             );
-            app.overlay = Overlay::None;
+            app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
         "exit" => SlashHandled::Quit,
@@ -857,7 +857,7 @@ fn open_sessions_overlay(app: &mut TuiApp) {
         .as_ref()
         .map(|d| load_session_summaries(d))
         .unwrap_or_default();
-    app.overlay = Overlay::SessionList {
+    app.overlays.overlay = Overlay::SessionList {
         sessions: list,
         selected: 0,
         scroll: 0,
@@ -916,18 +916,18 @@ fn apply_loaded_session(
                 .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
         });
     app.messages = messages;
-    app.total_input_tokens = total_input_tokens;
-    app.total_cache_read_tokens = total_cache_read_tokens;
-    app.total_cache_write_tokens = 0;
-    app.total_output_tokens = total_output_tokens;
-    app.total_microcompact_cleared = 0;
-    app.context_warn_80_shown = false;
-    app.context_warn_90_shown = false;
-    app.current_iteration = 0;
+    app.telemetry.total_input_tokens = total_input_tokens;
+    app.telemetry.total_cache_read_tokens = total_cache_read_tokens;
+    app.telemetry.total_cache_write_tokens = 0;
+    app.telemetry.total_output_tokens = total_output_tokens;
+    app.telemetry.total_microcompact_cleared = 0;
+    app.telemetry.context_warn_80_shown = false;
+    app.telemetry.context_warn_90_shown = false;
+    app.runtime.current_iteration = 0;
     app.session_started_at = started_at;
     app.resume_pin_bottom = true;
     app.auto_scroll = true;
-    app.overlay = Overlay::None;
+    app.overlays.overlay = Overlay::None;
     env.reload_notify.notify_one();
     let short: String = app.session_id.to_string().chars().take(8).collect();
     app.push_system_info(format!("Resumed session {short}"));
@@ -1024,11 +1024,20 @@ fn audit_event_parts(ev: &akmon_core::AuditEvent) -> (String, &'static str, Stri
 /// Formats the `/cost` overlay body (excluding footer).
 pub fn cost_summary_lines(app: &TuiApp) -> Vec<String> {
     let mut lines = vec![
-        format!("Input tokens:       {}", app.total_input_tokens),
-        format!("Cache hits:         {}", app.total_cache_read_tokens),
-        format!("Cache writes:       {}", app.total_cache_write_tokens),
-        format!("Output tokens:      {}", app.total_output_tokens),
-        format!("Microcompact (~saved): {}", app.total_microcompact_cleared),
+        format!("Input tokens:       {}", app.telemetry.total_input_tokens),
+        format!(
+            "Cache hits:         {}",
+            app.telemetry.total_cache_read_tokens
+        ),
+        format!(
+            "Cache writes:       {}",
+            app.telemetry.total_cache_write_tokens
+        ),
+        format!("Output tokens:      {}", app.telemetry.total_output_tokens),
+        format!(
+            "Microcompact (~saved): {}",
+            app.telemetry.total_microcompact_cleared
+        ),
         "─────────────────────────".to_string(),
     ];
     let est = estimate_cost_usd_line(app);
@@ -1040,12 +1049,12 @@ pub fn cost_summary_lines(app: &TuiApp) -> Vec<String> {
 
 fn estimate_cost_usd_line(app: &TuiApp) -> String {
     match estimate_cost_usd_with_rows(
-        u64::from(app.total_input_tokens),
-        u64::from(app.total_output_tokens),
-        u64::from(app.total_cache_read_tokens),
+        u64::from(app.telemetry.total_input_tokens),
+        u64::from(app.telemetry.total_output_tokens),
+        u64::from(app.telemetry.total_cache_read_tokens),
         &app.model_name,
-        app.uses_openrouter,
-        app.free_local_inference,
+        app.runtime.uses_openrouter,
+        app.runtime.free_local_inference,
         &app.model_estimates,
     ) {
         Some(total) => format!("~${total:.4}"),
@@ -1096,7 +1105,7 @@ fn copy_to_clipboard(text: &str) -> bool {
 
 /// Applies the highlighted `/model` row and rebuilds the agent session.
 pub fn model_picker_enter(app: &mut TuiApp, env: &SlashEnv) {
-    let name = match &app.overlay {
+    let name = match &app.overlays.overlay {
         Overlay::ModelPicker {
             rows,
             selectable,
@@ -1131,14 +1140,14 @@ pub fn model_picker_enter(app: &mut TuiApp, env: &SlashEnv) {
     refresh_app_provider_labels(app, &cfg_snapshot);
     env.reload_notify.notify_one();
     app.push_system_info(format!("Model changed to {name}"));
-    app.overlay = Overlay::None;
+    app.overlays.overlay = Overlay::None;
 }
 
 /// Resumes the highlighted session from [`Overlay::SessionList`] when Enter is pressed.
 pub fn session_list_enter(app: &mut TuiApp, env: &SlashEnv) {
     let Overlay::SessionList {
         sessions, selected, ..
-    } = &app.overlay
+    } = &app.overlays.overlay
     else {
         return;
     };
@@ -1157,7 +1166,7 @@ pub fn session_list_enter(app: &mut TuiApp, env: &SlashEnv) {
     if let Ok(loaded) = load_session_file(&path) {
         apply_loaded_session(app, env, loaded);
     }
-    app.overlay = Overlay::None;
+    app.overlays.overlay = Overlay::None;
 }
 
 /// Formats one line for the session picker: `{date} {id8} {preview}`.

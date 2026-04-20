@@ -124,3 +124,47 @@ anthropic_key = "sk-ant-..."
 ```
 
 Per-provider pages: [Ollama](../providers/ollama.md), [Anthropic](../providers/anthropic.md), and the rest under **Providers** in the sidebar.
+
+## Troubleshooting flow (`akmon doctor providers`)
+
+Run:
+
+```bash
+akmon doctor providers
+```
+
+JSON mode:
+
+```bash
+akmon --output json doctor providers
+```
+
+Use this flow:
+
+1. Fix all `base_url`/`endpoint` sanity failures first.
+2. Fix missing key/auth checks for the provider you actually run with.
+3. Resolve reachability failures (network, DNS, firewall, service down).
+4. Re-run doctor until active provider is healthy.
+
+Common pitfalls flagged by doctor:
+
+- Azure endpoint missing deployment path (`/openai/deployments/<name>/chat/completions`)
+- OpenAI-compatible endpoint set without key
+- OpenRouter/OpenAI key missing while model selection implies that provider
+- Ollama URL valid but service unreachable (`ollama serve` not running)
+
+## Local reliability troubleshooting (Ollama)
+
+When local runs stall or return empty output:
+
+1. Check server/process state first:
+   - `ollama ps`
+2. Warm the model before long tasks:
+   - `ollama run <model>`
+3. If the session has drifted to large context:
+   - use `/clear`, then retry
+4. If tool-heavy tasks keep stalling:
+   - switch to a known tool-capable local model, for example:
+   - `/model qwen2.5-coder:7b`
+
+Akmon now emits consistent loading/status hints in both streaming and buffered paths, and timeout/no-output errors include recovery actions so operators can recover without guesswork.

@@ -73,8 +73,9 @@ pub use lang_profile::{
 pub use mcp::McpServerConfig;
 pub use permission::Permission;
 pub use policy::{
-    FilesystemPolicyConfig, NetworkPolicyConfig, PatternRuleSet, PolicyConfig, PolicyDecision,
-    PolicyEngine, PolicyEngineError, PolicyEngineMode, ShellPolicyConfig, ToolPolicyConfig,
+    FilesystemPolicyConfig, McpPolicyConfig, NetworkPolicyConfig, PatternRuleSet, PolicyConfig,
+    PolicyDecision, PolicyEngine, PolicyEngineError, PolicyEngineMode, ShellPolicyConfig,
+    ToolPolicyConfig,
 };
 pub use policy_profiles::{
     PolicyPackError, PolicyProfileName, built_in_policy_profile, merge_policy_config,

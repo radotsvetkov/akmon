@@ -60,6 +60,31 @@ Responsibilities include:
 - first-token/stream timeout behavior,
 - provider display and model-specific heuristics.
 
+## TUI state decomposition (`akmon-tui`)
+
+`TuiApp` remains the composition root, but state is now split into focused internal modules under `crates/akmon-tui/src/state/`:
+
+- `composer`: input buffer + cursor behavior (insert/paste/backspace/delete/left/right/submit),
+- `overlay_state`: overlay/modal state, confirmation gate state, ask-followup state, slash autocomplete selection/suppression,
+- `session_telemetry`: token/tool counters, touched files, and context-warning bookkeeping,
+- `provider_runtime`: provider/runtime status such as provider label, run flags, iteration progress, stream cursor, and ollama probe.
+
+Why this helps:
+
+- lower regression risk by reducing mixed responsibilities in `app.rs`,
+- easier targeted tests for state transitions,
+- clearer ownership when adding new TUI logic without changing UX behavior.
+
+This refactor is intentionally internal: behavior and command semantics stay the same while maintainability/testability improve.
+
+Contributor guideline for TUI changes:
+
+- put new input-edit semantics in `state/composer.rs`,
+- put overlay transition rules in `state/overlay_state.rs`,
+- put counters/usage accumulation in `state/session_telemetry.rs`,
+- put runtime/provider status updates in `state/provider_runtime.rs`,
+- keep `TuiApp` focused on orchestration and event routing.
+
 ## Permission system path
 
 Before tool execution:

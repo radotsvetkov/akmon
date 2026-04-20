@@ -122,6 +122,36 @@ MCP is not a bypass:
 - potentially destructive actions can still require confirmation,
 - audit logs still record actions and outcomes.
 
+### MCP governance policy dimensions
+
+In configured policy mode, MCP is governed by explicit server/tool rules:
+
+```toml
+[mcp.servers]
+allow = ["github-prod"]
+deny = ["*"]
+
+[mcp.tools]
+allow = ["search_issues"]
+deny = ["*"]
+```
+
+This example allows exactly one server/tool pair and denies all others.
+
+Fail-closed behavior:
+
+- missing or malformed MCP context denies,
+- ambiguous MCP context (same tool name from multiple servers) denies,
+- parent policy modes without configured MCP rules deny.
+
+### Audit enrichment for MCP actions
+
+Policy and MCP tool outcome audit rows include:
+
+- `mcp_server`
+- `mcp_tool`
+- `decision_reason` (policy rows)
+
 Treat MCP servers like production dependencies: least privilege, scoped credentials, and explicit ownership.
 
 ## Common mistakes and troubleshooting
@@ -130,3 +160,5 @@ Treat MCP servers like production dependencies: least privilege, scoped credenti
 - **Tool missing in session:** verify server is enabled and reachable from runtime shell.
 - **Slow responses:** reduce response size in MCP server output; return focused payloads.
 - **Risky action exposure:** split read-only and write-capable tools into separate servers/credentials.
+- **MCP call denied by policy:** check `[mcp.servers]` and `[mcp.tools]` allow/deny rules, then inspect audit `decision_reason`.
+- **Unexpected fail-closed deny:** ensure MCP tool names are unique across servers or scope policy to one server.

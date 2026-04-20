@@ -53,6 +53,15 @@ use akmon_core::Permission;
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 
+/// MCP governance context for one tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpPolicyContext {
+    /// MCP server name where this tool is hosted.
+    pub server: String,
+    /// MCP tool name on that server.
+    pub tool: String,
+}
+
 /// One callable capability the agent may invoke (with JSON args and sandbox-aware context).
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -74,4 +83,11 @@ pub trait Tool: Send + Sync {
 
     /// Runs the tool with parsed JSON arguments and shared [`ToolContext`].
     async fn execute(&self, args: JsonValue, ctx: &ToolContext) -> ToolOutput;
+
+    /// MCP governance context when this tool is an MCP proxy.
+    ///
+    /// Non-MCP tools return `None`.
+    fn mcp_policy_context(&self) -> Option<McpPolicyContext> {
+        None
+    }
 }

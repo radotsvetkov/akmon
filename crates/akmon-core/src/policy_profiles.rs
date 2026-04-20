@@ -240,6 +240,10 @@ pub fn merge_policy_config(base: &PolicyConfig, overlay: &PolicyConfig) -> Polic
         merge_rule_list(&base.network.deny_domains, &overlay.network.deny_domains);
     merged.tools.allow = merge_rule_list(&base.tools.allow, &overlay.tools.allow);
     merged.tools.deny = merge_rule_list(&base.tools.deny, &overlay.tools.deny);
+    merged.mcp.servers.allow = merge_rule_list(&base.mcp.servers.allow, &overlay.mcp.servers.allow);
+    merged.mcp.servers.deny = merge_rule_list(&base.mcp.servers.deny, &overlay.mcp.servers.deny);
+    merged.mcp.tools.allow = merge_rule_list(&base.mcp.tools.allow, &overlay.mcp.tools.allow);
+    merged.mcp.tools.deny = merge_rule_list(&base.mcp.tools.deny, &overlay.mcp.tools.deny);
     merged
 }
 
@@ -311,8 +315,10 @@ mod tests {
     fn merge_preserves_overlay_precedence_in_list_order() {
         let mut base = PolicyConfig::default();
         base.tools.allow = vec!["read_*".into(), "search".into()];
+        base.mcp.tools.allow = vec!["search_*".into()];
         let mut overlay = PolicyConfig::default();
         overlay.tools.allow = vec!["search".into(), "write_file".into()];
+        overlay.mcp.tools.allow = vec!["search_*".into(), "list_*".into()];
         let merged = merge_policy_config(&base, &overlay);
         assert_eq!(
             merged.tools.allow,
@@ -321,6 +327,10 @@ mod tests {
                 "search".to_string(),
                 "write_file".to_string()
             ]
+        );
+        assert_eq!(
+            merged.mcp.tools.allow,
+            vec!["search_*".to_string(), "list_*".to_string()]
         );
     }
 

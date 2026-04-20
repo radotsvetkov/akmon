@@ -46,6 +46,14 @@ Interpretation:
 - **GPT-4o-mini:** strong budget option if OpenAI is preferred.
 - **Ollama local models:** free token cost, but lower capability and potentially higher latency.
 
+For local models, "free token cost" still carries operational tradeoffs:
+
+- cold-start latency can be significant on first request,
+- smaller local context windows can trigger no-output/context-overflow failure modes,
+- tool-calling reliability varies by model family.
+
+Use Akmon's local status hints and remediation guidance (`/clear`, `ollama ps`, model switch) to recover quickly.
+
 ## Practical cost controls
 
 Use multiple levers together:

@@ -230,9 +230,9 @@ pub fn save_session_snapshot(
         model: config.model_name.clone(),
         started_at: started_at.to_rfc3339(),
         messages,
-        total_input_tokens: app.total_input_tokens,
-        total_cache_read_tokens: app.total_cache_read_tokens,
-        total_output_tokens: app.total_output_tokens,
+        total_input_tokens: app.telemetry.total_input_tokens,
+        total_cache_read_tokens: app.telemetry.total_cache_read_tokens,
+        total_output_tokens: app.telemetry.total_output_tokens,
     };
     let json = serde_json::to_string_pretty(&doc)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("session json: {e}")))?;

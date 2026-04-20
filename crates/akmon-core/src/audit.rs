@@ -88,6 +88,15 @@ pub enum AuditEvent {
         verdict: PolicyVerdict,
         /// Human-readable explanation (safe for logs; no secret material).
         reason: String,
+        /// MCP server context when this decision is for an MCP action.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_server: Option<String>,
+        /// MCP tool context when this decision is for an MCP action.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_tool: Option<String>,
+        /// Structured decision reason for downstream machine parsing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_reason: Option<String>,
     },
     /// A tool invocation was dispatched to the execution layer.
     ToolDispatch {
@@ -99,6 +108,15 @@ pub enum AuditEvent {
         tool_name: String,
         /// Redacted or summarized arguments — never raw API keys.
         input_summary: String,
+        /// MCP server context when this dispatch is an MCP tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_server: Option<String>,
+        /// MCP tool context when this dispatch is an MCP tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_tool: Option<String>,
+        /// Optional decision reason associated with this dispatch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_reason: Option<String>,
     },
     /// A tool invocation completed (success or failure).
     ToolOutcome {
@@ -112,6 +130,15 @@ pub enum AuditEvent {
         outcome: ToolOutcomeKind,
         /// Short, log-safe summary (no secrets).
         summary: String,
+        /// MCP server context when this outcome is an MCP tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_server: Option<String>,
+        /// MCP tool context when this outcome is an MCP tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_tool: Option<String>,
+        /// Optional decision reason associated with this outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_reason: Option<String>,
     },
     /// One observable step from the agent orchestrator (FSM events, stream milestones).
     AgentStep {

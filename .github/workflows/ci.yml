@@ -44,13 +44,19 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      - name: CLI surface smoke test
-        run: |
-          cargo run -p akmon-cli --no-default-features -- --help
-          cargo run -p akmon-cli --no-default-features -- audit --help
-          cargo run -p akmon-cli --no-default-features -- evidence --help
-          cargo run -p akmon-cli --no-default-features -- slo --help
-          cargo run -p akmon-cli --no-default-features -- policy --help
+  docs-quality:
+    name: Docs Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Install mdBook
         run: |
@@ -59,10 +65,20 @@ jobs:
             | tar -xz
           sudo mv mdbook /usr/local/bin/
 
-      - name: Docs build check
-        run: |
-          cd docs
-          mdbook build
+      - name: mdBook build
+        run: mdbook build docs
+
+      - name: Markdown local link checks
+        run: python3 scripts/docs/check_markdown_links.py
+
+      - name: CLI snippet smoke checks
+        run: bash scripts/docs/check_cli_smoke.sh
+
+      - name: JSON snippet sanity checks
+        run: python3 scripts/docs/check_json_snippets.py
+
+      - name: Docs checker fixture tests
+        run: bash scripts/docs/test_fixtures.sh
 
   build-release:
     name: Build release binary

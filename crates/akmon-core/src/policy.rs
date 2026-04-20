@@ -26,6 +26,8 @@ pub struct PolicyConfig {
     pub network: NetworkPolicyConfig,
     /// Tool-name rules for dispatch-time checks.
     pub tools: ToolPolicyConfig,
+    /// MCP server/tool governance rules for external tool calls.
+    pub mcp: McpPolicyConfig,
 }
 
 /// Read/write filesystem policy buckets.
@@ -76,6 +78,16 @@ pub struct ToolPolicyConfig {
     pub allow: Vec<String>,
     /// Tool-name deny patterns.
     pub deny: Vec<String>,
+}
+
+/// MCP governance rules split by server and tool dimensions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpPolicyConfig {
+    /// MCP server allow/deny patterns matched against server name.
+    pub servers: PatternRuleSet,
+    /// MCP tool allow/deny patterns matched against MCP tool name.
+    pub tools: PatternRuleSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,8 +157,68 @@ impl PolicyConfig {
         )
     }
 
+    /// Applies MCP server/tool governance rules.
+    ///
+    /// Fail-closed behavior:
+    /// - missing or empty `server_name` / `tool_name` denies;
+    /// - explicit deny wins;
+    /// - no allow match denies.
+    pub fn evaluate_mcp_action(
+        &self,
+        server_name: Option<&str>,
+        tool_name: Option<&str>,
+    ) -> (PolicyVerdict, String) {
+        let server = server_name.map(str::trim).unwrap_or_default();
+        let tool = tool_name.map(str::trim).unwrap_or_default();
+        if server.is_empty() || tool.is_empty() {
+            return (
+                PolicyVerdict::Deny,
+                "denied: malformed MCP context (missing server or tool)".to_string(),
+            );
+        }
+        let (server_verdict, server_reason) = evaluate_pattern_rules(
+            "mcp.server",
+            "server",
+            server,
+            &self.mcp.servers.allow,
+            &self.mcp.servers.deny,
+        );
+        if matches!(server_verdict, PolicyVerdict::Deny) {
+            return (
+                PolicyVerdict::Deny,
+                format!("denied: MCP server policy blocked `{server}` ({server_reason})"),
+            );
+        }
+        let (tool_verdict, tool_reason) = evaluate_pattern_rules(
+            "mcp.tool",
+            "tool",
+            tool,
+            &self.mcp.tools.allow,
+            &self.mcp.tools.deny,
+        );
+        if matches!(tool_verdict, PolicyVerdict::Deny) {
+            return (
+                PolicyVerdict::Deny,
+                format!("denied: MCP tool policy blocked `{tool}` ({tool_reason})"),
+            );
+        }
+        (
+            PolicyVerdict::Allow,
+            format!(
+                "allowed: MCP context `{server}` / `{tool}` passed server+tool rules ({server_reason}; {tool_reason})"
+            ),
+        )
+    }
+
     fn has_tool_rules(&self) -> bool {
         !self.tools.allow.is_empty() || !self.tools.deny.is_empty()
+    }
+
+    fn has_mcp_rules(&self) -> bool {
+        !self.mcp.servers.allow.is_empty()
+            || !self.mcp.servers.deny.is_empty()
+            || !self.mcp.tools.allow.is_empty()
+            || !self.mcp.tools.deny.is_empty()
     }
 }
 
@@ -485,6 +557,113 @@ impl PolicyEngine {
         ))
     }
 
+    /// Automatic MCP governance evaluation (server + tool context).
+    ///
+    /// This path is intentionally fail-closed. MCP execution requires
+    /// [`PolicyEngineMode::Configured`], and both MCP server and tool context.
+    pub fn evaluate_mcp_automatic(
+        &self,
+        session_id: &str,
+        dispatch_tool_name: Option<&str>,
+        mcp_server: Option<&str>,
+        mcp_tool: Option<&str>,
+    ) -> PolicyDecision {
+        let timestamp = Utc::now();
+        let (allowed, reason, verdict) = match &self.mode {
+            PolicyEngineMode::Configured(cfg) => {
+                let server = mcp_server.map(str::trim).unwrap_or_default();
+                let tool = mcp_tool.map(str::trim).unwrap_or_default();
+                if server.is_empty() || tool.is_empty() {
+                    (
+                        false,
+                        "denied: malformed MCP context (missing server or tool)".to_string(),
+                        PolicyVerdict::Deny,
+                    )
+                } else if !cfg.has_mcp_rules() {
+                    (
+                        false,
+                        "denied: MCP policy missing (configured mode requires explicit [mcp] allow rules)"
+                            .to_string(),
+                        PolicyVerdict::Deny,
+                    )
+                } else {
+                    let tool_gate = dispatch_tool_name.and_then(|name| {
+                        if cfg.has_tool_rules() {
+                            Some((name, cfg.evaluate_tool_name(name)))
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some((name, (tool_verdict, tool_reason))) = tool_gate {
+                        if matches!(tool_verdict, PolicyVerdict::Deny) {
+                            (
+                                false,
+                                format!(
+                                    "denied: parent tool policy blocked dispatch tool `{name}` ({tool_reason})"
+                                ),
+                                PolicyVerdict::Deny,
+                            )
+                        } else {
+                            let (mcp_verdict, mcp_reason) =
+                                cfg.evaluate_mcp_action(Some(server), Some(tool));
+                            (
+                                matches!(mcp_verdict, PolicyVerdict::Allow),
+                                format!(
+                                    "dispatch tool `{name}` passed parent tool policy ({tool_reason}); {mcp_reason}"
+                                ),
+                                mcp_verdict,
+                            )
+                        }
+                    } else {
+                        let (mcp_verdict, mcp_reason) =
+                            cfg.evaluate_mcp_action(Some(server), Some(tool));
+                        (matches!(mcp_verdict, PolicyVerdict::Allow), mcp_reason, mcp_verdict)
+                    }
+                }
+            }
+            PolicyEngineMode::DenyAll => (
+                false,
+                "denied: parent policy mode is deny-all".to_string(),
+                PolicyVerdict::Deny,
+            ),
+            PolicyEngineMode::Interactive => (
+                false,
+                "denied: parent policy mode is interactive; MCP requires configured fail-closed rules"
+                    .to_string(),
+                PolicyVerdict::Deny,
+            ),
+            PolicyEngineMode::AutoApproveReads { .. } => (
+                false,
+                "denied: parent policy mode is auto-approve-reads; MCP requires configured fail-closed rules"
+                    .to_string(),
+                PolicyVerdict::Deny,
+            ),
+            PolicyEngineMode::AutoApproveReadsAndFetch { .. } => (
+                false,
+                "denied: parent policy mode is auto-approve-reads-and-fetch; MCP requires configured fail-closed rules"
+                    .to_string(),
+                PolicyVerdict::Deny,
+            ),
+        };
+        let audit = AuditEvent::PolicyEvaluation {
+            session_id: session_id.to_string(),
+            timestamp,
+            permission: Permission::NetworkFetch {
+                url: "mcp://tool-call".to_string(),
+            },
+            verdict,
+            reason: reason.clone(),
+            mcp_server: mcp_server.map(ToOwned::to_owned),
+            mcp_tool: mcp_tool.map(ToOwned::to_owned),
+            decision_reason: Some(reason.clone()),
+        };
+        PolicyDecision {
+            allowed,
+            reason,
+            audit,
+        }
+    }
+
     /// Records a caller-supplied verdict in [`PolicyEngineMode::Interactive`],
     /// [`PolicyEngineMode::AutoApproveReads`], or [`PolicyEngineMode::AutoApproveReadsAndFetch`]
     /// (e.g. write confirmation after `--yes`). Always emits an audit event.
@@ -525,6 +704,9 @@ impl PolicyEngine {
             permission,
             verdict,
             reason: reason.clone(),
+            mcp_server: None,
+            mcp_tool: None,
+            decision_reason: None,
         };
         PolicyDecision {
             allowed,
@@ -942,5 +1124,95 @@ mod tests {
             engine.evaluate_automatic("s", perm),
             Err(PolicyEngineError::InteractiveRequiresCaller)
         );
+    }
+
+    #[test]
+    fn configured_mcp_requires_explicit_rules_fail_closed() {
+        let cfg = PolicyConfig::default();
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let decision = engine.evaluate_mcp_automatic(
+            "sess-mcp",
+            Some("mcp_tool"),
+            Some("github"),
+            Some("search_issues"),
+        );
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("MCP policy missing"));
+    }
+
+    #[test]
+    fn configured_mcp_denies_malformed_context() {
+        let cfg = PolicyConfig {
+            mcp: McpPolicyConfig {
+                servers: PatternRuleSet {
+                    allow: vec!["github".into()],
+                    deny: vec![],
+                },
+                tools: PatternRuleSet {
+                    allow: vec!["search_*".into()],
+                    deny: vec![],
+                },
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let decision = engine.evaluate_mcp_automatic("sess-mcp", Some("mcp_tool"), None, Some("x"));
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("malformed MCP context"));
+    }
+
+    #[test]
+    fn configured_mcp_server_or_tool_deny_wins() {
+        let cfg = PolicyConfig {
+            mcp: McpPolicyConfig {
+                servers: PatternRuleSet {
+                    allow: vec!["github".into()],
+                    deny: vec!["github".into()],
+                },
+                tools: PatternRuleSet {
+                    allow: vec!["search_*".into()],
+                    deny: vec!["search_secret".into()],
+                },
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let server_denied = engine.evaluate_mcp_automatic(
+            "sess-mcp",
+            Some("mcp_tool"),
+            Some("github"),
+            Some("search_issues"),
+        );
+        assert!(!server_denied.allowed);
+        assert!(server_denied.reason.contains("MCP server policy blocked"));
+    }
+
+    #[test]
+    fn configured_mcp_allows_when_server_and_tool_match_allow() {
+        let cfg = PolicyConfig {
+            mcp: McpPolicyConfig {
+                servers: PatternRuleSet {
+                    allow: vec!["github".into()],
+                    deny: vec![],
+                },
+                tools: PatternRuleSet {
+                    allow: vec!["search_*".into()],
+                    deny: vec![],
+                },
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let decision = engine.evaluate_mcp_automatic(
+            "sess-mcp",
+            Some("mcp_tool"),
+            Some("github"),
+            Some("search_issues"),
+        );
+        assert!(decision.allowed);
+        let json = decision.audit.to_json().expect("policy audit json");
+        assert!(json.contains("\"mcp_server\":\"github\""));
+        assert!(json.contains("\"mcp_tool\":\"search_issues\""));
+        assert!(json.contains("decision_reason"));
     }
 }

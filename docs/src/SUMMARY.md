@@ -102,6 +102,7 @@
 - [CLI Reference](./reference/cli.md)
 - [Slash Commands](./reference/slash-commands.md)
 - [Configuration Reference](./reference/config.md)
+- [Release notes: v1.8.1](./releases/v1.8.1.md)
 - [Release notes: v1.8.0](./releases/v1.8.0.md)
 - [Tools Reference](./reference/tools.md)
 - [Environment Variables](./reference/env-vars.md)

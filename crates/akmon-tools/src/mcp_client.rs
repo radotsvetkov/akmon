@@ -6,9 +6,9 @@ use akmon_core::{McpServerConfig, Permission};
 use async_trait::async_trait;
 use serde_json::{Value as JsonValue, json};
 
-use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
+use crate::{McpPolicyContext, Tool};
 
 /// One tool entry decoded from a `tools/list` JSON-RPC result (before building an [`McpTool`]).
 #[derive(Debug, Clone)]
@@ -126,12 +126,22 @@ pub async fn discover_mcp_tools(server: &McpServerConfig) -> Result<Vec<McpTool>
     let specs = parse_tools_list_envelope(&value)?;
     Ok(specs
         .into_iter()
-        .map(|s| McpTool::new(s.name, s.description, s.input_schema, server.url.clone()))
+        .map(|s| {
+            McpTool::new(
+                server.name.clone(),
+                s.name,
+                s.description,
+                s.input_schema,
+                server.url.clone(),
+            )
+        })
         .collect())
 }
 
 /// Proxy for one remote MCP tool (invokes `tools/call` over JSON-RPC HTTP).
 pub struct McpTool {
+    server_name: String,
+    remote_tool_name: String,
     tool_name: String,
     tool_description: String,
     input_schema: JsonValue,
@@ -143,6 +153,7 @@ pub struct McpTool {
 impl McpTool {
     /// Builds a proxy; uses a default [`reqwest::Client`] (per-request timeout is set in [`Tool::execute`]).
     pub fn new(
+        server_name: String,
         tool_name: String,
         tool_description: String,
         input_schema: JsonValue,
@@ -152,6 +163,8 @@ impl McpTool {
             url: server_url.clone(),
         }];
         Self {
+            server_name,
+            remote_tool_name: tool_name.clone(),
             tool_name,
             tool_description,
             input_schema,
@@ -186,7 +199,7 @@ impl Tool for McpTool {
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": &self.tool_name,
+                "name": &self.remote_tool_name,
                 "arguments": args,
             }
         });
@@ -241,6 +254,13 @@ impl Tool for McpTool {
             },
         }
     }
+
+    fn mcp_policy_context(&self) -> Option<McpPolicyContext> {
+        Some(McpPolicyContext {
+            server: self.server_name.clone(),
+            tool: self.remote_tool_name.clone(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -250,6 +270,7 @@ mod tests {
     #[test]
     fn mcp_tool_new_sets_name_and_description() {
         let t = McpTool::new(
+            "srv".into(),
             "db_query".into(),
             "Run a query".into(),
             json!({"type": "object"}),
@@ -262,8 +283,28 @@ mod tests {
     #[test]
     fn mcp_tool_parameters_schema_matches_input() {
         let schema = json!({"type": "object", "properties": {"q": {}}});
-        let t = McpTool::new("x".into(), "d".into(), schema.clone(), "http://a".into());
+        let t = McpTool::new(
+            "srv".into(),
+            "x".into(),
+            "d".into(),
+            schema.clone(),
+            "http://a".into(),
+        );
         assert_eq!(t.parameters_schema(), schema);
+    }
+
+    #[test]
+    fn mcp_tool_exposes_policy_context() {
+        let t = McpTool::new(
+            "github".into(),
+            "search_issues".into(),
+            "d".into(),
+            json!({}),
+            "http://a".into(),
+        );
+        let ctx = t.mcp_policy_context().expect("mcp context");
+        assert_eq!(ctx.server, "github");
+        assert_eq!(ctx.tool, "search_issues");
     }
 
     #[test]

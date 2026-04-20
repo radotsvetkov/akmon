@@ -4,6 +4,7 @@ mod audit_cmd;
 mod cli_forward;
 mod cli_project;
 mod config_cmd;
+mod doctor_cmd;
 mod evidence_cmd;
 mod export_cmd;
 mod import_cmd;
@@ -562,6 +563,8 @@ enum Commands {
     New(cli_project::NewCmd),
     /// Manage `~/.akmon/config.toml` (models, keys, MCP).
     Config(config_cmd::ConfigArgs),
+    /// Provider operability diagnostics and remediation hints.
+    Doctor(doctor_cmd::DoctorArgs),
     /// Verify audit JSONL chain integrity.
     Audit(audit_cmd::AuditArgs),
     /// Verify evidence artifact integrity.
@@ -1181,6 +1184,12 @@ async fn main() -> ExitCode {
         }
         Some(Commands::Config(c)) => {
             return config_cmd::run_config(c.clone()).await;
+        }
+        Some(Commands::Doctor(d)) => {
+            let global = load_user_global_config();
+            let connect = llm_connect_from_cli(&cli, &global, cli.model.clone());
+            return doctor_cmd::run_doctor(d.clone(), cli.output == OutputFormat::Json, &connect)
+                .await;
         }
         Some(Commands::Audit(a)) => {
             return audit_cmd::run_audit(a.clone(), cli.output == OutputFormat::Json);
