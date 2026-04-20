@@ -25,20 +25,23 @@
 
 Akmon is a terminal-native AI coding agent built as a single Rust binary for teams that need real control over AI side effects. It runs with local or hosted models, enforces typed permission checks for writes/shell/network actions, and produces machine-verifiable artifacts for audit and CI.
 
+**Website:** [radotsvetkov.github.io/akmon](https://radotsvetkov.github.io/akmon/) · **Docs:** [radotsvetkov.github.io/akmon/docs](https://radotsvetkov.github.io/akmon/docs/)
+
 [![CI](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml/badge.svg)](https://github.com/radotsvetkov/akmon/actions)
 [![Passed tests](https://img.shields.io/github/actions/workflow/status/radotsvetkov/akmon/ci.yml?branch=main&label=passed%20tests)](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
-## Why v1.8.1 matters
+## Why v1.8.2 matters
 
-Akmon v1.8.1 is an operability + reliability hardening release:
+Akmon v1.8.2 is an operability and trust release: **provider routing is fully explainable** without changing how backends are selected:
 
-- deterministic provider diagnostics (`akmon doctor providers`),
-- fail-closed MCP governance with enriched audit context,
-- deterministic docs quality gates in CI,
-- internal TUI state decomposition with behavior parity (no UX change),
-- stronger Ollama/local timeout and remediation behavior.
+- deterministic `ProviderResolutionTrace` (mirrors `LlmConnectConfig::resolve()`),
+- `akmon config explain-provider` (text or JSON),
+- `akmon doctor providers` includes the same `provider_resolution` block (text + JSON),
+- headless `--output json` run summaries include additive `provider_resolution`.
+
+Earlier v1.8.x highlights still apply: `akmon doctor providers`, MCP governance hardening, docs quality gates in CI, and local-model reliability improvements—see [CHANGELOG.md](CHANGELOG.md) and [release notes v1.8.2](docs/src/releases/v1.8.2.md).
 
 ## 5-minute quickstart
 
@@ -94,17 +97,23 @@ Merge precedence is deterministic:
 
 `profile < packs < project-local policy < CLI override`
 
-## What changed in 1.8.1
+## What changed in 1.8.2
 
-- Provider diagnostics command: docs [CLI reference](docs/src/reference/cli.md), [Provider setup](docs/src/getting-started/providers.md)
-- MCP governance hardening: docs [Security model](docs/src/features/security.md), [MCP guide](docs/src/features/mcp.md), [Configuration reference](docs/src/reference/config.md)
-- Docs quality gates: docs [Contributing guide](CONTRIBUTING.md), [docs/README](docs/README.md)
-- TUI internal refactor (no UX change): docs [Contributing architecture](docs/src/contributing/architecture.md)
-- Local model reliability improvements: docs [Configuration](docs/src/getting-started/configuration.md), [Cost guide](docs/src/features/cost.md)
+- Provider resolution explainability: [CLI reference](docs/src/reference/cli.md) (`config explain-provider`, `doctor providers`), [Provider setup](docs/src/getting-started/providers.md), [Environment variables](docs/src/reference/env-vars.md)
+- Release notes: [docs/src/releases/v1.8.2.md](docs/src/releases/v1.8.2.md)
+
+### What changed in 1.8.1
+
+- Provider diagnostics command: [CLI reference](docs/src/reference/cli.md), [Provider setup](docs/src/getting-started/providers.md)
+- MCP governance hardening: [Security model](docs/src/features/security.md), [MCP guide](docs/src/features/mcp.md), [Configuration reference](docs/src/reference/config.md)
+- Docs quality gates: [Contributing guide](CONTRIBUTING.md), [docs/README](docs/README.md)
+- TUI internal refactor (no UX change): [Contributing architecture](docs/src/contributing/architecture.md)
+- Local model reliability: [Configuration](docs/src/getting-started/configuration.md), [Cost guide](docs/src/features/cost.md)
 
 ## Documentation
 
-- Hosted docs: [radotsvetkov.github.io/akmon/docs](https://radotsvetkov.github.io/akmon/docs/)
+- Project site: [radotsvetkov.github.io/akmon](https://radotsvetkov.github.io/akmon/)
+- Hosted handbook: [radotsvetkov.github.io/akmon/docs](https://radotsvetkov.github.io/akmon/docs/)
 - Introduction: [docs/src/introduction.md](docs/src/introduction.md)
 - Headless mode: [docs/src/usage/headless.md](docs/src/usage/headless.md)
 - Interactive mode: [docs/src/usage/interactive.md](docs/src/usage/interactive.md)
