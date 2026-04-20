@@ -1,66 +1,93 @@
 # Configuration reference
 
-This page describes common `~/.akmon/config.toml` keys. Exact schemas may grow between releases; use `akmon config show` for your version.
+Akmon user config is stored at `~/.akmon/config.toml`.
 
-## `[model]`
-
-| Key | Meaning |
-| --- | --- |
-| `default` | Default model id (provider-specific string). |
-| `anthropic_key` | Anthropic API key (prefer `akmon config key set`). |
-| `openrouter_key` | OpenRouter API key. |
-| `openai_key` | OpenAI API key. |
-| `groq_key` | Groq API key. |
-
-Prefer environment variables or `akmon config key` for secrets so they are not committed.
-
-## `[architect]` / planner
-
-| Key | Meaning |
-| --- | --- |
-| `planner_model` | Default model id for `--architect` planning phase. |
-
-## `[[model_estimates]]`
-
-Optional rows for **context-window %** and **rough USD cost** from usage. Each row:
-
-| Key | Meaning |
-| --- | --- |
-| `pattern` | Substring matched against the **current** model id (first match wins). |
-| `context_window_tokens` | Context window size in tokens for % in the TUI status bar. |
-| `input_per_million_usd` | Optional USD per 1M input tokens (merges with built-in defaults if only one side is set). |
-| `output_per_million_usd` | Optional USD per 1M output tokens. |
-| `cache_read_per_million_usd` | Optional USD per 1M cache-read tokens. |
-| `note` | Free text (e.g. rate-limit reminder); shown in `/context`. |
-
-In the **TUI**, **`/config`** (or **Ctrl+S**) → **Estimates** edits the row for the active model and writes `~/.akmon/config.toml`.
-
-Cost display is **not** a billing statement. **Rate limits** are not modeled in-app; set expectations with `note` or your provider’s dashboard.
-
-See [Getting started → Configuration](../getting-started/configuration.md#model-context-window-and-cost-estimate-model_estimates).
-
-## MCP servers
-
-Configured as tables under `mcp` / `[[mcp.servers]]` (see [MCP](../features/mcp.md)):
+## Core model keys
 
 ```toml
-[[mcp.servers]]
-name = "example"
-url = "https://example.com/mcp"
-enabled = true
+default_model = "llama3.2"
+ollama_url = "http://localhost:11434"
 ```
 
-## Paths
+Provider credentials can be set via env vars or `akmon config key`.
 
-Akmon resolves project root (git root), `AKMON.md`, `.akmon/plans/`, `.akmon/audit/`, and optional index paths relative to the project.
+## Policy governance (`[policy]`)
 
-## CLI
-
-```bash
-akmon config show    # masked effective config
-akmon config path    # config file location
-akmon config edit    # open in editor
-akmon config reset   # reset options (see help)
+```toml
+[policy]
+profile = "dev" # dev | staging | prod
+packs = [".akmon/policy-packs/org.toml", ".akmon/policy-packs/team.toml"]
 ```
 
-Full flag and subcommand matrix: [CLI reference](./cli.md).
+`profile` selects built-in defaults. `packs` adds extra policy layers.
+
+Effective precedence:
+
+1. selected built-in profile,
+2. policy packs,
+3. project-local policy (`.akmon/policy.toml` or `.akmon/policy.json`),
+4. CLI override (`--policy-override`).
+
+Within a layer, list fields append and deduplicate while keeping later precedence order.
+
+## Policy rule schema (`PolicyConfig`)
+
+Policy packs/local/override files use the same rule schema:
+
+```toml
+[filesystem.read]
+allow = ["src/**", "Cargo.toml", "README.md"]
+deny = ["src/**/secrets/**"]
+
+[filesystem.write]
+allow = ["src/**", "tests/**"]
+deny = [".git/**", "**/*.pem"]
+
+[shell]
+allow_prefixes = ["cargo ", "rustfmt "]
+deny_prefixes = ["cargo publish", "rm -rf "]
+
+[network]
+allow_domains = ["api.github.com", "*.rust-lang.org"]
+deny_domains = ["169.254.169.254", "*.internal.local"]
+
+[tools]
+allow = ["read_*", "search", "shell"]
+deny = ["shell_force", "write_secret"]
+```
+
+Engine behavior is deterministic:
+
+- explicit deny beats allow,
+- most specific rule wins in a rule list,
+- no matching allow means deny.
+
+## Reliability defaults (`[slo]`)
+
+```toml
+[slo]
+min_tool_success_rate = 0.95
+max_timeout_rate = 0.02
+max_policy_denial_rate = 0.20
+max_tool_failure_rate = 0.05
+max_retries_total = 3
+max_timeouts_total = 2
+min_tool_calls_total = 5
+
+[slo.trend]
+max_success_rate_drop_abs = 0.05
+max_timeout_rate_increase_abs = 0.02
+max_failure_rate_increase_abs = 0.03
+max_retries_increase_ratio = 1.0
+max_latency_avg_increase_ratio = 0.50
+min_baseline_samples = 5
+```
+
+CLI overrides take precedence over config.
+
+## Migration notes for v1.8.0 operators
+
+- Audit records are chain-shaped (`schema_version`, `event_index`, `prev_hash`, `event_hash`).
+- Run report JSON now includes additive `replay_metadata` and `reliability_metrics`.
+- Evidence artifacts are versioned (`evidence_schema_version: "evidence.v1"`).
+- Policy governance can now be managed by profile/packs without changing permission classes.

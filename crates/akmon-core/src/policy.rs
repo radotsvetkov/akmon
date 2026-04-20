@@ -1,33 +1,294 @@
 //! Policy engine: deny-all default, interactive resolution, and configured rules.
 
 use chrono::Utc;
+use glob::Pattern;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::audit::{AuditEvent, PolicyVerdict};
 use crate::permission::Permission;
 
-/// Rule set loaded from project configuration (fields added in a later slice).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Rule set loaded from project configuration.
+///
+/// The evaluator is deterministic and follows two global rules:
+///
+/// - explicit deny wins over allow;
+/// - when multiple rules in the same allow/deny set match, the most specific
+///   rule wins (ties resolve by declaration order).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PolicyConfig {
-    // Intentionally empty — declarative rules land in the next policy slice.
+    /// Filesystem path rules for read and write capabilities.
+    pub filesystem: FilesystemPolicyConfig,
+    /// Shell command prefix rules.
+    pub shell: ShellPolicyConfig,
+    /// Network domain rules (host portion of URL).
+    pub network: NetworkPolicyConfig,
+    /// Tool-name rules for dispatch-time checks.
+    pub tools: ToolPolicyConfig,
+}
+
+/// Read/write filesystem policy buckets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilesystemPolicyConfig {
+    /// Rules for [`Permission::ReadFile`] and [`Permission::ListDirectory`].
+    pub read: PatternRuleSet,
+    /// Rules for [`Permission::WriteFile`].
+    pub write: PatternRuleSet,
+}
+
+/// Glob-style allow/deny rule set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PatternRuleSet {
+    /// Allow patterns.
+    pub allow: Vec<String>,
+    /// Deny patterns.
+    pub deny: Vec<String>,
+}
+
+/// Prefix rules for shell commands.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellPolicyConfig {
+    /// Command prefixes that are permitted.
+    pub allow_prefixes: Vec<String>,
+    /// Command prefixes that are blocked.
+    pub deny_prefixes: Vec<String>,
+}
+
+/// Domain rules for network fetches.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkPolicyConfig {
+    /// Host/domain glob patterns that are permitted.
+    pub allow_domains: Vec<String>,
+    /// Host/domain glob patterns that are blocked.
+    pub deny_domains: Vec<String>,
+}
+
+/// Tool dispatch rules keyed by tool name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolPolicyConfig {
+    /// Tool-name allow patterns.
+    pub allow: Vec<String>,
+    /// Tool-name deny patterns.
+    pub deny: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuleMatch {
+    pattern: String,
+    specificity: usize,
+    declaration_index: usize,
 }
 
 impl PolicyConfig {
     /// Applies configured rules to `permission`.
-    ///
-    /// Skeleton: no rules are defined yet; every request is denied with a
-    /// stable explanation until rule evaluation is implemented.
-    pub fn evaluate_permission(&self, _permission: &Permission) -> (PolicyVerdict, String) {
-        (
-            PolicyVerdict::Deny,
-            "denied: PolicyConfig defines no matching rules yet (skeleton)".to_string(),
+    pub fn evaluate_permission(&self, permission: &Permission) -> (PolicyVerdict, String) {
+        match permission {
+            Permission::ReadFile { path } | Permission::ListDirectory { path } => {
+                let subject = normalize_path_for_policy(path);
+                evaluate_pattern_rules(
+                    "filesystem.read",
+                    "path",
+                    &subject,
+                    &self.filesystem.read.allow,
+                    &self.filesystem.read.deny,
+                )
+            }
+            Permission::WriteFile { path } => {
+                let subject = normalize_path_for_policy(path);
+                evaluate_pattern_rules(
+                    "filesystem.write",
+                    "path",
+                    &subject,
+                    &self.filesystem.write.allow,
+                    &self.filesystem.write.deny,
+                )
+            }
+            Permission::ExecuteCommand { command, .. } => evaluate_prefix_rules(
+                "shell",
+                "command",
+                command,
+                &self.shell.allow_prefixes,
+                &self.shell.deny_prefixes,
+            ),
+            Permission::NetworkFetch { url } => {
+                let Some(domain) = extract_domain(url) else {
+                    return (
+                        PolicyVerdict::Deny,
+                        format!("denied: network URL has no valid domain: `{url}`"),
+                    );
+                };
+                evaluate_pattern_rules(
+                    "network",
+                    "domain",
+                    &domain,
+                    &self.network.allow_domains,
+                    &self.network.deny_domains,
+                )
+            }
+        }
+    }
+
+    /// Applies configured rules to a `tool_name`.
+    pub fn evaluate_tool_name(&self, tool_name: &str) -> (PolicyVerdict, String) {
+        evaluate_pattern_rules(
+            "tool",
+            "name",
+            tool_name,
+            &self.tools.allow,
+            &self.tools.deny,
         )
     }
+
+    fn has_tool_rules(&self) -> bool {
+        !self.tools.allow.is_empty() || !self.tools.deny.is_empty()
+    }
+}
+
+fn evaluate_pattern_rules(
+    scope: &str,
+    subject_kind: &str,
+    subject: &str,
+    allow: &[String],
+    deny: &[String],
+) -> (PolicyVerdict, String) {
+    let deny_match = best_pattern_match(deny, subject);
+    let allow_match = best_pattern_match(allow, subject);
+    evaluate_matches(scope, subject_kind, subject, allow_match, deny_match)
+}
+
+fn evaluate_prefix_rules(
+    scope: &str,
+    subject_kind: &str,
+    subject: &str,
+    allow: &[String],
+    deny: &[String],
+) -> (PolicyVerdict, String) {
+    let deny_match = best_prefix_match(deny, subject);
+    let allow_match = best_prefix_match(allow, subject);
+    evaluate_matches(scope, subject_kind, subject, allow_match, deny_match)
+}
+
+fn evaluate_matches(
+    scope: &str,
+    subject_kind: &str,
+    subject: &str,
+    allow_match: Option<RuleMatch>,
+    deny_match: Option<RuleMatch>,
+) -> (PolicyVerdict, String) {
+    if let Some(m) = deny_match {
+        return (
+            PolicyVerdict::Deny,
+            format!(
+                "denied: {scope} matched deny rule `{}` for {subject_kind} `{subject}` (specificity={}, rule_index={})",
+                m.pattern, m.specificity, m.declaration_index
+            ),
+        );
+    }
+    if let Some(m) = allow_match {
+        return (
+            PolicyVerdict::Allow,
+            format!(
+                "allowed: {scope} matched allow rule `{}` for {subject_kind} `{subject}` (specificity={}, rule_index={})",
+                m.pattern, m.specificity, m.declaration_index
+            ),
+        );
+    }
+    (
+        PolicyVerdict::Deny,
+        format!("denied: no {scope} allow rule matched {subject_kind} `{subject}`"),
+    )
+}
+
+fn best_pattern_match(patterns: &[String], subject: &str) -> Option<RuleMatch> {
+    patterns
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, pattern)| {
+            let parsed = Pattern::new(pattern).ok()?;
+            if !parsed.matches(subject) {
+                return None;
+            }
+            Some(RuleMatch {
+                pattern: pattern.clone(),
+                specificity: pattern_specificity(pattern),
+                declaration_index: idx,
+            })
+        })
+        .max_by(|a, b| {
+            a.specificity
+                .cmp(&b.specificity)
+                .then_with(|| b.declaration_index.cmp(&a.declaration_index))
+        })
+}
+
+fn best_prefix_match(prefixes: &[String], subject: &str) -> Option<RuleMatch> {
+    prefixes
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, prefix)| {
+            let normalized = prefix.trim();
+            if normalized.is_empty() || !subject.starts_with(normalized) {
+                return None;
+            }
+            Some(RuleMatch {
+                pattern: normalized.to_string(),
+                specificity: normalized.len(),
+                declaration_index: idx,
+            })
+        })
+        .max_by(|a, b| {
+            a.specificity
+                .cmp(&b.specificity)
+                .then_with(|| b.declaration_index.cmp(&a.declaration_index))
+        })
+}
+
+fn pattern_specificity(pattern: &str) -> usize {
+    pattern
+        .chars()
+        .filter(|ch| !matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | '!'))
+        .count()
+}
+
+fn normalize_path_for_policy(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn extract_domain(url: &str) -> Option<String> {
+    let without_scheme = if let Some((_, rest)) = url.split_once("://") {
+        rest
+    } else {
+        url
+    };
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    if authority.is_empty() {
+        return None;
+    }
+    let host = authority
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| authority.split(':').next().unwrap_or_default().to_string());
+    let normalized = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized)
 }
 
 /// How the engine decides automatic permissions (anything other than a live
 /// caller verdict in interactive mode).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicyEngineMode {
     /// Default: deny every automatic evaluation (safest out-of-the-box).
     #[default]
@@ -48,7 +309,7 @@ pub enum PolicyEngineMode {
         /// When true, [`Permission::WriteFile`] uses interactive confirmation instead of automatic denial.
         confirm_writes: bool,
     },
-    /// Rules from [`PolicyConfig`] (skeleton denies until rules exist).
+    /// Rules from [`PolicyConfig`].
     Configured(PolicyConfig),
 }
 
@@ -98,8 +359,8 @@ impl PolicyEngine {
 
     /// Automatic evaluation: [`PolicyEngineMode::DenyAll`], [`PolicyEngineMode::Configured`],
     /// [`PolicyEngineMode::AutoApproveReads`], [`PolicyEngineMode::AutoApproveReadsAndFetch`],
-    /// and the allow branch of [`PolicyEngineMode::Interactive`]
-    /// (which always signals that the caller must prompt).
+    /// and the allow branch of [`PolicyEngineMode::Interactive`] (which always
+    /// signals that the caller must prompt).
     ///
     /// Returns [`PolicyEngineError::InteractiveRequiresCaller`] when the mode is
     /// [`PolicyEngineMode::Interactive`], or [`PolicyEngineMode::AutoApproveReads`] /
@@ -109,6 +370,19 @@ impl PolicyEngine {
         &self,
         session_id: &str,
         permission: Permission,
+    ) -> Result<PolicyDecision, PolicyEngineError> {
+        self.evaluate_automatic_for_tool(session_id, permission, None)
+    }
+
+    /// Automatic evaluation with optional `tool_name` context.
+    ///
+    /// When provided in [`PolicyEngineMode::Configured`], tool-level rules are
+    /// checked first and can deny before permission-specific rules.
+    pub fn evaluate_automatic_for_tool(
+        &self,
+        session_id: &str,
+        permission: Permission,
+        tool_name: Option<&str>,
     ) -> Result<PolicyDecision, PolicyEngineError> {
         let timestamp = Utc::now();
         let (allowed, reason, verdict) = match &self.mode {
@@ -171,9 +445,38 @@ impl PolicyEngine {
                 }
             },
             PolicyEngineMode::Configured(cfg) => {
-                let (verdict, r) = cfg.evaluate_permission(&permission);
-                let allowed = matches!(verdict, PolicyVerdict::Allow);
-                (allowed, r, verdict)
+                if let Some(name) = tool_name {
+                    if cfg.has_tool_rules() {
+                        let (tool_verdict, tool_reason) = cfg.evaluate_tool_name(name);
+                        if matches!(tool_verdict, PolicyVerdict::Deny) {
+                            (
+                                false,
+                                format!(
+                                    "denied: tool `{name}` blocked before permission check ({tool_reason})"
+                                ),
+                                PolicyVerdict::Deny,
+                            )
+                        } else {
+                            let (verdict, permission_reason) = cfg.evaluate_permission(&permission);
+                            let allowed = matches!(verdict, PolicyVerdict::Allow);
+                            (
+                                allowed,
+                                format!(
+                                    "tool `{name}` passed tool policy ({tool_reason}); {permission_reason}"
+                                ),
+                                verdict,
+                            )
+                        }
+                    } else {
+                        let (verdict, r) = cfg.evaluate_permission(&permission);
+                        let allowed = matches!(verdict, PolicyVerdict::Allow);
+                        (allowed, r, verdict)
+                    }
+                } else {
+                    let (verdict, r) = cfg.evaluate_permission(&permission);
+                    let allowed = matches!(verdict, PolicyVerdict::Allow);
+                    (allowed, r, verdict)
+                }
             }
         };
 
@@ -250,19 +553,244 @@ mod tests {
     }
 
     #[test]
-    fn configured_skeleton_denies() {
-        let engine = PolicyEngine::new(PolicyEngineMode::Configured(PolicyConfig::default()));
+    fn configured_denies_when_no_allow_matches() {
+        let cfg = PolicyConfig {
+            network: NetworkPolicyConfig {
+                allow_domains: vec!["api.example.com".into()],
+                deny_domains: vec![],
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
         let perm = Permission::NetworkFetch {
             url: "https://example.com".into(),
         };
-        let decision = engine.evaluate_automatic("sess-c", perm).unwrap();
+        let decision = engine
+            .evaluate_automatic("sess-c", perm)
+            .expect("configured decision");
         assert!(!decision.allowed);
+        assert!(decision.reason.contains("no network allow rule"));
+    }
+
+    #[test]
+    fn configured_allows_when_allow_rule_matches() {
+        let cfg = PolicyConfig {
+            network: NetworkPolicyConfig {
+                allow_domains: vec!["*.example.com".into()],
+                deny_domains: vec![],
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let perm = Permission::NetworkFetch {
+            url: "https://docs.example.com/v1".into(),
+        };
+        let decision = engine
+            .evaluate_automatic("sess-c", perm)
+            .expect("configured decision");
+        assert!(decision.allowed);
+        assert!(decision.reason.contains("matched allow rule"));
+    }
+
+    #[test]
+    fn configured_deny_wins_over_allow_for_path() {
+        let cfg = PolicyConfig {
+            filesystem: FilesystemPolicyConfig {
+                read: PatternRuleSet {
+                    allow: vec!["src/**".into()],
+                    deny: vec!["src/secret/**".into()],
+                },
+                write: PatternRuleSet::default(),
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let perm = Permission::ReadFile {
+            path: PathBuf::from("src/secret/token.txt"),
+        };
+        let decision = engine
+            .evaluate_automatic("sess-fs", perm)
+            .expect("configured decision");
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("matched deny rule"));
+    }
+
+    #[test]
+    fn configured_deny_wins_even_when_allow_is_more_specific() {
+        let cfg = PolicyConfig {
+            filesystem: FilesystemPolicyConfig {
+                read: PatternRuleSet {
+                    allow: vec!["src/security/private.txt".into()],
+                    deny: vec!["src/**".into()],
+                },
+                write: PatternRuleSet::default(),
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let perm = Permission::ReadFile {
+            path: PathBuf::from("src/security/private.txt"),
+        };
+        let decision = engine
+            .evaluate_automatic("sess-fs", perm)
+            .expect("configured decision");
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("matched deny rule"));
+    }
+
+    #[test]
+    fn configured_uses_most_specific_allow_rule() {
+        let cfg = PolicyConfig {
+            filesystem: FilesystemPolicyConfig {
+                read: PatternRuleSet {
+                    allow: vec!["src/**".into(), "src/security/**".into()],
+                    deny: vec![],
+                },
+                write: PatternRuleSet::default(),
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let perm = Permission::ReadFile {
+            path: PathBuf::from("src/security/policy.rs"),
+        };
+        let decision = engine
+            .evaluate_automatic("sess-fs", perm)
+            .expect("configured decision");
+        assert!(decision.allowed);
+        assert!(decision.reason.contains("src/security/**"));
+    }
+
+    #[test]
+    fn configured_shell_prefix_deny_wins() {
+        let cfg = PolicyConfig {
+            shell: ShellPolicyConfig {
+                allow_prefixes: vec!["cargo ".into()],
+                deny_prefixes: vec!["cargo publish".into()],
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let perm = Permission::ExecuteCommand {
+            command: "cargo publish --dry-run".into(),
+            cwd: PathBuf::from("."),
+        };
+        let decision = engine
+            .evaluate_automatic("sess-shell", perm)
+            .expect("configured decision");
+        assert!(!decision.allowed);
+        assert!(decision.reason.contains("cargo publish"));
+    }
+
+    #[test]
+    fn configured_network_rule_uses_domain_not_full_url() {
+        let cfg = PolicyConfig {
+            network: NetworkPolicyConfig {
+                allow_domains: vec!["api.example.com".into()],
+                deny_domains: vec![],
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let perm = Permission::NetworkFetch {
+            url: "https://api.example.com/v1/users".into(),
+        };
+        let decision = engine
+            .evaluate_automatic("sess-net", perm)
+            .expect("configured decision");
+        assert!(decision.allowed);
+    }
+
+    #[test]
+    fn configured_tool_name_rules_are_evaluated() {
+        let cfg = PolicyConfig {
+            tools: ToolPolicyConfig {
+                allow: vec!["shell*".into()],
+                deny: vec!["shell_dangerous".into()],
+            },
+            ..PolicyConfig::default()
+        };
+        let (v1, r1) = cfg.evaluate_tool_name("shell");
+        assert_eq!(v1, PolicyVerdict::Allow);
+        assert!(r1.contains("matched allow rule"));
+
+        let (v2, r2) = cfg.evaluate_tool_name("shell_dangerous");
+        assert_eq!(v2, PolicyVerdict::Deny);
+        assert!(r2.contains("matched deny rule"));
+    }
+
+    #[test]
+    fn configured_tool_rules_apply_during_automatic_evaluation() {
+        let cfg = PolicyConfig {
+            tools: ToolPolicyConfig {
+                allow: vec!["read_*".into()],
+                deny: vec!["shell".into()],
+            },
+            filesystem: FilesystemPolicyConfig {
+                read: PatternRuleSet {
+                    allow: vec!["README.md".into()],
+                    deny: vec![],
+                },
+                write: PatternRuleSet::default(),
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+
+        let denied = engine
+            .evaluate_automatic_for_tool(
+                "sess-tool",
+                Permission::ReadFile {
+                    path: PathBuf::from("README.md"),
+                },
+                Some("shell"),
+            )
+            .expect("configured decision");
+        assert!(!denied.allowed);
+        assert!(denied.reason.contains("blocked before permission check"));
+
+        let allowed = engine
+            .evaluate_automatic_for_tool(
+                "sess-tool",
+                Permission::ReadFile {
+                    path: PathBuf::from("README.md"),
+                },
+                Some("read_file"),
+            )
+            .expect("configured decision");
+        assert!(allowed.allowed);
+        assert!(allowed.reason.contains("passed tool policy"));
+    }
+
+    #[test]
+    fn non_tool_policy_evaluation_path_preserves_existing_behavior() {
+        let cfg = PolicyConfig {
+            tools: ToolPolicyConfig {
+                allow: vec!["read_*".into()],
+                deny: vec!["read_file".into()],
+            },
+            filesystem: FilesystemPolicyConfig {
+                read: PatternRuleSet {
+                    allow: vec!["README.md".into()],
+                    deny: vec![],
+                },
+                write: PatternRuleSet::default(),
+            },
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::new(PolicyEngineMode::Configured(cfg));
+        let decision = engine
+            .evaluate_automatic(
+                "sess-legacy",
+                Permission::ReadFile {
+                    path: PathBuf::from("README.md"),
+                },
+            )
+            .expect("configured decision");
+        assert!(decision.allowed);
         assert!(
-            decision
-                .audit
-                .to_json()
-                .expect("audit json")
-                .contains("deny")
+            !decision.reason.contains("tool"),
+            "legacy non-tool path should not include tool gating reason"
         );
     }
 

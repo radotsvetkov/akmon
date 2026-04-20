@@ -152,7 +152,6 @@ fn attach_specs_subagent_tools(
     });
     let rt = Arc::new(SubagentRuntime {
         provider: Arc::clone(provider),
-        policy: Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
         sandbox: Arc::clone(sandbox),
         akmon_md: akmon_md.clone(),
         plan_mode,

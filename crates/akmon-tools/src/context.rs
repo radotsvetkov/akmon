@@ -79,6 +79,12 @@ impl ToolContext {
         &self.project_hash
     }
 
+    /// Active policy engine for this tool invocation.
+    #[must_use]
+    pub fn policy_engine(&self) -> Arc<PolicyEngine> {
+        Arc::clone(&self.policy)
+    }
+
     /// Resolves a user-supplied path to an absolute path inside the sandbox (see [`Sandbox::resolve`]).
     pub fn resolve_path(&self, path: impl AsRef<Path>) -> Result<std::path::PathBuf, SandboxError> {
         self.sandbox.resolve(path)

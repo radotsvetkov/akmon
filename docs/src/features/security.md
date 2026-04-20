@@ -31,6 +31,61 @@ File operations are constrained to project boundaries. Path traversal attempts a
 
 For file changes, Akmon can present unified diffs before final approval. This gives human review at the moment side effects happen, not only at the end.
 
+## Policy-as-code (`Configured`)
+
+`Configured` policy mode supports declarative allow/deny rules for:
+
+- filesystem read/write paths,
+- shell command prefixes,
+- network domains,
+- tool names.
+
+Evaluation is deterministic: explicit deny wins, and the most specific matching
+rule is selected within each rule list.
+
+## Enterprise policy profiles and packs
+
+Akmon supports reusable policy governance inputs for org rollout:
+
+- built-in profiles (`dev`, `staging`, `prod`),
+- policy packs loaded from `.akmon/policy-packs/*.toml|json`,
+- project-local policy file (`.akmon/policy.toml` or `.akmon/policy.json`),
+- optional CLI override (`--policy-override`).
+
+Precedence is explicit and deterministic:
+
+`profile < packs < project-local < CLI override`
+
+This enables staged hardening from development to production without changing the underlying permission classes.
+
+Recommended posture:
+
+- `dev`: fast local iteration with controlled side effects.
+- `staging`: tighter shell/network/tool posture for pre-prod automation.
+- `prod`: explicit-deny heavy posture with minimal mutation surface.
+
+## Nested/subagent safety ceiling
+
+`spawn_subagent` now runs under a strict parent permission ceiling:
+
+- nested sessions never seed broad "allow all writes" approvals,
+- parent interactive mode is downgraded to read-oriented nested execution (no implicit side effects),
+- tool eligibility is pre-filtered with policy evaluation using tool-name context,
+- side-effect decisions still pass through normal permission checks at dispatch time.
+
+This closes the class of escalation where a nested run could gain broader write/shell/network
+rights than the parent session posture.
+
+Before:
+
+- nested bootstrap pre-seeded broad interactive allow replies,
+- side-effect tools could be available in nested runs even when parent posture was read-only.
+
+After:
+
+- nested runs fail closed when confirmations cannot be satisfied safely,
+- nested tool access is a subset of parent policy capability.
+
 ## Network and SSRF posture
 
 `web_fetch` applies protections against common private-address and metadata endpoint abuse patterns. This reduces risk from prompt injection that tries to exfiltrate internal data.
@@ -46,6 +101,12 @@ Operational guidance:
 ## What `--yes` is and is not
 
 `--yes` is a productivity flag, not a blanket "do anything" bypass. It primarily streamlines read-oriented operations; mutating actions remain policy-gated.
+
+## Reliability metrics are observability only
+
+Run/evidence reliability counters (tool success rates, denials, retries, timeouts)
+are for operational visibility and SLO monitoring. They do not grant permissions and
+do not bypass policy enforcement.
 
 ## Common mistakes and troubleshooting
 

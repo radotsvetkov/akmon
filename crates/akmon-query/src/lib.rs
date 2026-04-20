@@ -25,8 +25,8 @@ pub use context::{
 pub use context_manager::{COMPACT_RESERVED_BUFFER, COMPACT_TRIGGER, ContextManager};
 pub use error::SessionError;
 pub use session::{
-    AgentSession, PendingToolCall, SessionRunExit, ToolCallResult, ToolCallSummary,
-    execute_single_tool_call,
+    AgentSession, PendingToolCall, PolicyDecisionSummary, SessionEvidenceData, SessionRunExit,
+    ToolCallResult, ToolCallSummary, execute_single_tool_call,
 };
 pub use specs_and_handoff::{
     MIN_USER_TURNS_FOR_HANDOFF, clear_specs_dir, handoff_path, load_handoff_block_for_prompt,

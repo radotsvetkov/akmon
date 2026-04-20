@@ -21,6 +21,10 @@ akmon --version
 | Tutorial | Outcome |
 | --- | --- |
 | [Step-by-step](./step-by-step.md) | Build real projects in Rust, Python, TypeScript, and refactoring flows |
+| [Local-first developer flow (Ollama)](./local-first-ollama.md) | End-to-end local run with evidence + verification |
+| [CI headless governance flow](./ci-headless-governance.md) | Run JSON/evidence + enforce SLO/trend gates |
+| [Enterprise policy rollout](./enterprise-policy-rollout.md) | Roll `dev` -> `staging` -> `prod` with policy packs |
+| [Example projects](./example-projects.md) | Rust, Python, Node starter command recipes |
 | [Multi-agent automation](./multi-agent-automation.md) | Use phased workflows and context discipline at scale |
 | [Architecture patterns](./architecture-patterns.md) | Select plan/architect/spec patterns by task shape |
 

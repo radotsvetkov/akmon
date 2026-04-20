@@ -10,6 +10,10 @@
 
 - [Tutorials overview](./tutorials/overview.md)
 - [Step-by-step (Rust, Go, Python, Elixir)](./tutorials/step-by-step.md)
+- [Local-first developer flow (Ollama)](./tutorials/local-first-ollama.md)
+- [CI headless governance flow](./tutorials/ci-headless-governance.md)
+- [Enterprise policy rollout](./tutorials/enterprise-policy-rollout.md)
+- [Example projects](./tutorials/example-projects.md)
 - [Multi-agent & automation](./tutorials/multi-agent-automation.md)
 - [Architecture patterns](./tutorials/architecture-patterns.md)
 
@@ -71,6 +75,9 @@
 - [Git Integration](./features/git.md)
 - [MCP Tools](./features/mcp.md)
 - [Audit Log](./features/audit-log.md)
+- [Policy Profiles & Packs](./features/policy-profiles.md)
+- [Evidence Artifact](./features/evidence.md)
+- [Reliability & SLO Metrics](./features/reliability-slos.md)
 - [Security Model](./features/security.md)
 - [Cost Transparency](./features/cost.md)
 
@@ -95,6 +102,7 @@
 - [CLI Reference](./reference/cli.md)
 - [Slash Commands](./reference/slash-commands.md)
 - [Configuration Reference](./reference/config.md)
+- [Release notes: v1.8.0](./releases/v1.8.0.md)
 - [Tools Reference](./reference/tools.md)
 - [Environment Variables](./reference/env-vars.md)
 

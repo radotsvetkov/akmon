@@ -185,6 +185,8 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
                     "openai_compatible_url": cfg.openai_compatible_url,
                     "openai_compatible_api_key": cfg.openai_compatible_api_key.as_ref().map(|k| mask_key(k)),
                     "architect": cfg.architect,
+                    "policy": cfg.policy,
+                    "slo": cfg.slo,
                     "mcp": cfg.mcp,
                 });
                 let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;

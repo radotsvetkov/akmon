@@ -56,6 +56,13 @@ Use multiple levers together:
 - context hygiene (`/clear` when a session gets noisy),
 - use `/context` and `/cost` during long runs.
 
+For automated runs, pair budget caps with evidence/SLO checks:
+
+```bash
+akmon --yes --output json --max-budget-usd 1.50 --task "..." | tee run.json
+akmon slo verify run.json --thresholds .akmon/slo.toml
+```
+
 ## Common mistakes and troubleshooting
 
 - **Mistake:** using premium models for trivial edits.

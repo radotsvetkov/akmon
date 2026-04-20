@@ -42,7 +42,7 @@ pub enum PolicyEngineMode {
     /// Like AutoApproveReads but also auto-approve network fetches
     AutoApproveReadsAndFetch { confirm_writes: bool },
     
-    /// Use declarative rules from PolicyConfig (skeleton; rules TBD)
+    /// Use declarative rules from PolicyConfig
     Configured(PolicyConfig),
 }
 ```
@@ -96,6 +96,10 @@ pub fn evaluate_automatic(
     permission: Permission,
 ) -> Result<PolicyDecision, PolicyEngineError>
 ```
+
+When tool context is available during dispatch, Akmon uses
+`evaluate_automatic_for_tool(..., Some(tool_name))` so `[policy.tools]` rules
+are enforced before permission-class rules.
 
 **Decision logic by mode:**
 
@@ -346,27 +350,21 @@ async fn tool_success_appends_tool_role_message() { ... }
 
 ## Future Enhancements
 
-### PolicyConfig Rules (Skeleton)
+### PolicyConfig Rules
 
-Currently, `PolicyConfig` is empty and always denies:
+`PolicyConfig` now supports deterministic rules for:
 
-```rust
-pub struct PolicyConfig {
-    // Intentionally empty — declarative rules land in a later slice.
-}
+- filesystem read paths,
+- filesystem write paths,
+- shell command prefixes,
+- network domains (parsed from URL host),
+- tool names.
 
-impl PolicyConfig {
-    pub fn evaluate_permission(&self, _permission: &Permission) -> (PolicyVerdict, String) {
-        (PolicyVerdict::Deny, "denied: PolicyConfig defines no matching rules yet (skeleton)".into())
-    }
-}
-```
+Evaluation behavior:
 
-Future work will add:
-- Path-based allowlists (e.g., `src/**`, `!target/**`)
-- URL domain allowlists for network fetches
-- Command prefix allowlists (e.g., `cargo test`, but not `rm`)
-- Time-based grants (e.g., auto-approve for 5 minutes)
+- explicit deny always overrides allow,
+- most-specific matching rule wins within each allow/deny list,
+- if no allow rule matches, the request is denied.
 
 ---
 

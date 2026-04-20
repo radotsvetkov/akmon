@@ -1,12 +1,16 @@
 //! Akmon CLI — project discovery, optional `AKMON.md`, and headless `--task` runs.
 
+mod audit_cmd;
 mod cli_forward;
 mod cli_project;
 mod config_cmd;
+mod evidence_cmd;
 mod export_cmd;
 mod import_cmd;
+mod policy_cmd;
 mod session_index;
 mod session_transcript;
+mod slo_cmd;
 mod spec_cmd;
 
 use std::io::Write;
@@ -18,8 +22,11 @@ use std::time::Duration;
 
 use akmon_config::AkmonGlobalConfig;
 use akmon_core::{
-    AgentConfig, AgentError, AgentEvent, AuditEvent, InteractivePolicyReply, McpServerConfig,
-    PolicyEngine, PolicyEngineMode, PolicyVerdict, Sandbox, write_audit_jsonl,
+    AgentConfig, AgentError, AgentEvent, AuditEvent, EvidenceArtifact, EvidenceAudit,
+    EvidencePolicy, EvidenceToolCall, EvidenceTools, EvidenceVerification, InteractivePolicyReply,
+    McpServerConfig, PolicyEngine, PolicyEngineMode, PolicyVerdict, REPLAY_HASH_ALGORITHM,
+    ReplayMetadata, RunReliabilityMetrics, Sandbox, verify_audit_jsonl, write_audit_jsonl,
+    write_evidence_json,
 };
 use akmon_models::{LlmConnectConfig, LlmProvider, Message, MessageRole, ProviderError};
 use akmon_query::{
@@ -34,6 +41,7 @@ use akmon_tools::{
     WriteFileTool, WriteSpecTool, discover_mcp_tools,
 };
 use akmon_tui::TuiLaunchConfig;
+use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(feature = "semantic-index")]
 use fastembed::{TextEmbedding, TextInitOptions};
@@ -299,6 +307,27 @@ struct RunReport {
     cache_read_tokens: u64,
     /// Sandbox-relative paths touched by successful writes/edits this run.
     files_written: Vec<String>,
+    /// Deterministic replay metadata for forensic reproducibility.
+    replay_metadata: ReplayMetadata,
+    /// Reliability/SLO counters for this run.
+    reliability_metrics: RunReliabilityMetrics,
+}
+
+fn replay_metadata_for_report(session: &AgentSession) -> ReplayMetadata {
+    if let Some(m) = session.replay_metadata() {
+        return m.clone();
+    }
+    let provider = session.provider_arc();
+    ReplayMetadata {
+        hash_algorithm: REPLAY_HASH_ALGORITHM.to_string(),
+        provider_name: provider.name().to_string(),
+        model_id: provider.completion_model_id().to_string(),
+        session_id: session.session_id().to_string(),
+        policy_hash: "0".repeat(64),
+        config_hash: "0".repeat(64),
+        tool_registry_hash: "0".repeat(64),
+        prompt_assembly_hash: None,
+    }
 }
 
 /// Single JSON object on stdout for `--output json` when exiting before any agent session exists.
@@ -313,6 +342,7 @@ fn print_json_early_error_and_exit(error: String) -> ! {
         "cost_usd": 0.0,
         "files_written": [],
         "cache_read_tokens": 0,
+        "reliability_metrics": RunReliabilityMetrics::default(),
     });
     println!("{error_report}");
     std::process::exit(2);
@@ -452,6 +482,18 @@ pub(crate) struct Cli {
     /// JSON Lines audit file path (default: `<project>/.akmon/audit/<session_id>.jsonl`).
     #[arg(long = "audit-log", value_name = "PATH")]
     audit_log: Option<PathBuf>,
+    /// Evidence artifact output path (default: `<project>/.akmon/evidence/<session_id>.json`).
+    #[arg(long = "evidence-path", value_name = "PATH")]
+    evidence_path: Option<PathBuf>,
+    /// Select built-in policy profile (`dev`, `staging`, `prod`).
+    #[arg(long = "policy-profile", value_enum, global = true)]
+    policy_profile: Option<policy_cmd::PolicyProfileArg>,
+    /// Add a policy pack file (repeatable).
+    #[arg(long = "policy-pack", value_name = "PATH", action = clap::ArgAction::Append, global = true)]
+    policy_pack: Vec<PathBuf>,
+    /// Highest-precedence policy override file.
+    #[arg(long = "policy-override", value_name = "PATH", global = true)]
+    policy_override: Option<PathBuf>,
     /// Glob pattern allowed for the `shell` tool (argv-style commands only). Repeat for multiple patterns.
     #[arg(long = "shell-allow", value_name = "PATTERN")]
     shell_allow: Vec<String>,
@@ -520,6 +562,14 @@ enum Commands {
     New(cli_project::NewCmd),
     /// Manage `~/.akmon/config.toml` (models, keys, MCP).
     Config(config_cmd::ConfigArgs),
+    /// Verify audit JSONL chain integrity.
+    Audit(audit_cmd::AuditArgs),
+    /// Verify evidence artifact integrity.
+    Evidence(evidence_cmd::EvidenceArgs),
+    /// Verify reliability metrics against SLO thresholds.
+    Slo(slo_cmd::SloArgs),
+    /// Policy profile/pack management and effective view.
+    Policy(policy_cmd::PolicyArgs),
     /// Structured spec workflow under `.akmon/specs/<feature>/`.
     Spec(spec_cmd::SpecCmd),
     /// Synthesize `AKMON.md` from other tools' context files (Claude, Cursor, …).
@@ -626,7 +676,6 @@ fn cli_attach_specs_subagent(
     });
     let rt = Arc::new(SubagentRuntime {
         provider: Arc::clone(provider),
-        policy: Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
         sandbox: Arc::clone(sandbox),
         akmon_md: akmon_md.clone(),
         plan_mode,
@@ -657,7 +706,6 @@ fn cli_attach_specs_subagent(
         Arc::new(move || build_tool_registry(&shell_allow, web_fetch, has_git_root, plan_for_sub));
     let rt = Arc::new(SubagentRuntime {
         provider: Arc::clone(provider),
-        policy: Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
         sandbox: Arc::clone(sandbox),
         akmon_md: akmon_md.clone(),
         plan_mode,
@@ -764,6 +812,94 @@ fn resolve_audit_log_path(
         Some(p) => p,
         None => default_audit_log_path(project_root, session_id),
     }
+}
+
+/// Default evidence path under `project_root`: `.akmon/evidence/{session_id}.json`.
+fn default_evidence_path(project_root: &Path, session_id: uuid::Uuid) -> PathBuf {
+    project_root
+        .join(".akmon")
+        .join("evidence")
+        .join(format!("{session_id}.json"))
+}
+
+/// Resolves evidence output path: explicit `--evidence-path` or default under `.akmon/evidence/`.
+fn resolve_evidence_path(
+    project_root: &Path,
+    session_id: uuid::Uuid,
+    custom: Option<PathBuf>,
+) -> PathBuf {
+    match custom {
+        Some(p) => p,
+        None => default_evidence_path(project_root, session_id),
+    }
+}
+
+fn build_evidence_artifact(session: &AgentSession, audit_log_path: &Path) -> EvidenceArtifact {
+    let snapshot = session.evidence_data();
+    let reliability = snapshot.reliability_metrics.clone();
+    let replay = snapshot
+        .replay_metadata
+        .unwrap_or_else(|| replay_metadata_for_report(session));
+    let (audit_chain_valid, session_final_hash, note) = match verify_audit_jsonl(audit_log_path) {
+        Ok(s) => (true, s.session_final_hash, None),
+        Err(e) => (
+            false,
+            None,
+            Some(format!("audit chain validation failed: {e}")),
+        ),
+    };
+    let total = snapshot.tools.len() as u64;
+    let success = snapshot.tools.iter().filter(|t| t.success).count() as u64;
+    let failure = total.saturating_sub(success);
+    let mut artifact = EvidenceArtifact::new(
+        snapshot.session_id,
+        Utc::now(),
+        replay,
+        EvidenceAudit {
+            audit_log_path: audit_log_path.to_string_lossy().into_owned(),
+            audit_chain_valid,
+            session_final_hash,
+        },
+        EvidencePolicy {
+            allow: snapshot.policy.allow,
+            deny: snapshot.policy.deny,
+            prompted: snapshot.policy.prompted,
+            decision_samples: snapshot.policy.decision_samples,
+        },
+        EvidenceTools {
+            timeline: snapshot
+                .tools
+                .into_iter()
+                .map(|t| EvidenceToolCall {
+                    name: t.name,
+                    success: t.success,
+                    message: t.message,
+                })
+                .collect(),
+            total,
+            success,
+            failure,
+        },
+        snapshot.files_touched,
+        EvidenceVerification {
+            outcomes: Vec::new(),
+            unavailable_reason: Some("verification commands not collected in this run".into()),
+        },
+    );
+    artifact.reliability_metrics = reliability;
+    if let Some(n) = note {
+        artifact.notes.push(n);
+    }
+    artifact
+}
+
+fn write_evidence_artifact(
+    session: &AgentSession,
+    audit_log_path: &Path,
+    evidence_path: &Path,
+) -> std::io::Result<()> {
+    let artifact = build_evidence_artifact(session, audit_log_path);
+    write_evidence_json(evidence_path, &artifact)
 }
 
 fn resolve_resume_session_id(cli: &Cli, project_root: &Path) -> Result<Option<uuid::Uuid>, String> {
@@ -1046,6 +1182,25 @@ async fn main() -> ExitCode {
         Some(Commands::Config(c)) => {
             return config_cmd::run_config(c.clone()).await;
         }
+        Some(Commands::Audit(a)) => {
+            return audit_cmd::run_audit(a.clone(), cli.output == OutputFormat::Json);
+        }
+        Some(Commands::Evidence(e)) => {
+            return evidence_cmd::run_evidence(e.clone(), cli.output == OutputFormat::Json);
+        }
+        Some(Commands::Slo(s)) => {
+            let global = load_user_global_config();
+            return slo_cmd::run_slo(s.clone(), cli.output == OutputFormat::Json, &global);
+        }
+        Some(Commands::Policy(p)) => {
+            let global = load_user_global_config();
+            return policy_cmd::run_policy(
+                p.clone(),
+                cli.output == OutputFormat::Json,
+                &project_root,
+                &global,
+            );
+        }
         Some(Commands::Spec(sc)) => {
             return spec_cmd::run_spec(&cli, &project_root, sc.clone()).await;
         }
@@ -1279,6 +1434,7 @@ async fn main() -> ExitCode {
     };
 
     let audit_log_path = resolve_audit_log_path(&project_root, session_id, cli.audit_log.clone());
+    let evidence_path = resolve_evidence_path(&project_root, session_id, cli.evidence_path.clone());
     let global = load_user_global_config();
     let agent_config = AgentConfig {
         session_id,
@@ -1289,18 +1445,40 @@ async fn main() -> ExitCode {
         ..Default::default()
     };
 
-    let policy_mode = if cli.yes {
-        if cli.web_fetch && cli.yes_web {
-            PolicyEngineMode::AutoApproveReadsAndFetch {
-                confirm_writes: true,
-            }
-        } else {
-            PolicyEngineMode::AutoApproveReads {
-                confirm_writes: true,
+    let resolved_policy = policy_cmd::resolve_effective_policy(
+        &project_root,
+        &global,
+        &policy_cmd::PolicyResolutionOptions {
+            profile: cli.policy_profile.map(Into::into),
+            pack_paths: cli.policy_pack.clone(),
+            override_path: cli.policy_override.clone(),
+        },
+    );
+    let policy_mode = match resolved_policy {
+        Ok(Some(resolved)) => PolicyEngineMode::Configured(resolved.effective),
+        Ok(None) => {
+            if cli.yes {
+                if cli.web_fetch && cli.yes_web {
+                    PolicyEngineMode::AutoApproveReadsAndFetch {
+                        confirm_writes: true,
+                    }
+                } else {
+                    PolicyEngineMode::AutoApproveReads {
+                        confirm_writes: true,
+                    }
+                }
+            } else {
+                PolicyEngineMode::Interactive
             }
         }
-    } else {
-        PolicyEngineMode::Interactive
+        Err(e) => {
+            exit_early_config_error(
+                &cli,
+                format!("failed to resolve effective policy: {e}"),
+                None,
+                2,
+            );
+        }
     };
     let policy = Arc::new(PolicyEngine::new(policy_mode));
     let sandbox = sandbox_for_cli(project_root.clone(), has_git_root, &cli.add_dirs);
@@ -1466,6 +1644,14 @@ async fn main() -> ExitCode {
                 audit_log_path.display()
             );
         }
+        if run_outcome.is_ok()
+            && let Err(e) = write_evidence_artifact(&session, &audit_log_path, &evidence_path)
+        {
+            eprintln!(
+                "akmon: warning: failed to write evidence artifact {}: {e}",
+                evidence_path.display()
+            );
+        }
         let _ = write_handoff_file(&session, &project_root, &cli.model);
         headless_persist(&project_root, &session, &cli.model, headless_started_at);
         if let Some(handle) = index_thread {
@@ -1504,6 +1690,8 @@ async fn main() -> ExitCode {
                     .iter()
                     .map(|p| p.display().to_string())
                     .collect(),
+                replay_metadata: replay_metadata_for_report(&session),
+                reliability_metrics: session.reliability_metrics(),
             };
             let json_line = match serde_json::to_string(&report) {
                 Ok(s) => s,
@@ -1696,6 +1884,14 @@ async fn main() -> ExitCode {
                 audit_log_path.display()
             );
         }
+        if run_outcome.is_ok()
+            && let Err(e) = write_evidence_artifact(&session, &audit_log_path, &evidence_path)
+        {
+            eprintln!(
+                "akmon: warning: failed to write evidence artifact {}: {e}",
+                evidence_path.display()
+            );
+        }
         let _ = write_handoff_file(&session, &project_root, &cli.model);
         headless_persist(&project_root, &session, &cli.model, headless_started_at);
         if let Some(handle) = index_thread {
@@ -1734,6 +1930,8 @@ async fn main() -> ExitCode {
                     .iter()
                     .map(|p| p.display().to_string())
                     .collect(),
+                replay_metadata: replay_metadata_for_report(&session),
+                reliability_metrics: session.reliability_metrics(),
             };
             let json_line = match serde_json::to_string(&report) {
                 Ok(s) => s,
@@ -1846,6 +2044,14 @@ async fn main() -> ExitCode {
             audit_log_path.display()
         );
     }
+    if run_outcome.is_ok()
+        && let Err(e) = write_evidence_artifact(&session, &audit_log_path, &evidence_path)
+    {
+        eprintln!(
+            "akmon: warning: failed to write evidence artifact {}: {e}",
+            evidence_path.display()
+        );
+    }
 
     let _ = write_handoff_file(&session, &project_root, &cli.model);
 
@@ -1890,6 +2096,8 @@ async fn main() -> ExitCode {
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect(),
+            replay_metadata: replay_metadata_for_report(&session),
+            reliability_metrics: session.reliability_metrics(),
         };
         let json_line = match serde_json::to_string(&report) {
             Ok(s) => s,
@@ -2011,6 +2219,27 @@ mod tests {
             cost_usd: 0.01,
             cache_read_tokens: 3,
             files_written: vec!["src/main.rs".into()],
+            replay_metadata: ReplayMetadata {
+                hash_algorithm: REPLAY_HASH_ALGORITHM.into(),
+                provider_name: "ollama".into(),
+                model_id: "llama3.2".into(),
+                session_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                policy_hash: "a".repeat(64),
+                config_hash: "b".repeat(64),
+                tool_registry_hash: "c".repeat(64),
+                prompt_assembly_hash: Some("d".repeat(64)),
+            },
+            reliability_metrics: RunReliabilityMetrics {
+                tool_calls_total: 1,
+                tool_calls_success: 1,
+                tool_calls_failure: 0,
+                tool_latency_ms_total: 12,
+                tool_latency_ms_avg: 12,
+                tool_latency_ms_p95: Some(12),
+                policy_denials_total: 0,
+                retries_total: 0,
+                timeouts_total: 0,
+            },
         };
         let v = serde_json::to_value(&report).expect("serialize");
         assert_eq!(v["session_id"], "550e8400-e29b-41d4-a716-446655440000");
@@ -2032,5 +2261,183 @@ mod tests {
         assert_eq!(tools[0]["name"], "read_file");
         assert_eq!(tools[0]["success"], true);
         assert_eq!(tools[0]["message"], "ok");
+        assert_eq!(v["replay_metadata"]["hash_algorithm"], "sha256");
+        assert_eq!(v["replay_metadata"]["provider_name"], "ollama");
+        assert_eq!(v["replay_metadata"]["model_id"], "llama3.2");
+        assert_eq!(
+            v["replay_metadata"]["policy_hash"]
+                .as_str()
+                .map(|s| s.len()),
+            Some(64)
+        );
+        assert_eq!(v["reliability_metrics"]["tool_calls_total"], 1);
+        assert_eq!(v["reliability_metrics"]["tool_latency_ms_avg"], 12);
+    }
+
+    #[test]
+    fn run_report_reliability_metrics_is_additive_to_existing_schema() {
+        let report = RunReport {
+            session_id: "s".into(),
+            status: "success",
+            exit_reason: ExitReason::Completed,
+            result: "ok".into(),
+            tool_calls: vec![],
+            error: None,
+            audit_log_path: "/tmp/audit.jsonl".into(),
+            usage: RunUsageSummary {
+                total_input_tokens: 1,
+                total_cache_read_tokens: 0,
+                total_output_tokens: 1,
+            },
+            cost_usd: 0.0,
+            cache_read_tokens: 0,
+            files_written: vec!["src/lib.rs".into()],
+            replay_metadata: ReplayMetadata {
+                hash_algorithm: REPLAY_HASH_ALGORITHM.into(),
+                provider_name: "ollama".into(),
+                model_id: "llama3.2".into(),
+                session_id: "s".into(),
+                policy_hash: "a".repeat(64),
+                config_hash: "b".repeat(64),
+                tool_registry_hash: "c".repeat(64),
+                prompt_assembly_hash: None,
+            },
+            reliability_metrics: RunReliabilityMetrics::default(),
+        };
+        let v = serde_json::to_value(&report).expect("serialize");
+        assert!(v.get("session_id").is_some());
+        assert!(v.get("tool_calls").is_some());
+        assert!(v.get("usage").is_some());
+        assert!(v.get("replay_metadata").is_some());
+        assert!(v.get("reliability_metrics").is_some());
+    }
+
+    #[test]
+    fn evidence_path_defaults_under_dot_akmon() {
+        let root = std::path::Path::new("/tmp/proj");
+        let session_id = uuid::Uuid::nil();
+        let p = default_evidence_path(root, session_id);
+        assert_eq!(
+            p,
+            root.join(".akmon/evidence/00000000-0000-0000-0000-000000000000.json")
+        );
+    }
+
+    #[test]
+    fn evidence_path_override_is_used() {
+        let root = std::path::Path::new("/tmp/proj");
+        let session_id = uuid::Uuid::nil();
+        let custom = PathBuf::from("/tmp/custom-evidence.json");
+        let p = resolve_evidence_path(root, session_id, Some(custom.clone()));
+        assert_eq!(p, custom);
+    }
+
+    #[test]
+    fn evidence_writer_uses_default_path() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let session_id = uuid::Uuid::new_v4();
+        let audit_path = dir.path().join("audit.jsonl");
+        write_audit_jsonl(
+            &audit_path,
+            &[AuditEvent::AgentStep {
+                session_id: session_id.to_string(),
+                timestamp: Utc::now(),
+                description: "step".into(),
+            }],
+        )
+        .expect("write audit");
+        let sandbox = Arc::new(Sandbox::new(dir.path()));
+        let session = AgentSession::new(
+            AgentConfig {
+                session_id,
+                ..Default::default()
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(akmon_models::OllamaBackend::new(
+                "http://localhost:11434",
+                "llama3.2",
+            )),
+            vec![],
+            sandbox,
+            None,
+            false,
+        );
+        let default_path = default_evidence_path(dir.path(), session_id);
+        write_evidence_artifact(&session, &audit_path, &default_path).expect("write evidence");
+        assert!(default_path.is_file());
+    }
+
+    #[test]
+    fn evidence_writer_uses_override_path() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let session_id = uuid::Uuid::new_v4();
+        let audit_path = dir.path().join("audit.jsonl");
+        write_audit_jsonl(
+            &audit_path,
+            &[AuditEvent::AgentStep {
+                session_id: session_id.to_string(),
+                timestamp: Utc::now(),
+                description: "step".into(),
+            }],
+        )
+        .expect("write audit");
+        let sandbox = Arc::new(Sandbox::new(dir.path()));
+        let session = AgentSession::new(
+            AgentConfig {
+                session_id,
+                ..Default::default()
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(akmon_models::OllamaBackend::new(
+                "http://localhost:11434",
+                "llama3.2",
+            )),
+            vec![],
+            sandbox,
+            None,
+            false,
+        );
+        let custom = dir.path().join("custom").join("evidence.json");
+        write_evidence_artifact(&session, &audit_path, &custom).expect("write evidence");
+        assert!(custom.is_file());
+    }
+
+    #[test]
+    fn evidence_writer_includes_reliability_metrics_block() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let session_id = uuid::Uuid::new_v4();
+        let audit_path = dir.path().join("audit.jsonl");
+        write_audit_jsonl(
+            &audit_path,
+            &[AuditEvent::AgentStep {
+                session_id: session_id.to_string(),
+                timestamp: Utc::now(),
+                description: "step".into(),
+            }],
+        )
+        .expect("write audit");
+        let sandbox = Arc::new(Sandbox::new(dir.path()));
+        let session = AgentSession::new(
+            AgentConfig {
+                session_id,
+                ..Default::default()
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(akmon_models::OllamaBackend::new(
+                "http://localhost:11434",
+                "llama3.2",
+            )),
+            vec![],
+            sandbox,
+            None,
+            false,
+        );
+        let evidence_path = dir.path().join("evidence.json");
+        write_evidence_artifact(&session, &audit_path, &evidence_path).expect("write evidence");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&evidence_path).expect("read"))
+                .expect("json");
+        assert!(parsed.get("reliability_metrics").is_some());
+        assert_eq!(parsed["reliability_metrics"]["tool_calls_total"], 0);
     }
 }

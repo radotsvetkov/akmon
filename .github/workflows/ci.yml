@@ -44,6 +44,26 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      - name: CLI surface smoke test
+        run: |
+          cargo run -p akmon-cli --no-default-features -- --help
+          cargo run -p akmon-cli --no-default-features -- audit --help
+          cargo run -p akmon-cli --no-default-features -- evidence --help
+          cargo run -p akmon-cli --no-default-features -- slo --help
+          cargo run -p akmon-cli --no-default-features -- policy --help
+
+      - name: Install mdBook
+        run: |
+          curl -sSL \
+            https://github.com/rust-lang/mdBook/releases/download/v0.4.40/mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz
+          sudo mv mdbook /usr/local/bin/
+
+      - name: Docs build check
+        run: |
+          cd docs
+          mdbook build
+
   build-release:
     name: Build release binary
     runs-on: ${{ matrix.os }}

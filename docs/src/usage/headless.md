@@ -1,17 +1,8 @@
 # Headless mode
 
-Headless mode runs Akmon without interactive supervision and is ideal for CI/CD, scripted maintenance, and batch repository automation.
+Headless mode is for CI and scripted runs.
 
-## When to use headless mode
-
-Use headless mode when you need repeatable automated execution:
-
-- pull-request checks,
-- scheduled maintenance tasks,
-- org-wide refactoring runs,
-- scriptable JSON output for downstream tooling.
-
-## Basic command pattern
+## Basic run
 
 ```bash
 akmon \
@@ -19,118 +10,55 @@ akmon \
   --yes \
   --max-budget-usd 2.00 \
   --output json \
-  --task "Run cargo clippy and fix warnings without changing behavior"
+  --task "run cargo clippy and fix warnings"
 ```
 
-## Complete GitHub Actions example
+Default artifacts:
 
-```yaml
-name: AI-powered lint fix
+- audit: `.akmon/audit/<session-id>.jsonl`
+- evidence: `.akmon/evidence/<session-id>.json`
 
-on:
-  pull_request:
-    types: [opened]
-
-jobs:
-  ai-fix:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Akmon
-        run: |
-          curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64.tar.gz | tar xz
-          sudo mv akmon /usr/local/bin/
-
-      - name: Run Akmon
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          akmon \
-            --model claude-haiku-4-5-20251001 \
-            --yes \
-            --max-budget-usd 2.00 \
-            --output json \
-            --task "Run cargo clippy and fix warnings. Run cargo test after each change." \
-          | tee akmon-result.json
-
-      - name: Check exit
-        run: |
-          status=$(jq -r '.exit_reason' akmon-result.json)
-          test "$status" = "completed"
-```
-
-## JSON output fields
-
-Typical run report:
-
-```json
-{
-  "session_id": "d329615d-...",
-  "status": "completed",
-  "exit_reason": "completed",
-  "result": "Fixed 14 clippy warnings across 6 files",
-  "tool_calls": 28,
-  "files_written": ["src/main.rs", "src/auth.rs"],
-  "usage": {
-    "total_input_tokens": 145000,
-    "total_output_tokens": 8200,
-    "total_cache_read_tokens": 98000
-  },
-  "cost_usd": 0.18
-}
-```
-
-Practical interpretation:
-
-- `exit_reason` gates CI behavior,
-- `files_written` can trigger selective test/deploy logic,
-- `usage` and `cost_usd` feed budget reporting.
-
-## Budget control in production
-
-Recommended patterns:
-
-- per-run cap: `--max-budget-usd 1.00`,
-- fail CI when `exit_reason != completed`,
-- aggregate daily spend via scheduled job reading JSON outputs.
-
-Example shell budget gate:
+## CI governance flow
 
 ```bash
-result=$(akmon --yes --output json --max-budget-usd 1.5 --task "...")
-cost=$(echo "$result" | jq -r '.cost_usd')
-echo "run cost: $cost"
+# run
+akmon --yes --output json --task "run unit tests and summarize failures" | tee run.json
+
+# verify trust artifacts
+akmon audit verify .akmon/audit/<session-id>.jsonl
+akmon evidence verify .akmon/evidence/<session-id>.json
+
+# enforce SLO policy
+akmon slo verify .akmon/evidence/<session-id>.json --strict
+
+# enforce trend regression gate
+akmon slo trend .akmon/evidence/<session-id>.json \
+  --baseline-dir .akmon/evidence/history \
+  --window 20 \
+  --strict
 ```
 
-## Batch processing multiple repositories
+## JSON report fields
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+Headless JSON includes:
 
-repos=(
-  ~/services/auth-service
-  ~/services/payment-service
-  ~/services/notification-service
-)
+- lifecycle fields (`status`, `exit_reason`, `result`),
+- usage/cost fields,
+- additive `replay_metadata`,
+- additive `reliability_metrics`.
 
-for repo in "${repos[@]}"; do
-  echo "Processing $repo"
-  cd "$repo"
-  result=$(akmon \
-    --model claude-haiku-4-5-20251001 \
-    --yes \
-    --max-budget-usd 3.00 \
-    --output json \
-    --task "Update dependencies to latest compatible versions and run tests")
-  echo "$result" | jq -r '"\(.session_id) \(.exit_reason) $\( .cost_usd )"'
-done
-```
+Use `exit_reason` + command exit code for CI gating.
 
-## Common mistakes and troubleshooting
+## Exit code guidance
 
-- **No budget cap:** always set `--max-budget-usd` in unattended runs.
-- **Overly broad task:** split "fix everything" into narrower tasks.
-- **Missing provider key in CI:** verify env injection before run.
-- **Non-zero exit from incomplete runs:** parse `exit_reason`, do not assume success from process completion alone.
+- `akmon` run: process exits non-zero on runtime/config failures.
+- `akmon audit verify`: `0` valid, `1` invalid/missing.
+- `akmon evidence verify`: `0` valid, `1` invalid/missing.
+- `akmon slo verify`: `0` pass, `1` violation, `2` invalid input/config.
+- `akmon slo trend`: `0` pass, `1` violation, `2` invalid input/config.
+
+## Common mistakes
+
+- Running unattended jobs without `--max-budget-usd`.
+- Parsing only old JSON fields and ignoring additive metrics/replay blocks.
+- Using broad tasks instead of scoped, verifiable tasks.

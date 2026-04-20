@@ -4,10 +4,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use akmon_core::{
     AgentConfig, AgentError, AgentEvent, AgentState, AuditEvent, InteractivePolicyReply,
-    Permission, PolicyEngineError, PolicyEngineMode, PolicyVerdict, Sandbox, check_iteration_limit,
+    Permission, PolicyEngineError, PolicyEngineMode, PolicyVerdict, ReplayHashInputs,
+    ReplayMetadata, RunReliabilityMetrics, Sandbox, build_replay_metadata, check_iteration_limit,
     estimate_cost_usd_with_rows, validate_transition,
 };
 use akmon_models::{
@@ -45,6 +47,36 @@ pub struct ToolCallSummary {
     pub message: String,
 }
 
+/// Policy decision summary extracted from run audit events for evidence artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PolicyDecisionSummary {
+    /// Number of allow verdicts.
+    pub allow: u64,
+    /// Number of deny verdicts.
+    pub deny: u64,
+    /// Number of interactive/prompted policy decisions (best-effort).
+    pub prompted: u64,
+    /// Sanitized sample lines (permission kind + verdict + reason).
+    pub decision_samples: Vec<String>,
+}
+
+/// Deterministic evidence input snapshot exported by the session layer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionEvidenceData {
+    /// Stable session identifier.
+    pub session_id: String,
+    /// Replay metadata produced for this run.
+    pub replay_metadata: Option<ReplayMetadata>,
+    /// Policy decision summary from audit events.
+    pub policy: PolicyDecisionSummary,
+    /// Chronological tool summaries from this run.
+    pub tools: Vec<ToolCallSummary>,
+    /// Sandbox-relative modified paths (sorted unique).
+    pub files_touched: Vec<String>,
+    /// Reliability/SLO counters for this run.
+    pub reliability_metrics: RunReliabilityMetrics,
+}
+
 /// Why [`AgentSession::run`] stopped successfully (when [`Result`] is [`Ok`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +111,8 @@ pub struct ToolCallResult {
     pub success: bool,
     /// Arguments the model supplied (for post-hooks such as auto-commit).
     pub arguments: Value,
+    /// Wall-clock duration of this tool call in milliseconds.
+    pub latency_ms: u64,
 }
 
 /// Builds [`CompletionConfig`] with `tools` populated and model-appropriate [`CompletionConfig::max_tokens`].
@@ -206,6 +240,14 @@ pub struct AgentSession {
     pub modified_paths: Vec<PathBuf>,
     /// Truncated assistant text from the last finished run (`HANDOFF.md`).
     pub last_assistant_snippet: Option<String>,
+    /// Deterministic replay metadata for the most recent run snapshot.
+    replay_metadata: Option<ReplayMetadata>,
+    /// Optional prompt-assembly fingerprint captured from the first model request shape of a run.
+    prompt_assembly_fingerprint: Option<Value>,
+    /// Per-run reliability metrics.
+    reliability_metrics: RunReliabilityMetrics,
+    /// Latency samples used to compute p95 cheaply at run scope.
+    tool_latency_samples_ms: Vec<u64>,
 }
 
 impl AgentSession {
@@ -259,6 +301,10 @@ impl AgentSession {
             user_turns_finished: 0,
             modified_paths: Vec::new(),
             last_assistant_snippet: None,
+            replay_metadata: None,
+            prompt_assembly_fingerprint: None,
+            reliability_metrics: RunReliabilityMetrics::default(),
+            tool_latency_samples_ms: Vec::new(),
         }
     }
 
@@ -317,6 +363,7 @@ impl AgentSession {
         task: &str,
         err: ModelError,
     ) -> Result<Option<AgentError>, AgentError> {
+        self.record_timeout_if_model_error(&err);
         if matches!(err, ModelError::RateLimited { .. }) {
             let resume = "Rate limit exhausted after 5 retries.\nWait a few minutes then continue with: akmon -c";
             self.apply_event(
@@ -560,6 +607,35 @@ impl AgentSession {
         self.last_run_exit
     }
 
+    /// Replay metadata snapshot for the latest run.
+    pub fn replay_metadata(&self) -> Option<&ReplayMetadata> {
+        self.replay_metadata.as_ref()
+    }
+
+    /// Reliability counters for the latest run.
+    pub fn reliability_metrics(&self) -> RunReliabilityMetrics {
+        self.reliability_metrics_snapshot()
+    }
+
+    /// Session evidence snapshot suitable for artifact construction.
+    pub fn evidence_data(&self) -> SessionEvidenceData {
+        let mut files_touched = self
+            .modified_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>();
+        files_touched.sort();
+        files_touched.dedup();
+        SessionEvidenceData {
+            session_id: self.session_id().to_string(),
+            replay_metadata: self.replay_metadata.clone(),
+            policy: summarize_policy_decisions(&self.audit_log),
+            tools: self.tool_call_summaries.clone(),
+            files_touched,
+            reliability_metrics: self.reliability_metrics_snapshot(),
+        }
+    }
+
     /// Replaces model-visible transcript rows (e.g. after loading a saved session file).
     pub fn restore_context_from_messages(&mut self, messages: Vec<Message>) {
         self.context = messages;
@@ -594,6 +670,10 @@ impl AgentSession {
         self.total_cost_usd = 0.0;
         self.budget_stop_before_next_iteration = false;
         self.last_run_exit = SessionRunExit::Completed;
+        self.prompt_assembly_fingerprint = None;
+        self.reliability_metrics = RunReliabilityMetrics::default();
+        self.tool_latency_samples_ms.clear();
+        self.refresh_replay_metadata();
         Ok(())
     }
 
@@ -762,6 +842,7 @@ impl AgentSession {
                 self.config.max_completion_tokens,
                 self.config.fallback_model.clone(),
             );
+            self.capture_prompt_assembly_hash_if_absent(&messages, &completion_config);
             tracing::debug!(
                 "tools for {}: {}",
                 model_id.as_str(),
@@ -878,6 +959,7 @@ impl AgentSession {
                                         &task,
                                     )
                                     .await?;
+                                    self.record_retry_attempt();
                                     iteration = iteration.saturating_add(1);
                                     continue 'session;
                                 }
@@ -885,6 +967,7 @@ impl AgentSession {
                                 if self.continuation_count < 3 {
                                     self.continuation_count =
                                         self.continuation_count.saturating_add(1);
+                                    self.record_retry_attempt();
                                     self.apply_event(
                                         &event_tx,
                                         AgentEvent::StatusInfo {
@@ -1101,6 +1184,112 @@ Resume from the mid-sentence or mid-block point where the response was cut."
         }
     }
 
+    fn capture_prompt_assembly_hash_if_absent(
+        &mut self,
+        messages: &[Message],
+        completion_config: &CompletionConfig,
+    ) {
+        if self.prompt_assembly_fingerprint.is_some() {
+            return;
+        }
+        let mut role_counts: HashMap<&'static str, u64> = HashMap::new();
+        for m in messages {
+            let key = match m.role {
+                MessageRole::System => "system",
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Tool => "tool",
+            };
+            let entry = role_counts.entry(key).or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
+        let mut tool_names = completion_config
+            .tools
+            .iter()
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>();
+        tool_names.sort();
+        let fingerprint = json!({
+            "message_count": messages.len(),
+            "role_counts": role_counts,
+            "message_char_lengths": messages.iter().map(|m| m.content.chars().count()).collect::<Vec<usize>>(),
+            "tool_names": tool_names,
+            "max_tokens": completion_config.max_tokens,
+            "temperature": completion_config.temperature,
+            "first_token_deadline_ms": completion_config.first_token_deadline_ms,
+            "stream": completion_config.stream,
+            "has_fallback_model": completion_config.fallback_model.is_some(),
+        });
+        self.prompt_assembly_fingerprint = Some(fingerprint);
+        self.refresh_replay_metadata();
+    }
+
+    fn refresh_replay_metadata(&mut self) {
+        let policy_value = match serde_json::to_value(self.policy.mode()) {
+            Ok(v) => v,
+            Err(e) => json!({ "serialization_error": e.to_string() }),
+        };
+        // Intentionally hashes only non-secret runtime knobs. Provider credentials and tokens
+        // are excluded from replay metadata by design.
+        let config_value = json!({
+            "max_iterations": self.config.max_iterations,
+            "confirmation_timeout_secs": self.config.confirmation_timeout_secs,
+            "auto_commit": self.config.auto_commit,
+            "max_completion_tokens": self.config.max_completion_tokens,
+            "subagent_style": self.config.subagent_style,
+            "max_budget_usd": self.config.max_budget_usd,
+            "fallback_model": self.config.fallback_model,
+            "model_estimates": self.config.model_estimates,
+            "plan_mode": self.plan_mode,
+        });
+        let mut tool_registry = self
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "name": t.name(),
+                    "description": t.description(),
+                    "required_permissions": t.required_permissions(),
+                    "parameters_schema": t.parameters_schema(),
+                })
+            })
+            .collect::<Vec<Value>>();
+        tool_registry.sort_by(|a, b| {
+            let an = a
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let bn = b
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            an.cmp(&bn)
+        });
+        let inputs = ReplayHashInputs {
+            policy: policy_value,
+            config: config_value,
+            tool_registry: Value::Array(tool_registry),
+            prompt_assembly: self.prompt_assembly_fingerprint.clone(),
+        };
+        let session_id = self.config.session_id.to_string();
+        match build_replay_metadata(
+            self.provider.name(),
+            self.provider.completion_model_id(),
+            session_id.as_str(),
+            &inputs,
+        ) {
+            Ok(m) => {
+                self.replay_metadata = Some(m);
+            }
+            Err(e) => {
+                tracing::warn!("failed to build replay metadata: {e}");
+                self.replay_metadata = None;
+            }
+        }
+    }
+
     /// Policy + optional parallel execution for one model turn's tool calls.
     async fn dispatch_tool_calls_batch(
         &mut self,
@@ -1150,6 +1339,7 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                     },
                     success: false,
                     arguments: args.clone(),
+                    latency_ms: 0,
                 });
                 continue;
             };
@@ -1180,6 +1370,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                         },
                         success: false,
                         arguments: args.clone(),
+                        latency_ms: 0,
                     });
                     continue;
                 }
@@ -1232,6 +1423,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                     output: ToolOutput::Success { content: msg },
                     success: true,
                     arguments: args.clone(),
+                    latency_ms: 0,
                 });
                 continue;
             }
@@ -1268,7 +1460,10 @@ Complete and verify the current file(s), then continue in the next turn.";
                     };
                     self.audit_log.push(decision.audit.clone());
                     if !decision.allowed {
-                        policy_denial_message = Some(format!("policy denied: {perm:?}"));
+                        policy_denial_message = Some(format!(
+                            "policy denied for tool `{name}` permission `{perm:?}`: {}",
+                            decision.reason
+                        ));
                         break;
                     }
                     continue;
@@ -1295,7 +1490,10 @@ Complete and verify the current file(s), then continue in the next turn.";
                     };
                     self.audit_log.push(decision.audit.clone());
                     if !decision.allowed {
-                        policy_denial_message = Some(format!("policy denied: {perm:?}"));
+                        policy_denial_message = Some(format!(
+                            "policy denied for tool `{name}` permission `{perm:?}`: {}",
+                            decision.reason
+                        ));
                         break;
                     }
                     continue;
@@ -1317,23 +1515,27 @@ Complete and verify the current file(s), then continue in the next turn.";
                     };
                     self.audit_log.push(decision.audit.clone());
                     if !decision.allowed {
-                        policy_denial_message = Some(format!("policy denied: {perm:?}"));
+                        policy_denial_message = Some(format!(
+                            "policy denied for tool `{name}` permission `{perm:?}`: {}",
+                            decision.reason
+                        ));
                         break;
                     }
                     continue;
                 }
 
-                let allowed = match self.policy.mode() {
+                let decision = match self.policy.mode() {
                     PolicyEngineMode::Interactive
                     | PolicyEngineMode::AutoApproveReads { .. }
                     | PolicyEngineMode::AutoApproveReadsAndFetch { .. } => {
-                        match self
-                            .policy
-                            .evaluate_automatic(session_id.as_str(), perm.clone())
-                        {
+                        match self.policy.evaluate_automatic_for_tool(
+                            session_id.as_str(),
+                            perm.clone(),
+                            Some(name.as_str()),
+                        ) {
                             Ok(decision) => {
                                 self.audit_log.push(decision.audit.clone());
-                                decision.allowed
+                                decision
                             }
                             Err(PolicyEngineError::InteractiveRequiresCaller) => {
                                 let desc = match &perm {
@@ -1427,7 +1629,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                                     task,
                                 )
                                 .await?;
-                                decision.allowed
+                                decision
                             }
                             Err(e) => {
                                 return Err(AgentError::SessionFailed {
@@ -1437,10 +1639,11 @@ Complete and verify the current file(s), then continue in the next turn.";
                         }
                     }
                     _ => {
-                        let decision = match self
-                            .policy
-                            .evaluate_automatic(session_id.as_str(), perm.clone())
-                        {
+                        let decision = match self.policy.evaluate_automatic_for_tool(
+                            session_id.as_str(),
+                            perm.clone(),
+                            Some(name.as_str()),
+                        ) {
                             Ok(d) => d,
                             Err(e) => {
                                 return Err(AgentError::SessionFailed {
@@ -1449,17 +1652,21 @@ Complete and verify the current file(s), then continue in the next turn.";
                             }
                         };
                         self.audit_log.push(decision.audit.clone());
-                        decision.allowed
+                        decision
                     }
                 };
 
-                if !allowed {
-                    policy_denial_message = Some(format!("policy denied: {perm:?}"));
+                if !decision.allowed {
+                    policy_denial_message = Some(format!(
+                        "policy denied for tool `{name}` permission `{perm:?}`: {}",
+                        decision.reason
+                    ));
                     break;
                 }
             }
 
             if let Some(msg) = policy_denial_message {
+                self.record_policy_denial();
                 self.apply_event(
                     event_tx,
                     AgentEvent::ToolCallCompleted {
@@ -1480,6 +1687,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                     },
                     success: false,
                     arguments: args.clone(),
+                    latency_ms: 0,
                 });
                 continue;
             }
@@ -1631,6 +1839,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                     });
                 }
             };
+            self.record_tool_completion_metrics(r);
             self.append_tool_message(&r.call_id, &r.tool_name, r.output.clone())?;
         }
 
@@ -2093,6 +2302,67 @@ Complete and verify the current file(s), then continue in the next turn.";
         }
     }
 
+    fn record_tool_completion_metrics(&mut self, result: &ToolCallResult) {
+        self.reliability_metrics.tool_calls_total =
+            self.reliability_metrics.tool_calls_total.saturating_add(1);
+        if result.success {
+            self.reliability_metrics.tool_calls_success = self
+                .reliability_metrics
+                .tool_calls_success
+                .saturating_add(1);
+        } else {
+            self.reliability_metrics.tool_calls_failure = self
+                .reliability_metrics
+                .tool_calls_failure
+                .saturating_add(1);
+        }
+        self.reliability_metrics.tool_latency_ms_total = self
+            .reliability_metrics
+            .tool_latency_ms_total
+            .saturating_add(result.latency_ms);
+        self.tool_latency_samples_ms.push(result.latency_ms);
+
+        let total = self.reliability_metrics.tool_calls_total;
+        self.reliability_metrics.tool_latency_ms_avg = if total == 0 {
+            0
+        } else {
+            self.reliability_metrics.tool_latency_ms_total / total
+        };
+        self.reliability_metrics.tool_latency_ms_p95 = None;
+
+        if matches!(&result.output, ToolOutput::Error { .. })
+            && tool_output_is_timeout(&result.output)
+        {
+            self.reliability_metrics.timeouts_total =
+                self.reliability_metrics.timeouts_total.saturating_add(1);
+        }
+    }
+
+    fn record_policy_denial(&mut self) {
+        self.reliability_metrics.policy_denials_total = self
+            .reliability_metrics
+            .policy_denials_total
+            .saturating_add(1);
+    }
+
+    fn record_retry_attempt(&mut self) {
+        self.reliability_metrics.retries_total =
+            self.reliability_metrics.retries_total.saturating_add(1);
+    }
+
+    fn record_timeout_if_model_error(&mut self, err: &ModelError) {
+        if model_error_is_timeout(err) {
+            self.reliability_metrics.timeouts_total =
+                self.reliability_metrics.timeouts_total.saturating_add(1);
+        }
+    }
+
+    fn reliability_metrics_snapshot(&self) -> RunReliabilityMetrics {
+        let mut snapshot = self.reliability_metrics.clone();
+        snapshot.tool_latency_ms_p95 = percentile_95(&self.tool_latency_samples_ms);
+        snapshot
+    }
+
     async fn apply_event(
         &mut self,
         tx: &mpsc::Sender<AgentEvent>,
@@ -2160,6 +2430,85 @@ fn summarize_tool_output(output: &ToolOutput) -> (bool, String) {
     }
 }
 
+fn tool_output_is_timeout(output: &ToolOutput) -> bool {
+    if let ToolOutput::Error { message, .. } = output {
+        let lower = message.to_ascii_lowercase();
+        return lower.contains("timed out") || lower.contains("timeout");
+    }
+    false
+}
+
+fn model_error_is_timeout(error: &ModelError) -> bool {
+    match error {
+        ModelError::FirstTokenTimeout => true,
+        ModelError::StreamInterrupted { message } => {
+            let lower = message.to_ascii_lowercase();
+            lower.contains("timed out") || lower.contains("timeout")
+        }
+        _ => false,
+    }
+}
+
+fn percentile_95(samples: &[u64]) -> Option<u64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let rank = (n.saturating_mul(95).saturating_add(99)) / 100;
+    let idx = rank.saturating_sub(1).min(n.saturating_sub(1));
+    sorted.get(idx).copied()
+}
+
+fn summarize_policy_decisions(audit: &[AuditEvent]) -> PolicyDecisionSummary {
+    let mut allow = 0_u64;
+    let mut deny = 0_u64;
+    let mut prompted = 0_u64;
+    let mut samples = Vec::new();
+    for event in audit {
+        if let AuditEvent::PolicyEvaluation {
+            permission,
+            verdict,
+            reason,
+            ..
+        } = event
+        {
+            match verdict {
+                PolicyVerdict::Allow => allow = allow.saturating_add(1),
+                PolicyVerdict::Deny => deny = deny.saturating_add(1),
+            }
+            let lowered = reason.to_ascii_lowercase();
+            if lowered.contains("interactive")
+                || lowered.contains("user approved")
+                || lowered.contains("user denied")
+            {
+                prompted = prompted.saturating_add(1);
+            }
+            if samples.len() < 20 {
+                let permission_kind = match permission {
+                    Permission::ReadFile { .. } => "read_file",
+                    Permission::ListDirectory { .. } => "list_directory",
+                    Permission::WriteFile { .. } => "write_file",
+                    Permission::ExecuteCommand { .. } => "execute_command",
+                    Permission::NetworkFetch { .. } => "network_fetch",
+                };
+                let verdict_text = match verdict {
+                    PolicyVerdict::Allow => "allow",
+                    PolicyVerdict::Deny => "deny",
+                };
+                samples.push(format!("{verdict_text}:{permission_kind}:{reason}"));
+            }
+        }
+    }
+    PolicyDecisionSummary {
+        allow,
+        deny,
+        prompted,
+        decision_samples: samples,
+    }
+}
+
 /// Runs one tool after policy approval (no events; used for parallel [`Tool::execute`]).
 pub async fn execute_single_tool_call(
     call: &PendingToolCall,
@@ -2167,7 +2516,10 @@ pub async fn execute_single_tool_call(
     ctx: &ToolContext,
 ) -> ToolCallResult {
     let arguments = call.arguments.clone();
+    let started = Instant::now();
     let output = tool.execute(call.arguments.clone(), ctx).await;
+    let elapsed_ms_u128 = started.elapsed().as_millis();
+    let latency_ms = u64::try_from(elapsed_ms_u128).unwrap_or(u64::MAX);
     let (success, _) = summarize_tool_output(&output);
     ToolCallResult {
         call_id: call.id.clone(),
@@ -2175,6 +2527,7 @@ pub async fn execute_single_tool_call(
         output,
         success,
         arguments,
+        latency_ms,
     }
 }
 
@@ -2399,7 +2752,10 @@ fn concrete_permissions(
 mod tests {
     use super::*;
 
-    use akmon_core::{PolicyEngine, PolicyEngineMode};
+    use akmon_core::{
+        FilesystemPolicyConfig, PatternRuleSet, PolicyConfig, PolicyEngine, PolicyEngineMode,
+        ToolPolicyConfig,
+    };
     use async_trait::async_trait;
     use futures::stream;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2858,6 +3214,30 @@ mod tests {
         }
     }
 
+    struct TimeoutTool;
+
+    #[async_trait]
+    impl Tool for TimeoutTool {
+        fn name(&self) -> &str {
+            "timeout_tool"
+        }
+
+        fn description(&self) -> &str {
+            "returns timeout-like error"
+        }
+
+        fn required_permissions(&self) -> &[Permission] {
+            delay_tool_perms()
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> ToolOutput {
+            ToolOutput::Error {
+                code: akmon_tools::ToolErrorCode::SubprocessFailed,
+                message: "command timed out after 30s".into(),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn two_parallel_reads_context_order_matches_request_order() {
         let dir = tempfile::tempdir().expect("tmp");
@@ -3159,6 +3539,322 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reliability_metrics_track_tool_success_failure_policy_denial_and_latency() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let p = dir.path().join("r.txt");
+        tokio::fs::write(&p, b"ok").await.expect("w");
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![
+                    ModelToolCall {
+                        id: "r1".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path": "r.txt"}),
+                    },
+                    ModelToolCall {
+                        id: "w1".into(),
+                        name: "write_file".into(),
+                        arguments: json!({"path": "x.txt", "content": "n"}),
+                    },
+                ],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: false,
+            })),
+            Arc::new(seq),
+            vec![
+                Box::new(akmon_tools::ReadFileTool::new()),
+                Box::new(akmon_tools::WriteFileTool::new()),
+            ],
+            sandbox,
+            None,
+            false,
+        );
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+
+        let m = session.reliability_metrics();
+        assert_eq!(m.tool_calls_total, 2);
+        assert_eq!(m.tool_calls_success, 1);
+        assert_eq!(m.tool_calls_failure, 1);
+        assert_eq!(m.policy_denials_total, 1);
+        assert!(m.tool_latency_ms_total >= m.tool_latency_ms_avg);
+        assert!(m.tool_latency_ms_p95.is_some());
+        let evidence = session.evidence_data();
+        assert_eq!(evidence.reliability_metrics.tool_calls_total, 2);
+    }
+
+    #[tokio::test]
+    async fn reliability_metrics_count_retry_continuations() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::MaxTokens,
+                tool_calls: vec![],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(seq),
+            vec![],
+            sandbox,
+            None,
+            false,
+        );
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        assert_eq!(session.reliability_metrics().retries_total, 1);
+    }
+
+    #[tokio::test]
+    async fn reliability_metrics_count_tool_timeout_failures() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "t1".into(),
+                    name: "timeout_tool".into(),
+                    arguments: json!({}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![Box::new(TimeoutTool)],
+            sandbox,
+            None,
+            false,
+        );
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let m = session.reliability_metrics();
+        assert_eq!(m.tool_calls_failure, 1);
+        assert_eq!(m.timeouts_total, 1);
+    }
+
+    #[tokio::test]
+    async fn configured_tool_policy_denies_dispatch_even_when_permission_would_allow() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let p = dir.path().join("r.txt");
+        tokio::fs::write(&p, b"ok").await.expect("w");
+
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "r1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "r.txt"}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+
+        let cfg = PolicyConfig {
+            tools: ToolPolicyConfig {
+                allow: vec!["read_*".into()],
+                deny: vec!["read_file".into()],
+            },
+            filesystem: FilesystemPolicyConfig {
+                read: PatternRuleSet {
+                    allow: vec!["r.txt".into()],
+                    deny: vec![],
+                },
+                write: PatternRuleSet::default(),
+            },
+            ..PolicyConfig::default()
+        };
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Configured(cfg))),
+            Arc::new(seq),
+            vec![Box::new(akmon_tools::ReadFileTool::new())],
+            sandbox,
+            None,
+            false,
+        );
+
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("x".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+
+        let tool_msgs: Vec<_> = session
+            .context
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert!(
+            tool_msgs[0].content.contains("policy denied")
+                || tool_msgs[0].content.contains("PermissionDenied"),
+            "tool should be denied by tool policy, got {}",
+            tool_msgs[0].content
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_tool_policy_allow_and_permission_allow_executes_tool() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let p = dir.path().join("r.txt");
+        tokio::fs::write(&p, b"ok").await.expect("w");
+
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "r1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "r.txt"}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+
+        let cfg = PolicyConfig {
+            tools: ToolPolicyConfig {
+                allow: vec!["read_*".into()],
+                deny: vec![],
+            },
+            filesystem: FilesystemPolicyConfig {
+                read: PatternRuleSet {
+                    allow: vec!["r.txt".into()],
+                    deny: vec![],
+                },
+                write: PatternRuleSet::default(),
+            },
+            ..PolicyConfig::default()
+        };
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Configured(cfg))),
+            Arc::new(seq),
+            vec![Box::new(akmon_tools::ReadFileTool::new())],
+            sandbox,
+            None,
+            false,
+        );
+
+        let (ev_tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("x".into(), ev_tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+
+        let tool_msgs: Vec<_> = session
+            .context
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert!(
+            tool_msgs[0].content.contains("ok"),
+            "tool should be allowed and return file contents, got {}",
+            tool_msgs[0].content
+        );
+    }
+
+    #[tokio::test]
     async fn tool_results_appended_in_request_order_not_completion_order() {
         let dir = tempfile::tempdir().expect("tmp");
         let sandbox = test_sandbox(dir.path());
@@ -3436,7 +4132,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_events_roundtrip_as_jsonl_after_run() {
-        use akmon_core::{AuditEvent, write_audit_jsonl};
+        use akmon_core::write_audit_jsonl;
 
         let dir = tempfile::tempdir().expect("tmp");
         let sandbox = test_sandbox(dir.path());
@@ -3478,10 +4174,99 @@ mod tests {
         let contents = std::fs::read_to_string(&audit_file).expect("read audit");
         assert!(!contents.trim().is_empty());
         for line in contents.lines() {
-            let parsed: AuditEvent =
-                serde_json::from_str(line).expect("valid AuditEvent JSONL line");
-            assert!(parsed.to_json().is_ok());
+            let parsed: akmon_core::AuditChainRecord =
+                serde_json::from_str(line).expect("valid AuditChainRecord JSONL line");
+            assert!(parsed.event.to_json().is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn replay_metadata_present_and_does_not_expose_prompt_secret() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let seq = SeqProvider::new(vec![vec![Ok(StreamEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            tool_calls: vec![],
+        })]]);
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(seq),
+            vec![],
+            sandbox,
+            None,
+            false,
+        );
+
+        let secret = "sk-test-secret-in-user-task";
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run(secret.to_string(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+
+        let replay = session.replay_metadata().expect("replay metadata");
+        let serialized = serde_json::to_string(replay).expect("serialize");
+        assert!(!serialized.contains(secret));
+        assert!(replay.prompt_assembly_hash.is_some());
+    }
+
+    #[tokio::test]
+    async fn evidence_data_sorts_and_dedups_files() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let sandbox = test_sandbox(dir.path());
+        let seq = SeqProvider::new(vec![vec![Ok(StreamEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            tool_calls: vec![],
+        })]]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: Uuid::nil(),
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(seq),
+            vec![],
+            sandbox,
+            None,
+            false,
+        );
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        session.modified_paths = vec![
+            PathBuf::from("b.rs"),
+            PathBuf::from("a.rs"),
+            PathBuf::from("a.rs"),
+        ];
+        let evidence = session.evidence_data();
+        assert_eq!(
+            evidence.files_touched,
+            vec!["a.rs".to_string(), "b.rs".to_string()]
+        );
+        assert!(evidence.replay_metadata.is_some());
     }
 
     #[test]

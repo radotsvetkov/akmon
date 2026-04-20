@@ -1,4 +1,4 @@
-//! User-level configuration at `~/.akmon/config.toml` (models, API keys, MCP servers).
+//! User-level configuration at `~/.akmon/config.toml` (models, API keys, MCP servers, SLO defaults).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,27 @@ pub struct DisplayConfig {
     pub theme: TerminalTheme,
 }
 
+/// SLO defaults under `[slo]` and `[slo.trend]`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SloConfig {
+    /// Single-run threshold checks (`akmon slo verify`).
+    #[serde(flatten)]
+    pub thresholds: akmon_core::ReliabilitySloThresholds,
+    /// Trend/regression guardrail checks (`akmon slo trend`).
+    #[serde(default)]
+    pub trend: akmon_core::RegressionGuardConfig,
+}
+
+/// Policy profile/pack defaults under `[policy]`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PolicyGovernanceConfig {
+    /// Default built-in profile (`dev`, `staging`, `prod`).
+    pub profile: Option<akmon_core::PolicyProfileName>,
+    /// Additional policy pack paths loaded in listed order.
+    pub packs: Vec<String>,
+}
+
 /// Serializable contents of `~/.akmon/config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AkmonGlobalConfig {
@@ -109,6 +130,12 @@ pub struct AkmonGlobalConfig {
     /// Optional per-model context-window and USD hints for status bars, `/context`, and headless budget math.
     #[serde(default)]
     pub model_estimates: Vec<akmon_core::ModelCostEstimateRow>,
+    /// Default reliability SLO settings (`[slo]`) for verify + trend checks.
+    #[serde(default)]
+    pub slo: SloConfig,
+    /// Enterprise policy profile/pack defaults.
+    #[serde(default)]
+    pub policy: PolicyGovernanceConfig,
 }
 
 impl AkmonGlobalConfig {
@@ -160,6 +187,26 @@ impl AkmonGlobalConfig {
 
 # [architect]
 # planner_model = "llama3.2"
+
+# [policy]
+# profile = "dev"
+# packs = [".akmon/policy-packs/team.toml"]
+
+# [slo]
+# min_tool_success_rate = 0.95
+# max_timeout_rate = 0.02
+# max_tool_failure_rate = 0.05
+# max_retries_total = 3
+# max_timeouts_total = 2
+# min_tool_calls_total = 5
+#
+# [slo.trend]
+# max_success_rate_drop_abs = 0.05
+# max_timeout_rate_increase_abs = 0.02
+# max_failure_rate_increase_abs = 0.03
+# max_retries_increase_ratio = 1.0
+# max_latency_avg_increase_ratio = 0.50
+# min_baseline_samples = 5
 "#
     }
 }
@@ -333,5 +380,51 @@ mod tests {
         assert_eq!(l.model_estimates.len(), 1);
         assert_eq!(l.model_estimates[0].pattern, "claude-haiku");
         assert_eq!(l.model_estimates[0].context_window_tokens, Some(200_000));
+    }
+
+    #[test]
+    fn slo_thresholds_roundtrip_in_toml() {
+        let dir = tempdir().expect("tmp");
+        let path = dir.path().join("config.toml");
+        let c = AkmonGlobalConfig {
+            slo: SloConfig {
+                thresholds: akmon_core::ReliabilitySloThresholds {
+                    min_tool_success_rate: Some(0.95),
+                    max_timeouts_total: Some(2),
+                    ..Default::default()
+                },
+                trend: akmon_core::RegressionGuardConfig {
+                    max_success_rate_drop_abs: Some(0.1),
+                    min_baseline_samples: Some(5),
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        };
+        save_config_to(&path, &c).expect("save");
+        let l = load_config_from(&path).expect("load");
+        assert_eq!(l.slo.thresholds.min_tool_success_rate, Some(0.95));
+        assert_eq!(l.slo.thresholds.max_timeouts_total, Some(2));
+        assert_eq!(l.slo.trend.max_success_rate_drop_abs, Some(0.1));
+    }
+
+    #[test]
+    fn policy_governance_roundtrip_in_toml() {
+        let dir = tempdir().expect("tmp");
+        let path = dir.path().join("config.toml");
+        let c = AkmonGlobalConfig {
+            policy: PolicyGovernanceConfig {
+                profile: Some(akmon_core::PolicyProfileName::Staging),
+                packs: vec![".akmon/policy-packs/org.toml".into()],
+            },
+            ..Default::default()
+        };
+        save_config_to(&path, &c).expect("save");
+        let l = load_config_from(&path).expect("load");
+        assert_eq!(
+            l.policy.profile,
+            Some(akmon_core::PolicyProfileName::Staging)
+        );
+        assert_eq!(l.policy.packs.len(), 1);
     }
 }

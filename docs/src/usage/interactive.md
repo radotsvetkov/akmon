@@ -62,6 +62,21 @@ When the model requests writes or command execution:
 
 Use session-wide allowances carefully; they trade control for speed.
 
+## Policy profiles in interactive sessions
+
+You can run interactive sessions with enterprise policy profiles/packs:
+
+```bash
+akmon chat --policy-profile dev
+akmon chat --policy-profile staging --policy-pack .akmon/policy-packs/org.toml
+```
+
+Inspect the final merged configured policy before starting:
+
+```bash
+akmon policy show-effective --profile staging --policy-pack .akmon/policy-packs/org.toml
+```
+
 ## Common mistakes and troubleshooting
 
 - **Mistake:** broad vague prompts ("fix everything").

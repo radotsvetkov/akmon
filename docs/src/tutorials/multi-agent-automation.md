@@ -24,6 +24,22 @@ Net effect:
 - clearer plan/spec handoff,
 - lower token waste.
 
+## Safety defaults for nested runs
+
+Subagents are intentionally conservative:
+
+- no implicit broad approvals are injected at nested bootstrap,
+- nested execution is capped by the parent permission posture,
+- when parent policy is interactive, nested runs stay read-oriented unless policy can be
+  satisfied automatically,
+- side-effect tools that exceed the parent ceiling are filtered out before nested execution.
+
+Practical guidance:
+
+- use subagents for research/summarization,
+- perform high-impact write/shell steps in the main session where approvals are explicit,
+- if a nested run reports ceiling restrictions, tighten task scope to read-only discovery.
+
 ## Three-phase pattern
 
 ### Phase 1: Research (subagent)

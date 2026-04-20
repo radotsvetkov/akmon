@@ -73,12 +73,23 @@ jobs:
           find dist -type f -name 'akmon-*' -exec cp -v {} release-assets/ \;
           ls -la release-assets
 
+      - name: Prepare release notes body
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          NOTES_FILE="docs/src/releases/${TAG}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            cp "$NOTES_FILE" RELEASE_NOTES.md
+          else
+            {
+              echo "# ${TAG}"
+              echo
+              echo "See [CHANGELOG.md](https://github.com/radotsvetkov/akmon/blob/main/CHANGELOG.md) for full details."
+            } > RELEASE_NOTES.md
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: release-assets/*
-          body: |
-            Prebuilt binaries (slim build, `--no-default-features` — no bundled semantic index). See [CHANGELOG.md](https://github.com/radotsvetkov/akmon/blob/main/CHANGELOG.md).
-
-            **Install (macOS / Linux, no sudo):** download the matching asset, `chmod +x`, move to a directory on your `PATH` (e.g. `~/bin`). See the [readme](https://github.com/radotsvetkov/akmon#readme) for details.
+          body_path: RELEASE_NOTES.md

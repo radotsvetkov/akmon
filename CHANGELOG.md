@@ -4,9 +4,67 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-04-20
+
+### Added
+
+- **Policy governance for enterprise environments:** built-in profiles (`dev`, `staging`, `prod`), composable local policy packs, deterministic merge precedence, and `akmon policy show-effective` introspection.
+- **Policy-as-code runtime posture:** configured rule evaluation for filesystem/shell/network/tool access with deterministic deny/allow behavior.
+- **Audit verification pipeline:** tamper-evident audit chain verification via `akmon audit verify`.
+- **Replay/evidence trust linkage:** replay metadata in headless JSON output, evidence artifact generation/verification (`akmon evidence verify`), and deterministic policy-hash impact from effective merged policy.
+- **Reliability guardrails:** run-level reliability metrics in run report/evidence, SLO verification (`akmon slo verify`), and baseline trend regression checks (`akmon slo trend`).
+- **Operator docs and tutorials:** end-to-end local-first, CI governance, and enterprise policy-rollout tutorials plus release-focused trust pipeline guidance.
+
+### Changed
+
+- **Safety defaults hardening:** nested/subagent execution remains constrained by parent policy posture and fails closed for ambiguous side-effect contexts.
+- **Release/operator docs:** README, CLI/config/security/audit/evidence references, and landing copy now align to trust-runtime workflows and command behavior.
+- **Versioning/package metadata:** workspace version advanced to `1.8.0`; docs and install examples updated accordingly.
+
+### Migration notes
+
+- **Audit consumers:** parse each JSONL line as `AuditChainRecord` (`schema_version: "audit_chain.v1"`), not raw `AuditEvent`.
+- **Run report consumers:** treat `replay_metadata` and `reliability_metrics` as additive stable fields in `--output json`.
+- **Evidence consumers:** require `evidence_schema_version` and validate linked audit/session hash consistency.
+- **Policy governance rollout:** effective policy source order is explicit (`profile < packs < local < CLI override`); invalid selected pack inputs fail closed.
+
+### Operator impact
+
+- CI can now gate runs with both integrity checks (`audit`/`evidence`) and reliability checks (`slo verify`/`slo trend`).
+- Teams can stage policy hardening (`dev` -> `staging` -> `prod`) without changing permission classes.
+
 ## [1.7.7] - 2026-04-10
 
 ### Added
+
+- **Audit verification CLI:** `akmon audit verify <path>` verifies audit-chain integrity and exits non-zero on invalid/tampered/unsupported files (supports `--output json`).
+- **Replay metadata in run report:** headless `--output json` now includes a deterministic `replay_metadata` block (`hash_algorithm`, provider/model/session ids, policy/config/tool hashes, optional prompt assembly hash).
+- **Evidence artifact:** headless runs now emit `.akmon/evidence/<session-id>.json` (`evidence.v1`) with replay metadata, audit linkage, policy summary, tool outcomes, and touched files. Add `--evidence-path` to override output location.
+- **Evidence verification CLI:** `akmon evidence verify <path>` validates evidence schema and linked audit-chain integrity.
+- **Reliability/SLO metrics:** headless run reports now include `reliability_metrics` (`tool_calls_*`, latency totals/avg/p95, `policy_denials_total`, `retries_total`, `timeouts_total`), and evidence artifacts include the same block for CI/ops consumption.
+- **SLO guardrail command:** `akmon slo verify <path>` evaluates run-report/evidence reliability metrics against threshold policies (`[slo]` config defaults, threshold files, and CLI overrides) with CI-friendly non-zero exits on violations.
+- **Trend regression detection:** `akmon slo trend <current-path>` compares current reliability metrics vs last-N baseline artifacts and fails on configurable degradation tolerances (`[slo.trend]` or `--config`), with structured JSON output for CI.
+- **Enterprise policy profiles/packs:** built-in `dev`/`staging`/`prod` profiles, deterministic policy-pack loading, explicit merge precedence (`profile < packs < local < CLI override`), and `akmon policy show-effective` for operator introspection.
+
+### Changed
+
+- **Policy hardening:** dispatch-time policy checks now consistently use tool-context evaluation where tool names are known, preventing tool-rule bypass when permission class alone would allow.
+- **Audit schema versioning:** each JSONL record now includes `schema_version: "audit_chain.v1"` for stable downstream parsing contracts.
+- **Subagent safety defaults hardening:** nested `spawn_subagent` execution no longer injects broad pre-approved interactive allows; nested tool access is now capped by parent policy posture and fails closed when side-effect confirmations are ambiguous.
+- **Configured policy assembly:** headless session policy mode now uses merged effective policy when profile/packs/local/override sources are present; no-source runs preserve prior interactive/`--yes` behavior.
+
+### Migration notes
+
+- **Audit consumers:** deserialize each line as `AuditChainRecord` instead of `AuditEvent`.
+- **Event payload access:** read the original event via `.event` (flattened `event_kind` JSON remains present).
+- **Schema validation:** expect and validate `schema_version == "audit_chain.v1"`.
+- **Run report consumers:** treat `replay_metadata` as an additive JSON schema field when parsing `--output json` run summaries.
+- **Evidence consumers:** parse versioned `evidence_schema_version` and validate `audit.session_final_hash` linkage to the referenced audit file.
+- **Reliability consumers:** parse `reliability_metrics` as additive; provider-internal retries not surfaced by session APIs remain outside current counters.
+- **SLO policy consumers:** treat `violations` and `skipped_checks` as machine-readable output (`--output json`) and use `--strict` to fail on missing metrics/insufficient sample.
+- **Trend policy consumers:** use `sample_counts` and `skipped` in `akmon slo trend --output json` to separate true regressions from insufficient baseline coverage.
+- **Nested automation behavior:** workflows that previously relied on implicit nested write/shell/network approvals must now use explicit parent policy configuration or perform those actions in the primary session.
+- **Policy governance rollout:** teams can codify environment profiles and packs without changing permission classes; policy drift is observable via replay/evidence `policy_hash`.
 
 - **TUI `/config` and Ctrl+S:** full-screen **settings** overlay with an **Estimates** tab to edit **`[[model_estimates]]`** for the current model (context window tokens, optional USD per 1M input/output/cache-read, note). Saves to `~/.akmon/config.toml` and reloads in-session estimates for the agent.
 - **Configurable model estimates:** `[[model_estimates]]` in user config for context-window % and rough USD cost; documented in getting started and configuration reference.
