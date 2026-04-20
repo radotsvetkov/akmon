@@ -31,6 +31,12 @@ File operations are constrained to project boundaries. Path traversal attempts a
 
 For file changes, Akmon can present unified diffs before final approval. This gives human review at the moment side effects happen, not only at the end.
 
+For automation and CI, file-modifying tools also expose `dry_run` validation:
+
+- run `patch` / `apply_patch` / `edit` / `write_file` with `dry_run: true`,
+- inspect returned `file_change_set` (`mode: "dry_run"`, `summary`, `risk`, per-file `changes`),
+- execute the same tool call without `dry_run` only when risk and diffs are acceptable.
+
 ## Policy-as-code (`Configured`)
 
 `Configured` policy mode supports declarative allow/deny rules for:

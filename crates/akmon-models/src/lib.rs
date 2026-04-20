@@ -13,6 +13,7 @@ mod ollama;
 mod ollama_models;
 mod openai_compat;
 mod provider_error;
+mod provider_resolution;
 mod stream;
 mod tool_def;
 
@@ -36,6 +37,7 @@ pub use ollama_models::{
 };
 pub use openai_compat::{OpenAiCompatBackend, infer_context_window_tokens};
 pub use provider_error::{ProviderError, ProviderResult};
+pub use provider_resolution::{ProviderResolutionCandidate, ProviderResolutionTrace};
 pub use stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 pub use tool_def::ToolDefinition;
 

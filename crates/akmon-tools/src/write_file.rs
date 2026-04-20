@@ -11,12 +11,11 @@ use tokio::fs;
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::diff_render::unified_diff_text;
+use crate::file_change_set::{ChangeSetMode, FileChange, FileChangeSet, diff_stats_from_unified};
 use crate::output::{ToolErrorCode, ToolOutput};
 
 static WRITE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Beyond this line count, the success message includes a note nudging incremental writes.
-const LARGE_FILE_LINE_THRESHOLD: usize = 200;
 
 fn write_file_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
@@ -44,6 +43,15 @@ impl Default for WriteFileTool {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Sandbox-relative path for success payloads (forward slashes).
+fn relative_path_display(file: &Path, sandbox_root: &Path) -> Option<String> {
+    let c = std::fs::canonicalize(file).ok()?;
+    let root = std::fs::canonicalize(sandbox_root).ok()?;
+    c.strip_prefix(&root)
+        .ok()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
 /// Splits a sandbox-relative path into a parent segment for [`akmon_core::Sandbox::resolve`] and a single final file name.
@@ -132,6 +140,11 @@ impl Tool for WriteFileTool {
                 "content": {
                     "type": "string",
                     "description": "Content to write to the file"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Validate and generate diff payload without writing file changes."
                 }
             },
             "required": ["path", "content"]
@@ -158,9 +171,12 @@ impl Tool for WriteFileTool {
                 };
             }
         };
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let bytes = content.as_bytes();
-        let line_count = content.lines().count();
 
         let (parent_str, file_name) = match split_write_path(path_str) {
             Ok(pair) => pair,
@@ -190,32 +206,49 @@ impl Tool for WriteFileTool {
         };
 
         let resolved = resolved_parent.join(file_name);
+        let old_content = match fs::read(&resolved).await {
+            Ok(existing) => std::str::from_utf8(&existing).ok().map(ToOwned::to_owned),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => None,
+        };
 
-        match atomic_write_utf8(&resolved, bytes).await {
-            Ok(n) => {
-                let msg = if line_count > LARGE_FILE_LINE_THRESHOLD {
-                    format!(
-                        "File written: {} ({} lines; wrote {n} bytes). \
-                         Note: this was a large single write ({} lines). \
-                         For files this size, prefer: \
-                         (1) write a short skeleton, then `edit` for each section, \
-                         or (2) split into smaller focused files.",
-                        resolved.display(),
-                        line_count,
-                        line_count,
-                    )
-                } else {
-                    format!(
-                        "wrote {n} bytes to {} ({} lines)",
-                        resolved.display(),
-                        line_count
-                    )
-                };
-                ToolOutput::Success { content: msg }
+        if !dry_run {
+            match atomic_write_utf8(&resolved, bytes).await {
+                Ok(_) => {}
+                Err(e) => {
+                    return ToolOutput::Error {
+                        code: ToolErrorCode::PermissionDenied,
+                        message: format!("write failed: {e}"),
+                    };
+                }
             }
+        }
+
+        let rel = relative_path_display(&resolved, ctx.primary_root().as_ref())
+            .unwrap_or_else(|| path_str.to_string().replace('\\', "/"));
+        let before = old_content.as_deref().unwrap_or("");
+        let unified = unified_diff_text(before, content, rel.as_str());
+        let (lines_added, lines_removed, lines_changed) = diff_stats_from_unified(&unified);
+        let mode = if dry_run {
+            ChangeSetMode::DryRun
+        } else {
+            ChangeSetMode::Applied
+        };
+        let payload = FileChangeSet::from_files(
+            mode,
+            vec![FileChange {
+                path: rel,
+                diff: unified,
+                lines_added,
+                lines_removed,
+                lines_changed,
+            }],
+        );
+        match serde_json::to_string(&payload) {
+            Ok(content) => ToolOutput::Success { content },
             Err(e) => ToolOutput::Error {
                 code: ToolErrorCode::PermissionDenied,
-                message: format!("write failed: {e}"),
+                message: format!("serialize write result: {e}"),
             },
         }
     }
@@ -247,7 +280,12 @@ mod tests {
         let out = w
             .execute(json!({ "path": "out.txt", "content": "payload" }), &c)
             .await;
-        assert!(matches!(out, ToolOutput::Success { .. }));
+        let ToolOutput::Success { content } = out else {
+            panic!("expected success");
+        };
+        let v: serde_json::Value = serde_json::from_str(&content).expect("json");
+        assert_eq!(v["type"], "file_change_set");
+        assert_eq!(v["mode"], "applied");
         let read = r.execute(json!({ "path": "out.txt" }), &c).await;
         assert_eq!(
             read,
@@ -289,5 +327,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn dry_run_does_not_write_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let w = WriteFileTool::new();
+        let out = w
+            .execute(
+                json!({ "path": "out.txt", "content": "payload", "dry_run": true }),
+                &ctx(dir.path()),
+            )
+            .await;
+        let ToolOutput::Success { content } = out else {
+            panic!("expected success");
+        };
+        let v: serde_json::Value = serde_json::from_str(&content).expect("json");
+        assert_eq!(v["mode"], "dry_run");
+        assert!(!dir.path().join("out.txt").exists());
     }
 }

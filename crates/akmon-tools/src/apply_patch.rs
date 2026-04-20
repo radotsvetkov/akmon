@@ -22,20 +22,6 @@ fn apply_patch_permissions() -> &'static [Permission] {
     .as_slice()
 }
 
-/// Counts `+`/`-` lines in a unified diff (excluding `+++` / `---` headers).
-fn count_patch_hunk_lines(patch_text: &str) -> (usize, usize) {
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    for line in patch_text.lines() {
-        if line.starts_with('+') && !line.starts_with("+++") {
-            added += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            removed += 1;
-        }
-    }
-    (added, removed)
-}
-
 /// Prepends `---` / `+++` headers when the model sends only `@@` hunks; ensures a single-file diff.
 fn normalize_single_file_patch(rel: &str, patch_body: &str) -> Result<String, ToolOutput> {
     let rel = rel.replace('\\', "/");
@@ -117,6 +103,11 @@ impl Tool for ApplyPatchTool {
                 "patch": {
                     "type": "string",
                     "description": "Unified diff: either a full hunk block (--- a/file, +++ b/file, @@ ...) or only the @@ hunks (headers are added from file_path)"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Validate and generate diff payload without writing files."
                 }
             },
             "required": ["file_path", "patch"]
@@ -148,20 +139,14 @@ impl Tool for ApplyPatchTool {
             Ok(s) => s,
             Err(e) => return e,
         };
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        let (added, removed) = count_patch_hunk_lines(patch_text);
-
-        match PatchTool::new()
-            .execute(json!({ "patch": full }), ctx)
+        PatchTool::new()
+            .execute(json!({ "patch": full, "dry_run": dry_run }), ctx)
             .await
-        {
-            ToolOutput::Success { .. } => ToolOutput::Success {
-                content: format!(
-                    "Applied patch to {path_str}: {added} lines added, {removed} lines removed"
-                ),
-            },
-            e => e,
-        }
     }
 }
 
@@ -169,7 +154,7 @@ impl Tool for ApplyPatchTool {
 mod tests {
     use super::*;
     use akmon_core::{PolicyEngine, PolicyEngineMode, Sandbox};
-    use serde_json::json;
+    use serde_json::{Value as JsonValue, json};
     use std::sync::Arc;
 
     fn ctx(root: &std::path::Path) -> ToolContext {
@@ -196,8 +181,14 @@ mod tests {
         let ToolOutput::Success { content } = out else {
             panic!("expected success: {out:?}");
         };
-        assert!(content.contains("Applied patch"));
-        assert!(content.contains("lines added"));
+        let v: JsonValue = serde_json::from_str(&content).expect("json");
+        assert_eq!(v["mode"], "applied");
+        assert_eq!(v["summary"]["files_changed"], 1);
+        assert!(
+            v["files"][0]["diff"]
+                .as_str()
+                .is_some_and(|d| d.contains("+hi"))
+        );
         let disk = std::fs::read_to_string(dir.path().join("f.txt")).expect("read");
         assert_eq!(disk, "hi\nworld\n");
     }
@@ -227,5 +218,53 @@ mod tests {
             matches!(out, ToolOutput::Error { .. }),
             "expected error: {out:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn dry_run_does_not_modify_file() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(dir.path().join("f.txt"), "hello\nworld\n").expect("w");
+        let tool = ApplyPatchTool::new();
+        let out = tool
+            .execute(
+                json!({
+                    "file_path": "f.txt",
+                    "patch": "@@ -1,2 +1,2 @@\n-hello\n+hi\n world\n",
+                    "dry_run": true
+                }),
+                &ctx(dir.path()),
+            )
+            .await;
+        let ToolOutput::Success { content } = out else {
+            panic!("expected success");
+        };
+        let v: JsonValue = serde_json::from_str(&content).expect("json");
+        assert_eq!(v["type"], "file_change_set");
+        assert_eq!(v["mode"], "dry_run");
+        let disk = std::fs::read_to_string(dir.path().join("f.txt")).expect("read");
+        assert_eq!(disk, "hello\nworld\n");
+    }
+
+    #[tokio::test]
+    async fn dry_run_path_escape_still_fails() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let inner = dir.path().join("inner");
+        std::fs::create_dir_all(&inner).expect("mkdir");
+        std::fs::write(dir.path().join("x.txt"), "a\n").expect("w");
+        let tool = ApplyPatchTool::new();
+        let out = tool
+            .execute(
+                json!({
+                    "file_path": "../x.txt",
+                    "patch": "@@ -1,1 +1,1 @@\n-a\n+b\n",
+                    "dry_run": true
+                }),
+                &ctx(&inner),
+            )
+            .await;
+        let ToolOutput::Error { code, .. } = out else {
+            panic!("expected error");
+        };
+        assert_eq!(code, ToolErrorCode::PathEscape);
     }
 }

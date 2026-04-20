@@ -15,11 +15,11 @@ Input: path.
 
 TOOL: write_file
 Purpose: Create or replace a file atomically.
-Input: path, content.
+Input: path, content, optional dry_run=true (validate only, no write).
 
 TOOL: edit
 Purpose: Modify existing file by replacing one unique old_str.
-Input: path, old_str, new_str.
+Input: path, old_str, new_str, optional dry_run=true (validate only, no write).
 
 TOOL: search
 Purpose: Find regex text matches in files.
@@ -27,11 +27,11 @@ Input: pattern, optional path, optional file_pattern, optional case_sensitive.
 
 TOOL: patch
 Purpose: Apply unified diff to one or more files.
-Input: patch.
+Input: patch, optional dry_run=true (validate only, no write).
 
 TOOL: apply_patch
 Purpose: Apply unified diff to exactly one file.
-Input: file_path, patch.
+Input: file_path, patch, optional dry_run=true (validate only, no write).
 
 TOOL: shell
 Purpose: Run allowlisted shell command; cwd persists between calls.

@@ -8,6 +8,7 @@ mod ask_followup;
 mod context;
 mod diff_render;
 mod edit;
+mod file_change_set;
 mod git;
 mod list_directory;
 mod mcp_client;

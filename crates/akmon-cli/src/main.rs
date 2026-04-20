@@ -9,6 +9,7 @@ mod evidence_cmd;
 mod export_cmd;
 mod import_cmd;
 mod policy_cmd;
+mod scout_cmd;
 mod session_index;
 mod session_transcript;
 mod slo_cmd;
@@ -29,7 +30,9 @@ use akmon_core::{
     ReplayMetadata, RunReliabilityMetrics, Sandbox, verify_audit_jsonl, write_audit_jsonl,
     write_evidence_json,
 };
-use akmon_models::{LlmConnectConfig, LlmProvider, Message, MessageRole, ProviderError};
+use akmon_models::{
+    LlmConnectConfig, LlmProvider, Message, MessageRole, ProviderError, ProviderResolutionTrace,
+};
 use akmon_query::{
     AgentSession, SessionRunExit, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
     ToolCallSummary, write_handoff_file,
@@ -250,6 +253,26 @@ fn load_akmon_md(project_root: &Path) -> std::io::Result<Option<String>> {
     }
 }
 
+fn load_dossier_system_block(path: &Path) -> Result<String, String> {
+    let dossier = scout_cmd::load_dossier(path)?;
+    Ok(scout_cmd::dossier_prompt_block(&dossier))
+}
+
+fn merge_akmon_with_dossier(
+    akmon_md: Option<String>,
+    dossier_block: Option<String>,
+) -> Option<String> {
+    match (akmon_md, dossier_block) {
+        (Some(mut md), Some(block)) => {
+            md.push_str("\n\n");
+            md.push_str(&block);
+            Some(md)
+        }
+        (None, Some(block)) => Some(block),
+        (md, None) => md,
+    }
+}
+
 /// How human-readable versus machine-readable the process should be on stdout.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum OutputFormat {
@@ -312,6 +335,9 @@ struct RunReport {
     replay_metadata: ReplayMetadata,
     /// Reliability/SLO counters for this run.
     reliability_metrics: RunReliabilityMetrics,
+    /// Provider routing trace for the effective CLI model/config (explainability only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_resolution: Option<ProviderResolutionTrace>,
 }
 
 fn replay_metadata_for_report(session: &AgentSession) -> ReplayMetadata {
@@ -547,6 +573,9 @@ pub(crate) struct Cli {
     /// Extra directories merged into the sandbox (in addition to the project root). Repeatable.
     #[arg(long = "add-dir", global = true, value_name = "DIR", action = clap::ArgAction::Append)]
     add_dirs: Vec<PathBuf>,
+    /// Optional scout dossier JSON to inject into prompt context.
+    #[arg(long = "dossier", global = true, value_name = "PATH")]
+    dossier: Option<PathBuf>,
     /// Model to try on repeated HTTP 429/529 before giving up (headless only).
     #[arg(long = "fallback-model", global = true, value_name = "MODEL")]
     fallback_model: Option<String>,
@@ -573,6 +602,8 @@ enum Commands {
     Slo(slo_cmd::SloArgs),
     /// Policy profile/pack management and effective view.
     Policy(policy_cmd::PolicyArgs),
+    /// Generate a bounded, read-only project context dossier.
+    Scout(scout_cmd::ScoutArgs),
     /// Structured spec workflow under `.akmon/specs/<feature>/`.
     Spec(spec_cmd::SpecCmd),
     /// Synthesize `AKMON.md` from other tools' context files (Claude, Cursor, …).
@@ -723,6 +754,11 @@ fn load_user_global_config() -> AkmonGlobalConfig {
         .as_ref()
         .and_then(|p| akmon_config::load_config_from(p).ok())
         .unwrap_or_default()
+}
+
+fn provider_resolution_for_cli(cli: &Cli) -> ProviderResolutionTrace {
+    let global = load_user_global_config();
+    llm_connect_from_cli(cli, &global, cli.model.clone()).explain_provider_resolution()
 }
 
 fn coalesce_opt(a: Option<String>, b: Option<String>) -> Option<String> {
@@ -1183,7 +1219,7 @@ async fn main() -> ExitCode {
             return cli_project::run_new(&cli, args, &cwd).await;
         }
         Some(Commands::Config(c)) => {
-            return config_cmd::run_config(c.clone()).await;
+            return config_cmd::run_config(c.clone(), &cli).await;
         }
         Some(Commands::Doctor(d)) => {
             let global = load_user_global_config();
@@ -1210,6 +1246,14 @@ async fn main() -> ExitCode {
                 &global,
             );
         }
+        Some(Commands::Scout(s)) => {
+            return scout_cmd::run_scout(
+                s.clone(),
+                &project_root,
+                cli.output == OutputFormat::Json,
+                cli.max_budget_usd,
+            );
+        }
         Some(Commands::Spec(sc)) => {
             return spec_cmd::run_spec(&cli, &project_root, sc.clone()).await;
         }
@@ -1234,6 +1278,17 @@ async fn main() -> ExitCode {
                 None
             }
         };
+        let dossier_block = match &cli.dossier {
+            Some(path) => match load_dossier_system_block(path) {
+                Ok(block) => Some(block),
+                Err(e) => {
+                    eprintln!("akmon: invalid dossier {}: {e}", path.display());
+                    return ExitCode::from(2);
+                }
+            },
+            None => None,
+        };
+        let akmon_content = merge_akmon_with_dossier(akmon_content, dossier_block);
         let has_akmon_md = project_root.join("AKMON.md").is_file();
 
         let mode_label = if cli.yes { "AUTO" } else { "INTERACTIVE" };
@@ -1407,6 +1462,21 @@ async fn main() -> ExitCode {
             exit_early_config_error(&cli, format!("failed to read AKMON.md: {e}"), None, 2);
         }
     };
+    let dossier_block = match &cli.dossier {
+        Some(path) => match load_dossier_system_block(path) {
+            Ok(block) => Some(block),
+            Err(e) => {
+                exit_early_config_error(
+                    &cli,
+                    format!("invalid dossier {}: {e}", path.display()),
+                    None,
+                    2,
+                );
+            }
+        },
+        None => None,
+    };
+    let akmon_content = merge_akmon_with_dossier(akmon_content, dossier_block);
 
     if cli.plan && cli.architect {
         exit_early_config_error(
@@ -1701,6 +1771,7 @@ async fn main() -> ExitCode {
                     .collect(),
                 replay_metadata: replay_metadata_for_report(&session),
                 reliability_metrics: session.reliability_metrics(),
+                provider_resolution: Some(provider_resolution_for_cli(&cli)),
             };
             let json_line = match serde_json::to_string(&report) {
                 Ok(s) => s,
@@ -1941,6 +2012,7 @@ async fn main() -> ExitCode {
                     .collect(),
                 replay_metadata: replay_metadata_for_report(&session),
                 reliability_metrics: session.reliability_metrics(),
+                provider_resolution: Some(provider_resolution_for_cli(&cli)),
             };
             let json_line = match serde_json::to_string(&report) {
                 Ok(s) => s,
@@ -2107,6 +2179,7 @@ async fn main() -> ExitCode {
                 .collect(),
             replay_metadata: replay_metadata_for_report(&session),
             reliability_metrics: session.reliability_metrics(),
+            provider_resolution: Some(provider_resolution_for_cli(&cli)),
         };
         let json_line = match serde_json::to_string(&report) {
             Ok(s) => s,
@@ -2145,6 +2218,7 @@ fn exit_code_for_agent_error(e: &AgentError) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scout_cmd::{ScoutCandidateFile, ScoutDossier};
 
     fn reg(
         shell_allow: &[String],
@@ -2249,6 +2323,7 @@ mod tests {
                 retries_total: 0,
                 timeouts_total: 0,
             },
+            provider_resolution: None,
         };
         let v = serde_json::to_value(&report).expect("serialize");
         assert_eq!(v["session_id"], "550e8400-e29b-41d4-a716-446655440000");
@@ -2281,6 +2356,7 @@ mod tests {
         );
         assert_eq!(v["reliability_metrics"]["tool_calls_total"], 1);
         assert_eq!(v["reliability_metrics"]["tool_latency_ms_avg"], 12);
+        assert!(v.get("provider_resolution").is_none());
     }
 
     #[test]
@@ -2312,6 +2388,7 @@ mod tests {
                 prompt_assembly_hash: None,
             },
             reliability_metrics: RunReliabilityMetrics::default(),
+            provider_resolution: None,
         };
         let v = serde_json::to_value(&report).expect("serialize");
         assert!(v.get("session_id").is_some());
@@ -2448,5 +2525,63 @@ mod tests {
                 .expect("json");
         assert!(parsed.get("reliability_metrics").is_some());
         assert_eq!(parsed["reliability_metrics"]["tool_calls_total"], 0);
+    }
+
+    #[test]
+    fn merge_akmon_with_dossier_appends_context_block() {
+        let merged = merge_akmon_with_dossier(
+            Some("# AKMON\nrules".into()),
+            Some("=== Context Scout Dossier ===\nblock".into()),
+        );
+        let text = merged.expect("merged");
+        assert!(text.contains("# AKMON"));
+        assert!(text.contains("Context Scout Dossier"));
+    }
+
+    #[test]
+    fn load_dossier_system_block_success() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = dir.path().join("dossier.json");
+        let dossier = ScoutDossier {
+            schema_version: "context_scout.v1".into(),
+            task: "task".into(),
+            project_root: dir.path().display().to_string(),
+            scanned_paths: vec!["src".into()],
+            key_entrypoints: vec!["Cargo.toml".into()],
+            candidate_files: vec![ScoutCandidateFile {
+                path: "src/main.rs".into(),
+                rationale: "path matches task terms: main".into(),
+            }],
+            related_tests: vec!["tests/main_test.rs".into()],
+            constraints: vec!["read-only".into()],
+            unresolved_questions: vec![],
+            confidence: "medium".into(),
+            files_scanned: 10,
+            max_files: 20,
+            truncated: false,
+            generated_at: None,
+        };
+        let raw = serde_json::to_string_pretty(&dossier).expect("json");
+        std::fs::write(&p, raw).expect("write");
+        let block = load_dossier_system_block(&p).expect("load");
+        assert!(block.contains("Context Scout Dossier"));
+        assert!(block.contains("candidate_files"));
+    }
+
+    #[test]
+    fn load_dossier_system_block_missing_path_errors() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = dir.path().join("missing.json");
+        let err = load_dossier_system_block(&p).expect_err("must fail");
+        assert!(err.contains("failed to read dossier"));
+    }
+
+    #[test]
+    fn load_dossier_system_block_malformed_json_errors() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = dir.path().join("bad.json");
+        std::fs::write(&p, "{bad").expect("write");
+        let err = load_dossier_system_block(&p).expect_err("must fail");
+        assert!(err.contains("invalid dossier JSON"));
     }
 }

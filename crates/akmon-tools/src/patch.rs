@@ -7,11 +7,13 @@ use std::sync::OnceLock;
 use akmon_core::{Permission, SandboxError};
 use async_trait::async_trait;
 use diffy::{Patch, apply};
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 use tokio::fs;
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::diff_render::unified_diff_text;
+use crate::file_change_set::{ChangeSetMode, FileChange, FileChangeSet, diff_stats_from_unified};
 use crate::output::{ToolErrorCode, ToolOutput};
 use crate::write_file::atomic_write_utf8;
 
@@ -137,6 +139,11 @@ impl Tool for PatchTool {
                 "patch": {
                     "type": "string",
                     "description": "A unified diff patch in standard format. File paths in the patch are relative to the project root."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Validate and compute full diff payload without writing files."
                 }
             },
             "required": ["patch"]
@@ -153,6 +160,10 @@ impl Tool for PatchTool {
                 };
             }
         };
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let chunks = split_unified_patches(patch_text);
         if chunks.is_empty() {
@@ -163,7 +174,7 @@ impl Tool for PatchTool {
         }
 
         let sandbox_root = ctx.primary_root();
-        let mut file_results: Vec<JsonValue> = Vec::new();
+        let mut file_changes: Vec<FileChange> = Vec::new();
 
         for (seg_ix, chunk) in chunks.iter().enumerate() {
             let patch = match Patch::from_str(chunk) {
@@ -284,31 +295,37 @@ impl Tool for PatchTool {
                 }
             };
 
-            match atomic_write_utf8(&resolved, new_content.as_bytes()).await {
-                Ok(_) => {}
-                Err(e) => {
-                    return ToolOutput::Error {
-                        code: ToolErrorCode::PermissionDenied,
-                        message: format!("write failed for {rel_str}: {e}"),
-                    };
+            if !dry_run {
+                match atomic_write_utf8(&resolved, new_content.as_bytes()).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return ToolOutput::Error {
+                            code: ToolErrorCode::PermissionDenied,
+                            message: format!("write failed for {rel_str}: {e}"),
+                        };
+                    }
                 }
             }
 
             let display_path = relative_path_display(&resolved, sandbox_root.as_path())
                 .unwrap_or_else(|| rel_str.clone());
-
-            file_results.push(json!({
-                "path": display_path,
-                "hunks_applied": patch.hunks().len(),
-            }));
+            let unified = unified_diff_text(content, &new_content, display_path.as_str());
+            let (lines_added, lines_removed, lines_changed) = diff_stats_from_unified(&unified);
+            file_changes.push(FileChange {
+                path: display_path,
+                diff: unified,
+                lines_added,
+                lines_removed,
+                lines_changed,
+            });
         }
 
-        let files_patched = file_results.len();
-        let payload = json!({
-            "files_patched": files_patched,
-            "files": file_results,
-        });
-
+        let mode = if dry_run {
+            ChangeSetMode::DryRun
+        } else {
+            ChangeSetMode::Applied
+        };
+        let payload = FileChangeSet::from_files(mode, file_changes);
         match serde_json::to_string(&payload) {
             Ok(content) => ToolOutput::Success { content },
             Err(e) => ToolOutput::Error {
@@ -354,8 +371,14 @@ mod tests {
             panic!("expected success: {out:?}");
         };
         let v: JsonValue = serde_json::from_str(&content).expect("json");
-        assert_eq!(v["files_patched"], 1);
-        assert_eq!(v["files"][0]["hunks_applied"], 1);
+        assert_eq!(v["type"], "file_change_set");
+        assert_eq!(v["mode"], "applied");
+        assert_eq!(v["summary"]["files_changed"], 1);
+        assert!(
+            v["files"][0]["diff"]
+                .as_str()
+                .is_some_and(|d| d.contains("+hi"))
+        );
         let disk = std::fs::read_to_string(dir.path().join("f.txt")).expect("read");
         assert_eq!(disk, "hi\nworld\n");
     }
@@ -383,7 +406,13 @@ mod tests {
             panic!("expected success: {out:?}");
         };
         let v: JsonValue = serde_json::from_str(&content).expect("json");
-        assert_eq!(v["files"][0]["hunks_applied"], 2);
+        assert_eq!(v["mode"], "applied");
+        assert_eq!(v["summary"]["files_changed"], 1);
+        assert!(
+            v["files"][0]["diff"]
+                .as_str()
+                .is_some_and(|d| d.contains("+mid"))
+        );
         let disk = std::fs::read_to_string(dir.path().join("t.txt")).expect("read");
         assert_eq!(disk, "a\nmid\nb\nc\ne\n");
     }
@@ -510,7 +539,8 @@ mod tests {
             panic!("expected success");
         };
         let v: JsonValue = serde_json::from_str(&content).expect("json");
-        assert_eq!(v["files_patched"], 2);
+        assert_eq!(v["mode"], "applied");
+        assert_eq!(v["summary"]["files_changed"], 2);
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt"))
                 .expect("r")
@@ -523,5 +553,78 @@ mod tests {
                 .trim_end(),
             "newb"
         );
+    }
+
+    #[tokio::test]
+    async fn dry_run_does_not_modify_content_and_marks_mode() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(dir.path().join("f.txt"), "hello\nworld\n").expect("w");
+        let patch = r#"--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+-hello
++hi
+ world
+"#;
+        let tool = PatchTool::new();
+        let out = tool
+            .execute(json!({ "patch": patch, "dry_run": true }), &ctx(dir.path()))
+            .await;
+        let ToolOutput::Success { content } = out else {
+            panic!("expected success");
+        };
+        let v: JsonValue = serde_json::from_str(&content).expect("json");
+        assert_eq!(v["type"], "file_change_set");
+        assert_eq!(v["mode"], "dry_run");
+        assert!(v["summary"]["lines_changed"].as_u64().unwrap_or(0) > 0);
+        assert!(matches!(
+            v["risk"].as_str(),
+            Some("low" | "medium" | "high")
+        ));
+        let disk = std::fs::read_to_string(dir.path().join("f.txt")).expect("read");
+        assert_eq!(disk, "hello\nworld\n");
+    }
+
+    #[tokio::test]
+    async fn dry_run_invalid_hunk_still_fails() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(dir.path().join("f.txt"), "one\ntwo\n").expect("w");
+        let patch = r#"--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+-nope
++yes
+ two
+"#;
+        let tool = PatchTool::new();
+        let out = tool
+            .execute(json!({ "patch": patch, "dry_run": true }), &ctx(dir.path()))
+            .await;
+        let ToolOutput::Error { code, .. } = out else {
+            panic!("expected error");
+        };
+        assert_eq!(code, ToolErrorCode::PatchFailed);
+    }
+
+    #[tokio::test]
+    async fn dry_run_path_escape_still_fails() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let inner = dir.path().join("inner");
+        std::fs::create_dir_all(&inner).expect("mkdir");
+        std::fs::write(dir.path().join("x.txt"), "a\n").expect("w");
+        let patch = r#"--- a/../x.txt
++++ b/../x.txt
+@@ -1,1 +1,1 @@
+-a
++b
+"#;
+        let tool = PatchTool::new();
+        let out = tool
+            .execute(json!({ "patch": patch, "dry_run": true }), &ctx(&inner))
+            .await;
+        let ToolOutput::Error { code, .. } = out else {
+            panic!("expected error");
+        };
+        assert_eq!(code, ToolErrorCode::PathEscape);
     }
 }

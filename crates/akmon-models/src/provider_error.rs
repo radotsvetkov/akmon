@@ -3,7 +3,8 @@
 use thiserror::Error;
 
 /// Failure to build a provider from [`crate::LlmConnectConfig::resolve`].
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderError {
     /// Bedrock was selected but AWS credentials could not be loaded.
     #[error("AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars.")]

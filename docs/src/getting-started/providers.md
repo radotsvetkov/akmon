@@ -125,7 +125,33 @@ anthropic_key = "sk-ant-..."
 
 Per-provider pages: [Ollama](../providers/ollama.md), [Anthropic](../providers/anthropic.md), and the rest under **Providers** in the sidebar.
 
-## Troubleshooting flow (`akmon doctor providers`)
+## Troubleshooting flow (`akmon doctor providers` + `akmon config explain-provider`)
+
+Routing behavior is **unchanged**—these commands only **explain** which resolver branch would win for your current `--model`, flags, and `~/.akmon/config.toml`.
+
+### Walkthrough: “Why am I on Ollama instead of OpenAI?”
+
+1. Show the resolution trace (text or JSON):
+
+   ```bash
+   akmon config explain-provider
+   akmon config explain-provider --json
+   ```
+
+   Read `selected_provider`, then scan `candidates[]` in `priority_order` order. Each row states why a branch was skipped, matched, or would have failed (named prerequisites only—no secrets).
+
+2. Cross-check health and endpoints:
+
+   ```bash
+   akmon doctor providers
+   akmon --output json doctor providers
+   ```
+
+   The JSON report includes the same `provider_resolution` block plus reachability and masked key checks.
+
+3. Fix the **first** issue that applies: missing env vars or flags listed under `missing_prerequisites`, Azure endpoint/key mismatch, or Ollama not running—then re-run step 1.
+
+### Doctor-only checklist
 
 Run:
 

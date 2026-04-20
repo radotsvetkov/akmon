@@ -9,7 +9,7 @@ use crate::{
     ProviderError,
 };
 
-fn nonempty(opt: Option<String>) -> Option<String> {
+pub(crate) fn nonempty(opt: Option<String>) -> Option<String> {
     opt.filter(|s| !s.trim().is_empty())
 }
 
@@ -19,7 +19,7 @@ pub fn looks_like_claude_api_model(model: &str) -> bool {
     lower.starts_with("claude-") || lower == "claude"
 }
 
-fn looks_like_openai_chat_model(model: &str) -> bool {
+pub(crate) fn looks_like_openai_chat_model(model: &str) -> bool {
     let lower = model.trim().to_lowercase();
     lower.starts_with("gpt-")
         || lower.starts_with("chatgpt-")
@@ -28,7 +28,7 @@ fn looks_like_openai_chat_model(model: &str) -> bool {
         || lower.starts_with("o4")
 }
 
-fn looks_like_groq_hosted_model(model: &str) -> bool {
+pub(crate) fn looks_like_groq_hosted_model(model: &str) -> bool {
     let lower = model.trim().to_lowercase();
     lower.starts_with("llama") || lower.starts_with("mixtral")
 }
@@ -137,6 +137,12 @@ impl Default for LlmConnectConfig {
 }
 
 impl LlmConnectConfig {
+    /// Deterministic provider resolution trace (calls [`Self::resolve`] once; introspection only).
+    #[must_use]
+    pub fn explain_provider_resolution(&self) -> crate::ProviderResolutionTrace {
+        crate::provider_resolution::explain_provider_resolution(self)
+    }
+
     /// Human-readable backend label for status bars (matches [`Self::resolve`] priority).
     pub fn inferred_backend_name(&self) -> &'static str {
         let model = self.model.trim();

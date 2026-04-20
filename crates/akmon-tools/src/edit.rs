@@ -5,12 +5,13 @@ use std::sync::OnceLock;
 
 use akmon_core::{Permission, SandboxError};
 use async_trait::async_trait;
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 use tokio::fs;
 
 use crate::Tool;
 use crate::context::ToolContext;
 use crate::diff_render::unified_diff_text;
+use crate::file_change_set::{ChangeSetMode, FileChange, FileChangeSet, diff_stats_from_unified};
 use crate::output::{ToolErrorCode, ToolOutput};
 use crate::write_file::atomic_write_utf8;
 
@@ -70,20 +71,6 @@ fn find_closest_line_hint(content: &str, search: &str) -> String {
         .into()
 }
 
-fn diff_stats_from_unified(diff: &str) -> (usize, usize, usize) {
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    for line in diff.lines() {
-        if line.starts_with('+') && !line.starts_with("+++") {
-            added += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            removed += 1;
-        }
-    }
-    let lines_changed = added.max(removed);
-    (added, removed, lines_changed)
-}
-
 /// Registers the `edit` tool: single exact substring replacement with an atomic file write.
 #[async_trait]
 impl Tool for EditTool {
@@ -114,6 +101,11 @@ impl Tool for EditTool {
                 "new_str": {
                     "type": "string",
                     "description": "The string to replace old_str with. Can be empty to delete old_str."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Validate and generate diff payload without writing file changes."
                 }
             },
             "required": ["path", "old_str", "new_str"]
@@ -157,6 +149,10 @@ impl Tool for EditTool {
                 };
             }
         };
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let resolved = match ctx.resolve_path(path_str) {
             Ok(p) => p,
@@ -263,8 +259,6 @@ impl Tool for EditTool {
         }
 
         let updated = content.replacen(old_str, new_str, 1);
-        let bytes_before = content.len();
-        let bytes_after = updated.len();
 
         let rel = match relative_path_display(&resolved, ctx.primary_root().as_ref()) {
             Some(r) => r,
@@ -274,30 +268,38 @@ impl Tool for EditTool {
         let unified = unified_diff_text(content, &updated, rel.as_str());
         let (lines_added, lines_removed, lines_changed) = diff_stats_from_unified(&unified);
 
-        match atomic_write_utf8(&resolved, updated.as_bytes()).await {
-            Ok(_) => {
-                let payload = json!({
-                    "type": "file_edit_diff",
-                    "path": rel,
-                    "diff": unified,
-                    "lines_added": lines_added,
-                    "lines_removed": lines_removed,
-                    "lines_changed": lines_changed,
-                    "replaced": true,
-                    "bytes_before": bytes_before,
-                    "bytes_after": bytes_after,
-                });
-                match serde_json::to_string(&payload) {
-                    Ok(content) => ToolOutput::Success { content },
-                    Err(e) => ToolOutput::Error {
+        if !dry_run {
+            match atomic_write_utf8(&resolved, updated.as_bytes()).await {
+                Ok(_) => {}
+                Err(e) => {
+                    return ToolOutput::Error {
                         code: ToolErrorCode::PermissionDenied,
-                        message: format!("serialize edit result: {e}"),
-                    },
+                        message: format!("write failed: {e}"),
+                    };
                 }
             }
+        }
+
+        let mode = if dry_run {
+            ChangeSetMode::DryRun
+        } else {
+            ChangeSetMode::Applied
+        };
+        let payload = FileChangeSet::from_files(
+            mode,
+            vec![FileChange {
+                path: rel,
+                diff: unified,
+                lines_added,
+                lines_removed,
+                lines_changed,
+            }],
+        );
+        match serde_json::to_string(&payload) {
+            Ok(content) => ToolOutput::Success { content },
             Err(e) => ToolOutput::Error {
                 code: ToolErrorCode::PermissionDenied,
-                message: format!("write failed: {e}"),
+                message: format!("serialize edit result: {e}"),
             },
         }
     }
@@ -351,10 +353,11 @@ mod tests {
             panic!("expected success: {out:?}");
         };
         let v: JsonValue = serde_json::from_str(&content).expect("json");
-        assert_eq!(v["type"], "file_edit_diff");
-        assert_eq!(v["replaced"], true);
+        assert_eq!(v["type"], "file_change_set");
+        assert_eq!(v["mode"], "applied");
+        assert_eq!(v["summary"]["files_changed"], 1);
         assert!(
-            v["diff"]
+            v["files"][0]["diff"]
                 .as_str()
                 .is_some_and(|d| d.contains("-BETA") && d.contains("+delta"))
         );
@@ -522,5 +525,30 @@ mod tests {
                 content: "keep OK end".into(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn dry_run_does_not_modify_file() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(dir.path().join("f.txt"), "keep CHANGE end").expect("w");
+        let edit = EditTool::new();
+        let out = edit
+            .execute(
+                json!({
+                    "path": "f.txt",
+                    "old_str": "CHANGE",
+                    "new_str": "OK",
+                    "dry_run": true
+                }),
+                &ctx(dir.path()),
+            )
+            .await;
+        let ToolOutput::Success { content } = out else {
+            panic!("expected success");
+        };
+        let v: JsonValue = serde_json::from_str(&content).expect("json");
+        assert_eq!(v["mode"], "dry_run");
+        let disk = std::fs::read_to_string(dir.path().join("f.txt")).expect("read");
+        assert_eq!(disk, "keep CHANGE end");
     }
 }

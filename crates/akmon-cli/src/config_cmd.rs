@@ -49,6 +49,8 @@ pub enum ConfigSubcommand {
     /// MCP server registry.
     #[command(subcommand)]
     Mcp(McpCmd),
+    /// Show how Akmon would route the current model to a provider (explainability only; does not change routing).
+    ExplainProvider,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -135,8 +137,8 @@ impl From<McpScopeArg> for McpScope {
 }
 
 /// Runs one `akmon config` invocation.
-pub async fn run_config(args: ConfigArgs) -> ExitCode {
-    match run_config_inner(args).await {
+pub async fn run_config(args: ConfigArgs, cli: &crate::Cli) -> ExitCode {
+    match run_config_inner(args, cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("✗ {e}");
@@ -145,7 +147,7 @@ pub async fn run_config(args: ConfigArgs) -> ExitCode {
     }
 }
 
-async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
+async fn run_config_inner(args: ConfigArgs, cli: &crate::Cli) -> Result<(), String> {
     let Some(cmd) = args.cmd.as_ref() else {
         if args.json {
             return Err(
@@ -355,6 +357,49 @@ async fn run_config_inner(args: ConfigArgs) -> Result<(), String> {
             }
         },
         ConfigSubcommand::Mcp(m) => run_mcp(&args, m).await,
+        ConfigSubcommand::ExplainProvider => {
+            let (_, global) = load_user_config().map_err(|e| e.to_string())?;
+            let connect = crate::llm_connect_from_cli(cli, &global, cli.model.clone());
+            let trace = connect.explain_provider_resolution();
+            let use_json = args.json || matches!(cli.output, crate::OutputFormat::Json);
+            if use_json {
+                let pretty = serde_json::to_string_pretty(&trace).map_err(|e| e.to_string())?;
+                println!("{pretty}");
+            } else {
+                print_explain_provider_text(&trace);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_explain_provider_text(trace: &akmon_models::ProviderResolutionTrace) {
+    println!(
+        "Provider resolution (explainability only; same routing as `LlmConnectConfig::resolve`)"
+    );
+    println!("model_id: {}", trace.model_id);
+    match (&trace.selected_provider, &trace.resolution_error) {
+        (Some(p), None) => println!("selected_provider: {p}"),
+        (None, Some(e)) => println!("resolution_error: {e}"),
+        _ => {}
+    }
+    println!("{}", trace.selected_reason);
+    println!();
+    println!("candidates (priority_order ascending):");
+    for c in &trace.candidates {
+        let elig = if c.eligible {
+            "eligible"
+        } else {
+            "not_eligible"
+        };
+        println!(
+            "  {:2} {:18} {elig}: {}",
+            c.priority_order, c.provider, c.reason
+        );
+        if !c.missing_prerequisites.is_empty() {
+            let joined = c.missing_prerequisites.join(", ");
+            println!("      missing_prerequisites: {joined}");
+        }
     }
 }
 
@@ -852,11 +897,16 @@ mod tests {
     #![allow(clippy::await_holding_lock)]
 
     use super::*;
+    use clap::Parser;
     use std::path::Path;
     use std::process::ExitCode;
     use std::sync::Mutex;
 
     static FAKE_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn sample_cli() -> crate::Cli {
+        crate::Cli::parse_from(["akmon", "--model", "llama3.2"])
+    }
 
     struct TempHome {
         old: Option<std::ffi::OsString>,
@@ -887,10 +937,13 @@ mod tests {
 
     #[tokio::test]
     async fn config_json_without_subcommand_errors() {
-        let code = run_config(ConfigArgs {
-            json: true,
-            cmd: None,
-        })
+        let code = run_config(
+            ConfigArgs {
+                json: true,
+                cmd: None,
+            },
+            &sample_cli(),
+        )
         .await;
         assert_eq!(code, ExitCode::FAILURE);
     }
@@ -900,12 +953,15 @@ mod tests {
         let _lock = FAKE_HOME_LOCK.lock().expect("lock");
         let tmp = tempfile::tempdir().expect("tmp");
         let _home = TempHome::new(tmp.path());
-        let code = run_config(ConfigArgs {
-            json: true,
-            cmd: Some(ConfigSubcommand::Model(ModelCmd::Set {
-                model: "llama3.2".into(),
-            })),
-        })
+        let code = run_config(
+            ConfigArgs {
+                json: true,
+                cmd: Some(ConfigSubcommand::Model(ModelCmd::Set {
+                    model: "llama3.2".into(),
+                })),
+            },
+            &sample_cli(),
+        )
         .await;
         assert_eq!(code, ExitCode::SUCCESS);
         let path = tmp.path().join(".akmon/config.toml");
@@ -918,16 +974,19 @@ mod tests {
         let _lock = FAKE_HOME_LOCK.lock().expect("lock");
         let tmp = tempfile::tempdir().expect("tmp");
         let _home = TempHome::new(tmp.path());
-        let code = run_config(ConfigArgs {
-            json: false,
-            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Add {
-                name: "srv".into(),
-                url: "http://127.0.0.1:9/none".into(),
-                scope: McpScopeArg::Project,
-                test: false,
-                env: vec![],
-            })),
-        })
+        let code = run_config(
+            ConfigArgs {
+                json: false,
+                cmd: Some(ConfigSubcommand::Mcp(McpCmd::Add {
+                    name: "srv".into(),
+                    url: "http://127.0.0.1:9/none".into(),
+                    scope: McpScopeArg::Project,
+                    test: false,
+                    env: vec![],
+                })),
+            },
+            &sample_cli(),
+        )
         .await;
         assert_eq!(code, ExitCode::SUCCESS);
         let path = tmp.path().join(".akmon/config.toml");
@@ -941,21 +1000,27 @@ mod tests {
         let _lock = FAKE_HOME_LOCK.lock().expect("lock");
         let tmp = tempfile::tempdir().expect("tmp");
         let _home = TempHome::new(tmp.path());
-        run_config(ConfigArgs {
-            json: true,
-            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Add {
-                name: "x".into(),
-                url: "http://127.0.0.1:9/none".into(),
-                scope: McpScopeArg::User,
-                test: false,
-                env: vec![],
-            })),
-        })
+        run_config(
+            ConfigArgs {
+                json: true,
+                cmd: Some(ConfigSubcommand::Mcp(McpCmd::Add {
+                    name: "x".into(),
+                    url: "http://127.0.0.1:9/none".into(),
+                    scope: McpScopeArg::User,
+                    test: false,
+                    env: vec![],
+                })),
+            },
+            &sample_cli(),
+        )
         .await;
-        let code = run_config(ConfigArgs {
-            json: true,
-            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Remove { name: "x".into() })),
-        })
+        let code = run_config(
+            ConfigArgs {
+                json: true,
+                cmd: Some(ConfigSubcommand::Mcp(McpCmd::Remove { name: "x".into() })),
+            },
+            &sample_cli(),
+        )
         .await;
         assert_eq!(code, ExitCode::SUCCESS);
         let path = tmp.path().join(".akmon/config.toml");
@@ -968,21 +1033,27 @@ mod tests {
         let _lock = FAKE_HOME_LOCK.lock().expect("lock");
         let tmp = tempfile::tempdir().expect("tmp");
         let _home = TempHome::new(tmp.path());
-        run_config(ConfigArgs {
-            json: true,
-            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Add {
-                name: "y".into(),
-                url: "http://127.0.0.1:9/none".into(),
-                scope: McpScopeArg::User,
-                test: false,
-                env: vec![],
-            })),
-        })
+        run_config(
+            ConfigArgs {
+                json: true,
+                cmd: Some(ConfigSubcommand::Mcp(McpCmd::Add {
+                    name: "y".into(),
+                    url: "http://127.0.0.1:9/none".into(),
+                    scope: McpScopeArg::User,
+                    test: false,
+                    env: vec![],
+                })),
+            },
+            &sample_cli(),
+        )
         .await;
-        let code = run_config(ConfigArgs {
-            json: true,
-            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Disable { name: "y".into() })),
-        })
+        let code = run_config(
+            ConfigArgs {
+                json: true,
+                cmd: Some(ConfigSubcommand::Mcp(McpCmd::Disable { name: "y".into() })),
+            },
+            &sample_cli(),
+        )
         .await;
         assert_eq!(code, ExitCode::SUCCESS);
         let path = tmp.path().join(".akmon/config.toml");
@@ -995,12 +1066,15 @@ mod tests {
         let _lock = FAKE_HOME_LOCK.lock().expect("lock");
         let tmp = tempfile::tempdir().expect("tmp");
         let _home = TempHome::new(tmp.path());
-        let code = run_config(ConfigArgs {
-            json: false,
-            cmd: Some(ConfigSubcommand::Mcp(McpCmd::Remove {
-                name: "nope".into(),
-            })),
-        })
+        let code = run_config(
+            ConfigArgs {
+                json: false,
+                cmd: Some(ConfigSubcommand::Mcp(McpCmd::Remove {
+                    name: "nope".into(),
+                })),
+            },
+            &sample_cli(),
+        )
         .await;
         assert_eq!(code, ExitCode::FAILURE);
     }
@@ -1025,13 +1099,16 @@ mod tests {
         std::fs::write(proj.path().join(".gitignore"), "node_modules/\n").expect("gi");
         let old_cwd = std::env::current_dir().expect("cwd");
         std::env::set_current_dir(proj.path()).expect("cd");
-        let code = run_config(ConfigArgs {
-            json: true,
-            cmd: Some(ConfigSubcommand::Key(KeyCmd::Set {
-                provider: KeyProvider::Anthropic,
-                key: "sk-ant-test".into(),
-            })),
-        })
+        let code = run_config(
+            ConfigArgs {
+                json: true,
+                cmd: Some(ConfigSubcommand::Key(KeyCmd::Set {
+                    provider: KeyProvider::Anthropic,
+                    key: "sk-ant-test".into(),
+                })),
+            },
+            &sample_cli(),
+        )
         .await;
         std::env::set_current_dir(&old_cwd).expect("cd back");
         assert_eq!(code, ExitCode::SUCCESS);

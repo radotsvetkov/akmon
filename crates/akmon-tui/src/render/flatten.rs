@@ -336,16 +336,8 @@ fn tool_card(
             ),
         ]));
         if let Some(r) = result {
-            if let Ok(val) = serde_json::from_str::<JsonValue>(r) {
-                if val.get("type").and_then(|x| x.as_str()) == Some("file_edit_diff") {
-                    if let Some(diff) = val.get("diff").and_then(|x| x.as_str()) {
-                        append_colored_unified_diff_lines(&mut v, diff, w, body_paint);
-                    } else {
-                        append_wrapped_output_lines(&mut v, r, w, body_paint);
-                    }
-                } else {
-                    append_wrapped_output_lines(&mut v, r, w, body_paint);
-                }
+            if let Some(diff) = extract_file_edit_diff(r) {
+                append_colored_unified_diff_lines(&mut v, &diff, w, body_paint);
             } else {
                 append_wrapped_output_lines(&mut v, r, w, body_paint);
             }
@@ -467,6 +459,24 @@ fn extract_file_edit_diff(result: &str) -> Option<String> {
             .and_then(|x| x.as_str())
             .map(std::string::ToString::to_string);
     }
+    if let Some(diff) = val
+        .get("changes")
+        .and_then(|v| v.as_array())
+        .and_then(|changes| changes.first())
+        .and_then(|f| f.get("diff"))
+        .and_then(|d| d.as_str())
+    {
+        return Some(diff.to_string());
+    }
+    if let Some(diff) = val
+        .get("files")
+        .and_then(|v| v.as_array())
+        .and_then(|files| files.first())
+        .and_then(|f| f.get("diff"))
+        .and_then(|d| d.as_str())
+    {
+        return Some(diff.to_string());
+    }
     None
 }
 
@@ -563,5 +573,42 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect();
         assert!(flat.contains('l'));
+    }
+
+    #[test]
+    fn extracts_dry_run_file_change_set_diff() {
+        let payload = serde_json::json!({
+            "type": "file_change_set",
+            "mode": "dry_run",
+            "changes": [{
+                "path": "src/main.rs",
+                "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                "lines_added": 1,
+                "lines_removed": 1,
+                "lines_changed": 1
+            }],
+            "summary": {
+                "files_changed": 1,
+                "lines_added": 1,
+                "lines_removed": 1,
+                "lines_changed": 1
+            },
+            "risk": "low"
+        });
+        let s = serde_json::to_string(&payload).expect("json");
+        let diff = extract_file_edit_diff(&s).expect("diff");
+        assert!(diff.contains("+new"));
+    }
+
+    #[test]
+    fn legacy_file_edit_diff_still_supported() {
+        let payload = serde_json::json!({
+            "type": "file_edit_diff",
+            "path": "src/main.rs",
+            "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n"
+        });
+        let s = serde_json::to_string(&payload).expect("json");
+        let diff = extract_file_edit_diff(&s).expect("diff");
+        assert!(diff.contains("-old"));
     }
 }

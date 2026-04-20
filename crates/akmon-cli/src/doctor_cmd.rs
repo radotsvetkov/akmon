@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use akmon_models::LlmConnectConfig;
+use akmon_models::{LlmConnectConfig, ProviderResolutionTrace};
 use clap::Subcommand;
 use serde::Serialize;
 use serde_json::json;
@@ -61,6 +61,8 @@ struct ProviderDiagnosis {
 struct DoctorProvidersReport {
     ok: bool,
     active_provider: Option<String>,
+    /// Deterministic resolver trace (same ordering as `LlmConnectConfig::resolve`; introspection only).
+    provider_resolution: ProviderResolutionTrace,
     providers: Vec<ProviderDiagnosis>,
 }
 
@@ -128,6 +130,24 @@ fn print_doctor_text(report: &DoctorProvidersReport) {
         Some(active) => println!("doctor providers: {overall} (active={active})"),
         None => println!("doctor providers: {overall}"),
     }
+    println!();
+    println!("provider_resolution (explainability only):");
+    match (
+        &report.provider_resolution.selected_provider,
+        &report.provider_resolution.resolution_error,
+    ) {
+        (Some(id), None) => println!("  selected_provider: {id}"),
+        (None, Some(e)) => println!("  resolution_error: {e}"),
+        _ => {}
+    }
+    println!("  {}", report.provider_resolution.selected_reason);
+    for c in &report.provider_resolution.candidates {
+        let mark = if c.eligible { "eligible" } else { "—" };
+        println!(
+            "  {:2} {:18} {mark}: {}",
+            c.priority_order, c.provider, c.reason
+        );
+    }
     for p in &report.providers {
         let state = if p.healthy { "ok" } else { "issues" };
         let active = if p.active { ", active" } else { "" };
@@ -154,6 +174,7 @@ fn print_doctor_text(report: &DoctorProvidersReport) {
 }
 
 async fn diagnose_providers(connect: &LlmConnectConfig) -> DoctorProvidersReport {
+    let provider_resolution = connect.explain_provider_resolution();
     let active = map_active_provider(&connect.inferred_backend_name().to_lowercase());
     let mut providers = Vec::new();
     for kind in [
@@ -183,6 +204,7 @@ async fn diagnose_providers(connect: &LlmConnectConfig) -> DoctorProvidersReport
     DoctorProvidersReport {
         ok,
         active_provider: active.map(|k| k.name().to_string()),
+        provider_resolution,
         providers,
     }
 }
@@ -661,11 +683,13 @@ mod tests {
 
     #[test]
     fn json_output_shape_contains_expected_blocks() {
+        let connect = sample_connect();
         let mut report = DoctorProvidersReport {
             ok: true,
             active_provider: Some("ollama".into()),
+            provider_resolution: connect.explain_provider_resolution(),
             providers: vec![diagnose_provider_static(
-                &sample_connect(),
+                &connect,
                 ProviderKind::OpenAi,
                 false,
             )],
@@ -673,6 +697,8 @@ mod tests {
         report.providers[0].healthy = true;
         let payload = render_doctor_json(&report);
         assert!(payload["ok"].is_boolean());
+        assert!(payload["provider_resolution"].is_object());
+        assert!(payload["provider_resolution"]["candidates"].is_array());
         assert!(payload["providers"].is_array());
         assert!(payload["providers"][0]["checks"].is_array());
     }
@@ -707,6 +733,7 @@ mod tests {
         let report = DoctorProvidersReport {
             ok: false,
             active_provider: Some("openrouter".into()),
+            provider_resolution: sample_connect().explain_provider_resolution(),
             providers: vec![d],
         };
         let raw = render_doctor_json(&report).to_string();

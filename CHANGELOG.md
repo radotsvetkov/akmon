@@ -4,6 +4,32 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.2] - 2026-04-20
+
+### Added
+
+- **Provider resolution explainability:** deterministic `ProviderResolutionTrace` (`selected_provider`, `selected_reason`, `model_id`, ordered `candidates[]` with `eligible`, `reason`, `missing_prerequisites`, `priority_order`) mirroring `LlmConnectConfig::resolve` without changing routing.
+- **`akmon config explain-provider`:** prints the resolution trace (use `--json` on `config` or global `--output json` for machine-readable output). This is diagnostics only; it does not change which provider is selected at runtime.
+- **`akmon doctor providers`:** embeds the same `provider_resolution` block in text and JSON reports for side-by-side troubleshooting with reachability checks.
+- **Headless JSON runs:** `--output json` run summaries include an optional `provider_resolution` field with the trace for the effective CLI model and merged `~/.akmon/config.toml` (additive for automation).
+
+### Notes
+
+- Resolver priority and selection semantics are unchanged; all additions are strictly introspection/diagnostics. Traces never echo secret values—only named prerequisites (env vars / flags).
+
+## [Unreleased]
+
+### Added
+
+- **Diff trust dry-run:** `patch`, `apply_patch`, `edit`, and `write_file` now support `dry_run` validation mode that computes full diffs without mutating files.
+- **Context Scout Dossier:** new bounded `akmon scout` read-only workflow produces deterministic `context_scout.v1` JSON dossiers for planning/CI usage.
+
+### Changed
+
+- **File diff payload contract:** file-modifying tools now return a stabilized `file_change_set` payload with explicit `type`, `mode` (`applied` or `dry_run`), canonical `changes[]`, aggregate `summary`, and `risk` classification.
+- **Compatibility path:** `files[]` remains as a backward-compatible alias for existing parsers while `changes[]` is now canonical.
+- **Dossier ingestion:** `--dossier <path>` injects validated scout context into subsequent implementation runs without adding a new orchestration subsystem.
+
 ## [1.8.1] - 2026-04-20
 
 ### Added

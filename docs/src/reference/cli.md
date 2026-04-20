@@ -23,6 +23,7 @@ Use `akmon --help` for the authoritative flag list for your installed binary.
 | `--policy-profile` | Policy profile: `dev`, `staging`, `prod` |
 | `--policy-pack` | Additional policy pack file (repeatable) |
 | `--policy-override` | Highest-precedence policy override file |
+| `--dossier` | Inject scout dossier context into prompt |
 
 ## Trust and governance commands
 
@@ -106,6 +107,20 @@ Exit codes:
 - `0`: command succeeded (with or without configured policy sources)
 - `1`: merge/load error (invalid pack, ambiguous local policy, parse failure)
 
+### `akmon config explain-provider`
+
+Print a **deterministic provider resolution trace** for the effective CLI model and merged `~/.akmon/config.toml`. This command is **explainability only**: it does not change routing rules and mirrors the same selection as `LlmConnectConfig::resolve`.
+
+```bash
+akmon config explain-provider
+akmon config explain-provider --json
+akmon --output json config explain-provider
+```
+
+The JSON object includes `selected_provider`, `selected_reason`, `model_id`, optional `resolution_error`, and `candidates[]` (each with `provider`, `eligible`, `reason`, `missing_prerequisites`, `priority_order`). Secrets are never echoed—only named prerequisites.
+
+Pair this with `akmon doctor providers` when debugging: **explain-provider** answers “which branch won and why,” while **doctor** checks reachability and credential sanity.
+
 ### `akmon doctor providers`
 
 Run provider preflight diagnostics with actionable remediation hints.
@@ -114,6 +129,8 @@ Run provider preflight diagnostics with actionable remediation hints.
 akmon doctor providers
 akmon --output json doctor providers
 ```
+
+The report includes a `provider_resolution` block (same schema as `akmon config explain-provider`) so you can correlate routing decisions with health checks in one JSON payload.
 
 Checks include:
 
@@ -127,6 +144,40 @@ Exit codes:
 
 - `0`: active/required provider health checks passed
 - `1`: critical misconfiguration or unreachable required provider
+
+### `akmon scout --task "..."`
+
+Run bounded, read-only repository scouting and write a structured dossier.
+
+```bash
+akmon scout --task "find MCP policy enforcement path"
+akmon scout --task "TUI state boundaries" --max-files 300 --out .akmon/context/tui-scout.json
+akmon --output json scout --task "docs CI checks"
+```
+
+Key flags:
+
+- `--task`: required scout question.
+- `--max-files`: upper bound for scanned files (default `200`).
+- `--out`: dossier output path (default `.akmon/context/scout-<timestamp>.json`).
+- `--max-budget-usd`: optional cap (scout itself has zero model spend).
+
+Exit codes:
+
+- `0`: dossier generated and written successfully
+- `1`: scan or write failure
+- `2`: invalid input (empty task, invalid bounds, invalid budget)
+
+### `--dossier <PATH>` ingestion
+
+Use a previously generated dossier to seed implementation context:
+
+```bash
+akmon scout --task "provider routing and doctor coverage" --out .akmon/context/providers.json
+akmon --dossier .akmon/context/providers.json --task "implement provider explainability"
+```
+
+Invalid or malformed dossier files fail fast before session start.
 
 ## Headless JSON output shape
 
@@ -166,9 +217,34 @@ Example (`akmon --output json --task "..."`):
     "policy_denials_total": 0,
     "retries_total": 0,
     "timeouts_total": 0
+  },
+  "provider_resolution": {
+    "selected_provider": "ollama",
+    "selected_reason": "Resolution succeeded: selected provider `ollama` (same outcome as `LlmConnectConfig::resolve`).",
+    "model_id": "llama3.2",
+    "candidates": [
+      {
+        "provider": "bedrock",
+        "eligible": false,
+        "reason": "Skipped: Bedrock is considered only when `--bedrock` is set or `AWS_ACCESS_KEY_ID` is present.",
+        "priority_order": 1
+      }
+    ]
   }
 }
 ```
+
+The `provider_resolution` field is additive (automation may ignore it). When present, `candidates` lists every resolver branch in priority order with human-readable reasons; it is safe to log (no secret values).
+
+## Tool output parsing notes
+
+When a run executes file-modifying tools (`write_file`, `edit`, `patch`, `apply_patch`), successful tool outputs are JSON strings that include a `file_change_set` payload:
+
+- `type: "file_change_set"`
+- `mode: "applied"` or `mode: "dry_run"`
+- `changes[]` + `summary` + `risk`
+
+CI consumers should parse `changes[]` as canonical and may continue accepting `files[]` as a backward-compatible alias.
 
 ## Evidence output location
 

@@ -212,3 +212,23 @@ What you should see:
 - Multi-agent patterns: [multi-agent automation](./multi-agent-automation.md)
 - Headless CI workflows: [headless mode](../usage/headless.md)
 - Project context quality: [AKMON.md guide](../project/akmon-md.md)
+
+## Scout dossier to implementation
+
+Use the bounded scout flow to improve implementation context without enabling broad multi-agent orchestration:
+
+```bash
+# 1) Generate a read-only dossier
+akmon scout \
+  --task "find provider resolution paths and doctor coverage gaps" \
+  --max-files 250 \
+  --out .akmon/context/provider-scout.json
+
+# 2) Inspect the dossier
+jq '.confidence, .candidate_files[0:5], .constraints' .akmon/context/provider-scout.json
+
+# 3) Run implementation with dossier context injected
+akmon \
+  --dossier .akmon/context/provider-scout.json \
+  --task "implement provider resolution explainability with tests and docs"
+```
