@@ -98,8 +98,7 @@ impl Tool for SpawnSubagentTool {
             return ToolOutput::Error {
                 code: akmon_tools::ToolErrorCode::PermissionDenied,
                 message: format!(
-                    "subagent blocked: no tools available under parent permission ceiling\n{}",
-                    details
+                    "subagent blocked: no tools available under parent permission ceiling\n{details}"
                 ),
             };
         }
