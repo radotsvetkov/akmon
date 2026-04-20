@@ -1,3 +1,26 @@
+<div align="center">
+
+<pre>
+            ✦        ✦        ✦
+
+           ▓▓▓
+           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+         ▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒
+         ▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒
+           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+             ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+               ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+                   ▓▓▓▓▓▓▓▓▓▓▓▓
+                    ▓▓      ▓▓
+                    ▓▓      ▓▓
+                 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+               ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+             ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+           ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+</pre>
+
+</div>
+
 # Akmon
 
 Akmon is a terminal-native AI coding agent built as a single Rust binary for teams that need real control over AI side effects. It runs with local or hosted models, enforces typed permission checks for writes/shell/network actions, and produces machine-verifiable artifacts for audit and CI.
@@ -96,3 +119,9 @@ Merge precedence is deterministic:
 ## License
 
 Apache-2.0 only. See [LICENSE](LICENSE).
+
+---
+
+### What "Akmon" means
+
+Akmon is named after the forge/anvil idea: shape complex code with pressure and precision, while keeping control over every strike (permissions, audit trail, and model choice).
