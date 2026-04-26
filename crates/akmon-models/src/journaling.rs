@@ -9,12 +9,23 @@
 //! [`AttemptObserver`] for that integration and includes an internal collector that
 //! buffers attempts during one logical `complete()` call.
 
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
-use akmon_journal::{AttemptRecord, ObjectStore, SessionGraph};
+use akmon_journal::{
+    AttemptRecord, AttemptStatus, EventKind, Hash, ObjectStore, SessionGraph, digest_bytes,
+};
 use async_trait::async_trait;
+use futures::Stream;
+use pin_project_lite::pin_project;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 
-use crate::{CompletionConfig, CompletionStream, LlmProvider, Message, ModelError};
+use crate::{
+    CompletionConfig, CompletionStream, LlmProvider, Message, ModelError, ModelToolCall,
+    StopReason, StreamEvent, UsageReport,
+};
 
 /// Receives one [`AttemptRecord`] per HTTP attempt within a logical
 /// [`crate::LlmProvider::complete`] call.
@@ -43,7 +54,7 @@ where
 {
     inner: P,
     store: Arc<S>,
-    graph: Arc<tokio::sync::Mutex<G>>,
+    graph: Arc<Mutex<G>>,
     provider_id: String,
 }
 
@@ -54,12 +65,7 @@ where
     G: SessionGraph,
 {
     /// Creates a new journaling wrapper.
-    pub fn new(
-        inner: P,
-        provider_id: String,
-        store: Arc<S>,
-        graph: Arc<tokio::sync::Mutex<G>>,
-    ) -> Self {
+    pub fn new(inner: P, provider_id: String, store: Arc<S>, graph: Arc<Mutex<G>>) -> Self {
         Self {
             inner,
             store,
@@ -73,8 +79,8 @@ where
 impl<P, S, G> LlmProvider for JournalingProvider<P, S, G>
 where
     P: LlmProvider,
-    S: ObjectStore,
-    G: SessionGraph,
+    S: ObjectStore + 'static,
+    G: SessionGraph + 'static,
 {
     fn name(&self) -> &str {
         self.inner.name()
@@ -97,8 +103,456 @@ where
         messages: &[Message],
         config: &CompletionConfig,
     ) -> Result<CompletionStream, ModelError> {
-        self.inner.complete(messages, config).await
+        let collector = AttemptCollector::new();
+        let started_at = time::OffsetDateTime::now_utc();
+        let request_payload = RequestPayload {
+            provider_id: self.provider_id.as_str(),
+            messages,
+            config,
+        };
+        let request_bytes = canonical_cbor_bytes(&request_payload)?;
+        let request_hash = digest_bytes(self.store.algorithm(), &request_bytes);
+        put_bytes(self.store.as_ref(), &request_bytes)?;
+
+        let inner_stream = match self.inner.complete(messages, config).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                let ended_at = time::OffsetDateTime::now_utc();
+                let attempt = AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: map_model_error_to_attempt_status(&err),
+                    request_hash,
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                };
+                append_provider_call(
+                    self.graph.clone(),
+                    self.provider_id.clone(),
+                    vec![attempt],
+                    None,
+                )?;
+                return Err(err);
+            }
+        };
+
+        Ok(Box::pin(JournalingStream::new(
+            inner_stream,
+            self.store.clone(),
+            self.graph.clone(),
+            self.provider_id.clone(),
+            request_hash,
+            started_at,
+            collector,
+        )))
     }
+}
+
+pin_project! {
+    struct JournalingStream<S, G>
+    where
+        S: ObjectStore,
+        G: SessionGraph,
+    {
+        #[pin]
+        inner: CompletionStream,
+        store: Arc<S>,
+        graph: Arc<Mutex<G>>,
+        provider_id: String,
+        request_hash: Hash,
+        started_at: time::OffsetDateTime,
+        collector: AttemptCollector,
+        chunk_hashes: Vec<Hash>,
+        response: SynthesizedResponse,
+        last_error: Option<ModelError>,
+        done_seen: bool,
+        finalized: bool,
+    }
+}
+
+impl<S, G> JournalingStream<S, G>
+where
+    S: ObjectStore,
+    G: SessionGraph,
+{
+    fn new(
+        inner: CompletionStream,
+        store: Arc<S>,
+        graph: Arc<Mutex<G>>,
+        provider_id: String,
+        request_hash: Hash,
+        started_at: time::OffsetDateTime,
+        collector: AttemptCollector,
+    ) -> Self {
+        Self {
+            inner,
+            store,
+            graph,
+            provider_id,
+            request_hash,
+            started_at,
+            collector,
+            chunk_hashes: Vec::new(),
+            response: SynthesizedResponse::default(),
+            last_error: None,
+            done_seen: false,
+            finalized: false,
+        }
+    }
+
+    fn finalize(&mut self) -> Result<(), ModelError> {
+        if self.finalized {
+            return Ok(());
+        }
+        self.finalized = true;
+        let ended_at = time::OffsetDateTime::now_utc();
+        let response_hash = response_hash_for_final(&self.response, self.store.as_ref())?;
+        let stream_hash =
+            stream_hash_for_chunks(self.chunk_hashes.as_slice(), self.store.as_ref())?;
+        let attempts = synthesized_attempts_if_empty(
+            self.collector.drain(),
+            self.request_hash.clone(),
+            response_hash,
+            stream_hash.clone(),
+            self.started_at,
+            ended_at,
+            self.last_error.as_ref(),
+        );
+        append_provider_call(
+            Arc::clone(&self.graph),
+            self.provider_id.clone(),
+            attempts,
+            stream_hash,
+        )?;
+        Ok(())
+    }
+}
+
+impl<S, G> Stream for JournalingStream<S, G>
+where
+    S: ObjectStore,
+    G: SessionGraph,
+{
+    type Item = Result<StreamEvent, ModelError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.done_seen {
+            if !self.finalized && let Err(err) = self.as_mut().get_mut().finalize() {
+                self.finalized = true;
+                return Poll::Ready(Some(Err(err)));
+            }
+            return Poll::Ready(None);
+        }
+
+        let polled = {
+            let mut this = self.as_mut().project();
+            this.inner.as_mut().poll_next(cx)
+        };
+
+        match polled {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => {
+                self.done_seen = true;
+                if !self.finalized && let Err(err) = self.as_mut().get_mut().finalize() {
+                    self.finalized = true;
+                    return Poll::Ready(Some(Err(err)));
+                }
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(item)) => {
+                let this = self.as_mut().get_mut();
+                match &item {
+                    Ok(event) => {
+                        match store_stream_event_chunk(this.store.as_ref(), event) {
+                            Ok(hash) => this.chunk_hashes.push(hash),
+                            Err(err) => {
+                                this.last_error = Some(err.clone());
+                                this.done_seen = true;
+                                return Poll::Ready(Some(Err(err)));
+                            }
+                        }
+                        accumulate_response(event, &mut this.response);
+                        if matches!(event, StreamEvent::Done { .. }) {
+                            this.done_seen = true;
+                        }
+                    }
+                    Err(err) => {
+                        this.last_error = Some(err.clone());
+                        this.done_seen = true;
+                    }
+                }
+                Poll::Ready(Some(item))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RequestPayload<'a> {
+    provider_id: &'a str,
+    messages: &'a [Message],
+    config: &'a CompletionConfig,
+}
+
+impl Serialize for RequestPayload<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut s = serializer.serialize_struct("RequestPayload", 3)?;
+        s.serialize_field("provider_id", &self.provider_id)?;
+        s.serialize_field("messages", &self.messages)?;
+        s.serialize_field("config", &ConfigPayload(self.config))?;
+        s.end()
+    }
+}
+
+struct ConfigPayload<'a>(&'a CompletionConfig);
+
+impl Serialize for ConfigPayload<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let config = self.0;
+        let mut s = serializer.serialize_struct("CompletionConfig", 7)?;
+        s.serialize_field("max_tokens", &config.max_tokens)?;
+        s.serialize_field("session_id", &config.session_id)?;
+        s.serialize_field("temperature", &config.temperature)?;
+        s.serialize_field("first_token_deadline_ms", &config.first_token_deadline_ms)?;
+        s.serialize_field("stream", &config.stream)?;
+        s.serialize_field("tools", &config.tools)?;
+        s.serialize_field("fallback_model", &config.fallback_model)?;
+        s.end()
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct SynthesizedResponse {
+    text: String,
+    tool_calls: Vec<ModelToolCall>,
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamEventChunk {
+    #[serde(rename = "kind")]
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ModelToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<UsageReport>,
+}
+
+fn canonical_cbor_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, ModelError> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|err| ModelError::StreamInterrupted {
+        message: format!("canonical cbor encode failed: {err}"),
+    })?;
+    Ok(bytes)
+}
+
+fn put_bytes<S: ObjectStore>(store: &S, bytes: &[u8]) -> Result<Hash, ModelError> {
+    store
+        .put(bytes)
+        .map_err(|err| ModelError::BackendUnavailable {
+            message: format!("journal object store put failed: {err}"),
+        })
+}
+
+fn store_stream_event_chunk<S: ObjectStore>(
+    store: &S,
+    event: &StreamEvent,
+) -> Result<Hash, ModelError> {
+    let chunk = stream_event_chunk(event);
+    let bytes = canonical_cbor_bytes(&chunk)?;
+    put_bytes(store, &bytes)
+}
+
+fn stream_event_chunk(event: &StreamEvent) -> StreamEventChunk {
+    match event {
+        StreamEvent::ProviderReady { provider, model } => StreamEventChunk {
+            kind: "provider_ready",
+            provider: Some(provider.clone()),
+            model: Some(model.clone()),
+            message: None,
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+            usage: None,
+        },
+        StreamEvent::StatusHint { message } => StreamEventChunk {
+            kind: "status_hint",
+            provider: None,
+            model: None,
+            message: Some(message.clone()),
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+            usage: None,
+        },
+        StreamEvent::TextDelta { text } => StreamEventChunk {
+            kind: "text_delta",
+            provider: None,
+            model: None,
+            message: None,
+            text: Some(text.clone()),
+            stop_reason: None,
+            tool_calls: None,
+            usage: None,
+        },
+        StreamEvent::Done {
+            stop_reason,
+            tool_calls,
+        } => StreamEventChunk {
+            kind: "done",
+            provider: None,
+            model: None,
+            message: None,
+            text: None,
+            stop_reason: Some(stop_reason_label(stop_reason).to_owned()),
+            tool_calls: Some(tool_calls.clone()),
+            usage: None,
+        },
+        StreamEvent::UsageReport(usage) => StreamEventChunk {
+            kind: "usage_report",
+            provider: None,
+            model: None,
+            message: None,
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+            usage: Some(usage.clone()),
+        },
+        StreamEvent::Error { error } => StreamEventChunk {
+            kind: "error",
+            provider: None,
+            model: None,
+            message: Some(error.to_string()),
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+            usage: None,
+        },
+    }
+}
+
+fn stop_reason_label(reason: &StopReason) -> &'static str {
+    match reason {
+        StopReason::EndTurn => "end_turn",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::ToolUse => "tool_use",
+    }
+}
+
+fn accumulate_response(event: &StreamEvent, response: &mut SynthesizedResponse) {
+    match event {
+        StreamEvent::TextDelta { text } => response.text.push_str(text),
+        StreamEvent::Done {
+            stop_reason,
+            tool_calls,
+        } => {
+            response.stop_reason = Some(stop_reason_label(stop_reason).to_owned());
+            response.tool_calls = tool_calls.clone();
+        }
+        _ => {}
+    }
+}
+
+fn response_hash_for_final<S: ObjectStore>(
+    response: &SynthesizedResponse,
+    store: &S,
+) -> Result<Option<Hash>, ModelError> {
+    let has_response = !response.text.is_empty()
+        || !response.tool_calls.is_empty()
+        || response.stop_reason.is_some();
+    if !has_response {
+        return Ok(None);
+    }
+    let bytes = canonical_cbor_bytes(response)?;
+    Ok(Some(put_bytes(store, &bytes)?))
+}
+
+fn stream_hash_for_chunks<S: ObjectStore>(
+    chunk_hashes: &[Hash],
+    store: &S,
+) -> Result<Option<Hash>, ModelError> {
+    if chunk_hashes.is_empty() {
+        return Ok(None);
+    }
+    let bytes = canonical_cbor_bytes(chunk_hashes)?;
+    Ok(Some(put_bytes(store, &bytes)?))
+}
+
+fn synthesized_attempts_if_empty(
+    attempts: Vec<AttemptRecord>,
+    request_hash: Hash,
+    response_hash: Option<Hash>,
+    stream_hash: Option<Hash>,
+    started_at: time::OffsetDateTime,
+    ended_at: time::OffsetDateTime,
+    last_error: Option<&ModelError>,
+) -> Vec<AttemptRecord> {
+    if !attempts.is_empty() {
+        return attempts;
+    }
+    // TODO(Item 2.1 Layer 7): emit tracing::warn when this fallback is used for
+    // providers that should publish attempt observer records.
+    let status = match last_error {
+        Some(err) => map_model_error_to_attempt_status(err),
+        None => AttemptStatus::Success,
+    };
+    let error_message = last_error.map(std::string::ToString::to_string);
+    vec![AttemptRecord {
+        attempt_number: 1,
+        started_at,
+        ended_at,
+        status,
+        request_hash,
+        response_hash,
+        stream_hash,
+        error_message,
+    }]
+}
+
+fn map_model_error_to_attempt_status(err: &ModelError) -> AttemptStatus {
+    match err {
+        ModelError::RateLimited { .. } => AttemptStatus::RateLimited,
+        // First-token timeout is transport/network path failure, not caller cancellation.
+        ModelError::FirstTokenTimeout => AttemptStatus::NetworkError,
+        ModelError::BackendUnavailable { .. } => AttemptStatus::ServerError,
+        ModelError::AuthError
+        | ModelError::ContextWindowExceeded
+        | ModelError::ModelNotFound { .. } => AttemptStatus::ClientError,
+        ModelError::StreamInterrupted { .. } => AttemptStatus::NetworkError,
+    }
+}
+
+fn append_provider_call<G: SessionGraph>(
+    graph: Arc<Mutex<G>>,
+    provider_id: String,
+    attempts: Vec<AttemptRecord>,
+    stream_hash: Option<Hash>,
+) -> Result<(), ModelError> {
+    let mut guard = graph
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .append(EventKind::ProviderCall {
+            provider_id,
+            attempts,
+            stream_hash,
+        })
+        .map(|_| ())
+        .map_err(|err| ModelError::BackendUnavailable {
+            message: format!("journal graph append failed: {err}"),
+        })
 }
 
 /// Collects [`AttemptRecord`] values during one `complete()` call.
@@ -150,10 +604,13 @@ impl AttemptObserver for AttemptCollector {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
-    use akmon_journal::{HashAlgorithm, MemoryObjectStore, MemorySessionGraph};
+    use akmon_journal::{
+        EventKind, Hash, HashAlgorithm, MemoryObjectStore, MemorySessionGraph, ObjectStore,
+        SessionGraph, digest_bytes,
+    };
     use async_trait::async_trait;
     use futures::StreamExt;
 
@@ -169,6 +626,12 @@ mod tests {
         estimate: Option<usize>,
         events: Vec<Result<StreamEvent, ModelError>>,
     }
+
+    type WrappedHandles = (
+        JournalingProvider<MockProvider, MemoryObjectStore, MemorySessionGraph>,
+        Arc<MemoryObjectStore>,
+        Arc<Mutex<MemorySessionGraph>>,
+    );
 
     fn sample_attempt(attempt_number: u32) -> akmon_journal::AttemptRecord {
         akmon_journal::AttemptRecord {
@@ -213,14 +676,29 @@ mod tests {
     fn wrapped_with_mock(
         mock: MockProvider,
     ) -> JournalingProvider<MockProvider, MemoryObjectStore, MemorySessionGraph> {
+        let (wrapped, _, _) = wrapped_with_mock_handles(mock);
+        wrapped
+    }
+
+    fn wrapped_with_mock_handles(mock: MockProvider) -> WrappedHandles {
         let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
-        let graph = MemorySessionGraph::open_new(Arc::clone(&store), uuid::Uuid::new_v4());
-        JournalingProvider::new(
+        let mut graph = MemorySessionGraph::open_new(Arc::clone(&store), uuid::Uuid::new_v4());
+        let cwd_hash = store.put(b"cwd").expect("cwd hash");
+        let config_hash = store.put(b"config").expect("config hash");
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            })
+            .expect("session start");
+        let graph = Arc::new(Mutex::new(graph));
+        let wrapped = JournalingProvider::new(
             mock,
             "mock-provider".to_owned(),
-            store,
-            Arc::new(tokio::sync::Mutex::new(graph)),
-        )
+            Arc::clone(&store),
+            Arc::clone(&graph),
+        );
+        (wrapped, store, graph)
     }
 
     #[test]
@@ -379,5 +857,391 @@ mod tests {
         let observer: Arc<dyn AttemptObserver> = c.clone();
         observer.record_attempt(sample_attempt(1));
         assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn t_request_payload_canonical_deterministic_for_tool_parameter_key_order() {
+        let messages = vec![Message {
+            role: crate::MessageRole::User,
+            content: "hi".to_owned(),
+        }];
+        let cfg_one = CompletionConfig {
+            tools: vec![crate::ToolDefinition {
+                name: "tool".to_owned(),
+                description: "d".to_owned(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "string"},
+                        "b": {"type": "number"}
+                    }
+                }),
+            }],
+            ..CompletionConfig::default()
+        };
+        let cfg_two = CompletionConfig {
+            tools: vec![crate::ToolDefinition {
+                name: "tool".to_owned(),
+                description: "d".to_owned(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "b": {"type": "number"},
+                        "a": {"type": "string"}
+                    }
+                }),
+            }],
+            ..CompletionConfig::default()
+        };
+        let p1 = super::RequestPayload {
+            provider_id: "mock-provider",
+            messages: &messages,
+            config: &cfg_one,
+        };
+        let p2 = super::RequestPayload {
+            provider_id: "mock-provider",
+            messages: &messages,
+            config: &cfg_two,
+        };
+        let b1 = super::canonical_cbor_bytes(&p1).expect("cbor1");
+        let b2 = super::canonical_cbor_bytes(&p2).expect("cbor2");
+        assert_eq!(b1, b2);
+        let h1 = digest_bytes(HashAlgorithm::Sha256, &b1);
+        let h2 = digest_bytes(HashAlgorithm::Sha256, &b2);
+        assert_eq!(h1, h2);
+    }
+
+    #[tokio::test]
+    async fn t_complete_records_request_hash() {
+        let (wrapped, store, graph) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: vec![
+                Ok(StreamEvent::ProviderReady {
+                    provider: "Mock".to_owned(),
+                    model: "m".to_owned(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop_reason: crate::StopReason::EndTurn,
+                    tool_calls: vec![],
+                }),
+            ],
+        });
+        let messages = vec![Message {
+            role: crate::MessageRole::User,
+            content: "hello".to_owned(),
+        }];
+        let config = CompletionConfig::default();
+        let mut stream = wrapped
+            .complete(&messages, &config)
+            .await
+            .expect("complete");
+        while stream.next().await.is_some() {}
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        let (_, event) = history.last().expect("last");
+        let request_hash = match &event.kind {
+            EventKind::ProviderCall { attempts, .. } => attempts[0].request_hash.clone(),
+            _ => panic!("expected ProviderCall"),
+        };
+        let got = store
+            .get(&request_hash)
+            .expect("store get")
+            .expect("request bytes");
+        let payload = super::RequestPayload {
+            provider_id: "mock-provider",
+            messages: &messages,
+            config: &config,
+        };
+        let expected = super::canonical_cbor_bytes(&payload).expect("payload bytes");
+        assert_eq!(got.as_ref(), expected.as_slice());
+    }
+
+    #[tokio::test]
+    async fn t_complete_records_stream_chunks() {
+        let events = vec![
+            Ok(StreamEvent::ProviderReady {
+                provider: "Mock".to_owned(),
+                model: "m".to_owned(),
+            }),
+            Ok(StreamEvent::TextDelta {
+                text: "a".to_owned(),
+            }),
+            Ok(StreamEvent::TextDelta {
+                text: "b".to_owned(),
+            }),
+            Ok(StreamEvent::TextDelta {
+                text: "c".to_owned(),
+            }),
+            Ok(StreamEvent::Done {
+                stop_reason: crate::StopReason::EndTurn,
+                tool_calls: vec![],
+            }),
+        ];
+        let (wrapped, store, graph) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: events.clone(),
+        });
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        while stream.next().await.is_some() {}
+        let expected_chunk_hashes: Vec<Hash> = events
+            .iter()
+            .map(|evt| match evt {
+                Ok(ev) => {
+                    let bytes = super::canonical_cbor_bytes(&super::stream_event_chunk(ev))
+                        .expect("chunk bytes");
+                    digest_bytes(store.algorithm(), &bytes)
+                }
+                Err(_) => panic!("expected ok event"),
+            })
+            .collect();
+        for h in &expected_chunk_hashes {
+            assert!(store.contains(h).expect("contains"));
+        }
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        let (_, event) = history.last().expect("last");
+        let stream_hash = match &event.kind {
+            EventKind::ProviderCall { stream_hash, .. } => {
+                stream_hash.clone().expect("stream hash")
+            }
+            _ => panic!("expected ProviderCall"),
+        };
+        let stored_vec_bytes = store
+            .get(&stream_hash)
+            .expect("store get")
+            .expect("stream hash bytes");
+        let expected_vec_bytes =
+            super::canonical_cbor_bytes(&expected_chunk_hashes).expect("chunk vec");
+        assert_eq!(stored_vec_bytes.as_ref(), expected_vec_bytes.as_slice());
+    }
+
+    #[tokio::test]
+    async fn t_complete_emits_provider_call_event() {
+        let (wrapped, _store, graph) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: vec![
+                Ok(StreamEvent::ProviderReady {
+                    provider: "Mock".to_owned(),
+                    model: "m".to_owned(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop_reason: crate::StopReason::EndTurn,
+                    tool_calls: vec![],
+                }),
+            ],
+        });
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        while stream.next().await.is_some() {}
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        let provider_calls: Vec<&EventKind> = history
+            .iter()
+            .map(|(_, e)| &e.kind)
+            .filter(|k| matches!(k, EventKind::ProviderCall { .. }))
+            .collect();
+        assert_eq!(provider_calls.len(), 1);
+        match provider_calls[0] {
+            EventKind::ProviderCall {
+                provider_id,
+                attempts,
+                stream_hash,
+            } => {
+                assert_eq!(provider_id, "mock-provider");
+                assert_eq!(attempts.len(), 1);
+                assert!(stream_hash.is_some());
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn t_complete_synthesized_attempt_marks_success_on_clean_stream() {
+        let (wrapped, _store, graph) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: vec![Ok(StreamEvent::Done {
+                stop_reason: crate::StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        });
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        while stream.next().await.is_some() {}
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        let (_, event) = history.last().expect("last");
+        let attempt = match &event.kind {
+            EventKind::ProviderCall { attempts, .. } => attempts[0].clone(),
+            _ => panic!("expected ProviderCall"),
+        };
+        assert_eq!(attempt.status, akmon_journal::AttemptStatus::Success);
+        assert!(attempt.error_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn t_complete_synthesized_attempt_marks_other_on_error_stream() {
+        let err = ModelError::ModelNotFound {
+            model: "m".to_owned(),
+            hint: "missing".to_owned(),
+        };
+        let (wrapped, _store, graph) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: vec![Err(err.clone())],
+        });
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        while stream.next().await.is_some() {}
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        let (_, event) = history.last().expect("last");
+        let attempt = match &event.kind {
+            EventKind::ProviderCall { attempts, .. } => attempts[0].clone(),
+            _ => panic!("expected ProviderCall"),
+        };
+        assert_eq!(
+            attempt.status,
+            super::map_model_error_to_attempt_status(&err)
+        );
+        assert!(attempt.error_message.is_some());
+    }
+
+    #[tokio::test]
+    async fn t_complete_request_hash_deterministic() {
+        let (wrapped, _store, graph) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: vec![Ok(StreamEvent::Done {
+                stop_reason: crate::StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        });
+        let messages = vec![Message {
+            role: crate::MessageRole::User,
+            content: "same".to_owned(),
+        }];
+        let config = CompletionConfig::default();
+        for _ in 0..2 {
+            let mut s = wrapped
+                .complete(&messages, &config)
+                .await
+                .expect("complete");
+            while s.next().await.is_some() {}
+        }
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        let hashes: Vec<Hash> = history
+            .iter()
+            .filter_map(|(_, e)| match &e.kind {
+                EventKind::ProviderCall { attempts, .. } => Some(attempts[0].request_hash.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(hashes.len() >= 2);
+        assert_eq!(hashes[hashes.len() - 1], hashes[hashes.len() - 2]);
+    }
+
+    #[tokio::test]
+    async fn t_complete_yields_unchanged_to_caller() {
+        let events = vec![
+            Ok(StreamEvent::ProviderReady {
+                provider: "Mock".to_owned(),
+                model: "m".to_owned(),
+            }),
+            Ok(StreamEvent::TextDelta {
+                text: "hello".to_owned(),
+            }),
+            Ok(StreamEvent::Done {
+                stop_reason: crate::StopReason::EndTurn,
+                tool_calls: vec![],
+            }),
+        ];
+        let (wrapped, _, _) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: events.clone(),
+        });
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        let mut got = Vec::new();
+        while let Some(item) = stream.next().await {
+            got.push(item);
+        }
+        assert_eq!(got, events);
+    }
+
+    #[tokio::test]
+    async fn t_provider_call_visible_immediately_after_stream_drains() {
+        let (wrapped, _store, graph) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: vec![
+                Ok(StreamEvent::ProviderReady {
+                    provider: "Mock".to_owned(),
+                    model: "m".to_owned(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop_reason: crate::StopReason::EndTurn,
+                    tool_calls: vec![],
+                }),
+            ],
+        });
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        while stream.next().await.is_some() {}
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        assert!(
+            history
+                .iter()
+                .any(|(_, e)| matches!(e.kind, EventKind::ProviderCall { .. }))
+        );
     }
 }
