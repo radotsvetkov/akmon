@@ -33,6 +33,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 
 [dev-dependencies]
 akmon-journal = { path = "../akmon-journal", features = ["test-utils"] }
+mockito = "1"
 static_assertions = "1"
 time.workspace = true
 uuid.workspace = true

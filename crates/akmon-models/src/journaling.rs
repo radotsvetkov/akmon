@@ -222,18 +222,31 @@ where
         }
         self.finalized = true;
         let ended_at = time::OffsetDateTime::now_utc();
-        let response_hash = response_hash_for_final(&self.response, self.store.as_ref())?;
-        let stream_hash =
-            stream_hash_for_chunks(self.chunk_hashes.as_slice(), self.store.as_ref())?;
-        let attempts = synthesized_attempts_if_empty(
-            self.collector.drain(),
-            self.request_hash.clone(),
-            response_hash,
-            stream_hash.clone(),
-            self.started_at,
-            ended_at,
-            self.last_error.as_ref(),
-        );
+        let drained = self.collector.drain();
+        let (attempts, stream_hash) = if drained.is_empty() {
+            let response_hash = response_hash_for_final(&self.response, self.store.as_ref())?;
+            let stream_hash =
+                stream_hash_for_chunks(self.chunk_hashes.as_slice(), self.store.as_ref())?;
+            (
+                synthesized_attempts_if_empty(
+                    drained,
+                    self.request_hash.clone(),
+                    response_hash,
+                    stream_hash.clone(),
+                    self.started_at,
+                    ended_at,
+                    self.last_error.as_ref(),
+                ),
+                stream_hash,
+            )
+        } else {
+            let stream_hash = drained
+                .iter()
+                .rev()
+                .find(|a| matches!(a.status, AttemptStatus::Success))
+                .and_then(|a| a.stream_hash.clone());
+            (drained, stream_hash)
+        };
         append_provider_call(
             Arc::clone(&self.graph),
             self.provider_id.clone(),

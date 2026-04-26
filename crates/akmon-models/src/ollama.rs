@@ -2,6 +2,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -16,13 +17,14 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
-use crate::LlmProvider;
 use crate::config::CompletionConfig;
 use crate::error::ModelError;
 use crate::message::{Message, MessageRole};
 use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent};
 use crate::tool_def::ToolDefinition;
+use crate::{AttemptObserver, LlmProvider};
 use crate::{infer_ollama_capability_hint, probe_ollama};
+use akmon_journal::{AttemptRecord, AttemptStatus, Hash, HashAlgorithm};
 
 /// JSON line from Ollama's NDJSON chat stream (or the single JSON body when `stream: false`).
 #[derive(Debug, serde::Deserialize)]
@@ -164,13 +166,25 @@ where
 }
 
 /// Talks to a single Ollama server and model id.
-#[derive(Debug, Clone)]
 pub struct OllamaBackend {
     base_url: String,
     model: String,
     client: reqwest::Client,
+    attempt_observer: Arc<RwLock<Option<Arc<dyn AttemptObserver>>>>,
     /// Advertised context size (approximate; Ollama does not always expose this per pull).
     context_window_tokens: usize,
+}
+
+impl Clone for OllamaBackend {
+    fn clone(&self) -> Self {
+        Self {
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            client: self.client.clone(),
+            attempt_observer: Arc::clone(&self.attempt_observer),
+            context_window_tokens: self.context_window_tokens,
+        }
+    }
 }
 
 impl OllamaBackend {
@@ -188,6 +202,7 @@ impl OllamaBackend {
             base_url,
             model,
             client,
+            attempt_observer: Arc::new(RwLock::new(None)),
             context_window_tokens,
         }
     }
@@ -210,6 +225,19 @@ impl OllamaBackend {
 
     fn chat_url(&self) -> String {
         format!("{base}/api/chat", base = self.base_url)
+    }
+
+    fn observer(&self) -> Option<Arc<dyn AttemptObserver>> {
+        self.attempt_observer
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn emit_attempt(&self, attempt: AttemptRecord) {
+        if let Some(observer) = self.observer() {
+            observer.record_attempt(attempt);
+        }
     }
 
     fn map_messages(messages: &[Message]) -> Vec<OllamaApiMessage<'_>> {
@@ -256,6 +284,142 @@ fn map_reqwest_send_error(e: reqwest::Error) -> ModelError {
 fn map_reqwest_stream_error(e: reqwest::Error) -> ModelError {
     ModelError::StreamInterrupted {
         message: e.to_string(),
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct OllamaSynthesizedResponse {
+    text: String,
+    tool_calls: Vec<ModelToolCall>,
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaStreamEventChunk {
+    #[serde(rename = "kind")]
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ModelToolCall>>,
+}
+
+fn canonical_cbor_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, ModelError> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|err| {
+        ModelError::BackendUnavailable {
+            message: format!("canonical cbor encode failed: {err}"),
+        }
+    })?;
+    Ok(bytes)
+}
+
+fn sentinel_hash() -> Hash {
+    Hash::from_bytes(HashAlgorithm::Sha256, [0_u8; 32])
+}
+
+fn stop_reason_label(reason: &StopReason) -> &'static str {
+    match reason {
+        StopReason::EndTurn => "end_turn",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::ToolUse => "tool_use",
+    }
+}
+
+fn map_model_error_to_attempt_status(err: &ModelError) -> AttemptStatus {
+    match err {
+        ModelError::RateLimited { .. } => AttemptStatus::RateLimited,
+        ModelError::FirstTokenTimeout | ModelError::StreamInterrupted { .. } => {
+            AttemptStatus::NetworkError
+        }
+        ModelError::BackendUnavailable { .. } => AttemptStatus::ServerError,
+        ModelError::AuthError
+        | ModelError::ContextWindowExceeded
+        | ModelError::ModelNotFound { .. } => AttemptStatus::ClientError,
+    }
+}
+
+fn stream_event_chunk(event: &StreamEvent) -> OllamaStreamEventChunk {
+    match event {
+        StreamEvent::ProviderReady { provider, model } => OllamaStreamEventChunk {
+            kind: "provider_ready",
+            provider: Some(provider.clone()),
+            model: Some(model.clone()),
+            message: None,
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+        },
+        StreamEvent::StatusHint { message } => OllamaStreamEventChunk {
+            kind: "status_hint",
+            provider: None,
+            model: None,
+            message: Some(message.clone()),
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+        },
+        StreamEvent::TextDelta { text } => OllamaStreamEventChunk {
+            kind: "text_delta",
+            provider: None,
+            model: None,
+            message: None,
+            text: Some(text.clone()),
+            stop_reason: None,
+            tool_calls: None,
+        },
+        StreamEvent::Done {
+            stop_reason,
+            tool_calls,
+        } => OllamaStreamEventChunk {
+            kind: "done",
+            provider: None,
+            model: None,
+            message: None,
+            text: None,
+            stop_reason: Some(stop_reason_label(stop_reason).to_owned()),
+            tool_calls: Some(tool_calls.clone()),
+        },
+        StreamEvent::UsageReport(_) => OllamaStreamEventChunk {
+            kind: "usage_report",
+            provider: None,
+            model: None,
+            message: None,
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+        },
+        StreamEvent::Error { error } => OllamaStreamEventChunk {
+            kind: "error",
+            provider: None,
+            model: None,
+            message: Some(error.to_string()),
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+        },
+    }
+}
+
+fn accumulate_response(event: &StreamEvent, response: &mut OllamaSynthesizedResponse) {
+    match event {
+        StreamEvent::TextDelta { text } => response.text.push_str(text),
+        StreamEvent::Done {
+            stop_reason,
+            tool_calls,
+        } => {
+            response.stop_reason = Some(stop_reason_label(stop_reason).to_owned());
+            response.tool_calls = tool_calls.clone();
+        }
+        _ => {}
     }
 }
 
@@ -590,10 +754,70 @@ async fn run_streaming(
         },
     };
 
+    let observer = backend.observer();
+    let started_at = time::OffsetDateTime::now_utc();
+    let request_hash = if let Some(obs) = observer.as_ref() {
+        let request_bytes = match canonical_cbor_bytes(&req_body) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let ended_at = time::OffsetDateTime::now_utc();
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: AttemptStatus::Other(err.to_string()),
+                    request_hash: sentinel_hash(),
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                });
+                let _ = tx.send(Err(err)).await;
+                return;
+            }
+        };
+        match obs.put_object(&request_bytes) {
+            Ok(hash) => Some(hash),
+            Err(err) => {
+                let ended_at = time::OffsetDateTime::now_utc();
+                let msg = format!("journal write failed: {err}");
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: AttemptStatus::Other(msg.clone()),
+                    request_hash: sentinel_hash(),
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(msg.clone()),
+                });
+                let _ = tx
+                    .send(Err(ModelError::BackendUnavailable { message: msg }))
+                    .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     let resp = match backend.client.post(&url).json(&req_body).send().await {
         Ok(r) => r,
         Err(e) => {
-            let _ = tx.send(Err(map_reqwest_send_error(e))).await;
+            let err = map_reqwest_send_error(e);
+            if let Some(request_hash) = request_hash.clone() {
+                let ended_at = time::OffsetDateTime::now_utc();
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: map_model_error_to_attempt_status(&err),
+                    request_hash,
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                });
+            }
+            let _ = tx.send(Err(err)).await;
             return;
         }
     };
@@ -604,21 +828,60 @@ async fn run_streaming(
         let body = match resp.text().await {
             Ok(t) => t,
             Err(e) => {
-                let _ = tx
-                    .send(Err(ModelError::StreamInterrupted {
-                        message: e.to_string(),
-                    }))
-                    .await;
+                let err = ModelError::StreamInterrupted {
+                    message: e.to_string(),
+                };
+                if let Some(request_hash) = request_hash.clone() {
+                    let ended_at = time::OffsetDateTime::now_utc();
+                    backend.emit_attempt(AttemptRecord {
+                        attempt_number: 1,
+                        started_at,
+                        ended_at,
+                        status: map_model_error_to_attempt_status(&err),
+                        request_hash,
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some(err.to_string()),
+                    });
+                }
+                let _ = tx.send(Err(err)).await;
                 return;
             }
         };
         if status == StatusCode::NOT_FOUND {
             let err =
                 ollama_model_missing_error(backend.base_url.as_str(), backend.model.as_str()).await;
+            if let Some(request_hash) = request_hash.clone() {
+                let ended_at = time::OffsetDateTime::now_utc();
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: map_model_error_to_attempt_status(&err),
+                    request_hash,
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                });
+            }
             let _ = tx.send(Err(err)).await;
             return;
         }
-        let _ = tx.send(Err(map_status(status, &body, &headers))).await;
+        let err = map_status(status, &body, &headers);
+        if let Some(request_hash) = request_hash.clone() {
+            let ended_at = time::OffsetDateTime::now_utc();
+            backend.emit_attempt(AttemptRecord {
+                attempt_number: 1,
+                started_at,
+                ended_at,
+                status: map_model_error_to_attempt_status(&err),
+                request_hash,
+                response_hash: None,
+                stream_hash: None,
+                error_message: Some(err.to_string()),
+            });
+        }
+        let _ = tx.send(Err(err)).await;
         return;
     }
 
@@ -681,6 +944,8 @@ async fn run_streaming(
     let mut pending_tool_calls: Vec<ModelToolCall> = Vec::new();
     let mut received_content = false;
     let mut received_tool_calls = false;
+    let mut chunk_hashes: Vec<Hash> = Vec::new();
+    let mut response_synth = OllamaSynthesizedResponse::default();
     let mut first = true;
     loop {
         let line = if first {
@@ -690,19 +955,60 @@ async fn run_streaming(
             let idle_timeout = capability_hint.idle_stream_timeout_secs;
             match tokio::time::timeout(Duration::from_secs(idle_timeout), lines.next()).await {
                 Err(_) => {
-                    let _ = tx
-                        .send(Err(ModelError::BackendUnavailable {
-                            message: idle_timeout_remediation_message(
-                                backend.model.as_str(),
-                                idle_timeout,
-                            ),
-                        }))
-                        .await;
+                    let err = ModelError::BackendUnavailable {
+                        message: idle_timeout_remediation_message(
+                            backend.model.as_str(),
+                            idle_timeout,
+                        ),
+                    };
+                    if let Some(request_hash) = request_hash.clone()
+                        && let Some(obs) = observer.as_ref()
+                    {
+                        let ended_at = time::OffsetDateTime::now_utc();
+                        let response_hash = canonical_cbor_bytes(&response_synth)
+                            .ok()
+                            .and_then(|bytes| obs.put_object(&bytes).ok());
+                        let stream_hash = canonical_cbor_bytes(&chunk_hashes)
+                            .ok()
+                            .and_then(|bytes| obs.put_object(&bytes).ok());
+                        backend.emit_attempt(AttemptRecord {
+                            attempt_number: 1,
+                            started_at,
+                            ended_at,
+                            status: map_model_error_to_attempt_status(&err),
+                            request_hash,
+                            response_hash,
+                            stream_hash,
+                            error_message: Some(err.to_string()),
+                        });
+                    }
+                    let _ = tx.send(Err(err)).await;
                     return;
                 }
                 Ok(next) => match next {
                     None => break,
                     Some(Err(e)) => {
+                        if let Some(request_hash) = request_hash.clone()
+                            && let Some(obs) = observer.as_ref()
+                        {
+                            let ended_at = time::OffsetDateTime::now_utc();
+                            let response_hash = canonical_cbor_bytes(&response_synth)
+                                .ok()
+                                .and_then(|bytes| obs.put_object(&bytes).ok());
+                            let stream_hash = canonical_cbor_bytes(&chunk_hashes)
+                                .ok()
+                                .and_then(|bytes| obs.put_object(&bytes).ok());
+                            backend.emit_attempt(AttemptRecord {
+                                attempt_number: 1,
+                                started_at,
+                                ended_at,
+                                status: map_model_error_to_attempt_status(&e),
+                                request_hash,
+                                response_hash,
+                                stream_hash,
+                                error_message: Some(e.to_string()),
+                            });
+                        }
                         let _ = tx.send(Err(e)).await;
                         return;
                     }
@@ -722,8 +1028,63 @@ async fn run_streaming(
         )
         .await
         {
+            if let Some(request_hash) = request_hash.clone()
+                && let Some(obs) = observer.as_ref()
+            {
+                let ended_at = time::OffsetDateTime::now_utc();
+                let response_hash = canonical_cbor_bytes(&response_synth)
+                    .ok()
+                    .and_then(|bytes| obs.put_object(&bytes).ok());
+                let stream_hash = canonical_cbor_bytes(&chunk_hashes)
+                    .ok()
+                    .and_then(|bytes| obs.put_object(&bytes).ok());
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: map_model_error_to_attempt_status(&e),
+                    request_hash,
+                    response_hash,
+                    stream_hash,
+                    error_message: Some(e.to_string()),
+                });
+            }
             let _ = tx.send(Err(e)).await;
             return;
+        }
+
+        if let Ok(v) = serde_json::from_str::<JsonValue>(&line)
+            && let Ok(parsed) = serde_json::from_value::<OllamaChatLine>(v)
+        {
+            if let Some(msg) = &parsed.message
+                && !msg.content.is_empty()
+            {
+                let ev = StreamEvent::TextDelta {
+                    text: msg.content.clone(),
+                };
+                if let Some(obs) = observer.as_ref()
+                    && let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&ev))
+                    && let Ok(hash) = obs.put_object(&bytes)
+                {
+                    chunk_hashes.push(hash);
+                }
+                accumulate_response(&ev, &mut response_synth);
+            }
+            if parsed.done {
+                let tool_calls = extract_tool_calls_from_line(&parsed);
+                let reason = finalize_stop_reason(&parsed, &tool_calls);
+                let done_ev = StreamEvent::Done {
+                    stop_reason: reason,
+                    tool_calls,
+                };
+                if let Some(obs) = observer.as_ref()
+                    && let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&done_ev))
+                    && let Ok(hash) = obs.put_object(&bytes)
+                {
+                    chunk_hashes.push(hash);
+                }
+                accumulate_response(&done_ev, &mut response_synth);
+            }
         }
         if done_sent {
             break;
@@ -731,24 +1092,119 @@ async fn run_streaming(
     }
 
     if !received_content && !received_tool_calls {
-        let _ = tx
-            .send(Err(ModelError::StreamInterrupted {
-                message: no_output_remediation_message(
-                    capability_hint.context_window_tokens_hint,
-                    !config.tools.is_empty(),
-                ),
-            }))
-            .await;
+        let err = ModelError::StreamInterrupted {
+            message: no_output_remediation_message(
+                capability_hint.context_window_tokens_hint,
+                !config.tools.is_empty(),
+            ),
+        };
+        if let Some(request_hash) = request_hash.clone()
+            && observer.is_some()
+        {
+            let ended_at = time::OffsetDateTime::now_utc();
+            backend.emit_attempt(AttemptRecord {
+                attempt_number: 1,
+                started_at,
+                ended_at,
+                status: map_model_error_to_attempt_status(&err),
+                request_hash,
+                response_hash: None,
+                stream_hash: None,
+                error_message: Some(err.to_string()),
+            });
+        }
+        let _ = tx.send(Err(err)).await;
         return;
     }
 
     if !done_sent {
+        if let Some(obs) = observer.as_ref() {
+            let done_ev = StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            };
+            if let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&done_ev))
+                && let Ok(hash) = obs.put_object(&bytes)
+            {
+                chunk_hashes.push(hash);
+            }
+            accumulate_response(&done_ev, &mut response_synth);
+        }
         let _ = tx
             .send(Ok(StreamEvent::Done {
                 stop_reason: StopReason::EndTurn,
                 tool_calls: vec![],
             }))
             .await;
+    }
+
+    if let Some(request_hash) = request_hash
+        && let Some(obs) = observer.as_ref()
+    {
+        let ended_at = time::OffsetDateTime::now_utc();
+        let response_hash = if response_synth.text.is_empty()
+            && response_synth.tool_calls.is_empty()
+            && response_synth.stop_reason.is_none()
+        {
+            None
+        } else {
+            match canonical_cbor_bytes(&response_synth).and_then(|bytes| {
+                obs.put_object(&bytes)
+                    .map_err(|e| ModelError::BackendUnavailable {
+                        message: format!("journal write failed: {e}"),
+                    })
+            }) {
+                Ok(hash) => Some(hash),
+                Err(err) => {
+                    backend.emit_attempt(AttemptRecord {
+                        attempt_number: 1,
+                        started_at,
+                        ended_at,
+                        status: AttemptStatus::Other(err.to_string()),
+                        request_hash: sentinel_hash(),
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some(err.to_string()),
+                    });
+                    return;
+                }
+            }
+        };
+        let stream_hash = if chunk_hashes.is_empty() {
+            None
+        } else {
+            match canonical_cbor_bytes(&chunk_hashes).and_then(|bytes| {
+                obs.put_object(&bytes)
+                    .map_err(|e| ModelError::BackendUnavailable {
+                        message: format!("journal write failed: {e}"),
+                    })
+            }) {
+                Ok(hash) => Some(hash),
+                Err(err) => {
+                    backend.emit_attempt(AttemptRecord {
+                        attempt_number: 1,
+                        started_at,
+                        ended_at,
+                        status: AttemptStatus::Other(err.to_string()),
+                        request_hash: sentinel_hash(),
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some(err.to_string()),
+                    });
+                    return;
+                }
+            }
+        };
+        backend.emit_attempt(AttemptRecord {
+            attempt_number: 1,
+            started_at,
+            ended_at,
+            status: AttemptStatus::Success,
+            request_hash,
+            response_hash,
+            stream_hash,
+            error_message: None,
+        });
     }
 }
 
@@ -769,6 +1225,51 @@ async fn run_buffered(
             temperature: config.temperature,
             num_predict: config.max_tokens.min(i32::MAX as u32) as i32,
         },
+    };
+    let observer = backend.observer();
+    let started_at = time::OffsetDateTime::now_utc();
+    let request_hash = if let Some(obs) = observer.as_ref() {
+        let request_bytes = match canonical_cbor_bytes(&req_body) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let ended_at = time::OffsetDateTime::now_utc();
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: AttemptStatus::Other(err.to_string()),
+                    request_hash: sentinel_hash(),
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                });
+                let _ = tx.send(Err(err)).await;
+                return;
+            }
+        };
+        match obs.put_object(&request_bytes) {
+            Ok(hash) => Some(hash),
+            Err(err) => {
+                let ended_at = time::OffsetDateTime::now_utc();
+                let msg = format!("journal write failed: {err}");
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: AttemptStatus::Other(msg.clone()),
+                    request_hash: sentinel_hash(),
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(msg.clone()),
+                });
+                let _ = tx
+                    .send(Err(ModelError::BackendUnavailable { message: msg }))
+                    .await;
+                return;
+            }
+        }
+    } else {
+        None
     };
 
     let probe = tokio::time::timeout(
@@ -843,10 +1344,37 @@ async fn run_buffered(
 
     let text = match tokio::time::timeout(deadline, collect).await {
         Err(_) => {
-            let _ = tx.send(Err(ModelError::FirstTokenTimeout)).await;
+            let err = ModelError::FirstTokenTimeout;
+            if let Some(request_hash) = request_hash.clone() {
+                let ended_at = time::OffsetDateTime::now_utc();
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: map_model_error_to_attempt_status(&err),
+                    request_hash,
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                });
+            }
+            let _ = tx.send(Err(err)).await;
             return;
         }
         Ok(Err(e)) => {
+            if let Some(request_hash) = request_hash.clone() {
+                let ended_at = time::OffsetDateTime::now_utc();
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: map_model_error_to_attempt_status(&e),
+                    request_hash,
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(e.to_string()),
+                });
+            }
             let _ = tx.send(Err(e)).await;
             return;
         }
@@ -859,35 +1387,85 @@ async fn run_buffered(
     let v: JsonValue = match serde_json::from_str(&text) {
         Ok(v) => v,
         Err(e) => {
-            let _ = tx
-                .send(Err(ModelError::StreamInterrupted {
-                    message: format!("invalid JSON body: {e}"),
-                }))
-                .await;
+            let err = ModelError::StreamInterrupted {
+                message: format!("invalid JSON body: {e}"),
+            };
+            if let Some(request_hash) = request_hash.clone() {
+                let ended_at = time::OffsetDateTime::now_utc();
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: map_model_error_to_attempt_status(&err),
+                    request_hash,
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                });
+            }
+            let _ = tx.send(Err(err)).await;
             return;
         }
     };
     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
         let lower = err.to_lowercase();
         if lower.contains("context") || lower.contains("length") || lower.contains("token") {
-            let _ = tx.send(Err(ModelError::ContextWindowExceeded)).await;
+            let err = ModelError::ContextWindowExceeded;
+            if let Some(request_hash) = request_hash.clone() {
+                let ended_at = time::OffsetDateTime::now_utc();
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: map_model_error_to_attempt_status(&err),
+                    request_hash,
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                });
+            }
+            let _ = tx.send(Err(err)).await;
             return;
         }
-        let _ = tx
-            .send(Err(ModelError::StreamInterrupted {
-                message: err.to_string(),
-            }))
-            .await;
+        let e = ModelError::StreamInterrupted {
+            message: err.to_string(),
+        };
+        if let Some(request_hash) = request_hash.clone() {
+            let ended_at = time::OffsetDateTime::now_utc();
+            backend.emit_attempt(AttemptRecord {
+                attempt_number: 1,
+                started_at,
+                ended_at,
+                status: map_model_error_to_attempt_status(&e),
+                request_hash,
+                response_hash: None,
+                stream_hash: None,
+                error_message: Some(e.to_string()),
+            });
+        }
+        let _ = tx.send(Err(e)).await;
         return;
     }
     let parsed: OllamaChatLine = match serde_json::from_value(v) {
         Ok(v) => v,
         Err(e) => {
-            let _ = tx
-                .send(Err(ModelError::StreamInterrupted {
-                    message: format!("invalid chat response JSON: {e}"),
-                }))
-                .await;
+            let err = ModelError::StreamInterrupted {
+                message: format!("invalid chat response JSON: {e}"),
+            };
+            if let Some(request_hash) = request_hash.clone() {
+                let ended_at = time::OffsetDateTime::now_utc();
+                backend.emit_attempt(AttemptRecord {
+                    attempt_number: 1,
+                    started_at,
+                    ended_at,
+                    status: map_model_error_to_attempt_status(&err),
+                    request_hash,
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                });
+            }
+            let _ = tx.send(Err(err)).await;
             return;
         }
     };
@@ -908,22 +1486,94 @@ async fn run_buffered(
     let tool_calls = extract_tool_calls_from_line(&parsed);
     let received_tool_calls = !tool_calls.is_empty();
     if !received_content && !received_tool_calls {
-        let _ = tx
-            .send(Err(ModelError::StreamInterrupted {
-                message: no_output_remediation_message(
-                    capability_hint.context_window_tokens_hint,
-                    !config.tools.is_empty(),
-                ),
-            }))
-            .await;
+        let err = ModelError::StreamInterrupted {
+            message: no_output_remediation_message(
+                capability_hint.context_window_tokens_hint,
+                !config.tools.is_empty(),
+            ),
+        };
+        if let Some(request_hash) = request_hash.clone() {
+            let ended_at = time::OffsetDateTime::now_utc();
+            backend.emit_attempt(AttemptRecord {
+                attempt_number: 1,
+                started_at,
+                ended_at,
+                status: map_model_error_to_attempt_status(&err),
+                request_hash,
+                response_hash: None,
+                stream_hash: None,
+                error_message: Some(err.to_string()),
+            });
+        }
+        let _ = tx.send(Err(err)).await;
         return;
     }
+    let mut chunk_hashes: Vec<Hash> = Vec::new();
+    let mut synth = OllamaSynthesizedResponse::default();
+    if let Some(msg) = parsed.message.as_ref()
+        && !msg.content.is_empty()
+    {
+        let ev = StreamEvent::TextDelta {
+            text: msg.content.clone(),
+        };
+        if let Some(obs) = observer.as_ref()
+            && let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&ev))
+            && let Ok(hash) = obs.put_object(&bytes)
+        {
+            chunk_hashes.push(hash);
+        }
+        accumulate_response(&ev, &mut synth);
+    }
+    let done_ev = StreamEvent::Done {
+        stop_reason: reason.clone(),
+        tool_calls: tool_calls.clone(),
+    };
+    if let Some(obs) = observer.as_ref()
+        && let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&done_ev))
+        && let Ok(hash) = obs.put_object(&bytes)
+    {
+        chunk_hashes.push(hash);
+    }
+    accumulate_response(&done_ev, &mut synth);
     let _ = tx
         .send(Ok(StreamEvent::Done {
             stop_reason: reason,
             tool_calls,
         }))
         .await;
+
+    if let Some(request_hash) = request_hash
+        && let Some(obs) = observer.as_ref()
+    {
+        let ended_at = time::OffsetDateTime::now_utc();
+        let response_hash = if synth.text.is_empty()
+            && synth.tool_calls.is_empty()
+            && synth.stop_reason.is_none()
+        {
+            None
+        } else if let Ok(bytes) = canonical_cbor_bytes(&synth) {
+            obs.put_object(&bytes).ok()
+        } else {
+            None
+        };
+        let stream_hash = if chunk_hashes.is_empty() {
+            None
+        } else if let Ok(bytes) = canonical_cbor_bytes(&chunk_hashes) {
+            obs.put_object(&bytes).ok()
+        } else {
+            None
+        };
+        backend.emit_attempt(AttemptRecord {
+            attempt_number: 1,
+            started_at,
+            ended_at,
+            status: AttemptStatus::Success,
+            request_hash,
+            response_hash,
+            stream_hash,
+            error_message: None,
+        });
+    }
 }
 
 #[async_trait]
@@ -938,6 +1588,13 @@ impl LlmProvider for OllamaBackend {
 
     fn completion_model_id(&self) -> &str {
         self.model.as_str()
+    }
+
+    fn set_attempt_observer(&self, observer: Arc<dyn AttemptObserver>) {
+        *self
+            .attempt_observer
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(observer);
     }
 
     async fn complete(
@@ -963,7 +1620,14 @@ impl LlmProvider for OllamaBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journaling::JournalingProvider;
+    use akmon_journal::{
+        EventKind, HashAlgorithm, MemoryObjectStore, MemorySessionGraph, ObjectStore, SessionGraph,
+    };
+    use futures::StreamExt;
     use futures::stream;
+    use mockito::Server;
+    use std::sync::Mutex;
 
     #[test]
     fn new_trims_slash_and_stores_fields() {
@@ -998,5 +1662,90 @@ mod tests {
         assert!(msg.contains("ollama ps"));
         assert!(msg.contains("/model"));
         assert!(msg.contains("tool-capable"));
+    }
+
+    #[tokio::test]
+    async fn t_ollama_publishes_attempt_record_with_full_hashes() {
+        let mut server = Server::new_async().await;
+        let stream_body = concat!(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"one\"},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"two\"},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"three\"},\"done\":true,\"done_reason\":\"stop\"}\n"
+        );
+        let _mock = server
+            .mock("POST", "/api/chat")
+            .with_status(200)
+            .with_header("content-type", "application/x-ndjson")
+            .with_body(stream_body)
+            .create_async()
+            .await;
+
+        let backend = OllamaBackend::new(server.url(), "llama3.2");
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(Arc::clone(&store), uuid::Uuid::new_v4());
+        let cwd_hash = store.put(b"cwd").expect("cwd hash");
+        let config_hash = store.put(b"cfg").expect("cfg hash");
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            })
+            .expect("session start");
+        let graph = Arc::new(Mutex::new(graph));
+        let wrapped = JournalingProvider::new(
+            backend,
+            "ollama".to_owned(),
+            Arc::clone(&store),
+            Arc::clone(&graph),
+        );
+
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "hello".to_owned(),
+        }];
+        let cfg = CompletionConfig::default();
+        let mut stream = wrapped.complete(&messages, &cfg).await.expect("complete");
+        while let Some(item) = stream.next().await {
+            item.expect("stream item");
+        }
+
+        let history = graph
+            .lock()
+            .expect("graph lock")
+            .history()
+            .expect("history");
+        let provider_call = history
+            .iter()
+            .find_map(|(_, event)| match &event.kind {
+                EventKind::ProviderCall {
+                    provider_id,
+                    attempts,
+                    stream_hash,
+                } => Some((provider_id.clone(), attempts.clone(), stream_hash.clone())),
+                _ => None,
+            })
+            .expect("provider call");
+        assert_eq!(provider_call.1.len(), 1);
+        let attempt = &provider_call.1[0];
+        assert_eq!(attempt.attempt_number, 1);
+        assert_eq!(attempt.status, AttemptStatus::Success);
+        assert!(attempt.response_hash.is_some());
+        assert!(attempt.stream_hash.is_some());
+        assert!(
+            store
+                .contains(&attempt.request_hash)
+                .expect("request in store")
+        );
+        assert!(
+            store
+                .contains(attempt.response_hash.as_ref().expect("response hash"))
+                .expect("response in store")
+        );
+        assert!(
+            store
+                .contains(attempt.stream_hash.as_ref().expect("stream hash"))
+                .expect("stream in store")
+        );
+        assert_eq!(provider_call.2, attempt.stream_hash);
     }
 }
