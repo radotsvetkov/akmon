@@ -80,6 +80,10 @@ akmon slo verify .akmon/evidence/<session-id>.json --strict
 akmon slo trend .akmon/evidence/<session-id>.json --baseline-dir .akmon/evidence/history --window 20 --strict
 ```
 
+## Session evidence format
+
+Akmon's session records conform to the [AGEF specification](https://github.com/radotsvetkov/agef) — a portable, content-addressed, tamper-evident format for AI agent session evidence. The Akmon implementation is the AGEF v0.1 reference implementation.
+
 ## Enterprise policy profiles
 
 ```bash
