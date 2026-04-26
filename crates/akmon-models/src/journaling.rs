@@ -117,23 +117,47 @@ impl AttemptCollector {
             attempts: Mutex::new(Vec::new()),
         }
     }
+
+    /// Drains buffered attempts and leaves the collector empty.
+    fn drain(&self) -> Vec<AttemptRecord> {
+        let mut guard = self.attempts.lock().unwrap_or_else(|poisoned| {
+            // Recover from poisoning so subsequent attempts are not dropped.
+            poisoned.into_inner()
+        });
+        std::mem::take(&mut *guard)
+    }
+
+    /// Returns the current buffered attempt count.
+    fn len(&self) -> usize {
+        let guard = self.attempts.lock().unwrap_or_else(|poisoned| {
+            // Recover from poisoning so callers can still inspect state.
+            poisoned.into_inner()
+        });
+        guard.len()
+    }
 }
 
 impl AttemptObserver for AttemptCollector {
     fn record_attempt(&self, attempt: AttemptRecord) {
-        let _ = attempt;
+        let mut guard = self.attempts.lock().unwrap_or_else(|poisoned| {
+            // Mutex poisoning is recovered to avoid losing attempts; poisoning indicates
+            // a logic bug elsewhere in this type.
+            poisoned.into_inner()
+        });
+        guard.push(attempt);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::thread;
 
     use akmon_journal::{HashAlgorithm, MemoryObjectStore, MemorySessionGraph};
     use async_trait::async_trait;
     use futures::StreamExt;
 
-    use super::JournalingProvider;
+    use super::{AttemptCollector, AttemptObserver, JournalingProvider};
     use crate::{
         CompletionConfig, CompletionStream, LlmProvider, Message, ModelError, StreamEvent,
     };
@@ -144,6 +168,19 @@ mod tests {
         model_id: &'static str,
         estimate: Option<usize>,
         events: Vec<Result<StreamEvent, ModelError>>,
+    }
+
+    fn sample_attempt(attempt_number: u32) -> akmon_journal::AttemptRecord {
+        akmon_journal::AttemptRecord {
+            attempt_number,
+            started_at: time::OffsetDateTime::UNIX_EPOCH,
+            ended_at: time::OffsetDateTime::UNIX_EPOCH,
+            status: akmon_journal::AttemptStatus::Success,
+            request_hash: akmon_journal::Hash::from_bytes(HashAlgorithm::Sha256, [0_u8; 32]),
+            response_hash: None,
+            stream_hash: None,
+            error_message: None,
+        }
     }
 
     #[async_trait]
@@ -279,5 +316,68 @@ mod tests {
             got.push(item);
         }
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn t_collector_starts_empty() {
+        let c = AttemptCollector::new();
+        assert_eq!(c.len(), 0);
+    }
+
+    #[test]
+    fn t_collector_records_one_attempt() {
+        let c = AttemptCollector::new();
+        c.record_attempt(sample_attempt(1));
+        assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn t_collector_records_multiple_in_order() {
+        let c = AttemptCollector::new();
+        c.record_attempt(sample_attempt(1));
+        c.record_attempt(sample_attempt(2));
+        c.record_attempt(sample_attempt(3));
+        let drained = c.drain();
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained[0].attempt_number, 1);
+        assert_eq!(drained[1].attempt_number, 2);
+        assert_eq!(drained[2].attempt_number, 3);
+    }
+
+    #[test]
+    fn t_collector_drain_resets() {
+        let c = AttemptCollector::new();
+        c.record_attempt(sample_attempt(1));
+        let _ = c.drain();
+        assert_eq!(c.len(), 0);
+    }
+
+    #[test]
+    fn t_collector_concurrent_access_safe() {
+        const THREADS: usize = 8;
+        const WRITES_PER_THREAD: usize = 10;
+        let c = Arc::new(AttemptCollector::new());
+        let mut joins = Vec::new();
+        for thread_idx in 0..THREADS {
+            let collector = Arc::clone(&c);
+            joins.push(thread::spawn(move || {
+                for i in 0..WRITES_PER_THREAD {
+                    let n = (thread_idx * WRITES_PER_THREAD + i + 1) as u32;
+                    collector.record_attempt(sample_attempt(n));
+                }
+            }));
+        }
+        for j in joins {
+            j.join().expect("thread join");
+        }
+        assert_eq!(c.len(), THREADS * WRITES_PER_THREAD);
+    }
+
+    #[test]
+    fn t_collector_via_trait_object() {
+        let c = Arc::new(AttemptCollector::new());
+        let observer: Arc<dyn AttemptObserver> = c.clone();
+        observer.record_attempt(sample_attempt(1));
+        assert_eq!(c.len(), 1);
     }
 }
