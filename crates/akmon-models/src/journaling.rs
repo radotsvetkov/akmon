@@ -49,14 +49,25 @@ pub trait AttemptObserver: Send + Sync {
     fn put_object(&self, bytes: &[u8]) -> Result<Hash, JournalError>;
 }
 
-/// Journaling wrapper around an [`LlmProvider`] backend.
+/// Wraps any [`LlmProvider`] to capture per-call evidence into an AGEF-compatible journal
+/// substrate.
 ///
-/// The wrapper stores evidence objects and appends provider-call events to a session graph.
+/// Each call to [`LlmProvider::complete`] produces:
+/// - one or more [`akmon_journal::AttemptRecord`] entries (one per HTTP attempt, including
+///   retries) when the inner provider implements [`LlmProvider::set_attempt_observer`].
+/// - exactly one synthesized [`akmon_journal::AttemptRecord`] covering the full call when the
+///   inner provider does not support observation.
+/// - one [`akmon_journal::EventKind::ProviderCall`] event in the session graph at the end of the
+///   call.
+///
+/// The wrapper enforces synchronous append semantics: when the returned [`CompletionStream`] yields
+/// its terminal item, the `ProviderCall` event is already in the graph.
+///
+/// See the AGEF specification at <https://github.com/radotsvetkov/agef> for the journal format.
+///
 /// A mutex is required around the graph because [`LlmProvider::complete`] takes `&self` while
-/// [`SessionGraph::append`] requires `&mut self`.
-///
-/// The graph lock is intended to be held briefly per append operation and never across
-/// awaits while consuming the inner provider stream.
+/// [`SessionGraph::append`] requires `&mut self`. The graph lock is held briefly per append and
+/// never across awaits while consuming the inner provider stream.
 #[allow(dead_code)]
 pub struct JournalingProvider<P, S, G>
 where

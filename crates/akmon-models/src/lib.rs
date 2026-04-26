@@ -27,7 +27,7 @@ pub use anthropic::{
 pub use bedrock::{BEDROCK_DISPLAY_MODEL_IDS, BedrockBackend};
 pub use config::CompletionConfig;
 pub use error::ModelError;
-pub use journaling::AttemptObserver;
+pub use journaling::{AttemptObserver, JournalingProvider};
 pub use llm_connect::{
     LlmConnectConfig, looks_like_claude_api_model, looks_like_ollama_model, provider_display_name,
 };
