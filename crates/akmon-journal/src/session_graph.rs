@@ -960,9 +960,6 @@ mod tests {
         }
 
         let report = graph.verify().unwrap_or_else(|_| unreachable!());
-        assert_eq!(
-            report.head_mismatch,
-            Some((corrupted_stored, computed_end))
-        );
+        assert_eq!(report.head_mismatch, Some((corrupted_stored, computed_end)));
     }
 }
