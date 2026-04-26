@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use akmon_core::Secret;
@@ -14,13 +15,14 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::LlmProvider;
 use crate::config::CompletionConfig;
 use crate::error::ModelError;
 use crate::max_tokens::max_tokens_for_openai_style_model;
 use crate::message::{Message, MessageRole};
 use crate::stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 use crate::tool_def::ToolDefinition;
+use crate::{AttemptObserver, LlmProvider};
+use akmon_journal::{AttemptRecord, AttemptStatus, Hash, HashAlgorithm};
 
 /// Infers a conservative context window from model id substrings.
 pub fn infer_context_window_tokens(model_id: &str) -> usize {
@@ -280,6 +282,7 @@ struct OpenAiCompatInner {
 /// API keys are held in [`Secret`]; this type does **not** implement [`std::fmt::Debug`].
 pub struct OpenAiCompatBackend {
     inner: Arc<OpenAiCompatInner>,
+    attempt_observer: Arc<RwLock<Option<Arc<dyn AttemptObserver>>>>,
 }
 
 impl OpenAiCompatBackend {
@@ -305,6 +308,7 @@ impl OpenAiCompatBackend {
                 extra_headers,
                 context_window,
             }),
+            attempt_observer: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -415,6 +419,13 @@ impl OpenAiCompatBackend {
     pub fn auth_style_is_azure_api_key(&self) -> bool {
         matches!(self.inner.auth, AuthStyle::ApiKey(_))
     }
+
+    fn observer(&self) -> Option<Arc<dyn AttemptObserver>> {
+        self.attempt_observer
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
 }
 
 fn build_client() -> reqwest::Client {
@@ -458,6 +469,152 @@ fn map_send_err(e: reqwest::Error) -> ModelError {
 fn map_stream_err(e: reqwest::Error) -> ModelError {
     ModelError::StreamInterrupted {
         message: e.to_string(),
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct OpenAiSynthesizedResponse {
+    text: String,
+    tool_calls: Vec<ModelToolCall>,
+    stop_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiStreamEventChunk {
+    #[serde(rename = "kind")]
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ModelToolCall>>,
+}
+
+fn canonical_cbor_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, ModelError> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes).map_err(|err| {
+        ModelError::BackendUnavailable {
+            message: format!("canonical cbor encode failed: {err}"),
+        }
+    })?;
+    Ok(bytes)
+}
+
+fn sentinel_hash() -> Hash {
+    Hash::from_bytes(HashAlgorithm::Sha256, [0_u8; 32])
+}
+
+fn stop_reason_label(reason: &StopReason) -> &'static str {
+    match reason {
+        StopReason::EndTurn => "end_turn",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::ToolUse => "tool_use",
+    }
+}
+
+fn map_model_error_to_attempt_status(err: &ModelError) -> AttemptStatus {
+    match err {
+        ModelError::RateLimited { .. } => AttemptStatus::RateLimited,
+        ModelError::FirstTokenTimeout | ModelError::StreamInterrupted { .. } => {
+            AttemptStatus::NetworkError
+        }
+        ModelError::BackendUnavailable { .. } => AttemptStatus::ServerError,
+        ModelError::AuthError
+        | ModelError::ContextWindowExceeded
+        | ModelError::ModelNotFound { .. } => AttemptStatus::ClientError,
+    }
+}
+
+fn map_http_status_to_attempt_status(status: StatusCode) -> AttemptStatus {
+    match status.as_u16() {
+        429 => AttemptStatus::RateLimited,
+        529 => AttemptStatus::ServerError,
+        500..=599 => AttemptStatus::ServerError,
+        400..=499 => AttemptStatus::ClientError,
+        _ => AttemptStatus::Other(format!("unexpected HTTP status {status}")),
+    }
+}
+
+fn stream_event_chunk(event: &StreamEvent) -> OpenAiStreamEventChunk {
+    match event {
+        StreamEvent::ProviderReady { provider, model } => OpenAiStreamEventChunk {
+            kind: "provider_ready",
+            provider: Some(provider.clone()),
+            model: Some(model.clone()),
+            message: None,
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+        },
+        StreamEvent::StatusHint { message } => OpenAiStreamEventChunk {
+            kind: "status_hint",
+            provider: None,
+            model: None,
+            message: Some(message.clone()),
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+        },
+        StreamEvent::TextDelta { text } => OpenAiStreamEventChunk {
+            kind: "text_delta",
+            provider: None,
+            model: None,
+            message: None,
+            text: Some(text.clone()),
+            stop_reason: None,
+            tool_calls: None,
+        },
+        StreamEvent::Done {
+            stop_reason,
+            tool_calls,
+        } => OpenAiStreamEventChunk {
+            kind: "done",
+            provider: None,
+            model: None,
+            message: None,
+            text: None,
+            stop_reason: Some(stop_reason_label(stop_reason).to_owned()),
+            tool_calls: Some(tool_calls.clone()),
+        },
+        StreamEvent::UsageReport(_) => OpenAiStreamEventChunk {
+            kind: "usage_report",
+            provider: None,
+            model: None,
+            message: None,
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+        },
+        StreamEvent::Error { error } => OpenAiStreamEventChunk {
+            kind: "error",
+            provider: None,
+            model: None,
+            message: Some(error.to_string()),
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+        },
+    }
+}
+
+fn accumulate_response(event: &StreamEvent, response: &mut OpenAiSynthesizedResponse) {
+    match event {
+        StreamEvent::TextDelta { text } => response.text.push_str(text),
+        StreamEvent::Done {
+            stop_reason,
+            tool_calls,
+        } => {
+            response.stop_reason = Some(stop_reason_label(stop_reason).to_owned());
+            response.tool_calls = tool_calls.clone();
+        }
+        _ => {}
     }
 }
 
@@ -712,6 +869,7 @@ async fn run_openai_stream(
     mut body: Value,
     config: CompletionConfig,
     stream_footer_label: String,
+    observer: Option<Arc<dyn AttemptObserver>>,
     tx: mpsc::Sender<Result<StreamEvent, ModelError>>,
 ) {
     const RETRY_MAX: u32 = 5;
@@ -720,200 +878,479 @@ async fn run_openai_stream(
     const RETRY_CAP_SECS: u64 = 60;
 
     let mut rate_attempts: u32 = 0;
-    let resp = loop {
+    let mut fallback_applied = false;
+    loop {
+        if !fallback_applied
+            && rate_attempts == 3
+            && let Some(ref fb) = config.fallback_model
+            && let Some(obj) = body.as_object_mut()
+        {
+            obj.insert("model".to_string(), json!(fb));
+            fallback_applied = true;
+            let _ = tx
+                .send(Ok(StreamEvent::StatusHint {
+                    message: format!(
+                        "⟳ rate limited — retrying with fallback model `{fb}` ({}/{RETRY_MAX})",
+                        rate_attempts + 1
+                    ),
+                }))
+                .await;
+        }
+
+        let attempt_number = rate_attempts.saturating_add(1);
+        let started_at = time::OffsetDateTime::now_utc();
+        let request_hash = if let Some(obs) = observer.as_ref() {
+            let request_bytes = match canonical_cbor_bytes(&body) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    let ended_at = time::OffsetDateTime::now_utc();
+                    obs.record_attempt(AttemptRecord {
+                        attempt_number,
+                        started_at,
+                        ended_at,
+                        status: AttemptStatus::Other(err.to_string()),
+                        request_hash: sentinel_hash(),
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some(err.to_string()),
+                    });
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            };
+            match obs.put_object(&request_bytes) {
+                Ok(hash) => Some(hash),
+                Err(err) => {
+                    let ended_at = time::OffsetDateTime::now_utc();
+                    let msg = format!("journal write failed: {err}");
+                    obs.record_attempt(AttemptRecord {
+                        attempt_number,
+                        started_at,
+                        ended_at,
+                        status: AttemptStatus::Other(msg.clone()),
+                        request_hash: sentinel_hash(),
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some(msg.clone()),
+                    });
+                    let _ = tx
+                        .send(Err(ModelError::BackendUnavailable { message: msg }))
+                        .await;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
         let resp = match openai_post_request(&inner, &body).send().await {
             Ok(r) => r,
             Err(e) => {
-                let _ = tx.send(Err(map_send_err(e))).await;
+                let err = map_send_err(e);
+                if let Some(request_hash) = request_hash
+                    && let Some(obs) = observer.as_ref()
+                {
+                    let ended_at = time::OffsetDateTime::now_utc();
+                    obs.record_attempt(AttemptRecord {
+                        attempt_number,
+                        started_at,
+                        ended_at,
+                        status: map_model_error_to_attempt_status(&err),
+                        request_hash,
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some(err.to_string()),
+                    });
+                }
+                let _ = tx.send(Err(err)).await;
                 return;
             }
         };
 
-        if resp.status().is_success() {
-            break resp;
-        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let overloaded = status.as_u16() == 529;
+            let rate_limited = status == StatusCode::TOO_MANY_REQUESTS || overloaded;
+            let status_kind = map_http_status_to_attempt_status(status);
 
-        let status = resp.status();
-        let overloaded = status.as_u16() == 529;
-        let rate_limited = status == StatusCode::TOO_MANY_REQUESTS || overloaded;
+            if rate_limited {
+                rate_attempts = rate_attempts.saturating_add(1);
+                let headers = resp.headers().clone();
+                let body_txt = resp.text().await.unwrap_or_default();
+                if let Some(request_hash) = request_hash
+                    && let Some(obs) = observer.as_ref()
+                {
+                    let ended_at = time::OffsetDateTime::now_utc();
+                    obs.record_attempt(AttemptRecord {
+                        attempt_number,
+                        started_at,
+                        ended_at,
+                        status: status_kind,
+                        request_hash,
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some(format!("HTTP {status}: {}", truncate(&body_txt))),
+                    });
+                }
+                if rate_attempts > RETRY_MAX {
+                    let _ = tx.send(Err(map_http_status(status, &body_txt))).await;
+                    return;
+                }
 
-        if rate_limited {
-            rate_attempts = rate_attempts.saturating_add(1);
-            if rate_attempts > RETRY_MAX {
-                let body_txt = match resp.text().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(ModelError::StreamInterrupted {
-                                message: e.to_string(),
-                            }))
-                            .await;
-                        return;
-                    }
-                };
-                let _ = tx.send(Err(map_http_status(status, &body_txt))).await;
-                return;
+                let header_wait = headers
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+                let exp =
+                    RETRY_BASE_SECS.saturating_mul(RETRY_MULT.pow(rate_attempts.saturating_sub(1)));
+                let base_wait = header_wait.unwrap_or(exp).max(1);
+                let wait_secs = jittered_wait_secs(base_wait).min(RETRY_CAP_SECS);
+
+                for remaining in (1..=wait_secs).rev() {
+                    let _ = tx
+                        .send(Ok(StreamEvent::StatusHint {
+                            message: format!(
+                                "⟳ rate limited — retrying in {remaining}s ({rate_attempts}/{RETRY_MAX})"
+                            ),
+                        }))
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                continue;
             }
 
-            let headers = resp.headers().clone();
-            let header_wait = headers
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok());
-
-            let exp =
-                RETRY_BASE_SECS.saturating_mul(RETRY_MULT.pow(rate_attempts.saturating_sub(1)));
-            let base_wait = header_wait.unwrap_or(exp).max(1);
-            let wait_secs = jittered_wait_secs(base_wait).min(RETRY_CAP_SECS);
-
-            let _ = resp.text().await;
-
-            if rate_attempts == 4
-                && let Some(ref fb) = config.fallback_model
-                && let Some(obj) = body.as_object_mut()
-            {
-                obj.insert("model".to_string(), json!(fb));
-                let _ = tx
-                    .send(Ok(StreamEvent::StatusHint {
-                        message: format!(
-                            "⟳ rate limited — retrying with fallback model `{fb}` ({rate_attempts}/{RETRY_MAX})"
-                        ),
-                    }))
-                    .await;
-            }
-
-            for remaining in (1..=wait_secs).rev() {
-                let _ = tx
-                    .send(Ok(StreamEvent::StatusHint {
-                        message: format!(
-                            "⟳ rate limited — retrying in {remaining}s ({rate_attempts}/{RETRY_MAX})"
-                        ),
-                    }))
-                    .await;
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-            continue;
-        }
-
-        let body_txt = match resp.text().await {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = tx
-                    .send(Err(ModelError::StreamInterrupted {
-                        message: e.to_string(),
-                    }))
-                    .await;
-                return;
-            }
-        };
-        let _ = tx.send(Err(map_http_status(status, &body_txt))).await;
-        return;
-    };
-
-    let _ = tx
-        .send(Ok(StreamEvent::ProviderReady {
-            provider: stream_footer_label,
-            model: inner.model.clone(),
-        }))
-        .await;
-
-    let mut byte_stream = resp.bytes_stream();
-    let mut buf = String::new();
-    let deadline = Duration::from_millis(config.first_token_deadline_ms);
-    let first =
-        match tokio::time::timeout(deadline, read_next_sse_event(&mut buf, &mut byte_stream)).await
-        {
-            Err(_) => {
-                let _ = tx.send(Err(ModelError::FirstTokenTimeout)).await;
-                return;
-            }
-            Ok(Err(e)) => {
-                let _ = tx.send(Err(e)).await;
-                return;
-            }
-            Ok(Ok(None)) => {
-                let _ = tx
-                    .send(Err(ModelError::StreamInterrupted {
-                        message: "empty SSE stream".into(),
-                    }))
-                    .await;
-                return;
-            }
-            Ok(Ok(Some(b))) => b,
-        };
-
-    let mut tools: BTreeMap<u32, ToolPart> = BTreeMap::new();
-    let mut usage_acc: Option<UsageReport> = None;
-    let mut done_sent = false;
-    let mut pending = Some(first);
-
-    loop {
-        let block = match pending.take() {
-            Some(b) => b,
-            None => match read_next_sse_event(&mut buf, &mut byte_stream).await {
-                Ok(Some(b)) => b,
-                Ok(None) => break,
+            let body_txt = match resp.text().await {
+                Ok(t) => t,
                 Err(e) => {
+                    let err = ModelError::StreamInterrupted {
+                        message: e.to_string(),
+                    };
+                    if let Some(request_hash) = request_hash
+                        && let Some(obs) = observer.as_ref()
+                    {
+                        let ended_at = time::OffsetDateTime::now_utc();
+                        obs.record_attempt(AttemptRecord {
+                            attempt_number,
+                            started_at,
+                            ended_at,
+                            status: map_model_error_to_attempt_status(&err),
+                            request_hash,
+                            response_hash: None,
+                            stream_hash: None,
+                            error_message: Some(err.to_string()),
+                        });
+                    }
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            };
+            let err = map_http_status(status, &body_txt);
+            if let Some(request_hash) = request_hash
+                && let Some(obs) = observer.as_ref()
+            {
+                let ended_at = time::OffsetDateTime::now_utc();
+                obs.record_attempt(AttemptRecord {
+                    attempt_number,
+                    started_at,
+                    ended_at,
+                    status: status_kind,
+                    request_hash,
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some(err.to_string()),
+                });
+            }
+            let _ = tx.send(Err(err)).await;
+            return;
+        }
+
+        let provider_ready = StreamEvent::ProviderReady {
+            provider: stream_footer_label.clone(),
+            model: inner.model.clone(),
+        };
+        if let Some(obs) = observer.as_ref()
+            && let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&provider_ready))
+        {
+            let _ = obs.put_object(&bytes);
+        }
+        let _ = tx.send(Ok(provider_ready)).await;
+
+        let mut byte_stream = resp.bytes_stream();
+        let mut buf = String::new();
+        let mut chunk_hashes: Vec<Hash> = Vec::new();
+        let mut response_synth = OpenAiSynthesizedResponse::default();
+        let deadline = Duration::from_millis(config.first_token_deadline_ms);
+        let first =
+            match tokio::time::timeout(deadline, read_next_sse_event(&mut buf, &mut byte_stream))
+                .await
+            {
+                Err(_) => {
+                    let err = ModelError::FirstTokenTimeout;
+                    if let Some(request_hash) = request_hash.clone()
+                        && let Some(obs) = observer.as_ref()
+                    {
+                        let ended_at = time::OffsetDateTime::now_utc();
+                        obs.record_attempt(AttemptRecord {
+                            attempt_number,
+                            started_at,
+                            ended_at,
+                            status: map_model_error_to_attempt_status(&err),
+                            request_hash,
+                            response_hash: None,
+                            stream_hash: None,
+                            error_message: Some(err.to_string()),
+                        });
+                    }
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+                Ok(Err(e)) => {
+                    if let Some(request_hash) = request_hash.clone()
+                        && let Some(obs) = observer.as_ref()
+                    {
+                        let ended_at = time::OffsetDateTime::now_utc();
+                        obs.record_attempt(AttemptRecord {
+                            attempt_number,
+                            started_at,
+                            ended_at,
+                            status: map_model_error_to_attempt_status(&e),
+                            request_hash,
+                            response_hash: None,
+                            stream_hash: None,
+                            error_message: Some(e.to_string()),
+                        });
+                    }
                     let _ = tx.send(Err(e)).await;
                     return;
                 }
-            },
-        };
-
-        let v = match sse_block_to_json(&block) {
-            Ok(Some(x)) => x,
-            Ok(None) => {
-                if !done_sent {
-                    if let Some(snap) = usage_acc.clone() {
-                        let _ = tx.send(Ok(StreamEvent::UsageReport(snap))).await;
+                Ok(Ok(None)) => {
+                    let err = ModelError::StreamInterrupted {
+                        message: "empty SSE stream".into(),
+                    };
+                    if let Some(request_hash) = request_hash.clone()
+                        && let Some(obs) = observer.as_ref()
+                    {
+                        let ended_at = time::OffsetDateTime::now_utc();
+                        obs.record_attempt(AttemptRecord {
+                            attempt_number,
+                            started_at,
+                            ended_at,
+                            status: map_model_error_to_attempt_status(&err),
+                            request_hash,
+                            response_hash: None,
+                            stream_hash: None,
+                            error_message: Some(err.to_string()),
+                        });
                     }
-                    let _ = tx
-                        .send(Ok(StreamEvent::Done {
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+                Ok(Ok(Some(b))) => b,
+            };
+
+        let mut tools: BTreeMap<u32, ToolPart> = BTreeMap::new();
+        let mut usage_acc: Option<UsageReport> = None;
+        let mut done_sent = false;
+        let mut pending = Some(first);
+        loop {
+            let block = match pending.take() {
+                Some(b) => b,
+                None => match read_next_sse_event(&mut buf, &mut byte_stream).await {
+                    Ok(Some(b)) => b,
+                    Ok(None) => break,
+                    Err(e) => {
+                        if let Some(request_hash) = request_hash.clone()
+                            && let Some(obs) = observer.as_ref()
+                        {
+                            let ended_at = time::OffsetDateTime::now_utc();
+                            let response_hash = canonical_cbor_bytes(&response_synth)
+                                .ok()
+                                .and_then(|bytes| obs.put_object(&bytes).ok());
+                            let stream_hash = canonical_cbor_bytes(&chunk_hashes)
+                                .ok()
+                                .and_then(|bytes| obs.put_object(&bytes).ok());
+                            obs.record_attempt(AttemptRecord {
+                                attempt_number,
+                                started_at,
+                                ended_at,
+                                status: map_model_error_to_attempt_status(&e),
+                                request_hash,
+                                response_hash,
+                                stream_hash,
+                                error_message: Some(e.to_string()),
+                            });
+                        }
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                },
+            };
+
+            let v = match sse_block_to_json(&block) {
+                Ok(Some(x)) => x,
+                Ok(None) => {
+                    if !done_sent {
+                        if let Some(snap) = usage_acc.clone() {
+                            let usage_ev = StreamEvent::UsageReport(snap);
+                            if let Some(obs) = observer.as_ref()
+                                && let Ok(bytes) =
+                                    canonical_cbor_bytes(&stream_event_chunk(&usage_ev))
+                                && let Ok(hash) = obs.put_object(&bytes)
+                            {
+                                chunk_hashes.push(hash);
+                            }
+                            let _ = tx.send(Ok(usage_ev)).await;
+                        }
+                        let done_ev = StreamEvent::Done {
                             stop_reason: StopReason::EndTurn,
                             tool_calls: vec![],
-                        }))
-                        .await;
+                        };
+                        if let Some(obs) = observer.as_ref()
+                            && let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&done_ev))
+                            && let Ok(hash) = obs.put_object(&bytes)
+                        {
+                            chunk_hashes.push(hash);
+                        }
+                        accumulate_response(&done_ev, &mut response_synth);
+                        let _ = tx.send(Ok(done_ev)).await;
+                        done_sent = true;
+                    }
+                    break;
+                }
+                Err(e) => {
+                    if let Some(request_hash) = request_hash.clone()
+                        && let Some(obs) = observer.as_ref()
+                    {
+                        let ended_at = time::OffsetDateTime::now_utc();
+                        let response_hash = canonical_cbor_bytes(&response_synth)
+                            .ok()
+                            .and_then(|bytes| obs.put_object(&bytes).ok());
+                        let stream_hash = canonical_cbor_bytes(&chunk_hashes)
+                            .ok()
+                            .and_then(|bytes| obs.put_object(&bytes).ok());
+                        obs.record_attempt(AttemptRecord {
+                            attempt_number,
+                            started_at,
+                            ended_at,
+                            status: map_model_error_to_attempt_status(&e),
+                            request_hash,
+                            response_hash,
+                            stream_hash,
+                            error_message: Some(e.to_string()),
+                        });
+                    }
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            };
+
+            let events = match apply_openai_sse_line(&v, &mut tools, &mut usage_acc) {
+                Ok(evs) => evs,
+                Err(e) => {
+                    if let Some(request_hash) = request_hash.clone()
+                        && let Some(obs) = observer.as_ref()
+                    {
+                        let ended_at = time::OffsetDateTime::now_utc();
+                        let response_hash = canonical_cbor_bytes(&response_synth)
+                            .ok()
+                            .and_then(|bytes| obs.put_object(&bytes).ok());
+                        let stream_hash = canonical_cbor_bytes(&chunk_hashes)
+                            .ok()
+                            .and_then(|bytes| obs.put_object(&bytes).ok());
+                        obs.record_attempt(AttemptRecord {
+                            attempt_number,
+                            started_at,
+                            ended_at,
+                            status: map_model_error_to_attempt_status(&e),
+                            request_hash,
+                            response_hash,
+                            stream_hash,
+                            error_message: Some(e.to_string()),
+                        });
+                    }
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            };
+
+            for ev in events {
+                if let Some(obs) = observer.as_ref()
+                    && let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&ev))
+                    && let Ok(hash) = obs.put_object(&bytes)
+                {
+                    chunk_hashes.push(hash);
+                }
+                accumulate_response(&ev, &mut response_synth);
+                if matches!(ev, StreamEvent::Done { .. }) {
                     done_sent = true;
                 }
+                if tx.send(Ok(ev)).await.is_err() {
+                    return;
+                }
+            }
+            if done_sent {
                 break;
             }
-            Err(e) => {
-                let _ = tx.send(Err(e)).await;
-                return;
-            }
-        };
-
-        let events = match apply_openai_sse_line(&v, &mut tools, &mut usage_acc) {
-            Ok(evs) => evs,
-            Err(e) => {
-                let _ = tx.send(Err(e)).await;
-                return;
-            }
-        };
-
-        for ev in events {
-            if matches!(ev, StreamEvent::Done { .. }) {
-                done_sent = true;
-            }
-            if tx.send(Ok(ev)).await.is_err() {
-                return;
-            }
         }
-        if done_sent {
-            break;
-        }
-    }
 
-    if !done_sent {
-        if let Some(snap) = usage_acc {
-            let _ = tx.send(Ok(StreamEvent::UsageReport(snap))).await;
-        }
-        let _ = tx
-            .send(Ok(StreamEvent::Done {
+        if !done_sent {
+            if let Some(snap) = usage_acc {
+                let usage_ev = StreamEvent::UsageReport(snap);
+                if let Some(obs) = observer.as_ref()
+                    && let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&usage_ev))
+                    && let Ok(hash) = obs.put_object(&bytes)
+                {
+                    chunk_hashes.push(hash);
+                }
+                let _ = tx.send(Ok(usage_ev)).await;
+            }
+            let done_ev = StreamEvent::Done {
                 stop_reason: StopReason::EndTurn,
                 tool_calls: vec![],
-            }))
-            .await;
+            };
+            if let Some(obs) = observer.as_ref()
+                && let Ok(bytes) = canonical_cbor_bytes(&stream_event_chunk(&done_ev))
+                && let Ok(hash) = obs.put_object(&bytes)
+            {
+                chunk_hashes.push(hash);
+            }
+            accumulate_response(&done_ev, &mut response_synth);
+            let _ = tx.send(Ok(done_ev)).await;
+        }
+
+        if let Some(request_hash) = request_hash
+            && let Some(obs) = observer.as_ref()
+        {
+            let ended_at = time::OffsetDateTime::now_utc();
+            let response_hash = if response_synth.text.is_empty()
+                && response_synth.tool_calls.is_empty()
+                && response_synth.stop_reason.is_none()
+            {
+                None
+            } else if let Ok(bytes) = canonical_cbor_bytes(&response_synth) {
+                obs.put_object(&bytes).ok()
+            } else {
+                None
+            };
+            let stream_hash = if chunk_hashes.is_empty() {
+                None
+            } else if let Ok(bytes) = canonical_cbor_bytes(&chunk_hashes) {
+                obs.put_object(&bytes).ok()
+            } else {
+                None
+            };
+            obs.record_attempt(AttemptRecord {
+                attempt_number,
+                started_at,
+                ended_at,
+                status: AttemptStatus::Success,
+                request_hash,
+                response_hash,
+                stream_hash,
+                error_message: None,
+            });
+        }
+        return;
     }
 }
 
@@ -929,6 +1366,13 @@ impl LlmProvider for OpenAiCompatBackend {
 
     fn completion_model_id(&self) -> &str {
         self.inner.model.as_str()
+    }
+
+    fn set_attempt_observer(&self, observer: Arc<dyn AttemptObserver>) {
+        *self
+            .attempt_observer
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(observer);
     }
 
     async fn complete(
@@ -979,7 +1423,8 @@ impl LlmProvider for OpenAiCompatBackend {
         let inner = Arc::clone(&self.inner);
         let cfg = config.clone();
         let footer = openai_stream_footer_label(self.inner.display_name.as_str());
-        tokio::spawn(run_openai_stream(inner, body, cfg, footer, tx));
+        let observer = self.observer();
+        tokio::spawn(run_openai_stream(inner, body, cfg, footer, observer, tx));
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
 }
@@ -988,7 +1433,22 @@ impl LlmProvider for OpenAiCompatBackend {
 mod tests {
     use super::*;
     use crate::config::CompletionConfig;
+    use crate::journaling::JournalingProvider;
+    use akmon_journal::{
+        EventKind, HashAlgorithm, MemoryObjectStore, MemorySessionGraph, ObjectStore, SessionGraph,
+    };
+    use futures::StreamExt;
+    use mockito::Server;
     use static_assertions::assert_not_impl_any;
+    use std::sync::Mutex;
+
+    fn stream_body_ok(text: &str) -> String {
+        format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":1,\"completion_tokens\":1,\"prompt_tokens_details\":{{\"cached_tokens\":0}}}}}}\n\n\
+             data: [DONE]\n\n"
+        )
+    }
 
     #[test]
     fn openrouter_base_url_and_headers() {
@@ -1095,5 +1555,217 @@ mod tests {
     #[test]
     fn openai_backend_no_debug() {
         assert_not_impl_any!(OpenAiCompatBackend: std::fmt::Debug);
+    }
+
+    #[tokio::test]
+    async fn t_openai_compat_publishes_single_success_attempt() {
+        let mut server = Server::new_async().await;
+        let _m = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(stream_body_ok("ok"))
+            .create_async()
+            .await;
+        let backend = OpenAiCompatBackend::custom(server.url(), "key".into(), "gpt-4o-mini".into());
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(Arc::clone(&store), uuid::Uuid::new_v4());
+        let cwd_hash = store.put(b"cwd").expect("cwd hash");
+        let config_hash = store.put(b"cfg").expect("cfg hash");
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            })
+            .expect("session start");
+        let graph = Arc::new(Mutex::new(graph));
+        let wrapped = JournalingProvider::new(
+            backend,
+            "openai-compat".to_owned(),
+            Arc::clone(&store),
+            Arc::clone(&graph),
+        );
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "hello".to_owned(),
+        }];
+        let cfg = CompletionConfig::default();
+        let mut s = wrapped.complete(&messages, &cfg).await.expect("complete");
+        while let Some(item) = s.next().await {
+            item.expect("stream item");
+        }
+        let history = graph
+            .lock()
+            .expect("graph lock")
+            .history()
+            .expect("history");
+        let (_, attempts, stream_hash) = history
+            .iter()
+            .find_map(|(_, e)| match &e.kind {
+                EventKind::ProviderCall {
+                    provider_id: _,
+                    attempts,
+                    stream_hash,
+                } => Some(((), attempts.clone(), stream_hash.clone())),
+                _ => None,
+            })
+            .expect("provider call");
+        assert_eq!(attempts.len(), 1);
+        let a = &attempts[0];
+        assert_eq!(a.attempt_number, 1);
+        assert_eq!(a.status, AttemptStatus::Success);
+        assert!(a.response_hash.is_some());
+        assert!(a.stream_hash.is_some());
+        assert_eq!(stream_hash, a.stream_hash);
+    }
+
+    #[tokio::test]
+    async fn t_openai_compat_publishes_retry_sequence_on_rate_limit() {
+        let mut server = Server::new_async().await;
+        let _m1 = server
+            .mock("POST", "/chat/completions")
+            .with_status(429)
+            .with_body("{\"error\":\"rate\"}")
+            .expect(2)
+            .create_async()
+            .await;
+        let _m2 = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(stream_body_ok("ok"))
+            .expect(1)
+            .create_async()
+            .await;
+        let backend = OpenAiCompatBackend::custom(server.url(), "key".into(), "gpt-4o-mini".into());
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(Arc::clone(&store), uuid::Uuid::new_v4());
+        let cwd_hash = store.put(b"cwd").expect("cwd hash");
+        let config_hash = store.put(b"cfg").expect("cfg hash");
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            })
+            .expect("session start");
+        let graph = Arc::new(Mutex::new(graph));
+        let wrapped = JournalingProvider::new(
+            backend,
+            "openai-compat".to_owned(),
+            Arc::clone(&store),
+            Arc::clone(&graph),
+        );
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "hello".to_owned(),
+        }];
+        let cfg = CompletionConfig::default();
+        let mut s = wrapped.complete(&messages, &cfg).await.expect("complete");
+        while let Some(item) = s.next().await {
+            item.expect("stream item");
+        }
+        let history = graph
+            .lock()
+            .expect("graph lock")
+            .history()
+            .expect("history");
+        let (_, attempts, stream_hash) = history
+            .iter()
+            .find_map(|(_, e)| match &e.kind {
+                EventKind::ProviderCall {
+                    provider_id: _,
+                    attempts,
+                    stream_hash,
+                } => Some(((), attempts.clone(), stream_hash.clone())),
+                _ => None,
+            })
+            .expect("provider call");
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts[0].attempt_number, 1);
+        assert_eq!(attempts[1].attempt_number, 2);
+        assert_eq!(attempts[2].attempt_number, 3);
+        assert_eq!(attempts[0].status, AttemptStatus::RateLimited);
+        assert_eq!(attempts[1].status, AttemptStatus::RateLimited);
+        assert_eq!(attempts[2].status, AttemptStatus::Success);
+        assert!(attempts[0].response_hash.is_none() && attempts[0].stream_hash.is_none());
+        assert!(attempts[1].response_hash.is_none() && attempts[1].stream_hash.is_none());
+        assert!(attempts[2].response_hash.is_some() && attempts[2].stream_hash.is_some());
+        assert_eq!(stream_hash, attempts[2].stream_hash);
+    }
+
+    #[tokio::test]
+    async fn t_openai_compat_fallback_model_mutates_request_hash() {
+        let mut server = Server::new_async().await;
+        let _m1 = server
+            .mock("POST", "/chat/completions")
+            .with_status(429)
+            .with_body("{\"error\":\"rate\"}")
+            .expect(4)
+            .create_async()
+            .await;
+        let _m2 = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(stream_body_ok("ok"))
+            .expect(1)
+            .create_async()
+            .await;
+        let backend = OpenAiCompatBackend::custom(server.url(), "key".into(), "gpt-4o-mini".into());
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(Arc::clone(&store), uuid::Uuid::new_v4());
+        let cwd_hash = store.put(b"cwd").expect("cwd hash");
+        let config_hash = store.put(b"cfg").expect("cfg hash");
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            })
+            .expect("session start");
+        let graph = Arc::new(Mutex::new(graph));
+        let wrapped = JournalingProvider::new(
+            backend,
+            "openai-compat".to_owned(),
+            Arc::clone(&store),
+            Arc::clone(&graph),
+        );
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "hello".to_owned(),
+        }];
+        let cfg = CompletionConfig {
+            fallback_model: Some("gpt-4.1-mini".to_owned()),
+            ..CompletionConfig::default()
+        };
+        let mut s = wrapped.complete(&messages, &cfg).await.expect("complete");
+        while let Some(item) = s.next().await {
+            item.expect("stream item");
+        }
+        let history = graph
+            .lock()
+            .expect("graph lock")
+            .history()
+            .expect("history");
+        let attempts = history
+            .iter()
+            .find_map(|(_, e)| match &e.kind {
+                EventKind::ProviderCall {
+                    provider_id: _,
+                    attempts,
+                    stream_hash: _,
+                } => Some(attempts.clone()),
+                _ => None,
+            })
+            .expect("provider call");
+        assert_eq!(attempts.len(), 5);
+        assert_eq!(attempts[0].status, AttemptStatus::RateLimited);
+        assert_eq!(attempts[1].status, AttemptStatus::RateLimited);
+        assert_eq!(attempts[2].status, AttemptStatus::RateLimited);
+        assert_eq!(attempts[3].status, AttemptStatus::RateLimited);
+        assert_eq!(attempts[4].status, AttemptStatus::Success);
+        assert_eq!(attempts[0].request_hash, attempts[1].request_hash);
+        assert_eq!(attempts[1].request_hash, attempts[2].request_hash);
+        assert_eq!(attempts[3].request_hash, attempts[4].request_hash);
+        assert_ne!(attempts[2].request_hash, attempts[3].request_hash);
     }
 }
