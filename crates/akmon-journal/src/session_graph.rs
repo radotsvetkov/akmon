@@ -300,16 +300,18 @@ impl SessionGraph for RedbSessionGraph {
     }
 }
 
-#[cfg(test)]
-struct MemorySessionGraph {
+/// In-memory session graph implementation for tests and consumer test utilities.
+#[cfg(any(test, feature = "test-utils"))]
+pub struct MemorySessionGraph {
     store: Arc<crate::object_store::MemoryObjectStore>,
     session_id: uuid::Uuid,
     events: Vec<(Hash, Event)>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl MemorySessionGraph {
-    fn open_new(
+    /// Creates a new in-memory session graph for `session_id`.
+    pub fn open_new(
         store: Arc<crate::object_store::MemoryObjectStore>,
         session_id: uuid::Uuid,
     ) -> Self {
@@ -321,7 +323,7 @@ impl MemorySessionGraph {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 impl SessionGraph for MemorySessionGraph {
     fn session_id(&self) -> uuid::Uuid {
         self.session_id

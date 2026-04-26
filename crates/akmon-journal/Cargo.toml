@@ -8,6 +8,9 @@ authors.workspace = true
 repository.workspace = true
 description = "Akmon journal substrate: content-addressed object store and merkle session graph."
 
+[features]
+test-utils = []
+
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true

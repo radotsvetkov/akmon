@@ -24,4 +24,6 @@ pub use error::{JournalError, Result};
 pub use event::{AttemptRecord, AttemptStatus, Event, EventKind};
 pub use hash::{BLAKE3_LEN, Hash, HashAlgorithm, SHA256_LEN, WireHash, digest_bytes};
 pub use object_store::{MemoryObjectStore, ObjectStore, RedbObjectStore};
+#[cfg(any(test, feature = "test-utils"))]
+pub use session_graph::MemorySessionGraph;
 pub use session_graph::{RedbSessionGraph, SessionGraph, VerificationReport};
