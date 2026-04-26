@@ -128,6 +128,7 @@ name = "akmon-models"
 version = "1.8.2"
 dependencies = [
  "akmon-core",
+ "akmon-journal",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -146,6 +147,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]

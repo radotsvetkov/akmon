@@ -10,6 +10,7 @@ description = "LLM provider trait and model backends (Ollama, …)."
 
 [dependencies]
 akmon-core = { path = "../akmon-core" }
+akmon-journal = { path = "../akmon-journal" }
 async-trait = "0.1"
 bytes = "1"
 futures = "0.3"
@@ -29,4 +30,6 @@ urlencoding = "2.1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 [dev-dependencies]
+akmon-journal = { path = "../akmon-journal", features = ["test-utils"] }
 static_assertions = "1"
+uuid.workspace = true
