@@ -6,6 +6,8 @@
 //! Serialization boundary:
 //! - Internal persistence uses `postcard` for compact redb storage.
 //! - Event hashing / AGEF wire compatibility uses canonical CBOR bytes.
+//! - TODO(Item 4.3): bundle import/export owns external AGEF wire validation semantics, including
+//!   explicit unknown EventKind/AttemptStatus rejection at the bundle boundary.
 //!
 //! Quickstart: import common APIs from [`prelude`] and create a [`RedbObjectStore`], then
 //! open a [`RedbSessionGraph`] and append [`EventKind`] values.

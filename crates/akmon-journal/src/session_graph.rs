@@ -31,6 +31,8 @@ pub struct VerificationReport {
     pub broken_parent_links: Vec<(Hash, Hash)>,
     /// Sequence values where monotonic +1 invariant is violated.
     pub sequence_violations: Vec<u64>,
+    /// Stored session head differs from computed terminal event hash `(stored, computed)`.
+    pub head_mismatch: Option<(Hash, Hash)>,
 }
 
 /// Session graph operations.
@@ -44,6 +46,13 @@ pub trait SessionGraph: Send + Sync {
     /// Returns all events in sequence/topological order.
     fn history(&self) -> Result<Vec<(Hash, Event)>>;
     /// Verifies graph and object integrity, collecting all violations.
+    ///
+    /// This method intentionally treats hash-algorithm mismatches differently from ordinary
+    /// tamper-evidence findings. Structural inconsistencies (missing objects, parent-link breaks,
+    /// sequence gaps, hash mismatches, head mismatch) are accumulated into the report. A
+    /// `HashAlgorithmMismatch` from the object store is returned as `Err(...)` because it indicates
+    /// infrastructure-level corruption/configuration failure (the store and graph no longer agree
+    /// on the active algorithm), not a recoverable per-event inconsistency.
     fn verify(&self) -> Result<VerificationReport>;
 }
 
@@ -122,6 +131,7 @@ impl SessionGraph for RedbSessionGraph {
     }
 
     fn append(&mut self, kind: EventKind) -> Result<Hash> {
+        validate_event_kind_invariants(&kind)?;
         let current_head = self.head()?;
         // TODO(Item 4.x): avoid O(n) append by storing next sequence in session_heads.
         let sequence = self.history()?.len() as u64;
@@ -237,6 +247,7 @@ impl SessionGraph for RedbSessionGraph {
     fn verify(&self) -> Result<VerificationReport> {
         let mut report = VerificationReport::default();
         let history = self.history()?;
+        let stored_head = self.head()?;
         let mut expected_prev: Option<Hash> = None;
 
         for (idx, (stored_hash, event)) in history.iter().enumerate() {
@@ -278,6 +289,13 @@ impl SessionGraph for RedbSessionGraph {
             expected_prev = Some(stored_hash.clone());
         }
 
+        let computed_head = history.last().map(|(hash, _)| hash.clone());
+        if let (Some(stored), Some(computed)) = (stored_head, computed_head)
+            && stored != computed
+        {
+            report.head_mismatch = Some((stored, computed));
+        }
+
         Ok(report)
     }
 }
@@ -310,6 +328,7 @@ impl SessionGraph for MemorySessionGraph {
     }
 
     fn append(&mut self, kind: EventKind) -> Result<Hash> {
+        validate_event_kind_invariants(&kind)?;
         let parents = if let Some((head, _)) = self.events.last() {
             if matches!(kind, EventKind::SessionStart { .. }) {
                 return Err(JournalError::Verification(
@@ -357,6 +376,31 @@ impl SessionGraph for MemorySessionGraph {
         }
         Ok(report)
     }
+}
+
+fn validate_event_kind_invariants(kind: &EventKind) -> Result<()> {
+    if let EventKind::ProviderCall { attempts, .. } = kind {
+        if attempts.is_empty() {
+            return Err(JournalError::Verification(
+                "ProviderCall attempts must contain at least one attempt".to_owned(),
+            ));
+        }
+        for (idx, attempt) in attempts.iter().enumerate() {
+            let expected = (idx as u32) + 1;
+            if attempt.attempt_number != expected {
+                return Err(JournalError::Verification(format!(
+                    "ProviderCall attempts must be 1-indexed and contiguous: expected {}, found {}",
+                    expected, attempt.attempt_number
+                )));
+            }
+            if idx > 0 && attempt.started_at < attempts[idx - 1].started_at {
+                return Err(JournalError::Verification(
+                    "ProviderCall attempt started_at must be non-decreasing".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn referenced_object_hashes(kind: &EventKind) -> Vec<&Hash> {
@@ -502,6 +546,21 @@ mod tests {
                 stream_hash: Some(make_hash(store, 0x22)),
                 error_message: None,
             }],
+            stream_hash: Some(make_hash(store, 0x23)),
+        }
+    }
+
+    fn ts(seconds: i64) -> time::OffsetDateTime {
+        time::OffsetDateTime::from_unix_timestamp(seconds).unwrap_or_else(|_| unreachable!())
+    }
+
+    fn provider_call_with_attempts(
+        store: &dyn ObjectStore,
+        attempts: Vec<AttemptRecord>,
+    ) -> EventKind {
+        EventKind::ProviderCall {
+            provider_id: "p".to_owned(),
+            attempts,
             stream_hash: Some(make_hash(store, 0x23)),
         }
     }
@@ -660,9 +719,87 @@ mod tests {
         assert_eq!(report.hash_mismatches.len(), 0);
         assert_eq!(report.broken_parent_links.len(), 0);
         assert_eq!(report.sequence_violations.len(), 0);
+        assert!(report.head_mismatch.is_none());
         assert_eq!(report.missing_objects.len(), 0);
         assert_eq!(report.events_checked, 2);
         assert!(report.objects_checked >= 3);
+    }
+
+    #[test]
+    fn append_rejects_provider_call_with_empty_attempts() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(store.clone(), uuid::Uuid::new_v4());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        let result = graph.append(provider_call_with_attempts(store.as_ref(), Vec::new()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn append_rejects_provider_call_with_non_contiguous_attempt_numbers() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(store.clone(), uuid::Uuid::new_v4());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        let attempts = vec![
+            AttemptRecord {
+                attempt_number: 1,
+                started_at: ts(10),
+                ended_at: ts(11),
+                status: AttemptStatus::RateLimited,
+                request_hash: make_hash(store.as_ref(), 0x70),
+                response_hash: None,
+                stream_hash: None,
+                error_message: Some("429".to_owned()),
+            },
+            AttemptRecord {
+                attempt_number: 3,
+                started_at: ts(12),
+                ended_at: ts(13),
+                status: AttemptStatus::Success,
+                request_hash: make_hash(store.as_ref(), 0x71),
+                response_hash: Some(make_hash(store.as_ref(), 0x72)),
+                stream_hash: None,
+                error_message: None,
+            },
+        ];
+        let result = graph.append(provider_call_with_attempts(store.as_ref(), attempts));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn append_rejects_provider_call_with_decreasing_started_at() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(store.clone(), uuid::Uuid::new_v4());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        let attempts = vec![
+            AttemptRecord {
+                attempt_number: 1,
+                started_at: ts(20),
+                ended_at: ts(21),
+                status: AttemptStatus::RateLimited,
+                request_hash: make_hash(store.as_ref(), 0x73),
+                response_hash: None,
+                stream_hash: None,
+                error_message: Some("429".to_owned()),
+            },
+            AttemptRecord {
+                attempt_number: 2,
+                started_at: ts(19),
+                ended_at: ts(22),
+                status: AttemptStatus::Success,
+                request_hash: make_hash(store.as_ref(), 0x74),
+                response_hash: Some(make_hash(store.as_ref(), 0x75)),
+                stream_hash: None,
+                error_message: None,
+            },
+        ];
+        let result = graph.append(provider_call_with_attempts(store.as_ref(), attempts));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -782,5 +919,50 @@ mod tests {
         assert!(!report.hash_mismatches.is_empty());
         assert!(!report.sequence_violations.is_empty());
         assert!(!report.broken_parent_links.is_empty());
+        assert!(report.head_mismatch.is_some());
+    }
+
+    #[test]
+    fn verify_detects_head_mismatch_when_head_record_is_corrupted() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("verify_head_corrupt.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let sid = uuid::Uuid::new_v4();
+        let mut graph =
+            RedbSessionGraph::open_new(Arc::clone(&store), sid).unwrap_or_else(|_| unreachable!());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        let computed_end = graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
+
+        let corrupted_stored = Hash::from_bytes(HashAlgorithm::Sha256, [0xCC; 32]);
+        {
+            let tx = graph
+                .raw_db()
+                .begin_write()
+                .unwrap_or_else(|_| unreachable!());
+            {
+                let mut heads = tx
+                    .open_table(SESSION_HEADS_TABLE)
+                    .unwrap_or_else(|_| unreachable!());
+                let head = postcard::to_allocvec(&Some(corrupted_stored.clone()))
+                    .unwrap_or_else(|_| unreachable!());
+                heads
+                    .insert(session_key_bytes(sid).as_slice(), head.as_slice())
+                    .unwrap_or_else(|_| unreachable!());
+            }
+            tx.commit().unwrap_or_else(|_| unreachable!());
+        }
+
+        let report = graph.verify().unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            report.head_mismatch,
+            Some((corrupted_stored, computed_end))
+        );
     }
 }
