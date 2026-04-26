@@ -9,16 +9,26 @@ members = [
     "crates/akmon-query",
     "crates/akmon-index",
     "crates/akmon-tui",
+    "crates/akmon-journal",
 ]
 
 [workspace.dependencies]
 crossterm = "0.27"
 ratatui = "0.26"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+postcard = { version = "1", features = ["alloc"] }
+redb = "2"
+sha2 = "0.10"
+blake3 = "1"
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+hex = "0.4"
+bytes = "1"
+ciborium = "0.2"
 
 [workspace.package]
 version = "1.8.2"

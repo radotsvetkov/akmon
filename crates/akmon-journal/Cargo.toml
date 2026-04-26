@@ -1,0 +1,25 @@
+[package]
+name = "akmon-journal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Akmon journal substrate: content-addressed object store and merkle session graph."
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+postcard.workspace = true
+redb.workspace = true
+sha2.workspace = true
+blake3.workspace = true
+time.workspace = true
+hex.workspace = true
+bytes.workspace = true
+ciborium.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
