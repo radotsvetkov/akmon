@@ -18,6 +18,8 @@ mod provider_resolution;
 mod stream;
 mod tool_def;
 
+use std::sync::Arc;
+
 pub use anthropic::{
     AnthropicBackend, DEFAULT_ANTHROPIC_BASE_URL, DEFAULT_ANTHROPIC_CONTEXT_WINDOW,
     DEFAULT_ANTHROPIC_MODEL, anthropic_system_block_text,
@@ -25,6 +27,7 @@ pub use anthropic::{
 pub use bedrock::{BEDROCK_DISPLAY_MODEL_IDS, BedrockBackend};
 pub use config::CompletionConfig;
 pub use error::ModelError;
+pub use journaling::AttemptObserver;
 pub use llm_connect::{
     LlmConnectConfig, looks_like_claude_api_model, looks_like_ollama_model, provider_display_name,
 };
@@ -113,6 +116,19 @@ pub trait LlmProvider: Send + Sync {
         let _ = messages;
         None
     }
+
+    /// Install an attempt observer that receives a record per HTTP attempt the backend performs.
+    ///
+    /// May be called multiple times; the most recently installed observer is used for subsequent
+    /// attempts.
+    ///
+    /// Default implementation is a no-op for providers that do not support per-attempt
+    /// observation. Such providers produce a single synthesized [`akmon_journal::AttemptRecord`]
+    /// per logical [`LlmProvider::complete`] call that represents the full call as one attempt.
+    ///
+    /// Backends that support observation should override this method, store the observer, and
+    /// emit `AttemptRecord` values from their retry/attempt loops.
+    fn set_attempt_observer(&self, _observer: Arc<dyn AttemptObserver>) {}
 
     /// Runs one completion. Yields [`StreamEvent`] values until [`StreamEvent::Done`] or [`StreamEvent::Error`].
     ///

@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use akmon_journal::{
-    AttemptRecord, AttemptStatus, EventKind, Hash, ObjectStore, SessionGraph, digest_bytes,
+    AttemptRecord, AttemptStatus, EventKind, Hash, JournalError, ObjectStore, SessionGraph,
+    digest_bytes,
 };
 use async_trait::async_trait;
 use futures::Stream;
@@ -35,6 +36,17 @@ use crate::{
 pub trait AttemptObserver: Send + Sync {
     /// Records one provider HTTP/model attempt.
     fn record_attempt(&self, attempt: AttemptRecord);
+
+    /// Stores the given bytes in the underlying object store and returns the resulting hash.
+    ///
+    /// The returned [`Hash`] uses the store's configured algorithm (SHA-256 default, BLAKE3
+    /// optional per AGEF v0.1).
+    ///
+    /// Backends MUST use this method to obtain hashes for [`AttemptRecord`] fields
+    /// (`request_hash`, `response_hash`, etc.). Backends MUST NOT independently compute hashes
+    /// via hashing crates, because the store's algorithm is authoritative and direct computation
+    /// may produce hashes that do not resolve in the store.
+    fn put_object(&self, bytes: &[u8]) -> Result<Hash, JournalError>;
 }
 
 /// Journaling wrapper around an [`LlmProvider`] backend.
@@ -103,7 +115,9 @@ where
         messages: &[Message],
         config: &CompletionConfig,
     ) -> Result<CompletionStream, ModelError> {
-        let collector = AttemptCollector::new();
+        let collector = Arc::new(AttemptCollector::new(self.store.clone()));
+        let observer: Arc<dyn AttemptObserver> = collector.clone();
+        self.inner.set_attempt_observer(observer);
         let started_at = time::OffsetDateTime::now_utc();
         let request_payload = RequestPayload {
             provider_id: self.provider_id.as_str(),
@@ -163,7 +177,7 @@ pin_project! {
         provider_id: String,
         request_hash: Hash,
         started_at: time::OffsetDateTime,
-        collector: AttemptCollector,
+        collector: Arc<AttemptCollector<S>>,
         chunk_hashes: Vec<Hash>,
         response: SynthesizedResponse,
         last_error: Option<ModelError>,
@@ -184,7 +198,7 @@ where
         provider_id: String,
         request_hash: Hash,
         started_at: time::OffsetDateTime,
-        collector: AttemptCollector,
+        collector: Arc<AttemptCollector<S>>,
     ) -> Self {
         Self {
             inner,
@@ -239,7 +253,9 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.done_seen {
-            if !self.finalized && let Err(err) = self.as_mut().get_mut().finalize() {
+            if !self.finalized
+                && let Err(err) = self.as_mut().get_mut().finalize()
+            {
                 self.finalized = true;
                 return Poll::Ready(Some(Err(err)));
             }
@@ -255,7 +271,9 @@ where
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => {
                 self.done_seen = true;
-                if !self.finalized && let Err(err) = self.as_mut().get_mut().finalize() {
+                if !self.finalized
+                    && let Err(err) = self.as_mut().get_mut().finalize()
+                {
                     self.finalized = true;
                     return Poll::Ready(Some(Err(err)));
                 }
@@ -560,14 +578,16 @@ fn append_provider_call<G: SessionGraph>(
 /// Implements [`AttemptObserver`], buffering attempts in an internal mutex-protected
 /// vector. The wrapper drains this buffer after the inner stream terminates.
 #[allow(dead_code)]
-struct AttemptCollector {
+struct AttemptCollector<S: ObjectStore> {
+    store: Arc<S>,
     attempts: Mutex<Vec<AttemptRecord>>,
 }
 
 #[allow(dead_code)]
-impl AttemptCollector {
-    fn new() -> Self {
+impl<S: ObjectStore> AttemptCollector<S> {
+    fn new(store: Arc<S>) -> Self {
         Self {
+            store,
             attempts: Mutex::new(Vec::new()),
         }
     }
@@ -591,7 +611,7 @@ impl AttemptCollector {
     }
 }
 
-impl AttemptObserver for AttemptCollector {
+impl<S: ObjectStore> AttemptObserver for AttemptCollector<S> {
     fn record_attempt(&self, attempt: AttemptRecord) {
         let mut guard = self.attempts.lock().unwrap_or_else(|poisoned| {
             // Mutex poisoning is recovered to avoid losing attempts; poisoning indicates
@@ -600,11 +620,15 @@ impl AttemptObserver for AttemptCollector {
         });
         guard.push(attempt);
     }
+
+    fn put_object(&self, bytes: &[u8]) -> Result<Hash, JournalError> {
+        self.store.put(bytes)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::thread;
 
     use akmon_journal::{
@@ -627,8 +651,18 @@ mod tests {
         events: Vec<Result<StreamEvent, ModelError>>,
     }
 
+    struct InstrumentedMockProvider {
+        observer: RwLock<Option<Arc<dyn AttemptObserver>>>,
+        events: Vec<Result<StreamEvent, ModelError>>,
+    }
+
     type WrappedHandles = (
         JournalingProvider<MockProvider, MemoryObjectStore, MemorySessionGraph>,
+        Arc<MemoryObjectStore>,
+        Arc<Mutex<MemorySessionGraph>>,
+    );
+    type InstrumentedWrappedHandles = (
+        JournalingProvider<InstrumentedMockProvider, MemoryObjectStore, MemorySessionGraph>,
         Arc<MemoryObjectStore>,
         Arc<Mutex<MemorySessionGraph>>,
     );
@@ -673,6 +707,46 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl LlmProvider for InstrumentedMockProvider {
+        fn name(&self) -> &str {
+            "instrumented-mock"
+        }
+
+        fn context_window_tokens(&self) -> usize {
+            8192
+        }
+
+        fn completion_model_id(&self) -> &str {
+            "instrumented-model"
+        }
+
+        fn set_attempt_observer(&self, observer: Arc<dyn AttemptObserver>) {
+            let mut slot = self
+                .observer
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *slot = Some(observer);
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _config: &CompletionConfig,
+        ) -> Result<CompletionStream, ModelError> {
+            let observer = self
+                .observer
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(obs) = observer {
+                obs.record_attempt(sample_attempt(1));
+                obs.record_attempt(sample_attempt(2));
+            }
+            Ok(Box::pin(futures::stream::iter(self.events.clone())))
+        }
+    }
+
     fn wrapped_with_mock(
         mock: MockProvider,
     ) -> JournalingProvider<MockProvider, MemoryObjectStore, MemorySessionGraph> {
@@ -694,6 +768,29 @@ mod tests {
         let graph = Arc::new(Mutex::new(graph));
         let wrapped = JournalingProvider::new(
             mock,
+            "mock-provider".to_owned(),
+            Arc::clone(&store),
+            Arc::clone(&graph),
+        );
+        (wrapped, store, graph)
+    }
+
+    fn wrapped_with_instrumented_handles(
+        provider: InstrumentedMockProvider,
+    ) -> InstrumentedWrappedHandles {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(Arc::clone(&store), uuid::Uuid::new_v4());
+        let cwd_hash = store.put(b"cwd").expect("cwd hash");
+        let config_hash = store.put(b"config").expect("config hash");
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            })
+            .expect("session start");
+        let graph = Arc::new(Mutex::new(graph));
+        let wrapped = JournalingProvider::new(
+            provider,
             "mock-provider".to_owned(),
             Arc::clone(&store),
             Arc::clone(&graph),
@@ -798,20 +895,20 @@ mod tests {
 
     #[test]
     fn t_collector_starts_empty() {
-        let c = AttemptCollector::new();
+        let c = AttemptCollector::new(Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256)));
         assert_eq!(c.len(), 0);
     }
 
     #[test]
     fn t_collector_records_one_attempt() {
-        let c = AttemptCollector::new();
+        let c = AttemptCollector::new(Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256)));
         c.record_attempt(sample_attempt(1));
         assert_eq!(c.len(), 1);
     }
 
     #[test]
     fn t_collector_records_multiple_in_order() {
-        let c = AttemptCollector::new();
+        let c = AttemptCollector::new(Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256)));
         c.record_attempt(sample_attempt(1));
         c.record_attempt(sample_attempt(2));
         c.record_attempt(sample_attempt(3));
@@ -824,7 +921,7 @@ mod tests {
 
     #[test]
     fn t_collector_drain_resets() {
-        let c = AttemptCollector::new();
+        let c = AttemptCollector::new(Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256)));
         c.record_attempt(sample_attempt(1));
         let _ = c.drain();
         assert_eq!(c.len(), 0);
@@ -834,7 +931,9 @@ mod tests {
     fn t_collector_concurrent_access_safe() {
         const THREADS: usize = 8;
         const WRITES_PER_THREAD: usize = 10;
-        let c = Arc::new(AttemptCollector::new());
+        let c = Arc::new(AttemptCollector::new(Arc::new(MemoryObjectStore::new(
+            HashAlgorithm::Sha256,
+        ))));
         let mut joins = Vec::new();
         for thread_idx in 0..THREADS {
             let collector = Arc::clone(&c);
@@ -853,7 +952,9 @@ mod tests {
 
     #[test]
     fn t_collector_via_trait_object() {
-        let c = Arc::new(AttemptCollector::new());
+        let c = Arc::new(AttemptCollector::new(Arc::new(MemoryObjectStore::new(
+            HashAlgorithm::Sha256,
+        ))));
         let observer: Arc<dyn AttemptObserver> = c.clone();
         observer.record_attempt(sample_attempt(1));
         assert_eq!(c.len(), 1);
@@ -1243,5 +1344,74 @@ mod tests {
                 .iter()
                 .any(|(_, e)| matches!(e.kind, EventKind::ProviderCall { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn t_set_attempt_observer_default_is_noop() {
+        let (wrapped, _store, graph) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: vec![Ok(StreamEvent::Done {
+                stop_reason: crate::StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        });
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        while stream.next().await.is_some() {}
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        let (_, event) = history.last().expect("last");
+        match &event.kind {
+            EventKind::ProviderCall { attempts, .. } => assert_eq!(attempts.len(), 1),
+            _ => panic!("expected ProviderCall"),
+        }
+    }
+
+    #[tokio::test]
+    async fn t_set_attempt_observer_with_instrumented_backend() {
+        let provider = InstrumentedMockProvider {
+            observer: RwLock::new(None),
+            events: vec![Ok(StreamEvent::Done {
+                stop_reason: crate::StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        };
+        let (wrapped, _store, graph) = wrapped_with_instrumented_handles(provider);
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        while stream.next().await.is_some() {}
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        let (_, event) = history.last().expect("last");
+        match &event.kind {
+            EventKind::ProviderCall { attempts, .. } => assert_eq!(attempts.len(), 2),
+            _ => panic!("expected ProviderCall"),
+        }
+    }
+
+    #[test]
+    fn t_trait_object_compatibility() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: vec![],
+        });
+        let observer: Arc<dyn AttemptObserver> = Arc::new(AttemptCollector::new(Arc::new(
+            MemoryObjectStore::new(HashAlgorithm::Sha256),
+        )));
+        provider.set_attempt_observer(observer);
     }
 }
