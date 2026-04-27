@@ -31,7 +31,7 @@ use crate::context::{
     build_subagent_task_messages, context_limit_for_model,
 };
 use crate::context_manager::ContextManager;
-use crate::journal::{JournalHandle, emit_session_start};
+use crate::journal::{JournalHandle, emit_session_start, emit_user_turn};
 use crate::microcompact::{
     MICROCOMPACT_KEEP_RECENT_DEFAULT, MICROCOMPACT_KEEP_RECENT_GROQ, apply_microcompact_context,
 };
@@ -767,6 +767,10 @@ where
     ///
     /// When `interrupt_after_current_tools` is [`Some`] and the flag is set after a tool batch
     /// finishes, the session emits [`AgentEvent::Done`] and returns [`Ok(())`] without another model call.
+    ///
+    /// After [`Self::prepare_for_new_user_turn`] succeeds and state is [`AgentState::Idle`], appends
+    /// [`UserTurn`](akmon_journal::EventKind::UserTurn) to the journal (`task` as UTF-8); failure returns
+    /// [`AgentError::SessionFailed`] and does not run the model loop.
     pub async fn run(
         &mut self,
         task: String,
@@ -782,6 +786,8 @@ where
                 message: "AgentSession::run expected Idle state after prepare".into(),
             });
         }
+
+        emit_user_turn(&self.journal, &task)?;
 
         let mut iteration: u32 = 0;
         let mut user_line_committed = false;
@@ -3005,7 +3011,8 @@ mod tests {
         ToolPolicyConfig,
     };
     use akmon_journal::{
-        EventKind, Hash, HashAlgorithm, MemoryObjectStore, MemorySessionGraph, SessionGraph,
+        EventKind, Hash, HashAlgorithm, JournalError, MemoryObjectStore, MemorySessionGraph,
+        ObjectStore, SessionGraph, VerificationReport,
     };
     use async_trait::async_trait;
     use futures::stream;
@@ -3031,6 +3038,47 @@ mod tests {
 
     fn test_journal() -> JournalHandle<MemoryObjectStore, MemorySessionGraph> {
         test_journal_sid(Uuid::nil())
+    }
+
+    /// [`SessionGraph`] that rejects [`EventKind::UserTurn`] after [`MemorySessionGraph`] accepted `SessionStart`.
+    struct RejectUserTurnAppend {
+        inner: MemorySessionGraph,
+    }
+
+    impl SessionGraph for RejectUserTurnAppend {
+        fn session_id(&self) -> Uuid {
+            self.inner.session_id()
+        }
+
+        fn append(&mut self, kind: EventKind) -> akmon_journal::Result<Hash> {
+            if matches!(kind, EventKind::UserTurn { .. }) {
+                return Err(JournalError::Verification(
+                    "test reject UserTurn append".into(),
+                ));
+            }
+            self.inner.append(kind)
+        }
+
+        fn head(&self) -> akmon_journal::Result<Option<Hash>> {
+            self.inner.head()
+        }
+
+        fn history(&self) -> akmon_journal::Result<Vec<(Hash, akmon_journal::Event)>> {
+            self.inner.history()
+        }
+
+        fn verify(&self) -> akmon_journal::Result<VerificationReport> {
+            self.inner.verify()
+        }
+    }
+
+    fn test_journal_reject_user_turn_append(
+        session_id: Uuid,
+    ) -> JournalHandle<MemoryObjectStore, RejectUserTurnAppend> {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let inner = MemorySessionGraph::open_new(Arc::clone(&store), session_id);
+        let graph = Arc::new(Mutex::new(RejectUserTurnAppend { inner }));
+        JournalHandle::new(store, graph)
     }
 
     #[test]
@@ -5160,6 +5208,150 @@ mod tests {
         .expect("s2");
         let c2 = config_hash_from_session_start(&s2);
         assert_eq!(c1, c2);
+    }
+
+    #[tokio::test]
+    async fn t_user_turn_emitted_after_prepare() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let task = "known user turn text";
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run(task.into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        assert_eq!(h.len(), 2, "{h:?}");
+        assert!(matches!(h[0].1.kind, EventKind::SessionStart { .. }));
+        let prompt_hash = match &h[1].1.kind {
+            EventKind::UserTurn { prompt_hash } => prompt_hash.clone(),
+            ref k => panic!("expected UserTurn, got {k:?}"),
+        };
+        let bytes = session
+            .journal
+            .store
+            .get(&prompt_hash)
+            .expect("get")
+            .expect("blob");
+        assert_eq!(bytes.as_ref(), task.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn t_user_turn_emission_failure_returns_err() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_reject_user_turn_append(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        assert_eq!(session.journal_history_snapshot().expect("h0").len(), 1);
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        let err = session
+            .run("any task".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect_err("run should fail when UserTurn append fails");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("test reject UserTurn append"),
+            "unexpected err: {msg}"
+        );
+        assert_eq!(session.journal_history_snapshot().expect("h1").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn t_multiple_run_calls_emit_multiple_user_turns() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("first".into(), tx.clone(), &mut no_policy, &mut None, None)
+            .await
+            .expect("run1");
+        session
+            .run("second".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run2");
+        let h = session.journal_history_snapshot().expect("hist");
+        assert_eq!(h.len(), 3, "{h:?}");
+        assert!(matches!(h[0].1.kind, EventKind::SessionStart { .. }));
+        let h1 = match &h[1].1.kind {
+            EventKind::UserTurn { prompt_hash } => prompt_hash.clone(),
+            ref k => panic!("expected UserTurn, got {k:?}"),
+        };
+        let h2 = match &h[2].1.kind {
+            EventKind::UserTurn { prompt_hash } => prompt_hash.clone(),
+            ref k => panic!("expected UserTurn, got {k:?}"),
+        };
+        assert_ne!(h1, h2);
+        let b1 = session.journal.store.get(&h1).expect("g1").expect("blob1");
+        let b2 = session.journal.store.get(&h2).expect("g2").expect("blob2");
+        assert_eq!(b1.as_ref(), b"first");
+        assert_eq!(b2.as_ref(), b"second");
     }
 
     #[test]

@@ -121,6 +121,30 @@ where
     Ok(())
 }
 
+/// Stores `prompt` as raw UTF-8 bytes and appends [`UserTurn`](EventKind::UserTurn).
+///
+/// The blob is hashed from UTF-8 octets only (no CBOR envelope): the content address is the
+/// literal task bytes, which is deterministic and matches “hash what the model saw as user text”.
+pub(crate) fn emit_user_turn<S, G>(
+    journal: &JournalHandle<S, G>,
+    prompt: &str,
+) -> Result<(), AgentError>
+where
+    S: ObjectStore,
+    G: SessionGraph,
+{
+    let prompt_bytes = prompt.as_bytes().to_vec();
+    let prompt_hash = journal.store.put(&prompt_bytes).map_err(journal_err)?;
+    let mut guard = journal
+        .graph
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .append(EventKind::UserTurn { prompt_hash })
+        .map_err(journal_err)?;
+    Ok(())
+}
+
 /// Appends [`SessionEnd`](EventKind::SessionEnd).
 pub(crate) fn append_session_end<S, G>(
     journal: &JournalHandle<S, G>,
