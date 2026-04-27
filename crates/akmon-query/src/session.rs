@@ -19,7 +19,9 @@ use akmon_models::{
     anthropic_system_block_text, approximate_tokens, canonical_provider_id,
     looks_like_ollama_model, max_tokens_for_model, ollama_first_token_deadline_ms,
 };
-use akmon_tools::{McpPolicyContext, Tool, ToolContext, ToolOutput, unified_diff_text};
+use akmon_tools::{
+    JournalingTool, McpPolicyContext, Tool, ToolContext, ToolOutput, unified_diff_text,
+};
 use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::{Value, json};
@@ -278,7 +280,7 @@ where
     S: ObjectStore + Send + Sync + 'static,
     G: SessionGraph + Send + 'static,
 {
-    /// Creates a session in [`AgentState::Idle`] with the given dependencies, emits [`SessionStart`](akmon_journal::EventKind::SessionStart), then wraps `provider` in [`JournalingProvider`](akmon_models::JournalingProvider) for journal-backed completions.
+    /// Creates a session in [`AgentState::Idle`] with the given dependencies, emits [`SessionStart`](akmon_journal::EventKind::SessionStart), wraps `provider` in [`JournalingProvider`](akmon_models::JournalingProvider), then wraps each tool in [`JournalingTool`](akmon_tools::JournalingTool) so every dispatch emits [`ToolCall`](akmon_journal::EventKind::ToolCall) evidence.
     #[allow(clippy::too_many_arguments)] // journal handle is an explicit construction dependency (Item 3.1b).
     pub fn new(
         config: AgentConfig,
@@ -298,7 +300,6 @@ where
             keep_recent: ContextManager::default().keep_recent,
             fixed_system_messages,
         };
-        let tools: Vec<Arc<dyn Tool>> = tools.into_iter().map(Arc::from).collect();
         emit_session_start(&journal, &config)?;
         let provider_id = canonical_provider_id(provider.as_ref());
         let inner: Arc<dyn LlmProvider + Send + Sync> = provider;
@@ -308,6 +309,7 @@ where
             journal.store.clone(),
             journal.graph.clone(),
         ));
+        let tools = Self::journal_wrap_tools(tools, &journal);
         Ok(Self {
             config,
             state: AgentState::Idle,
@@ -348,6 +350,25 @@ where
             journal_started: AtomicBool::new(true),
             ended: AtomicBool::new(false),
         })
+    }
+
+    fn journal_wrap_tools(
+        tools: Vec<Box<dyn Tool>>,
+        journal: &JournalHandle<S, G>,
+    ) -> Vec<Arc<dyn Tool>> {
+        tools
+            .into_iter()
+            .map(|boxed| {
+                let inner: Arc<dyn Tool> = Arc::from(boxed);
+                let tool_id = inner.name().to_string();
+                Arc::new(JournalingTool::new(
+                    inner,
+                    tool_id,
+                    journal.store.clone(),
+                    journal.graph.clone(),
+                )) as Arc<dyn Tool>
+            })
+            .collect()
     }
 
     fn try_emit_session_end_once(
@@ -605,8 +626,10 @@ where
     }
 
     /// Swaps the tool registry (e.g. between plan-only and full implementation turns).
+    ///
+    /// Each incoming tool is wrapped in [`JournalingTool`](akmon_tools::JournalingTool) like at construction.
     pub fn replace_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
-        self.tools = tools.into_iter().map(Arc::from).collect();
+        self.tools = Self::journal_wrap_tools(tools, &self.journal);
     }
 
     /// Enables or disables plan-mode system prompts for subsequent model calls.
@@ -3583,6 +3606,32 @@ mod tests {
         }
     }
 
+    /// Minimal tool for journal `ToolCall` integration tests (fixed success body).
+    struct JournalEmitTool {
+        id: &'static str,
+    }
+
+    #[async_trait]
+    impl Tool for JournalEmitTool {
+        fn name(&self) -> &str {
+            self.id
+        }
+
+        fn description(&self) -> &str {
+            "journal emit test tool"
+        }
+
+        fn required_permissions(&self) -> &[Permission] {
+            delay_tool_perms()
+        }
+
+        async fn execute(&self, _args: Value, _ctx: &ToolContext) -> ToolOutput {
+            ToolOutput::Success {
+                content: "journal-fixed".into(),
+            }
+        }
+    }
+
     struct TimeoutTool;
 
     #[async_trait]
@@ -5552,6 +5601,248 @@ mod tests {
             n_pc >= 2,
             "expected summarization + main ProviderCall, got {h:?}"
         );
+    }
+
+    fn journal_test_canonical_cbor<T: serde::Serialize + ?Sized>(v: &T) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(v, &mut bytes).expect("cbor");
+        bytes
+    }
+
+    #[tokio::test]
+    async fn t_tool_call_event_emitted_during_dispatch() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tool_name = "journal_emit_tool";
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "tc1".into(),
+                    name: tool_name.into(),
+                    arguments: json!({"n": 7}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![Box::new(JournalEmitTool { id: tool_name })],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let first_pc = h
+            .iter()
+            .position(|(_, e)| matches!(e.kind, EventKind::ProviderCall { .. }))
+            .expect("ProviderCall");
+        let tc_idx = h
+            .iter()
+            .enumerate()
+            .find_map(|(i, (_, e))| matches!(e.kind, EventKind::ToolCall { .. }).then_some(i))
+            .expect("ToolCall");
+        assert!(
+            tc_idx > first_pc,
+            "ToolCall should follow first ProviderCall: {h:?}"
+        );
+        match &h[tc_idx].1.kind {
+            EventKind::ToolCall { tool_id, .. } => assert_eq!(tool_id, tool_name),
+            k => panic!("expected ToolCall, got {k:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn t_tool_call_input_output_resolvable_in_store() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tool_name = "journal_emit_tool";
+        let args = json!({"n": 7});
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "tc1".into(),
+                    name: tool_name.into(),
+                    arguments: args.clone(),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![Box::new(JournalEmitTool { id: tool_name })],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let (input_hash, output_hash, side_fx) = h
+            .iter()
+            .find_map(|(_, e)| match &e.kind {
+                EventKind::ToolCall {
+                    input_hash,
+                    output_hash,
+                    side_effects_hash,
+                    ..
+                } => Some((
+                    input_hash.clone(),
+                    output_hash.clone(),
+                    side_effects_hash.clone(),
+                )),
+                _ => None,
+            })
+            .expect("ToolCall");
+        assert!(
+            side_fx.is_none(),
+            "expected no side_effects_hash, got {side_fx:?}"
+        );
+        let expected_in = journal_test_canonical_cbor(&args);
+        let expected_out = journal_test_canonical_cbor(&ToolOutput::Success {
+            content: "journal-fixed".into(),
+        });
+        let got_in = session
+            .journal
+            .store
+            .get(&input_hash)
+            .expect("get in")
+            .expect("blob in");
+        let got_out = session
+            .journal
+            .store
+            .get(&output_hash)
+            .expect("get out")
+            .expect("blob out");
+        assert_eq!(got_in.as_ref(), expected_in.as_slice());
+        assert_eq!(got_out.as_ref(), expected_out.as_slice());
+    }
+
+    #[tokio::test]
+    async fn t_multiple_tools_each_emit_tool_call() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![
+                    ModelToolCall {
+                        id: "a".into(),
+                        name: "journal_emit_a".into(),
+                        arguments: json!({}),
+                    },
+                    ModelToolCall {
+                        id: "b".into(),
+                        name: "journal_emit_b".into(),
+                        arguments: json!({}),
+                    },
+                ],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![
+                Box::new(JournalEmitTool {
+                    id: "journal_emit_a",
+                }),
+                Box::new(JournalEmitTool {
+                    id: "journal_emit_b",
+                }),
+            ],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let ids: Vec<String> = h
+            .iter()
+            .filter_map(|(_, e)| match &e.kind {
+                EventKind::ToolCall { tool_id, .. } => Some(tool_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2, "expected two ToolCall events, got {ids:?}");
+        assert_ne!(ids[0], ids[1]);
+        assert!(ids.contains(&"journal_emit_a".into()));
+        assert!(ids.contains(&"journal_emit_b".into()));
     }
 
     #[test]
