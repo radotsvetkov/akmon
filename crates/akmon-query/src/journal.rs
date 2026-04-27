@@ -9,6 +9,7 @@ use akmon_journal::{
     SessionGraph,
 };
 use serde::Serialize;
+use serde_json::Value;
 use uuid::Uuid;
 
 /// Shared object store and mutex-protected session graph for one agent session.
@@ -141,6 +142,53 @@ where
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard
         .append(EventKind::UserTurn { prompt_hash })
+        .map_err(journal_err)?;
+    Ok(())
+}
+
+/// CBOR-backed permission decision context (minimal v2.0.0 shape: tool id, args, human-readable path).
+#[derive(Serialize)]
+struct PermissionGateContext<'a> {
+    tool_name: &'a str,
+    tool_input: &'a Value,
+    decision_path: &'a str,
+}
+
+/// Serializes [`PermissionGateContext`] to canonical CBOR for [`emit_permission_gate`].
+pub(crate) fn permission_gate_context_cbor(
+    tool_name: &str,
+    tool_input: &Value,
+    decision_path: &str,
+) -> Result<Vec<u8>, AgentError> {
+    canonical_cbor_bytes(&PermissionGateContext {
+        tool_name,
+        tool_input,
+        decision_path,
+    })
+}
+
+/// Appends [`EventKind::PermissionGate`] after storing `context_bytes` in the journal object store.
+pub(crate) fn emit_permission_gate<S, G>(
+    journal: &JournalHandle<S, G>,
+    policy_id: &str,
+    decision: &str,
+    context_bytes: &[u8],
+) -> Result<(), AgentError>
+where
+    S: ObjectStore,
+    G: SessionGraph,
+{
+    let context_hash = journal.store.put(context_bytes).map_err(journal_err)?;
+    let mut guard = journal
+        .graph
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .append(EventKind::PermissionGate {
+            policy_id: policy_id.to_owned(),
+            decision: decision.to_owned(),
+            context_hash,
+        })
         .map_err(journal_err)?;
     Ok(())
 }

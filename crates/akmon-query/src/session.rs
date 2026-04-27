@@ -371,6 +371,41 @@ where
             .collect()
     }
 
+    /// Best-effort [`akmon_journal::EventKind::PermissionGate`] emission; failures are logged and ignored.
+    fn warn_emit_permission_gate(
+        &self,
+        policy_id: &str,
+        decision: &str,
+        tool_name: &str,
+        tool_input: &Value,
+        decision_path: &str,
+    ) {
+        let bytes = match crate::journal::permission_gate_context_cbor(
+            tool_name,
+            tool_input,
+            decision_path,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    target: "akmon::session",
+                    error = %e,
+                    "PermissionGate context serialization failed; skipping journal event"
+                );
+                return;
+            }
+        };
+        if let Err(e) =
+            crate::journal::emit_permission_gate(&self.journal, policy_id, decision, &bytes)
+        {
+            tracing::warn!(
+                target: "akmon::session",
+                error = %e,
+                "PermissionGate journal emission failed; continuing session"
+            );
+        }
+    }
+
     fn try_emit_session_end_once(
         &self,
         summary_hash: Option<akmon_journal::Hash>,
@@ -630,6 +665,11 @@ where
     /// Each incoming tool is wrapped in [`JournalingTool`](akmon_tools::JournalingTool) like at construction.
     pub fn replace_tools(&mut self, tools: Vec<Box<dyn Tool>>) {
         self.tools = Self::journal_wrap_tools(tools, &self.journal);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_permission_allow_all_writes(&mut self, allow: bool) {
+        self.permission_allow_all_writes = allow;
     }
 
     /// Enables or disables plan-mode system prompts for subsequent model calls.
@@ -1603,6 +1643,17 @@ Complete and verify the current file(s), then continue in the next turn.";
                     Some(ctx.tool.as_str()),
                 );
                 self.audit_log.push(decision.audit.clone());
+                self.warn_emit_permission_gate(
+                    "mcp:auto",
+                    if decision.allowed {
+                        "allowed"
+                    } else {
+                        "denied"
+                    },
+                    name.as_str(),
+                    &args,
+                    "evaluate_mcp_automatic (MCP server/tool context)",
+                );
                 if !decision.allowed {
                     policy_denial_message = Some(format!(
                         "policy denied for MCP tool `{name}` (server=`{}`, tool=`{}`): {}",
@@ -1617,6 +1668,17 @@ Complete and verify the current file(s), then continue in the next turn.";
                     None,
                 );
                 self.audit_log.push(decision.audit.clone());
+                self.warn_emit_permission_gate(
+                    "mcp:auto",
+                    if decision.allowed {
+                        "allowed"
+                    } else {
+                        "denied"
+                    },
+                    name.as_str(),
+                    &args,
+                    "evaluate_mcp_automatic (mcp_tool without MCP context)",
+                );
                 if !decision.allowed {
                     policy_denial_message = Some(format!(
                         "policy denied for MCP tool `{name}` due to malformed context: {}",
@@ -1672,6 +1734,17 @@ Complete and verify the current file(s), then continue in the next turn.";
                         }
                     };
                     self.audit_log.push(decision.audit.clone());
+                    self.warn_emit_permission_gate(
+                        "remembered:write",
+                        if decision.allowed {
+                            "allowed"
+                        } else {
+                            "denied"
+                        },
+                        name.as_str(),
+                        &args,
+                        "allow-all-writes session shortcut (resolve_interactive Allow)",
+                    );
                     if !decision.allowed {
                         policy_denial_message = Some(format!(
                             "policy denied for tool `{name}` permission `{perm:?}`: {}",
@@ -1702,6 +1775,17 @@ Complete and verify the current file(s), then continue in the next turn.";
                         }
                     };
                     self.audit_log.push(decision.audit.clone());
+                    self.warn_emit_permission_gate(
+                        "remembered:shell-prefix",
+                        if decision.allowed {
+                            "allowed"
+                        } else {
+                            "denied"
+                        },
+                        name.as_str(),
+                        &args,
+                        "shell command prefix session shortcut (resolve_interactive Allow)",
+                    );
                     if !decision.allowed {
                         policy_denial_message = Some(format!(
                             "policy denied for tool `{name}` permission `{perm:?}`: {}",
@@ -1727,6 +1811,17 @@ Complete and verify the current file(s), then continue in the next turn.";
                         }
                     };
                     self.audit_log.push(decision.audit.clone());
+                    self.warn_emit_permission_gate(
+                        "remembered:session",
+                        if decision.allowed {
+                            "allowed"
+                        } else {
+                            "denied"
+                        },
+                        name.as_str(),
+                        &args,
+                        "session allowlist identical permission (resolve_interactive Allow)",
+                    );
                     if !decision.allowed {
                         policy_denial_message = Some(format!(
                             "policy denied for tool `{name}` permission `{perm:?}`: {}",
@@ -1748,6 +1843,17 @@ Complete and verify the current file(s), then continue in the next turn.";
                         ) {
                             Ok(decision) => {
                                 self.audit_log.push(decision.audit.clone());
+                                self.warn_emit_permission_gate(
+                                    "tool:auto",
+                                    if decision.allowed {
+                                        "allowed"
+                                    } else {
+                                        "denied"
+                                    },
+                                    name.as_str(),
+                                    &args,
+                                    "evaluate_automatic_for_tool (interactive or auto-read modes)",
+                                );
                                 decision
                             }
                             Err(PolicyEngineError::InteractiveRequiresCaller) => {
@@ -1819,6 +1925,17 @@ Complete and verify the current file(s), then continue in the next turn.";
                                     }
                                 };
                                 self.audit_log.push(decision.audit.clone());
+                                self.warn_emit_permission_gate(
+                                    "interactive",
+                                    if decision.allowed {
+                                        "allowed"
+                                    } else {
+                                        "denied"
+                                    },
+                                    name.as_str(),
+                                    &args,
+                                    "resolve_interactive after user confirmation",
+                                );
                                 if reply.remember_for_session
                                     && decision.allowed
                                     && !self.permission_session_allowlist.contains(&perm)
@@ -1865,6 +1982,17 @@ Complete and verify the current file(s), then continue in the next turn.";
                             }
                         };
                         self.audit_log.push(decision.audit.clone());
+                        self.warn_emit_permission_gate(
+                            "tool:auto",
+                            if decision.allowed {
+                                "allowed"
+                            } else {
+                                "denied"
+                            },
+                            name.as_str(),
+                            &args,
+                            "evaluate_automatic_for_tool (configured or deny-all mode)",
+                        );
                         decision
                     }
                 };
@@ -3108,6 +3236,67 @@ mod tests {
         let inner = MemorySessionGraph::open_new(Arc::clone(&store), session_id);
         let graph = Arc::new(Mutex::new(RejectUserTurnAppend { inner }));
         JournalHandle::new(store, graph)
+    }
+
+    /// [`SessionGraph`] that rejects [`EventKind::PermissionGate`] only (other events delegate).
+    struct RejectPermissionGateAppend {
+        inner: MemorySessionGraph,
+    }
+
+    impl SessionGraph for RejectPermissionGateAppend {
+        fn session_id(&self) -> Uuid {
+            self.inner.session_id()
+        }
+
+        fn append(&mut self, kind: EventKind) -> akmon_journal::Result<Hash> {
+            if matches!(kind, EventKind::PermissionGate { .. }) {
+                return Err(JournalError::Verification(
+                    "test reject PermissionGate append".into(),
+                ));
+            }
+            self.inner.append(kind)
+        }
+
+        fn head(&self) -> akmon_journal::Result<Option<Hash>> {
+            self.inner.head()
+        }
+
+        fn history(&self) -> akmon_journal::Result<Vec<(Hash, akmon_journal::Event)>> {
+            self.inner.history()
+        }
+
+        fn verify(&self) -> akmon_journal::Result<VerificationReport> {
+            self.inner.verify()
+        }
+    }
+
+    fn test_journal_reject_permission_gate(
+        session_id: Uuid,
+    ) -> JournalHandle<MemoryObjectStore, RejectPermissionGateAppend> {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let inner = MemorySessionGraph::open_new(Arc::clone(&store), session_id);
+        let graph = Arc::new(Mutex::new(RejectPermissionGateAppend { inner }));
+        JournalHandle::new(store, graph)
+    }
+
+    fn last_permission_gate_before_tool_call(
+        h: &[(Hash, akmon_journal::Event)],
+    ) -> Option<(&str, &str)> {
+        let tc_i = h
+            .iter()
+            .position(|(_, e)| matches!(e.kind, EventKind::ToolCall { .. }))?;
+        let mut out = None;
+        for (_, e) in h.iter().take(tc_i) {
+            if let EventKind::PermissionGate {
+                policy_id,
+                decision,
+                ..
+            } = &e.kind
+            {
+                out = Some((policy_id.as_str(), decision.as_str()));
+            }
+        }
+        out
     }
 
     #[test]
@@ -5843,6 +6032,308 @@ mod tests {
         assert_ne!(ids[0], ids[1]);
         assert!(ids.contains(&"journal_emit_a".into()));
         assert!(ids.contains(&"journal_emit_b".into()));
+    }
+
+    #[tokio::test]
+    async fn t_permission_gate_emitted_for_automatic_allow() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tool_name = "journal_emit_tool";
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "g1".into(),
+                    name: tool_name.into(),
+                    arguments: json!({}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![Box::new(JournalEmitTool { id: tool_name })],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("t".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let (pid, dec) = last_permission_gate_before_tool_call(&h).expect("pg before tc");
+        assert_eq!(pid, "tool:auto");
+        assert_eq!(dec, "allowed");
+    }
+
+    #[tokio::test]
+    async fn t_permission_gate_emitted_for_denial() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tool_name = "journal_emit_tool";
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "g1".into(),
+                    name: tool_name.into(),
+                    arguments: json!({}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(seq),
+            vec![Box::new(JournalEmitTool { id: tool_name })],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("t".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        assert!(
+            !h.iter()
+                .any(|(_, e)| matches!(e.kind, EventKind::ToolCall { .. })),
+            "denied tool must not execute: {h:?}"
+        );
+        let pg = h.iter().find_map(|(_, e)| match &e.kind {
+            EventKind::PermissionGate {
+                policy_id,
+                decision,
+                ..
+            } => Some((policy_id.as_str(), decision.as_str())),
+            _ => None,
+        });
+        let (pid, dec) = pg.expect("PermissionGate");
+        assert_eq!(pid, "tool:auto");
+        assert_eq!(dec, "denied");
+    }
+
+    #[tokio::test]
+    async fn t_permission_gate_emitted_for_interactive_confirmation() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "w1".into(),
+                    name: "write_file".into(),
+                    arguments: json!({"path": "out.txt", "content": "x"}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(4);
+        let _ = policy_tx.send(InteractivePolicyReply::allow_once()).await;
+
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
+            Arc::new(seq),
+            vec![Box::new(akmon_tools::WriteFileTool::new())],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut policy_opt = Some(policy_rx);
+        session
+            .run("task".into(), tx, &mut policy_opt, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let (pid, dec) = last_permission_gate_before_tool_call(&h).expect("pg before tc");
+        assert_eq!(pid, "interactive");
+        assert_eq!(dec, "allowed");
+        assert!(tmp.path().join("out.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn t_permission_gate_emitted_for_remembered_approval() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "w1".into(),
+                    name: "write_file".into(),
+                    arguments: json!({"path": "mem.txt", "content": "y"}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::Interactive)),
+            Arc::new(seq),
+            vec![Box::new(akmon_tools::WriteFileTool::new())],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        session.test_set_permission_allow_all_writes(true);
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let (pid, dec) = last_permission_gate_before_tool_call(&h).expect("pg before tc");
+        assert_eq!(pid, "remembered:write");
+        assert_eq!(dec, "allowed");
+        assert!(tmp.path().join("mem.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn t_permission_gate_failure_does_not_break_policy() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_reject_permission_gate(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        tokio::fs::write(tmp.path().join("f.txt"), b"z")
+            .await
+            .expect("w");
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ModelToolCall {
+                    id: "r1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "f.txt"}),
+                }],
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![Box::new(akmon_tools::ReadFileTool::new())],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("go".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let n_pg = h
+            .iter()
+            .filter(|(_, e)| matches!(e.kind, EventKind::PermissionGate { .. }))
+            .count();
+        assert_eq!(n_pg, 0, "PermissionGate append was rejected");
+        assert!(
+            h.iter()
+                .any(|(_, e)| matches!(e.kind, EventKind::ToolCall { .. })),
+            "tool should still run: {h:?}"
+        );
+        let tool_msgs: Vec<_> = session
+            .context
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert!(tool_msgs[0].content.contains('z'));
     }
 
     #[test]
