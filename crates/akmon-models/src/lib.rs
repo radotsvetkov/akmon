@@ -41,7 +41,9 @@ pub use ollama_models::{
 };
 pub use openai_compat::{OpenAiCompatBackend, infer_context_window_tokens};
 pub use provider_error::{ProviderError, ProviderResult};
-pub use provider_resolution::{ProviderResolutionCandidate, ProviderResolutionTrace};
+pub use provider_resolution::{
+    ProviderResolutionCandidate, ProviderResolutionTrace, canonical_provider_id,
+};
 pub use stream::{CompletionStream, ModelToolCall, StopReason, StreamEvent, UsageReport};
 pub use tool_def::ToolDefinition;
 
@@ -138,6 +140,40 @@ pub trait LlmProvider: Send + Sync {
         messages: &[Message],
         config: &CompletionConfig,
     ) -> Result<CompletionStream, ModelError>;
+}
+
+/// Forwards [`LlmProvider`] so [`JournalingProvider`] and other wrappers can use `Arc<dyn LlmProvider>` as inner `P`.
+///
+/// The explicit `Send + Sync` bounds match the object-safety requirements of [`LlmProvider`].
+#[async_trait]
+impl LlmProvider for Arc<dyn LlmProvider + Send + Sync> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn context_window_tokens(&self) -> usize {
+        (**self).context_window_tokens()
+    }
+
+    fn completion_model_id(&self) -> &str {
+        (**self).completion_model_id()
+    }
+
+    fn estimate_tokens(&self, messages: &[Message]) -> Option<usize> {
+        (**self).estimate_tokens(messages)
+    }
+
+    fn set_attempt_observer(&self, observer: Arc<dyn AttemptObserver>) {
+        (**self).set_attempt_observer(observer);
+    }
+
+    async fn complete(
+        &self,
+        messages: &[Message],
+        config: &CompletionConfig,
+    ) -> Result<CompletionStream, ModelError> {
+        (**self).complete(messages, config).await
+    }
 }
 
 #[cfg(test)]

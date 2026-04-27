@@ -312,17 +312,28 @@ where
                             Err(err) => {
                                 this.last_error = Some(err.clone());
                                 this.done_seen = true;
+                                if let Err(fe) = this.finalize() {
+                                    return Poll::Ready(Some(Err(fe)));
+                                }
                                 return Poll::Ready(Some(Err(err)));
                             }
                         }
                         accumulate_response(event, &mut this.response);
+                        // Finalize before yielding `Done` so consumers that stop polling after the
+                        // terminal event still persist [`EventKind::ProviderCall`] in this poll.
                         if matches!(event, StreamEvent::Done { .. }) {
                             this.done_seen = true;
+                            if let Err(fe) = this.finalize() {
+                                return Poll::Ready(Some(Err(fe)));
+                            }
                         }
                     }
                     Err(err) => {
                         this.last_error = Some(err.clone());
                         this.done_seen = true;
+                        if let Err(fe) = this.finalize() {
+                            return Poll::Ready(Some(Err(fe)));
+                        }
                     }
                 }
                 Poll::Ready(Some(item))
@@ -1336,6 +1347,10 @@ mod tests {
         assert_eq!(got, events);
     }
 
+    /// Drains until the inner stream yields [`None`] (one poll after [`StreamEvent::Done`]).
+    ///
+    /// This exercises the stream’s “second poll after `Done`” path; see
+    /// [`t_provider_call_visible_when_stream_breaks_on_done`] for the agent-style stop-at-`Done` pattern.
     #[tokio::test]
     async fn t_provider_call_visible_immediately_after_stream_drains() {
         let (wrapped, _store, graph) = wrapped_with_mock_handles(MockProvider {
@@ -1359,6 +1374,46 @@ mod tests {
             .await
             .expect("complete");
         while stream.next().await.is_some() {}
+        let guard = graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = guard.history().expect("history");
+        assert!(
+            history
+                .iter()
+                .any(|(_, e)| matches!(e.kind, EventKind::ProviderCall { .. }))
+        );
+    }
+
+    /// Stops polling immediately after [`StreamEvent::Done`] (no trailing `next()`), matching the
+    /// agent session loop; [`EventKind::ProviderCall`] must already be in the graph.
+    #[tokio::test]
+    async fn t_provider_call_visible_when_stream_breaks_on_done() {
+        let (wrapped, _store, graph) = wrapped_with_mock_handles(MockProvider {
+            provider_name: "mock",
+            context_window: 1,
+            model_id: "m",
+            estimate: None,
+            events: vec![
+                Ok(StreamEvent::ProviderReady {
+                    provider: "Mock".to_owned(),
+                    model: "m".to_owned(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop_reason: crate::StopReason::EndTurn,
+                    tool_calls: vec![],
+                }),
+            ],
+        });
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        while let Some(item) = stream.next().await {
+            if matches!(&item, Ok(StreamEvent::Done { .. })) {
+                break;
+            }
+        }
         let guard = graph
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1422,6 +1477,58 @@ mod tests {
             EventKind::ProviderCall { attempts, .. } => assert_eq!(attempts.len(), 2),
             _ => panic!("expected ProviderCall"),
         }
+    }
+
+    #[tokio::test]
+    async fn t_arc_dyn_forwarder_routes_set_attempt_observer() {
+        let instrumented = Arc::new(InstrumentedMockProvider {
+            observer: RwLock::new(None),
+            events: vec![
+                Ok(StreamEvent::ProviderReady {
+                    provider: "Mock".to_owned(),
+                    model: "m".to_owned(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop_reason: crate::StopReason::EndTurn,
+                    tool_calls: vec![],
+                }),
+            ],
+        });
+        let inner: Arc<dyn LlmProvider + Send + Sync> = instrumented.clone();
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(Arc::clone(&store), uuid::Uuid::new_v4());
+        let cwd_hash = store.put(b"cwd").expect("cwd hash");
+        let config_hash = store.put(b"cfg").expect("config hash");
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            })
+            .expect("session start");
+        let graph = Arc::new(Mutex::new(graph));
+        let wrapped = JournalingProvider::new(
+            inner,
+            "mock-provider".to_owned(),
+            Arc::clone(&store),
+            Arc::clone(&graph),
+        );
+        let mut stream = wrapped
+            .complete(&[], &CompletionConfig::default())
+            .await
+            .expect("complete");
+        while let Some(item) = stream.next().await {
+            if matches!(&item, Ok(StreamEvent::Done { .. })) {
+                break;
+            }
+        }
+        assert!(
+            instrumented
+                .observer
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some(),
+            "set_attempt_observer must reach InstrumentedMockProvider through Arc<dyn LlmProvider + Send + Sync>"
+        );
     }
 
     #[test]

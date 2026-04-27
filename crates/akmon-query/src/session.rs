@@ -14,10 +14,10 @@ use akmon_core::{
 };
 use akmon_journal::{ObjectStore, RedbObjectStore, RedbSessionGraph, SessionGraph};
 use akmon_models::{
-    CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
-    ModelToolCall, StopReason, StreamEvent, ToolDefinition, UsageReport,
-    anthropic_system_block_text, approximate_tokens, looks_like_ollama_model, max_tokens_for_model,
-    ollama_first_token_deadline_ms,
+    CompletionConfig, CompletionStream, JournalingProvider, LlmProvider, Message, MessageRole,
+    ModelError, ModelToolCall, StopReason, StreamEvent, ToolDefinition, UsageReport,
+    anthropic_system_block_text, approximate_tokens, canonical_provider_id,
+    looks_like_ollama_model, max_tokens_for_model, ollama_first_token_deadline_ms,
 };
 use akmon_tools::{McpPolicyContext, Tool, ToolContext, ToolOutput, unified_diff_text};
 use chrono::Utc;
@@ -278,7 +278,7 @@ where
     S: ObjectStore + Send + Sync + 'static,
     G: SessionGraph + Send + 'static,
 {
-    /// Creates a session in [`AgentState::Idle`] with the given dependencies and emits [`SessionStart`](akmon_journal::EventKind::SessionStart).
+    /// Creates a session in [`AgentState::Idle`] with the given dependencies, emits [`SessionStart`](akmon_journal::EventKind::SessionStart), then wraps `provider` in [`JournalingProvider`](akmon_models::JournalingProvider) for journal-backed completions.
     #[allow(clippy::too_many_arguments)] // journal handle is an explicit construction dependency (Item 3.1b).
     pub fn new(
         config: AgentConfig,
@@ -299,11 +299,20 @@ where
             fixed_system_messages,
         };
         let tools: Vec<Arc<dyn Tool>> = tools.into_iter().map(Arc::from).collect();
-        let session = Self {
+        emit_session_start(&journal, &config)?;
+        let provider_id = canonical_provider_id(provider.as_ref());
+        let inner: Arc<dyn LlmProvider + Send + Sync> = provider;
+        let wrapped: Arc<dyn LlmProvider> = Arc::new(JournalingProvider::new(
+            inner,
+            provider_id,
+            journal.store.clone(),
+            journal.graph.clone(),
+        ));
+        Ok(Self {
             config,
             state: AgentState::Idle,
             policy,
-            provider,
+            provider: wrapped,
             tools,
             sandbox,
             context: Vec::new(),
@@ -336,12 +345,9 @@ where
             tool_latency_samples_ms: Vec::new(),
             mcp_call_context_by_id: HashMap::new(),
             journal,
-            journal_started: AtomicBool::new(false),
+            journal_started: AtomicBool::new(true),
             ended: AtomicBool::new(false),
-        };
-        emit_session_start(&session.journal, &session.config)?;
-        session.journal_started.store(true, Ordering::SeqCst);
-        Ok(session)
+        })
     }
 
     fn try_emit_session_end_once(
@@ -3011,8 +3017,8 @@ mod tests {
         ToolPolicyConfig,
     };
     use akmon_journal::{
-        EventKind, Hash, HashAlgorithm, JournalError, MemoryObjectStore, MemorySessionGraph,
-        ObjectStore, SessionGraph, VerificationReport,
+        AttemptStatus, EventKind, Hash, HashAlgorithm, JournalError, MemoryObjectStore,
+        MemorySessionGraph, ObjectStore, SessionGraph, VerificationReport,
     };
     use async_trait::async_trait;
     use futures::stream;
@@ -3164,6 +3170,42 @@ mod tests {
         ) -> Result<CompletionStream, ModelError> {
             let v = self.events.clone();
             Ok(Box::pin(stream::iter(v)))
+        }
+    }
+
+    /// Drives [`ContextManager::needs_summarization`] true while delegating completions to [`StubProvider`].
+    struct HighEstimateProvider(StubProvider);
+
+    impl HighEstimateProvider {
+        fn for_summarization_test() -> Self {
+            Self(StubProvider::empty_end_turn())
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for HighEstimateProvider {
+        fn name(&self) -> &str {
+            "ollama"
+        }
+
+        fn context_window_tokens(&self) -> usize {
+            2_500
+        }
+
+        fn completion_model_id(&self) -> &str {
+            self.0.completion_model_id()
+        }
+
+        fn estimate_tokens(&self, _messages: &[Message]) -> Option<usize> {
+            Some(50_000)
+        }
+
+        async fn complete(
+            &self,
+            messages: &[Message],
+            config: &CompletionConfig,
+        ) -> Result<CompletionStream, ModelError> {
+            self.0.complete(messages, config).await
         }
     }
 
@@ -5244,12 +5286,17 @@ mod tests {
             .await
             .expect("run");
         let h = session.journal_history_snapshot().expect("hist");
-        assert_eq!(h.len(), 2, "{h:?}");
+        assert_eq!(h.len(), 3, "{h:?}");
         assert!(matches!(h[0].1.kind, EventKind::SessionStart { .. }));
         let prompt_hash = match &h[1].1.kind {
             EventKind::UserTurn { prompt_hash } => prompt_hash.clone(),
             ref k => panic!("expected UserTurn, got {k:?}"),
         };
+        assert!(
+            matches!(h[2].1.kind, EventKind::ProviderCall { .. }),
+            "expected ProviderCall, got {:?}",
+            h[2].1.kind
+        );
         let bytes = session
             .journal
             .store
@@ -5337,21 +5384,174 @@ mod tests {
             .await
             .expect("run2");
         let h = session.journal_history_snapshot().expect("hist");
-        assert_eq!(h.len(), 3, "{h:?}");
+        assert_eq!(h.len(), 5, "{h:?}");
         assert!(matches!(h[0].1.kind, EventKind::SessionStart { .. }));
-        let h1 = match &h[1].1.kind {
-            EventKind::UserTurn { prompt_hash } => prompt_hash.clone(),
-            ref k => panic!("expected UserTurn, got {k:?}"),
-        };
-        let h2 = match &h[2].1.kind {
-            EventKind::UserTurn { prompt_hash } => prompt_hash.clone(),
-            ref k => panic!("expected UserTurn, got {k:?}"),
-        };
-        assert_ne!(h1, h2);
-        let b1 = session.journal.store.get(&h1).expect("g1").expect("blob1");
-        let b2 = session.journal.store.get(&h2).expect("g2").expect("blob2");
+        let ut: Vec<_> = h
+            .iter()
+            .filter_map(|(_, e)| match &e.kind {
+                EventKind::UserTurn { prompt_hash } => Some(prompt_hash.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ut.len(), 2);
+        let b1 = session
+            .journal
+            .store
+            .get(&ut[0])
+            .expect("g1")
+            .expect("blob1");
+        let b2 = session
+            .journal
+            .store
+            .get(&ut[1])
+            .expect("g2")
+            .expect("blob2");
         assert_eq!(b1.as_ref(), b"first");
         assert_eq!(b2.as_ref(), b"second");
+        assert_ne!(ut[0], ut[1]);
+    }
+
+    #[tokio::test]
+    async fn t_provider_call_event_emitted_during_run() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let stub = StubProvider::empty_end_turn();
+        let expected_id = akmon_models::canonical_provider_id(&stub);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(stub),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("hello".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let pc = h.iter().find_map(|(_, e)| match &e.kind {
+            EventKind::ProviderCall {
+                provider_id,
+                attempts,
+                ..
+            } => Some((provider_id.clone(), attempts.clone())),
+            _ => None,
+        });
+        let (pid, attempts) = pc.expect("ProviderCall");
+        assert_eq!(pid, expected_id);
+        assert!(!attempts.is_empty(), "{attempts:?}");
+    }
+
+    #[tokio::test]
+    async fn t_provider_call_attempts_captured_for_mock() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("x".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let attempts = h
+            .iter()
+            .find_map(|(_, e)| match &e.kind {
+                EventKind::ProviderCall { attempts, .. } => Some(attempts.clone()),
+                _ => None,
+            })
+            .expect("ProviderCall");
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempt_number, 1);
+        assert_eq!(attempts[0].status, AttemptStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn t_summarization_path_emits_provider_call() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(HighEstimateProvider::for_summarization_test()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let bulk: Vec<Message> = (0..16)
+            .map(|i| Message {
+                role: MessageRole::User,
+                content: format!("bulk-{i}-{}", "y".repeat(500)),
+            })
+            .collect();
+        session.restore_context_from_messages(bulk);
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task line".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let n_pc = h
+            .iter()
+            .filter(|(_, e)| matches!(e.kind, EventKind::ProviderCall { .. }))
+            .count();
+        assert!(
+            n_pc >= 2,
+            "expected summarization + main ProviderCall, got {h:?}"
+        );
     }
 
     #[test]
