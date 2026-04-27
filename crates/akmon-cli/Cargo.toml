@@ -26,6 +26,7 @@ semantic-index = [
 akmon-config = { path = "../akmon-config" }
 akmon-core = { path = "../akmon-core" }
 akmon-index = { path = "../akmon-index", optional = true }
+akmon-journal = { path = "../akmon-journal" }
 akmon-models = { path = "../akmon-models" }
 akmon-query = { path = "../akmon-query" }
 akmon-tools = { path = "../akmon-tools" }
@@ -48,4 +49,5 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+akmon-journal = { path = "../akmon-journal", features = ["test-utils"] }
 tempfile = "3"

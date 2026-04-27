@@ -9,7 +9,8 @@ use akmon_core::{
 };
 use akmon_models::{LlmProvider, OllamaProbe};
 use akmon_query::{
-    AgentSession, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory, write_handoff_file,
+    AgentSession, DefaultAgentSession, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
+    open_default_journal_handle, write_handoff_file,
 };
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
@@ -166,7 +167,7 @@ async fn build_agent_session(
     policy_tx_slot: &PolicySenderSlot,
     plan_mode: bool,
     model_override: Option<&str>,
-) -> Result<(AgentSession, mpsc::Receiver<InteractivePolicyReply>), String> {
+) -> Result<(DefaultAgentSession, mpsc::Receiver<InteractivePolicyReply>), String> {
     let (policy_tx, policy_rx) = mpsc::channel::<InteractivePolicyReply>(32);
     {
         let mut guard = policy_tx_slot.lock().await;
@@ -243,6 +244,8 @@ async fn build_agent_session(
         model_estimates: config.model_estimates.clone(),
     };
 
+    let journal = open_default_journal_handle(agent_config.session_id)
+        .map_err(|e| format!("journal: {e}"))?;
     let session = AgentSession::new(
         agent_config,
         Arc::clone(&policy),
@@ -251,13 +254,15 @@ async fn build_agent_session(
         Arc::clone(&sandbox),
         config.akmon_md.clone(),
         plan_mode,
-    );
+        journal,
+    )
+    .map_err(|e| format!("session: {e}"))?;
 
     Ok((session, policy_rx))
 }
 
 fn apply_plan_tool_state(
-    session: &mut AgentSession,
+    session: &mut DefaultAgentSession,
     cfg: &TuiLaunchConfig,
     provider: &Arc<dyn LlmProvider>,
     sandbox: &Arc<Sandbox>,
@@ -277,7 +282,7 @@ fn apply_plan_tool_state(
 }
 
 async fn apply_full_tools_with_mcp(
-    session: &mut AgentSession,
+    session: &mut DefaultAgentSession,
     cfg: &TuiLaunchConfig,
 ) -> Result<(), String> {
     let mut tools = build_tool_registry(

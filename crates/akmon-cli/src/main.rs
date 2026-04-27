@@ -30,12 +30,13 @@ use akmon_core::{
     ReplayMetadata, RunReliabilityMetrics, Sandbox, verify_audit_jsonl, write_audit_jsonl,
     write_evidence_json,
 };
+use akmon_journal::{ObjectStore, SessionGraph};
 use akmon_models::{
     LlmConnectConfig, LlmProvider, Message, MessageRole, ProviderError, ProviderResolutionTrace,
 };
 use akmon_query::{
     AgentSession, SessionRunExit, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
-    ToolCallSummary, write_handoff_file,
+    ToolCallSummary, open_default_journal_handle, write_handoff_file,
 };
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
@@ -340,7 +341,11 @@ struct RunReport {
     provider_resolution: Option<ProviderResolutionTrace>,
 }
 
-fn replay_metadata_for_report(session: &AgentSession) -> ReplayMetadata {
+fn replay_metadata_for_report<S, G>(session: &AgentSession<S, G>) -> ReplayMetadata
+where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
     if let Some(m) = session.replay_metadata() {
         return m.clone();
     }
@@ -873,7 +878,14 @@ fn resolve_evidence_path(
     }
 }
 
-fn build_evidence_artifact(session: &AgentSession, audit_log_path: &Path) -> EvidenceArtifact {
+fn build_evidence_artifact<S, G>(
+    session: &AgentSession<S, G>,
+    audit_log_path: &Path,
+) -> EvidenceArtifact
+where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
     let snapshot = session.evidence_data();
     let reliability = snapshot.reliability_metrics.clone();
     let replay = snapshot
@@ -932,11 +944,15 @@ fn build_evidence_artifact(session: &AgentSession, audit_log_path: &Path) -> Evi
     artifact
 }
 
-fn write_evidence_artifact(
-    session: &AgentSession,
+fn write_evidence_artifact<S, G>(
+    session: &AgentSession<S, G>,
     audit_log_path: &Path,
     evidence_path: &Path,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
     let artifact = build_evidence_artifact(session, audit_log_path);
     write_evidence_json(evidence_path, &artifact)
 }
@@ -991,7 +1007,11 @@ fn model_messages_to_tui(msgs: Vec<Message>) -> Vec<akmon_tui::TuiMessage> {
         .collect()
 }
 
-fn exit_reason_ok(session: &AgentSession) -> ExitReason {
+fn exit_reason_ok<S, G>(session: &AgentSession<S, G>) -> ExitReason
+where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
     match session.last_run_exit() {
         SessionRunExit::BudgetLimit => ExitReason::BudgetLimit,
         SessionRunExit::Completed => ExitReason::Completed,
@@ -1005,12 +1025,15 @@ fn exit_reason_err(e: &AgentError) -> ExitReason {
     }
 }
 
-fn headless_persist(
+fn headless_persist<S, G>(
     project_root: &Path,
-    session: &AgentSession,
+    session: &AgentSession<S, G>,
     model: &str,
     started_at: chrono::DateTime<chrono::Utc>,
-) {
+) where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
     let msgs: Vec<Message> = session.context_messages().to_vec();
     let started_str = started_at.to_rfc3339();
     if let Err(e) = session_transcript::save_headless_session_file(
@@ -1672,7 +1695,13 @@ async fn main() -> ExitCode {
             auto_commit: false,
             ..agent_config.clone()
         };
-        let mut session = AgentSession::new(
+        let journal = match open_default_journal_handle(plan_agent_config.session_id) {
+            Ok(j) => j,
+            Err(e) => {
+                exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
+            }
+        };
+        let mut session = match AgentSession::new(
             plan_agent_config,
             Arc::clone(&policy),
             provider,
@@ -1680,7 +1709,13 @@ async fn main() -> ExitCode {
             Arc::clone(&sandbox),
             akmon_content.clone(),
             true,
-        );
+            journal,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                exit_early_config_error(&cli, format!("session: {e}"), Some(&mut index_thread), 2)
+            }
+        };
         if !resume_ctx.is_empty() {
             session.restore_context_from_messages(resume_ctx.clone());
         }
@@ -1833,7 +1868,13 @@ async fn main() -> ExitCode {
             auto_commit: false,
             ..agent_config.clone()
         };
-        let mut planner_session = AgentSession::new(
+        let journal = match open_default_journal_handle(planner_agent_config.session_id) {
+            Ok(j) => j,
+            Err(e) => {
+                exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
+            }
+        };
+        let mut planner_session = match AgentSession::new(
             planner_agent_config,
             Arc::clone(&policy),
             provider_planner,
@@ -1841,7 +1882,13 @@ async fn main() -> ExitCode {
             Arc::clone(&sandbox),
             akmon_content.clone(),
             true,
-        );
+            journal,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                exit_early_config_error(&cli, format!("session: {e}"), Some(&mut index_thread), 2)
+            }
+        };
         if !resume_ctx.is_empty() {
             planner_session.restore_context_from_messages(resume_ctx.clone());
         }
@@ -1934,7 +1981,13 @@ async fn main() -> ExitCode {
             &sandbox,
             &akmon_content,
         );
-        let mut session = AgentSession::new(
+        let journal = match open_default_journal_handle(agent_config.session_id) {
+            Ok(j) => j,
+            Err(e) => {
+                exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
+            }
+        };
+        let mut session = match AgentSession::new(
             agent_config,
             Arc::clone(&policy),
             provider_main,
@@ -1942,7 +1995,13 @@ async fn main() -> ExitCode {
             Arc::clone(&sandbox),
             akmon_content,
             false,
-        );
+            journal,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                exit_early_config_error(&cli, format!("session: {e}"), Some(&mut index_thread), 2)
+            }
+        };
         let impl_task = format!(
             "Implement this plan exactly:\n\n{plan_text}\n\nOriginal task: {task}\n\nFollow the plan step by step.\nDo not deviate from the plan without explaining why."
         );
@@ -2092,7 +2151,13 @@ async fn main() -> ExitCode {
         &akmon_content,
     );
 
-    let mut session = AgentSession::new(
+    let journal = match open_default_journal_handle(agent_config.session_id) {
+        Ok(j) => j,
+        Err(e) => {
+            exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
+        }
+    };
+    let mut session = match AgentSession::new(
         agent_config,
         Arc::clone(&policy),
         provider,
@@ -2100,7 +2165,13 @@ async fn main() -> ExitCode {
         Arc::clone(&sandbox),
         akmon_content,
         false,
-    );
+        journal,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            exit_early_config_error(&cli, format!("session: {e}"), Some(&mut index_thread), 2)
+        }
+    };
 
     if !resume_ctx.is_empty() {
         session.restore_context_from_messages(resume_ctx);
@@ -2217,8 +2288,23 @@ fn exit_code_for_agent_error(e: &AgentError) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::scout_cmd::{ScoutCandidateFile, ScoutDossier};
+    use akmon_journal::{HashAlgorithm, MemoryObjectStore, MemorySessionGraph};
+    use akmon_query::JournalHandle;
+
+    fn test_journal_sid(
+        session_id: uuid::Uuid,
+    ) -> JournalHandle<MemoryObjectStore, MemorySessionGraph> {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let graph = Arc::new(Mutex::new(MemorySessionGraph::open_new(
+            Arc::clone(&store),
+            session_id,
+        )));
+        JournalHandle::new(store, graph)
+    }
 
     fn reg(
         shell_allow: &[String],
@@ -2447,7 +2533,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal_sid(session_id),
+        )
+        .expect("session");
         let default_path = default_evidence_path(dir.path(), session_id);
         write_evidence_artifact(&session, &audit_path, &default_path).expect("write evidence");
         assert!(default_path.is_file());
@@ -2482,7 +2570,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal_sid(session_id),
+        )
+        .expect("session");
         let custom = dir.path().join("custom").join("evidence.json");
         write_evidence_artifact(&session, &audit_path, &custom).expect("write evidence");
         assert!(custom.is_file());
@@ -2517,7 +2607,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal_sid(session_id),
+        )
+        .expect("session");
         let evidence_path = dir.path().join("evidence.json");
         write_evidence_artifact(&session, &audit_path, &evidence_path).expect("write evidence");
         let parsed: serde_json::Value =

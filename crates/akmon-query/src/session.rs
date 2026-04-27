@@ -12,6 +12,7 @@ use akmon_core::{
     ReplayMetadata, RunReliabilityMetrics, Sandbox, ToolOutcomeKind, build_replay_metadata,
     check_iteration_limit, estimate_cost_usd_with_rows, validate_transition,
 };
+use akmon_journal::{ObjectStore, RedbObjectStore, RedbSessionGraph, SessionGraph};
 use akmon_models::{
     CompletionConfig, CompletionStream, LlmProvider, Message, MessageRole, ModelError,
     ModelToolCall, StopReason, StreamEvent, ToolDefinition, UsageReport,
@@ -30,6 +31,7 @@ use crate::context::{
     build_subagent_task_messages, context_limit_for_model,
 };
 use crate::context_manager::ContextManager;
+use crate::journal::{JournalHandle, emit_session_start};
 use crate::microcompact::{
     MICROCOMPACT_KEEP_RECENT_DEFAULT, MICROCOMPACT_KEEP_RECENT_GROQ, apply_microcompact_context,
 };
@@ -193,7 +195,11 @@ fn trim_messages_for_model(model_id: &str, messages: Vec<Message>) -> Vec<Messag
 
 /// Owns one running agent: configuration, FSM state, policy, model backend, tool registry, chat
 /// history, audit trail, optional `AKMON.md` text, and the filesystem [`Sandbox`].
-pub struct AgentSession {
+pub struct AgentSession<S, G>
+where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
     config: AgentConfig,
     state: AgentState,
     policy: Arc<akmon_core::PolicyEngine>,
@@ -256,10 +262,24 @@ pub struct AgentSession {
     tool_latency_samples_ms: Vec<u64>,
     /// MCP context keyed by model tool-call id, for audit enrichment.
     mcp_call_context_by_id: HashMap<String, McpAuditContext>,
+    /// AGEF journal store and session graph for this [`AgentSession`].
+    journal: JournalHandle<S, G>,
+    /// Set after [`crate::journal::emit_session_start`] succeeds in [`Self::new`]. [`Drop`] skips [`SessionEnd`](akmon_journal::EventKind::SessionEnd) until this is true.
+    journal_started: AtomicBool,
+    /// When `true`, [`SessionEnd`](akmon_journal::EventKind::SessionEnd) was emitted (explicit [`Self::end`] or [`Drop`]).
+    ended: AtomicBool,
 }
 
-impl AgentSession {
-    /// Creates a session in [`AgentState::Idle`] with the given dependencies.
+/// Agent session using the default on-disk journal from [`crate::open_default_journal_handle`].
+pub type DefaultAgentSession = AgentSession<RedbObjectStore, RedbSessionGraph>;
+
+impl<S, G> AgentSession<S, G>
+where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
+    /// Creates a session in [`AgentState::Idle`] with the given dependencies and emits [`SessionStart`](akmon_journal::EventKind::SessionStart).
+    #[allow(clippy::too_many_arguments)] // journal handle is an explicit construction dependency (Item 3.1b).
     pub fn new(
         config: AgentConfig,
         policy: Arc<akmon_core::PolicyEngine>,
@@ -268,7 +288,8 @@ impl AgentSession {
         sandbox: Arc<Sandbox>,
         akmon_md: Option<String>,
         plan_mode: bool,
-    ) -> Self {
+        journal: JournalHandle<S, G>,
+    ) -> Result<Self, AgentError> {
         let max_tokens = provider.context_window_tokens().clamp(1, 100_000);
         let fixed_system_messages = if akmon_md.is_some() { 2 } else { 1 };
         let context_manager = ContextManager {
@@ -278,7 +299,7 @@ impl AgentSession {
             fixed_system_messages,
         };
         let tools: Vec<Arc<dyn Tool>> = tools.into_iter().map(Arc::from).collect();
-        Self {
+        let session = Self {
             config,
             state: AgentState::Idle,
             policy,
@@ -314,7 +335,48 @@ impl AgentSession {
             reliability_metrics: RunReliabilityMetrics::default(),
             tool_latency_samples_ms: Vec::new(),
             mcp_call_context_by_id: HashMap::new(),
+            journal,
+            journal_started: AtomicBool::new(false),
+            ended: AtomicBool::new(false),
+        };
+        emit_session_start(&session.journal, &session.config)?;
+        session.journal_started.store(true, Ordering::SeqCst);
+        Ok(session)
+    }
+
+    fn try_emit_session_end_once(
+        &self,
+        summary_hash: Option<akmon_journal::Hash>,
+    ) -> Result<(), AgentError> {
+        if self
+            .ended
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(());
         }
+        if let Err(e) = crate::journal::append_session_end(&self.journal, summary_hash) {
+            self.ended.store(false, Ordering::SeqCst);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Emits [`SessionEnd`](akmon_journal::EventKind::SessionEnd) once; preferred over relying on [`Drop`] when a `summary_hash` exists.
+    pub fn end(&self, summary_hash: Option<akmon_journal::Hash>) -> Result<(), AgentError> {
+        self.try_emit_session_end_once(summary_hash)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn journal_history_snapshot(
+        &self,
+    ) -> Result<Vec<(akmon_journal::Hash, akmon_journal::Event)>, akmon_journal::JournalError> {
+        let guard = self
+            .journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.history()
     }
 
     /// Clears chat context and per-turn counters; optionally deletes `.akmon/specs/*.md`.
@@ -2914,6 +2976,26 @@ fn concrete_permissions(
     }
 }
 
+impl<S, G> Drop for AgentSession<S, G>
+where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
+    fn drop(&mut self) {
+        if !self.journal_started.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Err(e) = self.try_emit_session_end_once(None) {
+            tracing::warn!(
+                target: "akmon::session",
+                session_id = %self.config.session_id,
+                error = %e,
+                "journal SessionEnd emission failed on drop"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2922,14 +3004,33 @@ mod tests {
         FilesystemPolicyConfig, PatternRuleSet, PolicyConfig, PolicyEngine, PolicyEngineMode,
         ToolPolicyConfig,
     };
+    use akmon_journal::{
+        EventKind, Hash, HashAlgorithm, MemoryObjectStore, MemorySessionGraph, SessionGraph,
+    };
     use async_trait::async_trait;
     use futures::stream;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
     use uuid::Uuid;
 
+    use crate::journal::JournalHandle;
+
     fn test_sandbox(dir: &std::path::Path) -> Arc<Sandbox> {
         Arc::new(Sandbox::new(dir))
+    }
+
+    fn test_journal_sid(session_id: Uuid) -> JournalHandle<MemoryObjectStore, MemorySessionGraph> {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let graph = Arc::new(Mutex::new(MemorySessionGraph::open_new(
+            Arc::clone(&store),
+            session_id,
+        )));
+        JournalHandle::new(store, graph)
+    }
+
+    fn test_journal() -> JournalHandle<MemoryObjectStore, MemorySessionGraph> {
+        test_journal_sid(Uuid::nil())
     }
 
     #[test]
@@ -2953,7 +3054,9 @@ mod tests {
             test_sandbox(tmp.path()),
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         assert!(matches!(s.state(), AgentState::Idle));
     }
 
@@ -3094,7 +3197,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -3151,7 +3256,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -3199,7 +3306,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -3265,7 +3374,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -3316,7 +3427,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (tx, mut rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -3500,7 +3613,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -3580,7 +3695,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -3653,7 +3770,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -3721,7 +3840,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -3799,7 +3920,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -3883,7 +4006,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -3927,7 +4052,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -3971,7 +4098,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -4044,7 +4173,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -4096,7 +4227,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -4137,7 +4270,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -4183,7 +4318,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -4231,7 +4368,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -4298,7 +4437,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -4376,7 +4517,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -4454,7 +4597,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -4541,7 +4686,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (ev_tx, _rx) = mpsc::channel(64);
         let mut policy_opt = Some(policy_rx);
@@ -4613,7 +4760,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (ev_tx, _ev_rx) = mpsc::channel(64);
         let mut policy_opt = Some(policy_rx);
@@ -4663,7 +4812,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -4703,7 +4854,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
@@ -4751,7 +4904,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
 
         let secret = "sk-test-secret-in-user-task";
         let (tx, _rx) = mpsc::channel(64);
@@ -4793,7 +4948,9 @@ mod tests {
             sandbox,
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         let (tx, _rx) = mpsc::channel(64);
         let mut no_policy = None;
         session
@@ -4865,7 +5022,9 @@ mod tests {
             test_sandbox(tmp.path()),
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         assert!(!crate::specs_and_handoff::should_write_handoff(&s));
         s.user_turns_finished = crate::specs_and_handoff::MIN_USER_TURNS_FOR_HANDOFF;
         assert!(!crate::specs_and_handoff::should_write_handoff(&s));
@@ -4894,7 +5053,9 @@ mod tests {
             test_sandbox(tmp.path()),
             None,
             false,
-        );
+            test_journal(),
+        )
+        .unwrap();
         s.user_turns_finished = crate::specs_and_handoff::MIN_USER_TURNS_FOR_HANDOFF;
         s.last_assistant_snippet = Some("summary".into());
         crate::specs_and_handoff::write_handoff_file(&s, tmp.path(), "test-model")
@@ -4903,5 +5064,219 @@ mod tests {
             .expect("read");
         assert!(body.contains("test-model"));
         assert!(body.contains("summary"));
+    }
+
+    #[test]
+    fn journal_session_start_emitted_once_at_new() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let h = s.journal_history_snapshot().expect("history");
+        assert_eq!(h.len(), 1);
+        assert!(matches!(h[0].1.kind, EventKind::SessionStart { .. }));
+        let head = {
+            let guard = s
+                .journal
+                .graph
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.head().expect("head query")
+        };
+        assert_eq!(head, Some(h[0].0.clone()));
+    }
+
+    fn config_hash_from_session_start(
+        s: &AgentSession<MemoryObjectStore, MemorySessionGraph>,
+    ) -> Hash {
+        let h = s.journal_history_snapshot().expect("history");
+        match &h[0].1.kind {
+            EventKind::SessionStart { config_hash, .. } => config_hash.clone(),
+            k => panic!("expected SessionStart, got {k:?}"),
+        }
+    }
+
+    #[test]
+    fn t_session_config_hash_deterministic() {
+        let sid = Uuid::new_v4();
+        let cfg = AgentConfig {
+            max_iterations: 11,
+            confirmation_timeout_secs: 45,
+            session_id: sid,
+            auto_commit: true,
+            max_completion_tokens: Some(4096),
+            subagent_style: true,
+            max_budget_usd: Some(2.25),
+            fallback_model: Some("fallback-model-id".into()),
+            model_estimates: Vec::new(),
+        };
+        let tmp = tempfile::tempdir().expect("tmp");
+        let j1 = test_journal_sid(sid);
+        let s1 = AgentSession::new(
+            cfg.clone(),
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j1,
+        )
+        .expect("s1");
+        let c1 = config_hash_from_session_start(&s1);
+        drop(s1);
+
+        let j2 = test_journal_sid(sid);
+        let s2 = AgentSession::new(
+            cfg.clone(),
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j2,
+        )
+        .expect("s2");
+        let c2 = config_hash_from_session_start(&s2);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn t_session_end_via_explicit_end_emits_once() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(StubProvider::empty_end_turn()),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        assert_eq!(s.journal_history_snapshot().expect("h").len(), 1);
+        s.end(None).expect("end");
+        assert_eq!(s.journal_history_snapshot().expect("h2").len(), 2);
+        s.end(None).expect("end idempotent");
+        assert_eq!(s.journal_history_snapshot().expect("h3").len(), 2);
+        assert!(matches!(
+            s.journal_history_snapshot().expect("h4")[1].1.kind,
+            EventKind::SessionEnd { .. }
+        ));
+    }
+
+    #[test]
+    fn t_session_end_explicit_then_drop_does_not_double_emit() {
+        let sid = Uuid::new_v4();
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let graph = Arc::new(Mutex::new(MemorySessionGraph::open_new(
+            Arc::clone(&store),
+            sid,
+        )));
+        let j = JournalHandle::new(Arc::clone(&store), Arc::clone(&graph));
+        let tmp = tempfile::tempdir().expect("tmp");
+        {
+            let s = AgentSession::new(
+                AgentConfig {
+                    max_iterations: 5,
+                    confirmation_timeout_secs: 30,
+                    session_id: sid,
+                    auto_commit: false,
+                    max_completion_tokens: None,
+                    subagent_style: false,
+                    max_budget_usd: None,
+                    fallback_model: None,
+                    model_estimates: Vec::new(),
+                },
+                Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+                Arc::new(StubProvider::empty_end_turn()),
+                vec![],
+                test_sandbox(tmp.path()),
+                None,
+                false,
+                j,
+            )
+            .expect("session");
+            assert_eq!(s.journal_history_snapshot().expect("h").len(), 1);
+            s.end(None).expect("end");
+            assert_eq!(s.journal_history_snapshot().expect("h2").len(), 2);
+        }
+        let guard = graph.lock().unwrap_or_else(|p| p.into_inner());
+        let h = guard.history().expect("h3");
+        assert_eq!(h.len(), 2);
+        assert!(matches!(h[1].1.kind, EventKind::SessionEnd { .. }));
+    }
+
+    #[test]
+    fn t_session_end_via_drop_emits_once() {
+        let sid = Uuid::new_v4();
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let graph = Arc::new(Mutex::new(MemorySessionGraph::open_new(
+            Arc::clone(&store),
+            sid,
+        )));
+        let j = JournalHandle::new(Arc::clone(&store), Arc::clone(&graph));
+        let tmp = tempfile::tempdir().expect("tmp");
+        {
+            let _s = AgentSession::new(
+                AgentConfig {
+                    max_iterations: 5,
+                    confirmation_timeout_secs: 30,
+                    session_id: sid,
+                    auto_commit: false,
+                    max_completion_tokens: None,
+                    subagent_style: false,
+                    max_budget_usd: None,
+                    fallback_model: None,
+                    model_estimates: Vec::new(),
+                },
+                Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+                Arc::new(StubProvider::empty_end_turn()),
+                vec![],
+                test_sandbox(tmp.path()),
+                None,
+                false,
+                j,
+            )
+            .expect("session");
+        }
+        let guard = graph.lock().unwrap_or_else(|p| p.into_inner());
+        let h = guard.history().expect("h");
+        assert_eq!(h.len(), 2);
+        assert!(matches!(h[1].1.kind, EventKind::SessionEnd { .. }));
     }
 }

@@ -3,6 +3,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use akmon_journal::{ObjectStore, SessionGraph};
+
 use crate::session::AgentSession;
 
 const SPECS_DIR: &str = ".akmon/specs";
@@ -65,17 +67,25 @@ pub const MIN_USER_TURNS_FOR_HANDOFF: u32 = 2;
 
 /// Whether [`write_handoff_file`] should emit a file for this session state.
 #[must_use]
-pub fn should_write_handoff(session: &AgentSession) -> bool {
+pub fn should_write_handoff<S, G>(session: &AgentSession<S, G>) -> bool
+where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
     session.user_turns_finished >= MIN_USER_TURNS_FOR_HANDOFF
         && (!session.modified_paths.is_empty() || session.last_assistant_snippet.is_some())
 }
 
 /// Writes `.akmon/HANDOFF.md` when [`should_write_handoff`] is true.
-pub fn write_handoff_file(
-    session: &AgentSession,
+pub fn write_handoff_file<S, G>(
+    session: &AgentSession<S, G>,
     project_root: &Path,
     model_label: &str,
-) -> std::io::Result<()> {
+) -> std::io::Result<()>
+where
+    S: ObjectStore + Send + Sync + 'static,
+    G: SessionGraph + Send + 'static,
+{
     if !should_write_handoff(session) {
         return Ok(());
     }

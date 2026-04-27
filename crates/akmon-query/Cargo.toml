@@ -10,10 +10,12 @@ description = "Akmon agent session: FSM, policy, model provider, and tools orche
 
 [dependencies]
 akmon-core = { path = "../akmon-core" }
+akmon-journal = { path = "../akmon-journal" }
 akmon-models = { path = "../akmon-models" }
 akmon-tools = { path = "../akmon-tools" }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+ciborium.workspace = true
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -23,4 +25,5 @@ tracing.workspace = true
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+akmon-journal = { path = "../akmon-journal", features = ["test-utils"] }
 tempfile = "3"

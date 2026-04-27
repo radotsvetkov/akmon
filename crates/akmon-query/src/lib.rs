@@ -6,6 +6,7 @@ mod akmon_md_gen;
 mod context;
 mod context_manager;
 mod error;
+mod journal;
 mod microcompact;
 mod session;
 mod specs_and_handoff;
@@ -24,9 +25,10 @@ pub use context::{
 };
 pub use context_manager::{COMPACT_RESERVED_BUFFER, COMPACT_TRIGGER, ContextManager};
 pub use error::SessionError;
+pub use journal::{JournalHandle, open_default_journal_handle};
 pub use session::{
-    AgentSession, PendingToolCall, PolicyDecisionSummary, SessionEvidenceData, SessionRunExit,
-    ToolCallResult, ToolCallSummary, execute_single_tool_call,
+    AgentSession, DefaultAgentSession, PendingToolCall, PolicyDecisionSummary, SessionEvidenceData,
+    SessionRunExit, ToolCallResult, ToolCallSummary, execute_single_tool_call,
 };
 pub use specs_and_handoff::{
     MIN_USER_TURNS_FOR_HANDOFF, clear_specs_dir, handoff_path, load_handoff_block_for_prompt,

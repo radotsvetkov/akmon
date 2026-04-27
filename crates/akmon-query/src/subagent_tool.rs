@@ -12,6 +12,7 @@ use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::open_default_journal_handle;
 use crate::session::AgentSession;
 
 /// Builds a fresh tool list for each nested run (excludes `spawn_subagent`).
@@ -114,7 +115,17 @@ impl Tool for SpawnSubagentTool {
             model_estimates: Vec::new(),
         };
 
-        let mut session = AgentSession::new(
+        let journal = match open_default_journal_handle(sub_config.session_id) {
+            Ok(j) => j,
+            Err(e) => {
+                return ToolOutput::Error {
+                    code: akmon_tools::ToolErrorCode::InvalidArgs,
+                    message: format!("subagent journal: {e}"),
+                };
+            }
+        };
+
+        let mut session = match AgentSession::new(
             sub_config,
             effective_policy,
             Arc::clone(&self.rt.provider),
@@ -122,7 +133,16 @@ impl Tool for SpawnSubagentTool {
             Arc::clone(&self.rt.sandbox),
             self.rt.akmon_md.clone(),
             self.rt.plan_mode,
-        );
+            journal,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                return ToolOutput::Error {
+                    code: akmon_tools::ToolErrorCode::InvalidArgs,
+                    message: format!("subagent session: {e}"),
+                };
+            }
+        };
 
         let (ev_tx, mut ev_rx) = mpsc::channel::<AgentEvent>(32);
         let drain = tokio::spawn(async move { while ev_rx.recv().await.is_some() {} });
