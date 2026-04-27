@@ -1,4 +1,9 @@
 //! End-to-end session integration: Redb-backed journal, full agent loop, reopen + verify.
+//!
+//! TODO (Phase 7 / changelog, non-blocking): Document in `AGEF SPEC.md` or v0.1.2 implementation
+//! notes that `AssistantTurn` MAY occur multiple times per logical user turn (e.g. assistant
+//! message with tool calls, then final text). Implementations SHOULD emit `AssistantTurn` at each
+//! `MessageRole::Assistant` context push. See `assert_event_kinds` expected sequence below.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
