@@ -403,16 +403,63 @@ Notes for Cursor:
 - Highest-risk item. Start with thorough audit of agent loop. Report findings. Wait for approval.
 - D-13 (logging vs. journal) is settled.
 - Do not refactor the loop. Instrument it.
+- **Item 3.1 design resolutions (post-3.1a audit):**
+  - **Decision 1 — Session granularity:** One AGEF session per `AgentSession`.
+    - TUI multi-turn conversation: one session graph.
+    - CLI single-turn invocation: one (smaller) session graph.
+    - `SessionStart` is emitted at `AgentSession::new` construction time (before `run()`).
+    - `SessionEnd` is emitted via `AgentSession::end()` when called, with `Drop` as safety-net emission when not explicitly ended.
+    - The Drop-path `SessionEnd` has `summary_hash: None`. Callers that want a session summary in their `SessionEnd` event must call `end(summary_hash)` explicitly before drop.
+  - **Decision 2 — RetrievalCall scope reduction (v2.0.0):**
+    - For Item 3.1b, emit `ToolCall` for all dispatched tools, including retrieval-like tools (`semantic_search`, `search`, `read_file`, `web_fetch`, etc.).
+    - Do **not** emit `RetrievalCall` in v2.0.0.
+    - Retrieval classification and `RetrievalCall` emission are deferred to Item 3.3.
+    - Verifiers (including Akmon's own `akmon verify` in Phase 4) MUST treat absence of `RetrievalCall` events as valid; presence of `ToolCall` events for tools that perform retrieval is the expected v2.0.0 shape.
+  - **Decision 3 — SessionEnd centralization mechanics:**
+    - Loop body remains instrumented, not refactored.
+    - Minor lifecycle refactor is allowed in `AgentSession` only (construction/start, explicit end, drop-safety path).
+    - If loop-body refactor is required, stop and escalate.
+- **Revised instrumentation rule for Item 3.1b:**
+  - Instrument the agent loop body.
+  - Lifecycle concerns (`new`, `end`, `Drop`, journal-handle ownership) may be refactored minimally.
+  - Any proposed `run()` loop-body refactor requires explicit approval.
 ---
  
 **Item 3.2 — End-to-end session test**
  
-Goal: Integration test covers a full session with all expected EventKind variants emitted.
+Goal: Integration test covers a full session with all expected EventKind variants for v2.0.0 emitted (excluding `RetrievalCall`, deferred to Item 3.3).
  
 When to start: alongside or immediately after Item 3.1.
  
 When done: test passes, runs in <5s with mock provider and tool.
  
+---
+
+**Item 3.1c — Retrieval capture integration**
+
+Status: **Deferred to Item 3.3 for v2.0.0.**
+
+Reason: Retrieval classification is intentionally postponed to avoid concurrent `Tool` trait changes during active session-integration work. v2.0.0 emits `ToolCall` for retrieval-like tools and does not emit `RetrievalCall`.
+
+---
+
+**Item 3.3 — Add `is_retrieval` to `Tool` trait and emit `RetrievalCall` for matching tools**
+
+Goal: Distinguish retrieval-class tool calls from action-class tool calls in the journal by adding `is_retrieval(&self) -> bool` to the `Tool` trait (default `false`) and emitting `RetrievalCall` vs `ToolCall` based on that flag.
+
+When to start: After Item 3.1b lands and Item 3.2's end-to-end test passes. Before Phase 7 (release preparation). Item 3.3 absorbs the work originally scoped under Item 3.1c.
+
+When done:
+- `Tool` trait includes `is_retrieval` with default `false`.
+- Retrieval tools opt in explicitly.
+- Session integration emits `RetrievalCall` for retrieval-class tools and `ToolCall` for others.
+- Existing behavior remains stable for tools that do not opt in.
+
+Notes:
+- This item is deferred from Item 3.1 to avoid two concurrent shape changes in `akmon-tools` during substrate/session integration.
+- May require AGEF spec v0.1.2 clarification:
+  "Implementations MAY emit ToolCall for tool invocations that the producer does not classify as retrieval. RetrievalCall is the preferred event when the implementation can identify retrieval semantics."
+
 ---
  
 ### §6.5 Phase 4 — Evidence operations
