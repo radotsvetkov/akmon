@@ -406,6 +406,21 @@ where
         }
     }
 
+    /// Best-effort [`akmon_journal::EventKind::AssistantTurn`] emission; failures are logged and ignored.
+    fn warn_emit_assistant_turn_cbor(&self, message_text: &str, tool_calls_cbor: Option<&[u8]>) {
+        if let Err(e) = crate::journal::emit_assistant_turn(
+            &self.journal,
+            message_text.as_bytes(),
+            tool_calls_cbor,
+        ) {
+            tracing::warn!(
+                target: "akmon::session",
+                error = %e,
+                "AssistantTurn journal emission failed; continuing session"
+            );
+        }
+    }
+
     fn try_emit_session_end_once(
         &self,
         summary_hash: Option<akmon_journal::Hash>,
@@ -1080,11 +1095,24 @@ where
                                         user_line_committed = true;
                                     }
                                     let assistant_record = json!({
-                                        "text": accumulated,
+                                        "text": &accumulated,
                                         "tool_calls": tool_calls.iter().map(|c| {
-                                            json!({"id": c.id, "name": c.name, "arguments": c.arguments})
+                                            json!({"id": &c.id, "name": &c.name, "arguments": &c.arguments})
                                         }).collect::<Vec<_>>(),
                                     });
+                                    let tool_calls_cbor_opt =
+                                        match crate::journal::assistant_tool_calls_cbor(&tool_calls)
+                                        {
+                                            Ok(b) => Some(b),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: "akmon::session",
+                                                    error = %e,
+                                                    "AssistantTurn tool_calls CBOR failed"
+                                                );
+                                                None
+                                            }
+                                        };
                                     self.context.push(Message {
                                         role: MessageRole::Assistant,
                                         content: assistant_record.to_string(),
@@ -1097,6 +1125,10 @@ where
                                         question_answer_rx,
                                     )
                                     .await?;
+                                    self.warn_emit_assistant_turn_cbor(
+                                        accumulated.as_str(),
+                                        tool_calls_cbor_opt.as_deref(),
+                                    );
                                     self.apply_event(
                                         &event_tx,
                                         AgentEvent::StatusInfo {
@@ -1135,8 +1167,9 @@ where
                                     }
                                     self.context.push(Message {
                                         role: MessageRole::Assistant,
-                                        content: accumulated,
+                                        content: accumulated.clone(),
                                     });
+                                    self.warn_emit_assistant_turn_cbor(accumulated.as_str(), None);
                                     self.context.push(Message {
                                         role: MessageRole::User,
                                         content: "Continue from exactly where you stopped. \
@@ -1184,11 +1217,24 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                         user_line_committed = true;
                                     }
                                     let assistant_record = json!({
-                                        "text": accumulated,
+                                        "text": &accumulated,
                                         "tool_calls": tool_calls.iter().map(|c| {
-                                            json!({"id": c.id, "name": c.name, "arguments": c.arguments})
+                                            json!({"id": &c.id, "name": &c.name, "arguments": &c.arguments})
                                         }).collect::<Vec<_>>(),
                                     });
+                                    let tool_calls_cbor_opt =
+                                        match crate::journal::assistant_tool_calls_cbor(&tool_calls)
+                                        {
+                                            Ok(b) => Some(b),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: "akmon::session",
+                                                    error = %e,
+                                                    "AssistantTurn tool_calls CBOR failed"
+                                                );
+                                                None
+                                            }
+                                        };
                                     self.context.push(Message {
                                         role: MessageRole::Assistant,
                                         content: assistant_record.to_string(),
@@ -1201,6 +1247,10 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                         question_answer_rx,
                                     )
                                     .await?;
+                                    self.warn_emit_assistant_turn_cbor(
+                                        accumulated.as_str(),
+                                        tool_calls_cbor_opt.as_deref(),
+                                    );
                                     if interrupt_after_current_tools
                                         .as_ref()
                                         .is_some_and(|f| f.load(Ordering::SeqCst))
@@ -1230,8 +1280,9 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                 }
                                 self.context.push(Message {
                                     role: MessageRole::Assistant,
-                                    content: accumulated,
+                                    content: accumulated.clone(),
                                 });
+                                self.warn_emit_assistant_turn_cbor(accumulated.as_str(), None);
                                 self.record_run_finished_success();
                                 self.last_run_exit = if self.budget_stop_before_next_iteration {
                                     SessionRunExit::BudgetLimit
@@ -1267,11 +1318,23 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                 }
 
                                 let assistant_record = json!({
-                                    "text": accumulated,
+                                    "text": &accumulated,
                                     "tool_calls": tool_calls.iter().map(|c| {
-                                        json!({"id": c.id, "name": c.name, "arguments": c.arguments})
+                                        json!({"id": &c.id, "name": &c.name, "arguments": &c.arguments})
                                     }).collect::<Vec<_>>(),
                                 });
+                                let tool_calls_cbor_opt =
+                                    match crate::journal::assistant_tool_calls_cbor(&tool_calls) {
+                                        Ok(b) => Some(b),
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                target: "akmon::session",
+                                                error = %e,
+                                                "AssistantTurn tool_calls CBOR failed"
+                                            );
+                                            None
+                                        }
+                                    };
                                 self.context.push(Message {
                                     role: MessageRole::Assistant,
                                     content: assistant_record.to_string(),
@@ -1285,6 +1348,10 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                                     question_answer_rx,
                                 )
                                 .await?;
+                                self.warn_emit_assistant_turn_cbor(
+                                    accumulated.as_str(),
+                                    tool_calls_cbor_opt.as_deref(),
+                                );
 
                                 if interrupt_after_current_tools
                                     .as_ref()
@@ -3277,6 +3344,62 @@ mod tests {
         let inner = MemorySessionGraph::open_new(Arc::clone(&store), session_id);
         let graph = Arc::new(Mutex::new(RejectPermissionGateAppend { inner }));
         JournalHandle::new(store, graph)
+    }
+
+    /// [`SessionGraph`] that rejects [`EventKind::AssistantTurn`] only.
+    struct RejectAssistantTurnAppend {
+        inner: MemorySessionGraph,
+    }
+
+    impl SessionGraph for RejectAssistantTurnAppend {
+        fn session_id(&self) -> Uuid {
+            self.inner.session_id()
+        }
+
+        fn append(&mut self, kind: EventKind) -> akmon_journal::Result<Hash> {
+            if matches!(kind, EventKind::AssistantTurn { .. }) {
+                return Err(JournalError::Verification(
+                    "test reject AssistantTurn append".into(),
+                ));
+            }
+            self.inner.append(kind)
+        }
+
+        fn head(&self) -> akmon_journal::Result<Option<Hash>> {
+            self.inner.head()
+        }
+
+        fn history(&self) -> akmon_journal::Result<Vec<(Hash, akmon_journal::Event)>> {
+            self.inner.history()
+        }
+
+        fn verify(&self) -> akmon_journal::Result<VerificationReport> {
+            self.inner.verify()
+        }
+    }
+
+    fn test_journal_reject_assistant_turn(
+        session_id: Uuid,
+    ) -> JournalHandle<MemoryObjectStore, RejectAssistantTurnAppend> {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let inner = MemorySessionGraph::open_new(Arc::clone(&store), session_id);
+        let graph = Arc::new(Mutex::new(RejectAssistantTurnAppend { inner }));
+        JournalHandle::new(store, graph)
+    }
+
+    fn journal_event_kind_tags(h: &[(Hash, akmon_journal::Event)]) -> Vec<&'static str> {
+        h.iter()
+            .map(|(_, e)| match &e.kind {
+                EventKind::SessionStart { .. } => "SessionStart",
+                EventKind::UserTurn { .. } => "UserTurn",
+                EventKind::ProviderCall { .. } => "ProviderCall",
+                EventKind::ToolCall { .. } => "ToolCall",
+                EventKind::PermissionGate { .. } => "PermissionGate",
+                EventKind::AssistantTurn { .. } => "AssistantTurn",
+                EventKind::RetrievalCall { .. } => "RetrievalCall",
+                EventKind::SessionEnd { .. } => "SessionEnd",
+            })
+            .collect()
     }
 
     fn last_permission_gate_before_tool_call(
@@ -5524,7 +5647,7 @@ mod tests {
             .await
             .expect("run");
         let h = session.journal_history_snapshot().expect("hist");
-        assert_eq!(h.len(), 3, "{h:?}");
+        assert_eq!(h.len(), 4, "{h:?}");
         assert!(matches!(h[0].1.kind, EventKind::SessionStart { .. }));
         let prompt_hash = match &h[1].1.kind {
             EventKind::UserTurn { prompt_hash } => prompt_hash.clone(),
@@ -5534,6 +5657,11 @@ mod tests {
             matches!(h[2].1.kind, EventKind::ProviderCall { .. }),
             "expected ProviderCall, got {:?}",
             h[2].1.kind
+        );
+        assert!(
+            matches!(h[3].1.kind, EventKind::AssistantTurn { .. }),
+            "expected AssistantTurn, got {:?}",
+            h[3].1.kind
         );
         let bytes = session
             .journal
@@ -5622,7 +5750,7 @@ mod tests {
             .await
             .expect("run2");
         let h = session.journal_history_snapshot().expect("hist");
-        assert_eq!(h.len(), 5, "{h:?}");
+        assert_eq!(h.len(), 7, "{h:?}");
         assert!(matches!(h[0].1.kind, EventKind::SessionStart { .. }));
         let ut: Vec<_> = h
             .iter()
@@ -6334,6 +6462,330 @@ mod tests {
             .collect();
         assert_eq!(tool_msgs.len(), 1);
         assert!(tool_msgs[0].content.contains('z'));
+    }
+
+    #[tokio::test]
+    async fn t_assistant_turn_emitted_for_pure_text_response() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seq = SeqProvider::new(vec![vec![
+            Ok(StreamEvent::TextDelta {
+                text: "hola".into(),
+            }),
+            Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            }),
+        ]]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(seq),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let tc_none = h.iter().find_map(|(_, e)| match &e.kind {
+            EventKind::AssistantTurn {
+                tool_calls_hash, ..
+            } => Some(tool_calls_hash.is_none()),
+            _ => None,
+        });
+        assert_eq!(
+            tc_none,
+            Some(true),
+            "expected AssistantTurn with tool_calls_hash None: {h:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn t_assistant_turn_emitted_with_tool_calls() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tool_name = "journal_emit_tool";
+        let model_calls = vec![ModelToolCall {
+            id: "c1".into(),
+            name: tool_name.into(),
+            arguments: json!({"k": 1}),
+        }];
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: model_calls.clone(),
+            })],
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            })],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![Box::new(JournalEmitTool { id: tool_name })],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("go".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let (msg_h, tc_h) = h
+            .iter()
+            .find_map(|(_, e)| match &e.kind {
+                EventKind::AssistantTurn {
+                    message_hash,
+                    tool_calls_hash,
+                } => tool_calls_hash
+                    .as_ref()
+                    .map(|tch| (message_hash.clone(), tch.clone())),
+                _ => None,
+            })
+            .expect("AssistantTurn with tool_calls");
+        let expected_tc = crate::journal::assistant_tool_calls_cbor(&model_calls).expect("cbor");
+        let got_tc = session
+            .journal
+            .store
+            .get(&tc_h)
+            .expect("get tc")
+            .expect("blob tc");
+        assert_eq!(got_tc.as_ref(), expected_tc.as_slice());
+        let got_msg = session
+            .journal
+            .store
+            .get(&msg_h)
+            .expect("get msg")
+            .expect("blob msg");
+        assert_eq!(got_msg.as_ref(), b"");
+    }
+
+    #[tokio::test]
+    async fn t_assistant_turn_message_hash_resolves_to_content() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let body = "plain_body_verify";
+        let seq = SeqProvider::new(vec![vec![
+            Ok(StreamEvent::TextDelta { text: body.into() }),
+            Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            }),
+        ]]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(seq),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let msg_h = h
+            .iter()
+            .find_map(|(_, e)| match &e.kind {
+                EventKind::AssistantTurn { message_hash, .. } => Some(message_hash.clone()),
+                _ => None,
+            })
+            .expect("AssistantTurn");
+        let got = session
+            .journal
+            .store
+            .get(&msg_h)
+            .expect("get")
+            .expect("blob");
+        assert_eq!(got.as_ref(), body.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn t_assistant_turn_failure_does_not_break_session() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_reject_assistant_turn(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let body = "survives_journal_loss";
+        let seq = SeqProvider::new(vec![vec![
+            Ok(StreamEvent::TextDelta { text: body.into() }),
+            Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            }),
+        ]]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll)),
+            Arc::new(seq),
+            vec![],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("task".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        assert!(
+            !h.iter()
+                .any(|(_, e)| matches!(e.kind, EventKind::AssistantTurn { .. })),
+            "AssistantTurn append rejected: {h:?}"
+        );
+        let mut saw_delta = false;
+        while let Ok(e) = rx.try_recv() {
+            if let AgentEvent::TextDelta { text } = e
+                && text == body
+            {
+                saw_delta = true;
+            }
+        }
+        assert!(saw_delta, "expected streamed TextDelta");
+        let assistants: Vec<_> = session
+            .context
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .collect();
+        assert_eq!(assistants.len(), 1);
+        assert_eq!(assistants[0].content, body);
+    }
+
+    #[tokio::test]
+    async fn t_full_event_sequence_for_simple_turn() {
+        let sid = Uuid::new_v4();
+        let j = test_journal_sid(sid);
+        let tmp = tempfile::tempdir().expect("tmp");
+        let tool_name = "journal_emit_tool";
+        let model_calls = vec![ModelToolCall {
+            id: "z9".into(),
+            name: tool_name.into(),
+            arguments: json!({}),
+        }];
+        let seq = SeqProvider::new(vec![
+            vec![Ok(StreamEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                tool_calls: model_calls.clone(),
+            })],
+            vec![
+                Ok(StreamEvent::TextDelta { text: "fin".into() }),
+                Ok(StreamEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                }),
+            ],
+        ]);
+        let mut session = AgentSession::new(
+            AgentConfig {
+                max_iterations: 5,
+                confirmation_timeout_secs: 30,
+                session_id: sid,
+                auto_commit: false,
+                max_completion_tokens: None,
+                subagent_style: false,
+                max_budget_usd: None,
+                fallback_model: None,
+                model_estimates: Vec::new(),
+            },
+            Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+                confirm_writes: true,
+            })),
+            Arc::new(seq),
+            vec![Box::new(JournalEmitTool { id: tool_name })],
+            test_sandbox(tmp.path()),
+            None,
+            false,
+            j,
+        )
+        .expect("session");
+        let (tx, _rx) = mpsc::channel(64);
+        let mut no_policy = None;
+        session
+            .run("one".into(), tx, &mut no_policy, &mut None, None)
+            .await
+            .expect("run");
+        let h = session.journal_history_snapshot().expect("hist");
+        let tags = journal_event_kind_tags(&h);
+        let expected = vec![
+            "SessionStart",
+            "UserTurn",
+            "ProviderCall",
+            "PermissionGate",
+            "ToolCall",
+            "AssistantTurn",
+            "ProviderCall",
+            "AssistantTurn",
+        ];
+        assert_eq!(tags, expected, "unexpected sequence: {h:?}");
     }
 
     #[test]

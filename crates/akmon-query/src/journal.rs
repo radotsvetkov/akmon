@@ -8,6 +8,7 @@ use akmon_journal::{
     EventKind, HashAlgorithm, JournalError, ObjectStore, RedbObjectStore, RedbSessionGraph,
     SessionGraph,
 };
+use akmon_models::ModelToolCall;
 use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -188,6 +189,39 @@ where
             policy_id: policy_id.to_owned(),
             decision: decision.to_owned(),
             context_hash,
+        })
+        .map_err(journal_err)?;
+    Ok(())
+}
+
+/// Canonical CBOR of model-requested tool calls for [`emit_assistant_turn`] `tool_calls_hash`.
+pub(crate) fn assistant_tool_calls_cbor(calls: &[ModelToolCall]) -> Result<Vec<u8>, AgentError> {
+    canonical_cbor_bytes(calls)
+}
+
+/// Stores `message_bytes` as raw UTF-8 (parallel to [`emit_user_turn`]: assistant text only; role is implied by [`EventKind::AssistantTurn`]) and appends [`EventKind::AssistantTurn`].
+pub(crate) fn emit_assistant_turn<S, G>(
+    journal: &JournalHandle<S, G>,
+    message_bytes: &[u8],
+    tool_calls_bytes: Option<&[u8]>,
+) -> Result<(), AgentError>
+where
+    S: ObjectStore,
+    G: SessionGraph,
+{
+    let message_hash = journal.store.put(message_bytes).map_err(journal_err)?;
+    let tool_calls_hash = match tool_calls_bytes {
+        Some(b) => Some(journal.store.put(b).map_err(journal_err)?),
+        None => None,
+    };
+    let mut guard = journal
+        .graph
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .append(EventKind::AssistantTurn {
+            message_hash,
+            tool_calls_hash,
         })
         .map_err(journal_err)?;
     Ok(())
