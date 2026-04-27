@@ -10,6 +10,7 @@ mod diff_render;
 mod edit;
 mod file_change_set;
 mod git;
+pub mod journaling;
 mod list_directory;
 mod mcp_client;
 mod memory_write;
@@ -89,6 +90,28 @@ pub trait Tool: Send + Sync {
     ///
     /// Non-MCP tools return `None`.
     fn mcp_policy_context(&self) -> Option<McpPolicyContext> {
+        None
+    }
+
+    /// Optional canonical bytes describing observable side effects this
+    /// invocation produced beyond its returned [`ToolOutput`]
+    /// (filesystem changes, network requests, process spawns, etc.).
+    ///
+    /// Default returns None. Tools that produce side effects MAY
+    /// override to return canonical CBOR bytes describing those
+    /// effects; the [`crate::journaling::JournalingTool`] wrapper
+    /// hashes and stores these bytes, producing a `side_effects_hash`
+    /// field on the resulting `ToolCall` event in the AGEF journal.
+    ///
+    /// Retrofitting existing tools to override this method is out of
+    /// scope for v2.0. Tools that override it should ensure the
+    /// returned bytes are deterministic for identical (input, output)
+    /// pairs to preserve replay determinism.
+    fn side_effects_manifest(
+        &self,
+        _input: &serde_json::Value,
+        _output: &ToolOutput,
+    ) -> Option<Vec<u8>> {
         None
     }
 }
