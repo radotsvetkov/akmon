@@ -1,5 +1,6 @@
 //! Session-scoped configuration for the agent FSM.
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::cost_estimate::ModelCostEstimateRow;
@@ -7,7 +8,7 @@ use crate::cost_estimate::ModelCostEstimateRow;
 /// Tunables for iteration ceiling, confirmation timeouts, and session identity.
 ///
 /// Values are read by the orchestrator (future slice); this module only holds data.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     /// Maximum number of iterations per session turn before [`super::check_iteration_limit`] fails with [`super::AgentError::IterationLimitReached`].
     ///
