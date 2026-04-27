@@ -33,6 +33,7 @@ pub use context::{ToolContext, project_hash_for_root};
 pub use diff_render::{colorize_unified_diff, render_diff, unified_diff_text};
 pub use edit::EditTool;
 pub use git::{GitTool, try_auto_commit_after_file_tool};
+pub use journaling::JournalingTool;
 pub use list_directory::ListDirectoryTool;
 pub use mcp_client::{McpTool, discover_mcp_tools};
 pub use memory_write::{MemoryWriteTool, format_relevant_memories_block, load_relevant_memories};

@@ -20,7 +20,22 @@ use serde::Serialize;
 
 use crate::{McpPolicyContext, Tool, ToolContext, ToolOutput};
 
-/// Wraps a [`Tool`] and records one journaled tool-call event per execution.
+/// Wraps any [`Tool`] and captures execution evidence in the AGEF journal substrate.
+///
+/// Each [`Tool::execute`] call appends exactly one [`akmon_journal::EventKind::ToolCall`]
+/// event containing hashes for input/output payloads and, when provided, side effects.
+///
+/// Permission decisions are not captured by this wrapper. They are emitted as
+/// `PermissionGate` events at the agent-loop level (Item 3.1).
+///
+/// Side effects are captured only when the inner tool overrides
+/// [`Tool::side_effects_manifest`]; the default implementation returns [`None`].
+///
+/// On journaling failures, this wrapper preserves caller behavior by returning the
+/// inner tool output unchanged and appending a degraded `ToolCall` event that uses
+/// sentinel zero-hash fields for failed stores.
+///
+/// Reference: <https://github.com/radotsvetkov/agef>.
 pub struct JournalingTool<T, S, G>
 where
     T: Tool,
