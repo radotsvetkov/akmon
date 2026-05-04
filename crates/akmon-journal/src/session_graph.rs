@@ -267,6 +267,77 @@ impl RedbSessionGraph {
         Ok(Self { store, session_id })
     }
 
+    /// Test-only: overwrites the event payload at `sequence` while preserving stored hash bytes.
+    ///
+    /// This enables corruption fixtures where event bytes change but address metadata remains.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn overwrite_event_at_sequence_for_testing(
+        &mut self,
+        sequence: u64,
+        event: Event,
+    ) -> Result<()> {
+        let key = event_key(self.session_id, sequence);
+        let write_txn = self
+            .store
+            .database()
+            .begin_write()
+            .map_err(|err| JournalError::StorageTx(Box::new(err)))?;
+        {
+            let mut events = write_txn.open_table(SESSION_EVENTS_TABLE).map_err(|err| {
+                JournalError::Verification(format!("open session_events failed: {err}"))
+            })?;
+            let existing = events
+                .get(key.as_slice())
+                .map_err(|err| {
+                    JournalError::Verification(format!("read session event failed: {err}"))
+                })?
+                .ok_or_else(|| {
+                    JournalError::Verification(format!(
+                        "session event not found at sequence {sequence}"
+                    ))
+                })?;
+            let mut stored: StoredEvent = postcard::from_bytes(existing.value())?;
+            drop(existing);
+            stored.event = event;
+            let bytes = postcard::to_allocvec(&stored)?;
+            events
+                .insert(key.as_slice(), bytes.as_slice())
+                .map_err(|err| {
+                    JournalError::Verification(format!("overwrite session event failed: {err}"))
+                })?;
+        }
+        write_txn.commit().map_err(|err| {
+            JournalError::Verification(format!("commit session event overwrite failed: {err}"))
+        })?;
+        Ok(())
+    }
+
+    /// Test-only: overwrites the stored session head hash.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn overwrite_head_for_testing(&mut self, head: Hash) -> Result<()> {
+        let session_key = session_key_bytes(self.session_id);
+        let head_bytes = postcard::to_allocvec(&Some(head))?;
+        let write_txn = self
+            .store
+            .database()
+            .begin_write()
+            .map_err(|err| JournalError::StorageTx(Box::new(err)))?;
+        {
+            let mut heads = write_txn.open_table(SESSION_HEADS_TABLE).map_err(|err| {
+                JournalError::Verification(format!("open session_heads failed: {err}"))
+            })?;
+            heads
+                .insert(session_key.as_slice(), head_bytes.as_slice())
+                .map_err(|err| {
+                    JournalError::Verification(format!("overwrite session head failed: {err}"))
+                })?;
+        }
+        write_txn.commit().map_err(|err| {
+            JournalError::Verification(format!("commit session head overwrite failed: {err}"))
+        })?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn raw_db(&self) -> &Database {
         self.store.database()
@@ -418,6 +489,36 @@ impl MemorySessionGraph {
             store,
             session_id,
             events: Vec::new(),
+        }
+    }
+
+    /// Test-only: overwrites the event payload at `sequence` while preserving stored hash bytes.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn overwrite_event_at_sequence_for_testing(
+        &mut self,
+        sequence: u64,
+        event: Event,
+    ) -> Result<()> {
+        let idx = usize::try_from(sequence).map_err(|_| {
+            JournalError::Verification(format!("sequence {sequence} does not fit usize"))
+        })?;
+        let slot = self.events.get_mut(idx).ok_or_else(|| {
+            JournalError::Verification(format!("session event not found at sequence {sequence}"))
+        })?;
+        slot.1 = event;
+        Ok(())
+    }
+
+    /// Test-only: overwrites the stored session head hash.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn overwrite_head_for_testing(&mut self, head: Hash) -> Result<()> {
+        if let Some((stored_head, _)) = self.events.last_mut() {
+            *stored_head = head;
+            Ok(())
+        } else {
+            Err(JournalError::Verification(
+                "cannot overwrite head for empty session".to_owned(),
+            ))
         }
     }
 }
