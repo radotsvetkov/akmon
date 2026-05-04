@@ -2,46 +2,23 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use akmon_journal::{
-    EventKind, HashAlgorithm, ObjectStore, RedbObjectStore, RedbSessionGraph, SessionGraph,
+use akmon_core::{AgentConfig, Permission, PolicyEngine, PolicyEngineMode, Sandbox};
+use akmon_journal::RedbObjectStore;
+use akmon_models::{
+    CompletionStream, LlmProvider, ModelError, ModelToolCall, StopReason, StreamEvent,
 };
+use akmon_query::AgentSession;
+use akmon_tools::{Tool, ToolContext, ToolOutput};
+use async_trait::async_trait;
+use futures_util::stream;
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::tempdir;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-fn journal_db_path(dir: &Path) -> std::path::PathBuf {
-    dir.join("journal.redb")
-}
-
-fn put_bytes(store: &RedbObjectStore, bytes: &[u8]) -> akmon_journal::Hash {
-    store.put(bytes).expect("put bytes")
-}
-
-fn create_clean_session(journal_dir: &Path, session_id: Uuid) {
-    std::fs::create_dir_all(journal_dir).expect("mkdir journal dir");
-    let db_path = journal_db_path(journal_dir);
-    let store = Arc::new(
-        RedbObjectStore::create(db_path.as_path(), HashAlgorithm::Sha256).expect("create store"),
-    );
-    let mut graph = RedbSessionGraph::open_new(Arc::clone(&store), session_id).expect("open graph");
-    graph
-        .append(EventKind::SessionStart {
-            cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
-            config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
-        })
-        .expect("append start");
-    graph
-        .append(EventKind::UserTurn {
-            prompt_hash: put_bytes(store.as_ref(), b"hello"),
-        })
-        .expect("append user");
-    graph
-        .append(EventKind::SessionEnd {
-            summary_hash: Some(put_bytes(store.as_ref(), b"summary")),
-        })
-        .expect("append end");
-}
+mod common;
+use common::*;
 
 fn run_verify(journal_dir: &Path, session_id: Uuid) -> std::process::Output {
     run_verify_with(journal_dir, session_id, false, false)
@@ -56,7 +33,7 @@ fn run_verify_verbose(journal_dir: &Path, session_id: Uuid) -> std::process::Out
 }
 
 fn run_verify_with(
-    journal_dir: &Path,
+    journal_dir: &std::path::Path,
     session_id: Uuid,
     json: bool,
     verbose: bool,
@@ -107,6 +84,17 @@ struct VerifyError {
     error: String,
 }
 
+fn categories(report: &VerifyReportV1) -> Vec<String> {
+    let mut out: Vec<String> = report
+        .violations
+        .iter()
+        .map(|v| v.category.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 #[test]
 fn t_verify_passes_for_clean_session() {
     let tmp = tempdir().expect("tempdir");
@@ -123,24 +111,8 @@ fn t_verify_passes_for_clean_session() {
 fn t_verify_fails_for_corrupted_session() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
-    create_clean_session(tmp.path(), sid);
-
-    let db_path = journal_db_path(tmp.path());
-    let store = Arc::new(RedbObjectStore::open(db_path.as_path()).expect("reopen store"));
-    let graph = RedbSessionGraph::reopen(Arc::clone(&store), sid).expect("reopen graph");
-    let history = graph.history().expect("history");
-    let prompt_hash = history
-        .iter()
-        .find_map(|(_, ev)| match &ev.kind {
-            EventKind::UserTurn { prompt_hash } => Some(prompt_hash.clone()),
-            _ => None,
-        })
-        .expect("prompt hash");
-    store
-        .overwrite_object_bytes_for_testing(&prompt_hash, b"corrupted-object")
-        .expect("overwrite object");
-    drop(graph);
-    drop(store);
+    let fixture = create_clean_session(tmp.path(), sid);
+    corrupt_fixture_object_bytes(&fixture);
 
     let out = run_verify(tmp.path(), sid);
     assert_eq!(out.status.code(), Some(1));
@@ -196,24 +168,8 @@ fn t_verify_json_output_for_clean_session() {
 fn t_verify_json_output_for_corrupted_session() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
-    create_clean_session(tmp.path(), sid);
-
-    let db_path = journal_db_path(tmp.path());
-    let store = Arc::new(RedbObjectStore::open(db_path.as_path()).expect("reopen store"));
-    let graph = RedbSessionGraph::reopen(Arc::clone(&store), sid).expect("reopen graph");
-    let history = graph.history().expect("history");
-    let prompt_hash = history
-        .iter()
-        .find_map(|(_, ev)| match &ev.kind {
-            EventKind::UserTurn { prompt_hash } => Some(prompt_hash.clone()),
-            _ => None,
-        })
-        .expect("prompt hash");
-    store
-        .overwrite_object_bytes_for_testing(&prompt_hash, b"corrupted-object")
-        .expect("overwrite object");
-    drop(graph);
-    drop(store);
+    let fixture = create_clean_session(tmp.path(), sid);
+    corrupt_fixture_object_bytes(&fixture);
 
     let out = run_verify_json(tmp.path(), sid);
     assert_eq!(out.status.code(), Some(1));
@@ -268,23 +224,13 @@ fn t_verify_json_field_stability() {
 fn t_verify_verbose_lists_specific_violations() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
-    create_clean_session(tmp.path(), sid);
-
-    let db_path = journal_db_path(tmp.path());
-    let store = Arc::new(RedbObjectStore::open(db_path.as_path()).expect("reopen store"));
-    let graph = RedbSessionGraph::reopen(Arc::clone(&store), sid).expect("reopen graph");
-    let history = graph.history().expect("history");
-    let (user_event_hash, prompt_hash) = history
-        .iter()
-        .find_map(|(event_hash, ev)| match &ev.kind {
-            EventKind::UserTurn { prompt_hash } => Some((event_hash.clone(), prompt_hash.clone())),
-            _ => None,
-        })
-        .expect("prompt hash");
+    let fixture = create_clean_session(tmp.path(), sid);
+    let user_event_hash = fixture.user_event_hash.clone();
+    let prompt_hash = fixture.prompt_hash.clone();
+    let store = Arc::new(RedbObjectStore::open(fixture.journal_db_path.as_path()).expect("open"));
     store
         .remove_object_for_testing(&prompt_hash)
         .expect("remove object");
-    drop(graph);
     drop(store);
 
     let out = run_verify_verbose(tmp.path(), sid);
@@ -316,24 +262,8 @@ fn t_verify_verbose_pass_lists_checks_performed() {
 fn t_verify_non_verbose_unchanged() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
-    create_clean_session(tmp.path(), sid);
-
-    let db_path = journal_db_path(tmp.path());
-    let store = Arc::new(RedbObjectStore::open(db_path.as_path()).expect("reopen store"));
-    let graph = RedbSessionGraph::reopen(Arc::clone(&store), sid).expect("reopen graph");
-    let history = graph.history().expect("history");
-    let prompt_hash = history
-        .iter()
-        .find_map(|(_, ev)| match &ev.kind {
-            EventKind::UserTurn { prompt_hash } => Some(prompt_hash.clone()),
-            _ => None,
-        })
-        .expect("prompt hash");
-    store
-        .overwrite_object_bytes_for_testing(&prompt_hash, b"corrupted-object")
-        .expect("overwrite object");
-    drop(graph);
-    drop(store);
+    let fixture = create_clean_session(tmp.path(), sid);
+    corrupt_fixture_object_bytes(&fixture);
 
     let out = run_verify(tmp.path(), sid);
     assert_eq!(out.status.code(), Some(1));
@@ -385,5 +315,246 @@ fn t_verify_report_lists_all_checks_performed() {
             "missing check {check} in {:?}",
             checks
         );
+    }
+}
+
+#[test]
+fn t_verify_detects_missing_session_end() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let _fixture = create_session_missing_end(tmp.path(), sid);
+    let out = run_verify_json(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(1));
+    let parsed: VerifyReportV1 = serde_json::from_slice(&out.stdout).expect("parse report");
+    assert!(
+        categories(&parsed)
+            .iter()
+            .any(|c| c == "session_end_missing")
+    );
+}
+
+#[test]
+fn t_verify_detects_duplicate_session_end() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let _fixture = create_session_duplicate_end(tmp.path(), sid);
+    let out = run_verify_json(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(1));
+    let parsed: VerifyReportV1 = serde_json::from_slice(&out.stdout).expect("parse report");
+    assert!(
+        categories(&parsed)
+            .iter()
+            .any(|c| c == "session_end_duplicate")
+    );
+}
+
+#[test]
+fn t_verify_detects_non_terminal_session_end() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let _fixture = create_session_end_not_terminal(tmp.path(), sid);
+    let out = run_verify_json(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(1));
+    let parsed: VerifyReportV1 = serde_json::from_slice(&out.stdout).expect("parse report");
+    assert!(
+        categories(&parsed)
+            .iter()
+            .any(|c| c == "session_end_not_terminal")
+    );
+}
+
+#[test]
+fn t_verify_detects_event_hash_mismatch() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let _fixture = create_session_event_hash_mismatch(tmp.path(), sid);
+    let out = run_verify_json(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(1));
+    let parsed: VerifyReportV1 = serde_json::from_slice(&out.stdout).expect("parse report");
+    assert!(
+        categories(&parsed)
+            .iter()
+            .any(|c| c == "event_hash_mismatch")
+    );
+}
+
+#[test]
+fn t_verify_detects_parent_chain_break() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let _fixture = create_session_parent_chain_break(tmp.path(), sid);
+    let out = run_verify_json(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(1));
+    let parsed: VerifyReportV1 = serde_json::from_slice(&out.stdout).expect("parse report");
+    assert!(categories(&parsed).iter().any(|c| c == "parent_chain"));
+}
+
+#[test]
+fn t_verify_detects_head_mismatch() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let _fixture = create_session_head_mismatch(tmp.path(), sid);
+    let out = run_verify_json(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(1));
+    let parsed: VerifyReportV1 = serde_json::from_slice(&out.stdout).expect("parse report");
+    assert!(categories(&parsed).iter().any(|c| c == "head_mismatch"));
+}
+
+#[test]
+fn t_verify_detects_multiple_violations_in_single_session() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let _fixture = create_session_multi_violation(tmp.path(), sid);
+    let out = run_verify_json(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(1));
+    let parsed: VerifyReportV1 = serde_json::from_slice(&out.stdout).expect("parse report");
+    let cats = categories(&parsed);
+    assert!(cats.iter().any(|c| c == "missing_object"));
+    assert!(cats.iter().any(|c| c == "session_end_duplicate"));
+}
+
+const TOOL_NAME: &str = "search_like";
+const TOOL_OUTPUT: &str = "TOOL_OUTPUT_PRED";
+
+fn search_tool_perms() -> &'static [Permission] {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<Vec<Permission>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        vec![Permission::ReadFile {
+            path: std::path::PathBuf::from("."),
+        }]
+    })
+    .as_slice()
+}
+
+struct IntegrationSearchTool;
+
+#[async_trait]
+impl Tool for IntegrationSearchTool {
+    fn name(&self) -> &str {
+        TOOL_NAME
+    }
+    fn description(&self) -> &str {
+        "integration search mock"
+    }
+    fn required_permissions(&self) -> &[Permission] {
+        search_tool_perms()
+    }
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> ToolOutput {
+        ToolOutput::Success {
+            content: TOOL_OUTPUT.into(),
+        }
+    }
+}
+
+struct OneTurnMockProvider {
+    sequences: Vec<Vec<Result<StreamEvent, ModelError>>>,
+    call: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl LlmProvider for OneTurnMockProvider {
+    fn name(&self) -> &str {
+        "integration-mock"
+    }
+    fn context_window_tokens(&self) -> usize {
+        200_000
+    }
+    fn completion_model_id(&self) -> &str {
+        "integration-mock-model"
+    }
+    async fn complete(
+        &self,
+        _messages: &[akmon_models::Message],
+        _config: &akmon_models::CompletionConfig,
+    ) -> Result<CompletionStream, ModelError> {
+        use std::sync::atomic::Ordering;
+        let i = self.call.fetch_add(1, Ordering::SeqCst);
+        let events = self.sequences.get(i).cloned().unwrap_or_default();
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+fn one_turn_sequences() -> Vec<Vec<Result<StreamEvent, ModelError>>> {
+    vec![
+        vec![Ok(StreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            tool_calls: vec![ModelToolCall {
+                id: "call-1".into(),
+                name: TOOL_NAME.into(),
+                arguments: serde_json::json!({"query": "widgets"}),
+            }],
+        })],
+        vec![
+            Ok(StreamEvent::TextDelta {
+                text: "final response".into(),
+            }),
+            Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            }),
+        ],
+    ]
+}
+
+#[tokio::test]
+async fn t_verify_full_session_via_real_agent_session() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal create");
+    let cfg = AgentConfig {
+        max_iterations: 8,
+        confirmation_timeout_secs: 30,
+        session_id: sid,
+        auto_commit: false,
+        max_completion_tokens: None,
+        subagent_style: false,
+        max_budget_usd: None,
+        fallback_model: None,
+        model_estimates: Vec::new(),
+    };
+
+    let mut session = AgentSession::new(
+        cfg,
+        Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+            confirm_writes: true,
+        })),
+        Arc::new(OneTurnMockProvider {
+            sequences: one_turn_sequences(),
+            call: std::sync::atomic::AtomicUsize::new(0),
+        }),
+        vec![Box::new(IntegrationSearchTool)],
+        Arc::new(Sandbox::new(tmp.path())),
+        None,
+        false,
+        journal,
+    )
+    .expect("session new");
+
+    let (tx, _rx) = mpsc::channel(64);
+    let mut no_policy = None;
+    session
+        .run("one turn".into(), tx, &mut no_policy, &mut None, None)
+        .await
+        .expect("run");
+    session.end(None).expect("session end");
+    drop(session);
+
+    let out = run_verify_json(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(0));
+    let parsed: VerifyReportV1 = serde_json::from_slice(&out.stdout).expect("parse report");
+    assert!(parsed.passed);
+    assert!(parsed.violations.is_empty());
+    let expected = [
+        "parent_chain",
+        "sequence",
+        "event_hash_recompute",
+        "object_presence",
+        "object_byte_rehash",
+        "head_consistency",
+        "session_end_invariants",
+    ];
+    for check in expected {
+        assert!(parsed.checks_performed.iter().any(|c| c == check));
     }
 }
