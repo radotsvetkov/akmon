@@ -78,7 +78,7 @@ Akmon is **not** for:
 | P0-2 | Content-addressed object store + merkle session graph | The substrate everything else depends on |
 | P0-3 | Full capture — prompts, model responses (incl. streaming chunks), tool I/O, retrieval results, permission decisions — all hashed into the store | The "what happened" evidence |
 | P0-4 | Tamper-evident verification — `akmon verify <session-id>` on the on-disk journal proves chain integrity, object closure, and byte-level object integrity (AGEF Section 13 step 5); portable head-based checks ship with bundle import/export (Item 4.3, manifest carries `head` and session id) | What makes evidence defensible |
-| P0-5 | Session inspection — `akmon inspect <head>` for human reading of a session | Required for review workflows |
+| P0-5 | Session inspection — `akmon inspect <session-id>` reads one on-disk journal session by UUID for human and CI consumption (`--format json`), with optional content resolution for referenced object hashes | Required for review workflows |
 | P0-6 | Portable bundle — `akmon export <head>` produces a self-contained artifact; `akmon import` round-trips | How sessions leave the producer's machine |
 | P0-7 | AGEF spec v0.1 published as separate repo | Makes the format a public artifact, not a private detail |
 | P0-8 | CI automation — all verify/inspect/export operations produce JSON with documented exit codes | Laptop + CI parity is a user commitment |
@@ -483,7 +483,33 @@ Notes:
 6. **E6 — JSON report:** **VerifyReportV1** in `akmon-cli` initially (shared crate only if multiple commands need it). Category strings are stable Akmon contract; schema documented under `docs/src/reference/` (Item 4.1 command page).
 7. **E7 — Exit codes:** `0` success, `1` any verification violation, `2` usage error, `3` I/O or environment error — documented under `docs/src/reference/` (Item 4.1 command page).
 
-**Item 4.2 — `akmon inspect`**
+**Item 4.2 — `akmon inspect`** (per D-12 output format)
+
+**Scope (substrate-only for v2.0.0 Item 4.2):**
+
+- **Invocation:** `akmon inspect <session-id> [--journal <path>] [--format <human|json>] [--resolve] [--verbose] [--binary <meta|hex|base64>]`.
+- **Operand:** `<session-id>` is the UUID assigned at `AgentSession` construction (same addressing model as Item 4.1).
+- **Journal path:** `--journal` optional; default is per-user journal location (D-04).
+- **Substrate-only:** Item 4.2 reads on-disk journal sessions only. Bundle inspection remains Item 4.3 territory.
+- **Output intent:** Human-readable event timeline by default; explicit JSON for CI/tooling; optional object-content resolution for hash fields.
+
+**Item 4.2 — Design decisions (Q1–Q5) for traceability**
+
+1. **Q1 — P0 wording alignment:** Inspect uses session UUID (not head hash). P0-5 wording updated accordingly.
+2. **Q2 — Human output verbosity:** Default output is scannable summaries per event; `--verbose` expands event metadata and kind-specific detail.
+3. **Q3 — Resolve behavior:** `--resolve` attempts to resolve **all** hash fields uniformly, with content-aware rendering (UTF-8 text preview vs binary-safe representation).
+4. **Q4 — Binary display mode:** `--binary <meta|hex|base64>` controls non-UTF-8 rendering when `--resolve` is active; default `meta`. `--binary` without `--resolve` is usage error (exit code 2).
+5. **Q5 — Filtering deferred:** Kind/range/limit filtering is intentionally out of Item 4.2 scope for v2.0.0.
+
+**Item 4.2.1 — `akmon inspect` filtering flags** (deferred follow-up)
+
+Goal: add `--kind <KIND>`, `--range <START..END>`, and `--limit <N>` filtering controls for inspect output.
+
+When to start: After Item 4.4 (`akmon redact`) lands, or earlier if real-world inspect usage shows clear need.
+
+Notes:
+- Out of scope for v2.0.0 Item 4.2 initial ship.
+- Item 4.2 ships full-session inspection first; filtering is additive follow-up.
  
 **Item 4.3 — `akmon export` and `akmon import`** (per D-11 bundle format, AGEF spec)
  
