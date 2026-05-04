@@ -38,7 +38,7 @@ fn run_verify_with(
     json: bool,
     verbose: bool,
 ) -> std::process::Output {
-    let bin = std::env::var("CARGO_BIN_EXE_akmon").expect("CARGO_BIN_EXE_akmon");
+    let bin = akmon_bin_path();
     let mut cmd = Command::new(bin);
     cmd.args([
         "verify",

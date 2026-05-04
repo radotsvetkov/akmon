@@ -7,6 +7,28 @@ use akmon_journal::{
 };
 use uuid::Uuid;
 
+/// Resolves the `akmon` binary path for CLI integration tests.
+///
+/// Cargo usually provides `CARGO_BIN_EXE_akmon`; some CI invocations of targeted
+/// integration tests may not, so this falls back to `target/<profile>/akmon`.
+#[must_use]
+pub fn akmon_bin_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_akmon") {
+        return PathBuf::from(path);
+    }
+    let exe = std::env::current_exe().expect("current_exe");
+    let deps_dir = exe.parent().expect("test binary dir");
+    let target_dir = deps_dir.parent().expect("target dir");
+    let candidate = target_dir.join(format!("akmon{}", std::env::consts::EXE_SUFFIX));
+    if candidate.is_file() {
+        return candidate;
+    }
+    panic!(
+        "akmon test binary not found: CARGO_BIN_EXE_akmon unset and fallback path missing at {}",
+        candidate.display()
+    );
+}
+
 /// Session fixture paths and key hashes useful for corruption tests.
 pub struct SessionFixture {
     /// Journal database path (`journal.redb`) under test tempdir.
