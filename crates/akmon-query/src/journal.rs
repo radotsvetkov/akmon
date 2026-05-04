@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use akmon_core::{AgentConfig, AgentError};
 use akmon_journal::{
     EventKind, HashAlgorithm, JournalError, ObjectStore, RedbObjectStore, RedbSessionGraph,
-    SessionGraph,
+    SessionGraph, session_head_row_exists,
 };
 use akmon_models::ModelToolCall;
 use serde::Serialize;
@@ -107,6 +107,22 @@ pub fn open_journal_read_only(
     let store = Arc::new(RedbObjectStore::open(db_path.as_path()).map_err(journal_err)?);
     let graph = RedbSessionGraph::reopen(Arc::clone(&store), session_id).map_err(journal_err)?;
     Ok(JournalHandle::new(store, Arc::new(Mutex::new(graph))))
+}
+
+/// Returns whether `session_id` has a row in the journal database `session_heads` table.
+///
+/// When `journal.redb` is missing, returns `Ok(false)` (no session can exist). Opens the database
+/// read-only and performs a single key probe.
+pub fn journal_contains_session(
+    journal_dir: &std::path::Path,
+    session_id: Uuid,
+) -> Result<bool, AgentError> {
+    let db_path = journal_db_path(journal_dir);
+    if !db_path.is_file() {
+        return Ok(false);
+    }
+    let store = RedbObjectStore::open(db_path.as_path()).map_err(journal_err)?;
+    session_head_row_exists(&store, session_id).map_err(journal_err)
 }
 
 fn journal_err(e: JournalError) -> AgentError {
@@ -265,4 +281,21 @@ where
         .append(EventKind::SessionEnd { summary_hash })
         .map_err(journal_err)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod journal_contains_session_tests {
+    use super::*;
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    #[test]
+    fn journal_contains_session_false_when_database_missing() {
+        let tmp = tempdir().unwrap();
+        let sid = Uuid::new_v4();
+        assert!(
+            !journal_contains_session(tmp.path(), sid).expect("probe"),
+            "missing journal.redb implies no session rows"
+        );
+    }
 }

@@ -774,6 +774,25 @@ fn parse_event_key(bytes: &[u8]) -> Result<(uuid::Uuid, u64)> {
     Ok((sid, u64::from_be_bytes(seq)))
 }
 
+/// Returns `true` when `session_heads` contains a row for `session_id`.
+///
+/// This is true for an empty session created via [`RedbSessionGraph::open_new`] (head row stores
+/// `None`) as well as for sessions with persisted events.
+pub fn session_head_row_exists(store: &RedbObjectStore, session_id: uuid::Uuid) -> Result<bool> {
+    let key = session_key_bytes(session_id);
+    let read_txn = store
+        .database()
+        .begin_read()
+        .map_err(|err| JournalError::StorageTx(Box::new(err)))?;
+    let heads = read_txn
+        .open_table(SESSION_HEADS_TABLE)
+        .map_err(|err| JournalError::Verification(format!("open session_heads failed: {err}")))?;
+    let row = heads
+        .get(key.as_slice())
+        .map_err(|err| JournalError::Verification(format!("read session_heads failed: {err}")))?;
+    Ok(row.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1373,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn reopen_succeeds_for_empty_session_after_open_new() {
+    fn t_session_exists_returns_true_for_empty_open_new_session() {
         let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
         let path = tmp.path().join("reopen_empty.redb");
         let store = Arc::new(
@@ -1385,14 +1404,46 @@ mod tests {
             let _g = RedbSessionGraph::open_new(Arc::clone(&store), sid)
                 .unwrap_or_else(|_| unreachable!());
         }
-        let reopened = RedbSessionGraph::reopen(store, sid).unwrap_or_else(|_| unreachable!());
-        assert!(reopened.head().unwrap_or_else(|_| unreachable!()).is_none());
         assert!(
-            reopened
-                .history()
-                .unwrap_or_else(|_| unreachable!())
-                .is_empty()
+            session_head_row_exists(store.as_ref(), sid).unwrap_or_else(|_| unreachable!()),
+            "expected session_heads row after open_new"
         );
+    }
+
+    #[test]
+    fn t_session_exists_returns_false_for_unknown_session() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("unknown_sid.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let sid_a = uuid::Uuid::new_v4();
+        RedbSessionGraph::open_new(Arc::clone(&store), sid_a).unwrap_or_else(|_| unreachable!());
+        let sid_other = uuid::Uuid::new_v4();
+        assert!(
+            !session_head_row_exists(store.as_ref(), sid_other).unwrap_or_else(|_| unreachable!())
+        );
+    }
+
+    #[test]
+    fn t_session_exists_returns_true_for_session_with_events() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("with_events.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let sid = uuid::Uuid::new_v4();
+        let mut graph =
+            RedbSessionGraph::open_new(Arc::clone(&store), sid).unwrap_or_else(|_| unreachable!());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
+        assert!(session_head_row_exists(store.as_ref(), sid).unwrap_or_else(|_| unreachable!()));
     }
 
     #[test]

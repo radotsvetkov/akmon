@@ -45,8 +45,8 @@ use akmon_models::{
 };
 use akmon_query::{
     AgentSession, SessionRunExit, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
-    ToolCallSummary, default_journal_dir, open_default_journal_handle, open_journal_read_only,
-    write_handoff_file,
+    ToolCallSummary, default_journal_dir, journal_contains_session, open_default_journal_handle,
+    open_journal_read_only, write_handoff_file,
 };
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
@@ -398,15 +398,18 @@ struct BundleViolation {
     message: String,
 }
 
-/// JSON shape emitted when bundle import cannot read or parse the archive.
+/// JSON shape emitted when `akmon bundle import` cannot complete (I/O, manifest, collision, or placeholder).
 #[derive(Debug, Serialize)]
 struct BundleImportInfraError {
     /// CLI crate version that produced this error object.
     akmon_version: String,
-    /// Stable infrastructure error category.
-    category: String,
     /// Human-readable error description.
     error: String,
+    /// Stable error category for automation.
+    category: String,
+    /// Target session UUID when `category` is `session_id_collision`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    colliding_session_id: Option<String>,
 }
 
 /// Display mode for resolved binary object content in `akmon inspect`.
@@ -1972,13 +1975,15 @@ fn bundle_read_bundle_exit_code(err: &BundleError) -> u8 {
 }
 
 fn print_bundle_import_infra_json_error(
-    category: &'static str,
+    category: &str,
     error: String,
+    colliding_session_id: Option<uuid::Uuid>,
 ) -> std::io::Result<()> {
     let body = BundleImportInfraError {
         akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        category: category.to_owned(),
         error,
+        category: category.to_owned(),
+        colliding_session_id: colliding_session_id.map(|u| u.as_hyphenated().to_string()),
     };
     let json =
         serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -2124,28 +2129,130 @@ fn run_bundle_import(
     rename_to: Option<uuid::Uuid>,
 ) -> ExitCode {
     if !verify_only {
-        // TODO(Layer 5b): Replace placeholder with ingest logic.
-        // Currently exits 2 with not_implemented because ingestion requires a graph API that
-        // preserves bundle event hashes (see Layer 5a notes about MemorySessionGraph::append
-        // limitations).
-        let _ = (journal, rename_to);
-        let msg = "bundle import without --verify-only is not implemented yet (Item 4.3 layer 5b); use --verify-only to validate a bundle";
+        let journal_dir = match journal {
+            Some(path) => path,
+            None => match default_journal_dir() {
+                Ok(path) => path,
+                Err(err) => {
+                    let msg = format!("cannot resolve default journal directory: {err}");
+                    if matches!(format, BundleImportFormat::Json) {
+                        let _ = print_bundle_import_infra_json_error(
+                            "journal_not_found",
+                            msg.clone(),
+                            None,
+                        );
+                    } else {
+                        eprintln!("akmon: bundle import: {msg}");
+                    }
+                    return ExitCode::from(3);
+                }
+            },
+        };
+
+        let mut file = match std::fs::File::open(&bundle) {
+            Ok(f) => f,
+            Err(err) => {
+                let msg = format!("cannot open bundle {}: {err}", bundle.display());
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error("io_error", msg.clone(), None);
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        };
+
+        let options = ReadBundleOptions {
+            allow_extra_files,
+            max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
+        };
+
+        let contents = match read_bundle(&mut file, &options) {
+            Ok(c) => c,
+            Err(err) => {
+                let msg = err.to_string();
+                let category = bundle_read_bundle_error_category(&err);
+                let code = bundle_read_bundle_exit_code(&err);
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error(category, msg.clone(), None);
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(code);
+            }
+        };
+
+        let bundle_sid = match uuid::Uuid::parse_str(contents.manifest.session.id.trim()) {
+            Ok(u) => u,
+            Err(err) => {
+                let msg = format!("bundle manifest session id is not a valid UUID: {err}");
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error(
+                        "invalid_manifest_session_id",
+                        msg.clone(),
+                        None,
+                    );
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(1);
+            }
+        };
+
+        let target_session_id = rename_to.unwrap_or(bundle_sid);
+
+        match journal_contains_session(&journal_dir, target_session_id) {
+            Ok(true) => {
+                let msg = format!("target journal already contains session {target_session_id}");
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error(
+                        "session_id_collision",
+                        msg,
+                        Some(target_session_id),
+                    );
+                } else {
+                    eprintln!("akmon: bundle import: error: {msg}");
+                    if rename_to.is_none() {
+                        eprintln!(
+                            "akmon: bundle import: hint: use --rename-to <NEW_UUID> to import as a different session"
+                        );
+                    } else {
+                        eprintln!(
+                            "akmon: bundle import: hint: --rename-to target also collides; choose a different UUID"
+                        );
+                    }
+                }
+                return ExitCode::from(2);
+            }
+            Ok(false) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ =
+                        print_bundle_import_infra_json_error("journal_access", msg.clone(), None);
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        }
+
+        // TODO(Layer 5b-3): Replace placeholder with ingest logic.
+        let msg = "bundle import without --verify-only is not implemented yet (Item 4.3 layer 5b-3); use --verify-only to validate a bundle";
         if matches!(format, BundleImportFormat::Json) {
-            let _ = print_bundle_import_infra_json_error("not_implemented", msg.to_owned());
+            let _ = print_bundle_import_infra_json_error("not_implemented", msg.to_owned(), None);
         } else {
             eprintln!("akmon: bundle import: {msg}");
         }
         return ExitCode::from(2);
     }
 
-    let _ = (journal, rename_to);
-
     let mut file = match std::fs::File::open(&bundle) {
         Ok(f) => f,
         Err(err) => {
             let msg = format!("cannot open bundle {}: {err}", bundle.display());
             if matches!(format, BundleImportFormat::Json) {
-                let _ = print_bundle_import_infra_json_error("io_error", msg.clone());
+                let _ = print_bundle_import_infra_json_error("io_error", msg.clone(), None);
             } else {
                 eprintln!("akmon: bundle import: {msg}");
             }
@@ -2165,7 +2272,7 @@ fn run_bundle_import(
             let category = bundle_read_bundle_error_category(&err);
             let code = bundle_read_bundle_exit_code(&err);
             if matches!(format, BundleImportFormat::Json) {
-                let _ = print_bundle_import_infra_json_error(category, msg.clone());
+                let _ = print_bundle_import_infra_json_error(category, msg.clone(), None);
             } else {
                 eprintln!("akmon: bundle import: {msg}");
             }
@@ -2179,8 +2286,11 @@ fn run_bundle_import(
         other => {
             let msg = format!("unsupported hash algorithm in manifest: {other}");
             if matches!(format, BundleImportFormat::Json) {
-                let _ =
-                    print_bundle_import_infra_json_error("unsupported_hash_algorithm", msg.clone());
+                let _ = print_bundle_import_infra_json_error(
+                    "unsupported_hash_algorithm",
+                    msg.clone(),
+                    None,
+                );
             } else {
                 eprintln!("akmon: bundle import: {msg}");
             }
@@ -2246,7 +2356,7 @@ fn run_bundle_import(
         if let Err(err) = store.put(bytes.as_slice()) {
             let msg = format!("object store insert failed: {err}");
             if matches!(format, BundleImportFormat::Json) {
-                let _ = print_bundle_import_infra_json_error("io_error", msg.clone());
+                let _ = print_bundle_import_infra_json_error("io_error", msg.clone(), None);
             } else {
                 eprintln!("akmon: bundle import: {msg}");
             }
@@ -2276,7 +2386,11 @@ fn run_bundle_import(
             Err(err) => {
                 let msg = format!("bundle graph verification failed: {err}");
                 if matches!(format, BundleImportFormat::Json) {
-                    let _ = print_bundle_import_infra_json_error("verification_error", msg.clone());
+                    let _ = print_bundle_import_infra_json_error(
+                        "verification_error",
+                        msg.clone(),
+                        None,
+                    );
                 } else {
                     eprintln!("akmon: bundle import: {msg}");
                 }
