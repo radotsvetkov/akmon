@@ -44,31 +44,38 @@ fn create_clean_session(journal_dir: &Path, session_id: Uuid) {
 }
 
 fn run_verify(journal_dir: &Path, session_id: Uuid) -> std::process::Output {
-    let bin = std::env::var("CARGO_BIN_EXE_akmon").expect("CARGO_BIN_EXE_akmon");
-    Command::new(bin)
-        .args([
-            "verify",
-            &session_id.to_string(),
-            "--journal",
-            &journal_dir.display().to_string(),
-        ])
-        .output()
-        .expect("run verify")
+    run_verify_with(journal_dir, session_id, false, false)
 }
 
 fn run_verify_json(journal_dir: &Path, session_id: Uuid) -> std::process::Output {
+    run_verify_with(journal_dir, session_id, true, false)
+}
+
+fn run_verify_verbose(journal_dir: &Path, session_id: Uuid) -> std::process::Output {
+    run_verify_with(journal_dir, session_id, false, true)
+}
+
+fn run_verify_with(
+    journal_dir: &Path,
+    session_id: Uuid,
+    json: bool,
+    verbose: bool,
+) -> std::process::Output {
     let bin = std::env::var("CARGO_BIN_EXE_akmon").expect("CARGO_BIN_EXE_akmon");
-    Command::new(bin)
-        .args([
-            "verify",
-            &session_id.to_string(),
-            "--journal",
-            &journal_dir.display().to_string(),
-            "--format",
-            "json",
-        ])
-        .output()
-        .expect("run verify json")
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "verify",
+        &session_id.to_string(),
+        "--journal",
+        &journal_dir.display().to_string(),
+    ]);
+    if json {
+        cmd.args(["--format", "json"]);
+    }
+    if verbose {
+        cmd.arg("--verbose");
+    }
+    cmd.output().expect("run verify")
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,4 +259,99 @@ fn t_verify_json_field_stability() {
     assert!(value.get("objects_checked").is_some());
     assert!(value.get("passed").is_some());
     assert!(value.get("violations").is_some());
+}
+
+#[test]
+fn t_verify_verbose_lists_specific_violations() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+
+    let db_path = journal_db_path(tmp.path());
+    let store = Arc::new(RedbObjectStore::open(db_path.as_path()).expect("reopen store"));
+    let graph = RedbSessionGraph::reopen(Arc::clone(&store), sid).expect("reopen graph");
+    let history = graph.history().expect("history");
+    let prompt_hash = history
+        .iter()
+        .find_map(|(_, ev)| match &ev.kind {
+            EventKind::UserTurn { prompt_hash } => Some(prompt_hash.clone()),
+            _ => None,
+        })
+        .expect("prompt hash");
+    store
+        .overwrite_object_bytes_for_testing(&prompt_hash, b"corrupted-object")
+        .expect("overwrite object");
+    drop(graph);
+    drop(store);
+
+    let out = run_verify_verbose(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("object hash mismatches (1):"));
+    assert!(stderr.contains(&prompt_hash.to_hex()));
+}
+
+#[test]
+fn t_verify_verbose_pass_lists_checks_performed() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_verify_verbose(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("checks performed:"));
+    assert!(stderr.contains("parent chain: ok"));
+    assert!(stderr.contains("sequence: ok"));
+    assert!(stderr.contains("event hash recompute: ok"));
+    assert!(stderr.contains("object presence: ok"));
+    assert!(stderr.contains("object byte re-hash: ok"));
+    assert!(stderr.contains("head consistency: ok"));
+}
+
+#[test]
+fn t_verify_non_verbose_unchanged() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+
+    let db_path = journal_db_path(tmp.path());
+    let store = Arc::new(RedbObjectStore::open(db_path.as_path()).expect("reopen store"));
+    let graph = RedbSessionGraph::reopen(Arc::clone(&store), sid).expect("reopen graph");
+    let history = graph.history().expect("history");
+    let prompt_hash = history
+        .iter()
+        .find_map(|(_, ev)| match &ev.kind {
+            EventKind::UserTurn { prompt_hash } => Some(prompt_hash.clone()),
+            _ => None,
+        })
+        .expect("prompt hash");
+    store
+        .overwrite_object_bytes_for_testing(&prompt_hash, b"corrupted-object")
+        .expect("overwrite object");
+    drop(graph);
+    drop(store);
+
+    let out = run_verify(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("violations:"));
+    assert!(stderr.contains("- object hash mismatches: 1"));
+    assert!(!stderr.contains("object hash mismatches (1):"));
+    assert!(!stderr.contains("checks performed:"));
+}
+
+#[test]
+fn t_verify_json_unaffected_by_verbose() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+
+    let baseline = run_verify_json(tmp.path(), sid);
+    assert_eq!(baseline.status.code(), Some(0));
+    let with_verbose = run_verify_with(tmp.path(), sid, true, true);
+    assert_eq!(with_verbose.status.code(), Some(0));
+
+    let baseline_v: Value = serde_json::from_slice(&baseline.stdout).expect("baseline json");
+    let verbose_v: Value = serde_json::from_slice(&with_verbose.stdout).expect("verbose json");
+    assert_eq!(baseline_v, verbose_v);
 }

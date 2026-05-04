@@ -842,7 +842,6 @@ fn run_verify(
     format: VerifyFormat,
     verbose: bool,
 ) -> ExitCode {
-    let _ = verbose;
     let journal_dir = match journal {
         Some(path) => path,
         None => match default_journal_dir() {
@@ -909,30 +908,126 @@ fn run_verify(
                 eprintln!("  events checked: {}", report.events_checked);
                 eprintln!("  objects checked: {}", report.objects_checked);
                 eprintln!("  SessionEnd: present and terminal");
+                if verbose {
+                    eprintln!();
+                    eprintln!("  checks performed:");
+                    eprintln!("    - parent chain: ok");
+                    eprintln!("    - sequence: ok");
+                    eprintln!("    - event hash recompute: ok");
+                    eprintln!("    - object presence: ok ({})", report.objects_checked);
+                    eprintln!("    - object byte re-hash: ok ({})", report.objects_checked);
+                    eprintln!("    - head consistency: ok");
+                }
             } else {
                 eprintln!("verification failed: session {session_id}");
                 eprintln!("  events checked: {}", report.events_checked);
                 eprintln!("  objects checked: {}", report.objects_checked);
                 eprintln!();
                 eprintln!("  violations:");
-                eprintln!("    - missing objects: {}", report.missing_objects.len());
-                eprintln!(
-                    "    - object hash mismatches: {}",
-                    report.object_hash_mismatches.len()
-                );
-                eprintln!(
-                    "    - event hash mismatches: {}",
-                    report.hash_mismatches.len()
-                );
-                eprintln!(
-                    "    - parent chain breaks: {}",
-                    report.broken_parent_links.len()
-                );
-                eprintln!(
-                    "    - sequence violations: {}",
-                    report.sequence_violations.len()
-                );
-                eprintln!("    - head mismatch: {}", report.head_mismatch.is_some());
+                if !verbose {
+                    eprintln!("    - missing objects: {}", report.missing_objects.len());
+                    eprintln!(
+                        "    - object hash mismatches: {}",
+                        report.object_hash_mismatches.len()
+                    );
+                    eprintln!(
+                        "    - event hash mismatches: {}",
+                        report.hash_mismatches.len()
+                    );
+                    eprintln!(
+                        "    - parent chain breaks: {}",
+                        report.broken_parent_links.len()
+                    );
+                    eprintln!(
+                        "    - sequence violations: {}",
+                        report.sequence_violations.len()
+                    );
+                    eprintln!("    - head mismatch: {}", report.head_mismatch.is_some());
+                } else {
+                    eprintln!(
+                        "    missing objects ({}): {}",
+                        report.missing_objects.len(),
+                        if report.missing_objects.is_empty() {
+                            "none"
+                        } else {
+                            ""
+                        }
+                    );
+                    for hash in &report.missing_objects {
+                        eprintln!("      - {}", hash.to_hex());
+                    }
+                    eprintln!();
+
+                    eprintln!(
+                        "    object hash mismatches ({}): {}",
+                        report.object_hash_mismatches.len(),
+                        if report.object_hash_mismatches.is_empty() {
+                            "none"
+                        } else {
+                            ""
+                        }
+                    );
+                    for hash in &report.object_hash_mismatches {
+                        eprintln!("      - {}", hash.to_hex());
+                    }
+                    eprintln!();
+
+                    eprintln!(
+                        "    event hash mismatches ({}): {}",
+                        report.hash_mismatches.len(),
+                        if report.hash_mismatches.is_empty() {
+                            "none"
+                        } else {
+                            ""
+                        }
+                    );
+                    for hash in &report.hash_mismatches {
+                        eprintln!("      - {}", hash.to_hex());
+                    }
+                    eprintln!();
+
+                    eprintln!(
+                        "    parent chain breaks ({}): {}",
+                        report.broken_parent_links.len(),
+                        if report.broken_parent_links.is_empty() {
+                            "none"
+                        } else {
+                            ""
+                        }
+                    );
+                    for (event_hash, expected_parent) in &report.broken_parent_links {
+                        eprintln!(
+                            "      - event {} expected parent {}",
+                            event_hash.to_hex(),
+                            expected_parent.to_hex()
+                        );
+                    }
+                    eprintln!();
+
+                    eprintln!(
+                        "    sequence violations ({}): {}",
+                        report.sequence_violations.len(),
+                        if report.sequence_violations.is_empty() {
+                            "none"
+                        } else {
+                            ""
+                        }
+                    );
+                    for seq in &report.sequence_violations {
+                        eprintln!("      - sequence={seq}");
+                    }
+                    eprintln!();
+
+                    if let Some((stored, computed)) = report.head_mismatch.as_ref() {
+                        eprintln!(
+                            "    head mismatch: true (stored {} terminal {})",
+                            stored.to_hex(),
+                            computed.to_hex()
+                        );
+                    } else {
+                        eprintln!("    head mismatch: false");
+                    }
+                }
                 let session_end_summary = match report.session_end_count {
                     0 => "missing".to_owned(),
                     1 if report.session_end_is_terminal => "present and terminal".to_owned(),
