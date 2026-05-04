@@ -1,0 +1,24 @@
+[package]
+name = "akmon-bundle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "AGEF bundle primitives for Akmon: manifest, events framing, objects, and tar.zst container."
+
+[dependencies]
+akmon-journal = { path = "../akmon-journal" }
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+time.workspace = true
+tar.workspace = true
+zstd.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

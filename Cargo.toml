@@ -10,6 +10,7 @@ members = [
     "crates/akmon-index",
     "crates/akmon-tui",
     "crates/akmon-journal",
+    "crates/akmon-bundle",
 ]
 
 [workspace.dependencies]
@@ -29,6 +30,8 @@ time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 hex = "0.4"
 bytes = "1"
 ciborium = "0.2"
+tar = "0.4"
+zstd = "0.13"
 
 [workspace.package]
 version = "1.8.2"
