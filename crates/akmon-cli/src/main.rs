@@ -2124,6 +2124,10 @@ fn run_bundle_import(
     rename_to: Option<uuid::Uuid>,
 ) -> ExitCode {
     if !verify_only {
+        // TODO(Layer 5b): Replace placeholder with ingest logic.
+        // Currently exits 2 with not_implemented because ingestion requires a graph API that
+        // preserves bundle event hashes (see Layer 5a notes about MemorySessionGraph::append
+        // limitations).
         let _ = (journal, rename_to);
         let msg = "bundle import without --verify-only is not implemented yet (Item 4.3 layer 5b); use --verify-only to validate a bundle";
         if matches!(format, BundleImportFormat::Json) {

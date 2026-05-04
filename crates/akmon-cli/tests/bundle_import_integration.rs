@@ -46,6 +46,24 @@ fn run_bundle_import_with(
     cmd.output().expect("run bundle import")
 }
 
+fn run_bundle_import_ingest_attempt(
+    bundle: &Path,
+    journal_dir: &Path,
+    extra: &[&str],
+) -> std::process::Output {
+    let bin = akmon_bin_path();
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "bundle",
+        "import",
+        bundle.to_str().expect("utf8 path"),
+        "--journal",
+        &journal_dir.display().to_string(),
+    ]);
+    cmd.args(extra);
+    cmd.output().expect("run bundle import ingest")
+}
+
 #[derive(Debug, Deserialize)]
 struct BundleVerifyReportV1 {
     akmon_version: String,
@@ -56,6 +74,21 @@ struct BundleVerifyReportV1 {
     objects_in_bundle: u64,
     passed: bool,
     violations: Vec<serde_json::Value>,
+}
+
+#[test]
+// TODO(Layer 5b): Update this test when ingestion lands.
+// Currently asserts exit 2 + "not_implemented"; should assert exit 0 + successful import after 5b.
+fn t_bundle_import_without_verify_only_is_placeholder() {
+    let tmp = tempdir().expect("tempdir");
+    let bundle = tmp.path().join("any.akmon");
+    let out = run_bundle_import_ingest_attempt(&bundle, tmp.path(), &[]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not implemented") || stderr.contains("layer 5b"),
+        "stderr={stderr}"
+    );
 }
 
 #[test]
