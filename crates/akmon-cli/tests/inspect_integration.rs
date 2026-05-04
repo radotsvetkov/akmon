@@ -47,6 +47,43 @@ fn run_inspect_with(
     cmd.output().expect("run inspect")
 }
 
+fn parse_human_summary_event_kinds(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            if line.starts_with('[') {
+                let mut parts = line.split_whitespace();
+                let _seq = parts.next()?;
+                let kind = parts.next()?;
+                Some(kind.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn parse_human_summary_hash_prefixes(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.split("hash=").nth(1))
+        .map(|rest| rest.trim().to_owned())
+        .collect()
+}
+
+fn inspect_kind_name(kind: &InspectEventKind) -> &'static str {
+    match kind {
+        InspectEventKind::SessionStart { .. } => "SessionStart",
+        InspectEventKind::UserTurn { .. } => "UserTurn",
+        InspectEventKind::ProviderCall { .. } => "ProviderCall",
+        InspectEventKind::ToolCall { .. } => "ToolCall",
+        InspectEventKind::RetrievalCall { .. } => "RetrievalCall",
+        InspectEventKind::PermissionGate { .. } => "PermissionGate",
+        InspectEventKind::AssistantTurn { .. } => "AssistantTurn",
+        InspectEventKind::SessionEnd { .. } => "SessionEnd",
+    }
+}
+
 fn contains_truncated_hash(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut i = 0usize;
@@ -213,7 +250,7 @@ fn t_inspect_json_output_for_clean_session() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
     create_clean_session(tmp.path(), sid);
-    let out = run_inspect_with(tmp.path(), sid, &["--format", "json", "--resolve"]);
+    let out = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let parsed: InspectReportV1 = serde_json::from_str(&stdout).expect("parse inspect report");
@@ -234,6 +271,383 @@ fn t_inspect_json_output_for_clean_session() {
         parsed.events[2].kind,
         InspectEventKind::SessionEnd { .. }
     ));
+}
+
+#[test]
+fn t_inspect_verbose_with_resolve_human() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_inspect_with(tmp.path(), sid, &["--verbose", "--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(contains_full_hash(&stdout));
+    assert!(stdout.contains("parent:"));
+    assert!(stdout.contains("emitted_at:"));
+    assert!(stdout.contains("| hello"));
+}
+
+#[test]
+fn t_inspect_verbose_with_resolve_binary_hex() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: put_bytes(store.as_ref(), b"assistant"),
+                tool_calls_hash: Some(put_bytes(store.as_ref(), &[0xFE, 0xED, 0xFA, 0xCE])),
+            })
+            .expect("append assistant");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect_with(
+        tmp.path(),
+        sid,
+        &["--verbose", "--resolve", "--binary", "hex"],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(contains_full_hash(&stdout));
+    assert!(looks_like_hex_pairs(&stdout));
+    assert!(stdout.contains("  | "));
+}
+
+#[test]
+fn t_inspect_format_json_with_verbose_byte_identical() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let base = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    let with_verbose = run_inspect_with(tmp.path(), sid, &["--format", "json", "--verbose"]);
+    assert_eq!(base.status.code(), Some(0));
+    assert_eq!(with_verbose.status.code(), Some(0));
+    assert_eq!(base.stdout, with_verbose.stdout);
+}
+
+#[test]
+fn t_inspect_handles_empty_session() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::SessionEnd {
+                summary_hash: Some(put_bytes(store.as_ref(), b"done")),
+            })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("events: 2"));
+    assert!(stdout.contains("SessionStart"));
+    assert!(stdout.contains("SessionEnd"));
+}
+
+#[tokio::test]
+async fn t_inspect_handles_single_turn_no_tools() {
+    struct TextOnlyMockProvider;
+    #[async_trait]
+    impl LlmProvider for TextOnlyMockProvider {
+        fn name(&self) -> &str {
+            "text-only-mock"
+        }
+        fn context_window_tokens(&self) -> usize {
+            200_000
+        }
+        fn completion_model_id(&self) -> &str {
+            "text-only-model"
+        }
+        async fn complete(
+            &self,
+            _messages: &[akmon_models::Message],
+            _config: &akmon_models::CompletionConfig,
+        ) -> Result<CompletionStream, ModelError> {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "single turn".into(),
+                }),
+                Ok(StreamEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                }),
+            ])))
+        }
+    }
+
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    let cfg = AgentConfig {
+        max_iterations: 8,
+        confirmation_timeout_secs: 30,
+        session_id: sid,
+        auto_commit: false,
+        max_completion_tokens: None,
+        subagent_style: false,
+        max_budget_usd: None,
+        fallback_model: None,
+        model_estimates: Vec::new(),
+    };
+    let mut session = AgentSession::new(
+        cfg,
+        Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+            confirm_writes: true,
+        })),
+        Arc::new(TextOnlyMockProvider),
+        vec![],
+        Arc::new(Sandbox::new(tmp.path())),
+        None,
+        false,
+        journal,
+    )
+    .expect("session");
+    let (tx, _rx) = mpsc::channel(32);
+    let mut no_policy = None;
+    session
+        .run("just text".into(), tx, &mut no_policy, &mut None, None)
+        .await
+        .expect("run");
+    session.end(None).expect("end");
+    drop(session);
+
+    let out = run_inspect(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("events: 5"));
+    assert!(stdout.contains("SessionStart"));
+    assert!(stdout.contains("UserTurn"));
+    assert!(stdout.contains("ProviderCall"));
+    assert!(stdout.contains("AssistantTurn"));
+    assert!(stdout.contains("SessionEnd"));
+    assert!(!stdout.contains("ToolCall"));
+    assert!(!stdout.contains("PermissionGate"));
+}
+
+#[test]
+fn t_inspect_human_and_json_describe_same_events() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::UserTurn {
+                prompt_hash: put_bytes(store.as_ref(), b"user prompt"),
+            })
+            .expect("append user");
+        graph
+            .append(EventKind::PermissionGate {
+                policy_id: "tool:auto".to_owned(),
+                decision: "allowed".to_owned(),
+                context_hash: put_bytes(store.as_ref(), br#"{"tool":"read_file"}"#),
+            })
+            .expect("append gate");
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: put_bytes(store.as_ref(), b"assistant"),
+                tool_calls_hash: None,
+            })
+            .expect("append assistant");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+
+    let human = run_inspect(tmp.path(), sid);
+    let json = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    assert_eq!(human.status.code(), Some(0));
+    assert_eq!(json.status.code(), Some(0));
+
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    let human_kinds = parse_human_summary_event_kinds(&human_stdout);
+    let human_hash_prefixes = parse_human_summary_hash_prefixes(&human_stdout);
+
+    let parsed: InspectReportV1 = serde_json::from_slice(&json.stdout).expect("parse json");
+    let json_kinds: Vec<String> = parsed
+        .events
+        .iter()
+        .map(|e| inspect_kind_name(&e.kind).to_owned())
+        .collect();
+    assert_eq!(human_kinds.len(), parsed.events.len());
+    assert_eq!(human_kinds, json_kinds);
+    for (idx, event) in parsed.events.iter().enumerate() {
+        assert!(
+            human_hash_prefixes[idx].starts_with(&event.event_hash[..8]),
+            "human hash prefix mismatch at {idx}"
+        );
+    }
+}
+
+#[test]
+fn t_inspect_displays_permission_gate() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::PermissionGate {
+                policy_id: "tool:auto".to_owned(),
+                decision: "allowed".to_owned(),
+                context_hash: put_bytes(store.as_ref(), br#"{"tool":"read_file"}"#),
+            })
+            .expect("append gate");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out_summary = run_inspect(tmp.path(), sid);
+    assert_eq!(out_summary.status.code(), Some(0));
+    let summary = String::from_utf8_lossy(&out_summary.stdout);
+    assert!(summary.contains("PermissionGate"));
+    assert!(summary.contains("policy: tool:auto"));
+    assert!(summary.contains("decision: allowed"));
+    assert!(summary.contains("context_hash:"));
+    let out_verbose = run_inspect_verbose(tmp.path(), sid);
+    assert_eq!(out_verbose.status.code(), Some(0));
+    let verbose = String::from_utf8_lossy(&out_verbose.stdout);
+    assert!(contains_full_hash(&verbose));
+}
+
+#[test]
+fn t_inspect_displays_retrieval_call_in_synthetic_journal() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::RetrievalCall {
+                index_id: "idx-main".to_owned(),
+                query_hash: put_bytes(store.as_ref(), b"query"),
+                results_hash: put_bytes(store.as_ref(), b"results"),
+            })
+            .expect("append retrieval");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+
+    let summary = run_inspect(tmp.path(), sid);
+    assert_eq!(summary.status.code(), Some(0));
+    let summary_out = String::from_utf8_lossy(&summary.stdout);
+    assert!(summary_out.contains("RetrievalCall"));
+    assert!(summary_out.contains("index_id: idx-main"));
+    assert!(summary_out.contains("query_hash:"));
+    assert!(summary_out.contains("results_hash:"));
+
+    let verbose = run_inspect_verbose(tmp.path(), sid);
+    assert_eq!(verbose.status.code(), Some(0));
+    let verbose_out = String::from_utf8_lossy(&verbose.stdout);
+    assert!(contains_full_hash(&verbose_out));
+
+    let json = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    assert_eq!(json.status.code(), Some(0));
+    let parsed: InspectReportV1 = serde_json::from_slice(&json.stdout).expect("json parse");
+    assert!(parsed.events.iter().any(|ev| {
+        matches!(
+            ev.kind,
+            InspectEventKind::RetrievalCall {
+                index_id: _,
+                query_hash: _,
+                results_hash: _
+            }
+        )
+    }));
+}
+
+#[test]
+fn t_inspect_output_stability() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+
+    let human_a = run_inspect(tmp.path(), sid);
+    let human_b = run_inspect(tmp.path(), sid);
+    assert_eq!(human_a.status.code(), Some(0));
+    assert_eq!(human_b.status.code(), Some(0));
+    assert_eq!(human_a.stdout, human_b.stdout);
+
+    let json_a = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    let json_b = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    assert_eq!(json_a.status.code(), Some(0));
+    assert_eq!(json_b.status.code(), Some(0));
+    assert_eq!(json_a.stdout, json_b.stdout);
+
+    let verbose_hex_a = run_inspect_with(
+        tmp.path(),
+        sid,
+        &["--verbose", "--resolve", "--binary", "hex"],
+    );
+    let verbose_hex_b = run_inspect_with(
+        tmp.path(),
+        sid,
+        &["--verbose", "--resolve", "--binary", "hex"],
+    );
+    assert_eq!(verbose_hex_a.status.code(), Some(0));
+    assert_eq!(verbose_hex_b.status.code(), Some(0));
+    assert_eq!(verbose_hex_a.stdout, verbose_hex_b.stdout);
 }
 
 #[test]
