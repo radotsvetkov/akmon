@@ -77,7 +77,7 @@ Akmon is **not** for:
 | P0-1 | Policy + sandbox + MCP governance — fail-closed, explainable, existing Akmon strength preserved and hardened | Foundation; security's lever |
 | P0-2 | Content-addressed object store + merkle session graph | The substrate everything else depends on |
 | P0-3 | Full capture — prompts, model responses (incl. streaming chunks), tool I/O, retrieval results, permission decisions — all hashed into the store | The "what happened" evidence |
-| P0-4 | Tamper-evident verification — `akmon verify <head>` proves chain integrity and object closure | What makes evidence defensible |
+| P0-4 | Tamper-evident verification — `akmon verify <session-id>` on the on-disk journal proves chain integrity, object closure, and byte-level object integrity (AGEF Section 13 step 5); portable head-based checks ship with bundle import/export (Item 4.3, manifest carries `head` and session id) | What makes evidence defensible |
 | P0-5 | Session inspection — `akmon inspect <head>` for human reading of a session | Required for review workflows |
 | P0-6 | Portable bundle — `akmon export <head>` produces a self-contained artifact; `akmon import` round-trips | How sessions leave the producer's machine |
 | P0-7 | AGEF spec v0.1 published as separate repo | Makes the format a public artifact, not a private detail |
@@ -465,14 +465,31 @@ Notes:
 ### §6.5 Phase 4 — Evidence operations
  
 **Item 4.1 — `akmon verify`** (per D-12 output format)
- 
+
+**Scope (substrate-only for v2.0.0 Item 4.1):**
+
+- **Invocation:** `akmon verify <session-id> [--journal <path>]` where `<session-id>` is the UUID assigned at `AgentSession` construction. `--journal` is optional and defaults to the per-user journal location (D-04).
+- **Out of scope for 4.1:** Verifying an AGEF `.tar.zst` bundle file. Bundle verification is Item 4.3 (import path) or a narrowly scoped follow-up if import does not expose it cleanly.
+- **Substrate checks:** Delegates to `akmon-journal` graph verification: parent chain, sequence, stored vs recomputed event hashes, stored head vs terminal event, referenced-object presence, **byte-level re-hash of object bytes** (per AGEF Section 13 step 5), and **SessionEnd** invariants (exactly one `SessionEnd`, last in sequence order).
+- **Output:** Human-readable by default; explicit `--format json` (D-12) using Akmon-stabilized **VerifyReportV1** (not AGEF-normative). Exit codes: `0` success, `1` any verification violation, `2` usage error, `3` I/O or environment error — documented under `docs/src/reference/` (Item 4.1 command page).
+
+**Item 4.1 — Design decisions (E1–E7) for traceability**
+
+1. **E1 — Primary operand:** `akmon verify <session-id>` where `<session-id>` is the session UUID from `AgentSession` construction.
+2. **E2 — Journal path:** Optional `--journal <path>`; when omitted, default is the per-user journal (D-04). No head-to-session index; head-oriented verification for shipped artifacts returns via Item 4.3 (bundle manifest embeds `session.head` and session id).
+3. **E3 — Substrate vs bundle:** Item 4.1 verifies live on-disk journals only; bundle verify remains Item 4.3 (or follow-up).
+4. **E4 — Object re-hash:** Extend `SessionGraph::verify` (Redb + in-memory symmetry) to read object bytes, re-digest, and record mismatches in `VerificationReport` (pre-step before CLI layers).
+5. **E5 — SessionEnd invariants:** Extend verification walk to count `SessionEnd` events and assert a single terminal `SessionEnd` (findings in report; surfaced in CLI/JSON).
+6. **E6 — JSON report:** **VerifyReportV1** in `akmon-cli` initially (shared crate only if multiple commands need it). Category strings are stable Akmon contract; schema documented under `docs/src/reference/` (Item 4.1 command page).
+7. **E7 — Exit codes:** `0` success, `1` any verification violation, `2` usage error, `3` I/O or environment error — documented under `docs/src/reference/` (Item 4.1 command page).
+
 **Item 4.2 — `akmon inspect`**
  
 **Item 4.3 — `akmon export` and `akmon import`** (per D-11 bundle format, AGEF spec)
  
 **Item 4.4 — `akmon redact`** (per D-07)
  
-Each item: design first, implement, document under `docs/src/commands/`, verification gate of fmt+clippy+test.
+Each item: design first, implement, document under `docs/src/commands/` or `docs/src/reference/` (per item; Item 4.1 command docs live in `docs/src/reference/`), verification gate of fmt+clippy+test.
  
 ---
  
