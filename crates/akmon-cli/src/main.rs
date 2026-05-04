@@ -295,6 +295,189 @@ enum VerifyFormat {
     Json,
 }
 
+/// Stable JSON shape for `akmon verify --format json`.
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct VerifyReportV1 {
+    /// CLI crate version that produced this report.
+    akmon_version: String,
+    /// AGEF specification version implemented by the journal substrate.
+    agef_version: String,
+    /// Hyphenated session UUID.
+    session_id: String,
+    /// Resolved journal directory used for verification.
+    journal_path: String,
+    /// Number of events walked.
+    events_checked: u32,
+    /// Number of object references checked.
+    objects_checked: u32,
+    /// True when verification found no violations.
+    passed: bool,
+    /// Flattened violations with stable categories.
+    violations: Vec<VerifyViolation>,
+}
+
+/// One machine-readable verification violation.
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct VerifyViolation {
+    /// Stable category identifier.
+    category: String,
+    /// Event hash in hex when applicable.
+    event_hash: Option<String>,
+    /// Object hash in hex when applicable.
+    object_hash: Option<String>,
+    /// Human-readable explanation.
+    message: String,
+}
+
+/// JSON shape emitted when verification cannot run (journal/session/infrastructure errors).
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct VerifyError {
+    /// CLI crate version that produced this error.
+    akmon_version: String,
+    /// Stable infrastructure error category.
+    category: String,
+    /// Human-readable error description.
+    error: String,
+}
+
+fn verify_report_v1(
+    session_id: uuid::Uuid,
+    journal_path: &Path,
+    report: &akmon_journal::VerificationReport,
+) -> VerifyReportV1 {
+    let mut violations = Vec::new();
+
+    violations.extend(report.missing_objects.iter().map(|hash| VerifyViolation {
+        category: "missing_object".to_owned(),
+        event_hash: None,
+        object_hash: Some(hash.to_hex()),
+        message: "Object referenced but not in store".to_owned(),
+    }));
+
+    violations.extend(
+        report
+            .object_hash_mismatches
+            .iter()
+            .map(|hash| VerifyViolation {
+                category: "object_hash_mismatch".to_owned(),
+                event_hash: None,
+                object_hash: Some(hash.to_hex()),
+                message: "Object bytes do not match hash".to_owned(),
+            }),
+    );
+
+    violations.extend(report.hash_mismatches.iter().map(|hash| VerifyViolation {
+        category: "event_hash_mismatch".to_owned(),
+        event_hash: Some(hash.to_hex()),
+        object_hash: None,
+        message: "Event hash does not match recomputed value".to_owned(),
+    }));
+
+    violations.extend(report.broken_parent_links.iter().map(
+        |(event_hash, expected_parent_hash)| VerifyViolation {
+            category: "parent_chain".to_owned(),
+            event_hash: Some(event_hash.to_hex()),
+            object_hash: None,
+            message: format!(
+                "Event parent does not match prior event hash (expected parent {})",
+                expected_parent_hash.to_hex()
+            ),
+        },
+    ));
+
+    violations.extend(
+        report
+            .sequence_violations
+            .iter()
+            .map(|seq| VerifyViolation {
+                category: "sequence".to_owned(),
+                event_hash: None,
+                object_hash: None,
+                message: format!("Event sequence number incorrect: {seq}"),
+            }),
+    );
+
+    if let Some((stored, computed)) = report.head_mismatch.as_ref() {
+        violations.push(VerifyViolation {
+            category: "head_mismatch".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: format!(
+                "Stored head does not match terminal event hash (stored {}, terminal {})",
+                stored.to_hex(),
+                computed.to_hex()
+            ),
+        });
+    }
+
+    match report.session_end_count {
+        0 => violations.push(VerifyViolation {
+            category: "session_end_missing".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: "SessionEnd event is missing".to_owned(),
+        }),
+        n if n > 1 => violations.push(VerifyViolation {
+            category: "session_end_duplicate".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: format!("SessionEnd appears multiple times (count={n})"),
+        }),
+        1 if !report.session_end_is_terminal => violations.push(VerifyViolation {
+            category: "session_end_not_terminal".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: "SessionEnd is not the terminal event".to_owned(),
+        }),
+        _ => {}
+    }
+
+    let journal_path =
+        dunce::canonicalize(journal_path).unwrap_or_else(|_| journal_path.to_path_buf());
+    VerifyReportV1 {
+        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+        agef_version: akmon_journal::AGEF_SPEC_VERSION.to_owned(),
+        session_id: session_id.to_string(),
+        journal_path: journal_path.display().to_string(),
+        events_checked: u32::try_from(report.events_checked).unwrap_or(u32::MAX),
+        objects_checked: u32::try_from(report.objects_checked).unwrap_or(u32::MAX),
+        passed: report.is_clean(),
+        violations,
+    }
+}
+
+fn print_verify_json_report(report: &VerifyReportV1) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(report).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
+fn print_verify_json_error(category: &'static str, error: String) -> std::io::Result<()> {
+    let body = VerifyError {
+        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+        category: category.to_owned(),
+        error,
+    };
+    let json =
+        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
+fn verify_error_category(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("session not found") {
+        "session_not_found"
+    } else if lower.contains("redb open failed") || lower.contains("no such file or directory") {
+        "journal_not_found"
+    } else if lower.contains("hash algorithm mismatch") {
+        "hash_algorithm_mismatch"
+    } else {
+        "verify_infrastructure_error"
+    }
+}
+
 /// Aggregated token counters for `--output json` (Anthropic cache fields are zero when unused).
 #[derive(Debug, Serialize)]
 struct RunUsageSummary {
@@ -659,13 +842,20 @@ fn run_verify(
     format: VerifyFormat,
     verbose: bool,
 ) -> ExitCode {
-    let _ = (format, verbose);
+    let _ = verbose;
     let journal_dir = match journal {
         Some(path) => path,
         None => match default_journal_dir() {
             Ok(path) => path,
             Err(err) => {
-                eprintln!("akmon: verify: cannot resolve default journal directory: {err}");
+                if matches!(format, VerifyFormat::Json) {
+                    let _ = print_verify_json_error(
+                        "verify_infrastructure_error",
+                        format!("cannot resolve default journal directory: {err}"),
+                    );
+                } else {
+                    eprintln!("akmon: verify: cannot resolve default journal directory: {err}");
+                }
                 return ExitCode::from(3);
             }
         },
@@ -674,11 +864,16 @@ fn run_verify(
     let handle = match open_journal_for_verify(journal_dir.as_path(), session_id) {
         Ok(h) => h,
         Err(err) => {
-            eprintln!(
-                "akmon: verify: cannot open journal {} for session {}: {err}",
+            let msg = format!(
+                "cannot open journal {} for session {}: {err}",
                 journal_dir.display(),
                 session_id
             );
+            if matches!(format, VerifyFormat::Json) {
+                let _ = print_verify_json_error(verify_error_category(&msg), msg);
+            } else {
+                eprintln!("akmon: verify: {msg}");
+            }
             return ExitCode::from(3);
         }
     };
@@ -690,50 +885,70 @@ fn run_verify(
     let report = match graph.verify() {
         Ok(r) => r,
         Err(err) => {
-            eprintln!("akmon: verify: verification failed with journal error: {err}");
+            let msg = format!("verification failed with journal error: {err}");
+            if matches!(format, VerifyFormat::Json) {
+                let _ = print_verify_json_error(verify_error_category(&msg), msg);
+            } else {
+                eprintln!("akmon: verify: {msg}");
+            }
             return ExitCode::from(3);
         }
     };
 
-    if report.is_clean() {
-        eprintln!("verified: session {session_id}");
-        eprintln!("  events checked: {}", report.events_checked);
-        eprintln!("  objects checked: {}", report.objects_checked);
-        eprintln!("  SessionEnd: present and terminal");
-        return ExitCode::SUCCESS;
+    match format {
+        VerifyFormat::Json => {
+            let body = verify_report_v1(session_id, journal_dir.as_path(), &report);
+            if let Err(err) = print_verify_json_report(&body) {
+                eprintln!("akmon: verify: failed to render JSON output: {err}");
+                return ExitCode::from(3);
+            }
+        }
+        VerifyFormat::Human => {
+            if report.is_clean() {
+                eprintln!("verified: session {session_id}");
+                eprintln!("  events checked: {}", report.events_checked);
+                eprintln!("  objects checked: {}", report.objects_checked);
+                eprintln!("  SessionEnd: present and terminal");
+            } else {
+                eprintln!("verification failed: session {session_id}");
+                eprintln!("  events checked: {}", report.events_checked);
+                eprintln!("  objects checked: {}", report.objects_checked);
+                eprintln!();
+                eprintln!("  violations:");
+                eprintln!("    - missing objects: {}", report.missing_objects.len());
+                eprintln!(
+                    "    - object hash mismatches: {}",
+                    report.object_hash_mismatches.len()
+                );
+                eprintln!(
+                    "    - event hash mismatches: {}",
+                    report.hash_mismatches.len()
+                );
+                eprintln!(
+                    "    - parent chain breaks: {}",
+                    report.broken_parent_links.len()
+                );
+                eprintln!(
+                    "    - sequence violations: {}",
+                    report.sequence_violations.len()
+                );
+                eprintln!("    - head mismatch: {}", report.head_mismatch.is_some());
+                let session_end_summary = match report.session_end_count {
+                    0 => "missing".to_owned(),
+                    1 if report.session_end_is_terminal => "present and terminal".to_owned(),
+                    1 => "not terminal".to_owned(),
+                    n => format!("duplicate (count={n})"),
+                };
+                eprintln!("    - SessionEnd: {session_end_summary}");
+            }
+        }
     }
 
-    eprintln!("verification failed: session {session_id}");
-    eprintln!("  events checked: {}", report.events_checked);
-    eprintln!("  objects checked: {}", report.objects_checked);
-    eprintln!();
-    eprintln!("  violations:");
-    eprintln!("    - missing objects: {}", report.missing_objects.len());
-    eprintln!(
-        "    - object hash mismatches: {}",
-        report.object_hash_mismatches.len()
-    );
-    eprintln!(
-        "    - event hash mismatches: {}",
-        report.hash_mismatches.len()
-    );
-    eprintln!(
-        "    - parent chain breaks: {}",
-        report.broken_parent_links.len()
-    );
-    eprintln!(
-        "    - sequence violations: {}",
-        report.sequence_violations.len()
-    );
-    eprintln!("    - head mismatch: {}", report.head_mismatch.is_some());
-    let session_end_summary = match report.session_end_count {
-        0 => "missing".to_owned(),
-        1 if report.session_end_is_terminal => "present and terminal".to_owned(),
-        1 => "not terminal".to_owned(),
-        n => format!("duplicate (count={n})"),
-    };
-    eprintln!("    - SessionEnd: {session_end_summary}");
-    ExitCode::from(1)
+    if report.is_clean() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 #[cfg(feature = "semantic-index")]
