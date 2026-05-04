@@ -48,7 +48,7 @@ use akmon_tools::{
 };
 use akmon_tui::TuiLaunchConfig;
 use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 #[cfg(feature = "semantic-index")]
 use fastembed::{TextEmbedding, TextInitOptions};
 use serde::Serialize;
@@ -302,6 +302,16 @@ enum InspectFormat {
     #[default]
     Human,
     /// Machine-readable JSON output for automation.
+    Json,
+}
+
+/// Output format for `akmon bundle export`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum BundleExportFormat {
+    /// Human-readable status messages.
+    #[default]
+    Human,
+    /// Machine-readable JSON status messages.
     Json,
 }
 
@@ -1341,6 +1351,12 @@ enum Commands {
     Import(import_cmd::ImportArgs),
     /// Write `AKMON.md` into another tool's expected paths (`--all` or `--tool`).
     Export(export_cmd::ExportArgs),
+    /// Bundle operations: export and import AGEF bundles.
+    #[command(long_about = "Bundle operations: export and import AGEF bundles.\n\n\
+Bundles are portable artifacts containing a complete session graph plus all referenced objects. \
+They are produced by `akmon bundle export` and consumed by `akmon bundle import`. \
+The bundle format is AGEF-compliant (see github.com/radotsvetkov/agef).")]
+    Bundle(BundleArgs),
     /// Verify a session's integrity (chain, hashes, object closure).
     #[command(
         long_about = "Verify the on-disk journal for the given session ID. Checks parent chain, \
@@ -1406,6 +1422,66 @@ Exit codes:\n\
         #[arg(long, default_value = "meta")]
         binary: BinaryMode,
     },
+}
+
+/// Arguments for `akmon bundle`.
+#[derive(Args, Debug, Clone)]
+struct BundleArgs {
+    /// Bundle command to execute.
+    #[command(subcommand)]
+    command: BundleCommands,
+}
+
+/// Nested bundle subcommands.
+#[derive(Subcommand, Debug, Clone)]
+enum BundleCommands {
+    /// Export a session as an AGEF bundle.
+    #[command(long_about = "Export a session as an AGEF bundle.\n\n\
+Reads the named session from the on-disk journal and writes a self-contained .akmon archive \
+(tar.zst per AGEF v0.1.1) at the specified path.\n\n\
+Examples:\n\
+  akmon bundle export 550e8400-e29b-41d4-a716-446655440000\n\
+  akmon bundle export 550e8400-... --output ~/audit/q3.akmon\n\
+  akmon bundle export 550e8400-... --format json\n\n\
+Exit codes:\n\
+  0 — bundle written successfully\n\
+  1 — (reserved; not currently emitted)\n\
+  2 — usage error (e.g., output path is a directory)\n\
+  3 — I/O or environment error (journal/session not found)")]
+    Export(BundleExportArgs),
+}
+
+/// Arguments for `akmon bundle export`.
+#[derive(Args, Debug, Clone)]
+struct BundleExportArgs {
+    /// Session UUID assigned at AgentSession construction.
+    session_id: uuid::Uuid,
+    /// Path where the bundle file will be written.
+    ///
+    /// If omitted, defaults to `<session-id>.akmon` in the current directory.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Path to the journal directory.
+    ///
+    /// Defaults to per-user journal location (`$XDG_STATE_HOME/akmon/journal`).
+    #[arg(long)]
+    journal: Option<PathBuf>,
+    /// Output format for status messages: human (default) or json.
+    #[arg(long, default_value = "human")]
+    format: BundleExportFormat,
+}
+
+fn run_bundle_export(
+    session_id: uuid::Uuid,
+    output: Option<PathBuf>,
+    journal: Option<PathBuf>,
+    format: BundleExportFormat,
+) -> ExitCode {
+    eprintln!(
+        "bundle export: session_id={session_id} output={output:?} journal={journal:?} format={format:?}"
+    );
+    eprintln!("(layer 1 stub — export logic in layer 2)");
+    ExitCode::SUCCESS
 }
 
 fn run_verify(
@@ -3061,6 +3137,16 @@ async fn main() -> ExitCode {
                 }
             };
         }
+        Some(Commands::Bundle(bundle_args)) => match &bundle_args.command {
+            BundleCommands::Export(args) => {
+                return run_bundle_export(
+                    args.session_id,
+                    args.output.clone(),
+                    args.journal.clone(),
+                    args.format,
+                );
+            }
+        },
         Some(Commands::New(args)) => {
             return cli_project::run_new(&cli, args, &cwd).await;
         }
@@ -4522,6 +4608,117 @@ mod tests {
             "550e8400-e29b-41d4-a716-446655440000",
             "--binary",
             "raw",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value") || rendered.contains("possible values"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_bundle_export_subcommand_parses_session_id() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "bundle",
+            "export",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .expect("parse bundle export");
+        match cli.command {
+            Some(Commands::Bundle(bundle)) => match bundle.command {
+                BundleCommands::Export(args) => {
+                    assert_eq!(
+                        args.session_id.to_string(),
+                        "550e8400-e29b-41d4-a716-446655440000"
+                    );
+                    assert!(args.output.is_none());
+                    assert!(args.journal.is_none());
+                    assert_eq!(args.format, BundleExportFormat::Human);
+                }
+            },
+            other => panic!("expected bundle export command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_bundle_export_subcommand_parses_optional_flags() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "bundle",
+            "export",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--output",
+            "/tmp/session.akmon",
+            "--journal",
+            "/tmp/journal.redb",
+            "--format",
+            "json",
+        ])
+        .expect("parse bundle export flags");
+        match cli.command {
+            Some(Commands::Bundle(bundle)) => match bundle.command {
+                BundleCommands::Export(args) => {
+                    assert_eq!(
+                        args.session_id.to_string(),
+                        "550e8400-e29b-41d4-a716-446655440000"
+                    );
+                    assert_eq!(args.output, Some(PathBuf::from("/tmp/session.akmon")));
+                    assert_eq!(args.journal, Some(PathBuf::from("/tmp/journal.redb")));
+                    assert_eq!(args.format, BundleExportFormat::Json);
+                }
+            },
+            other => panic!("expected bundle export command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_bundle_export_subcommand_rejects_invalid_uuid() {
+        let err = Cli::try_parse_from(["akmon", "bundle", "export", "not-a-uuid"])
+            .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value")
+                || rendered.contains("invalid character")
+                || rendered.contains("UUID"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_bundle_export_subcommand_rejects_missing_uuid() {
+        let err = Cli::try_parse_from(["akmon", "bundle", "export"]).expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("required arguments were not provided")
+                || rendered.contains("<SESSION_ID>")
+                || rendered.contains("Usage:"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_bundle_subcommand_without_subcommand_rejected() {
+        let err = Cli::try_parse_from(["akmon", "bundle"]).expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("subcommand")
+                || rendered.contains("required")
+                || rendered.contains("Usage:"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_bundle_export_format_invalid_value_rejected() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "bundle",
+            "export",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--format",
+            "yaml",
         ])
         .expect_err("must fail");
         let rendered = err.to_string();
