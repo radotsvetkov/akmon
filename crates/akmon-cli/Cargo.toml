@@ -52,3 +52,4 @@ uuid = { version = "1", features = ["v4"] }
 akmon-journal = { path = "../akmon-journal", features = ["test-utils"] }
 async-trait = "0.1"
 tempfile = "3"
+time.workspace = true

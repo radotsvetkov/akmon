@@ -95,11 +95,11 @@ pub fn open_default_journal_handle(
     Ok(JournalHandle::new(store, Arc::new(Mutex::new(graph))))
 }
 
-/// Opens an existing journal + session graph for read-only verification by `session_id`.
+/// Opens an existing journal + session graph for read-only operations by `session_id`.
 ///
 /// This function never creates a journal or session. It returns an error when the database file is
 /// missing/unreadable or when `session_id` is not present in the session graph.
-pub fn open_journal_for_verify(
+pub fn open_journal_read_only(
     journal_dir: &std::path::Path,
     session_id: Uuid,
 ) -> Result<JournalHandle<RedbObjectStore, RedbSessionGraph>, AgentError> {

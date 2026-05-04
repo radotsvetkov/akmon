@@ -27,7 +27,7 @@ pub use context_manager::{COMPACT_RESERVED_BUFFER, COMPACT_TRIGGER, ContextManag
 pub use error::SessionError;
 pub use journal::{
     JournalHandle, default_journal_dir, journal_db_path, open_default_journal_handle,
-    open_journal_for_verify,
+    open_journal_read_only,
 };
 pub use session::{
     AgentSession, DefaultAgentSession, PendingToolCall, PolicyDecisionSummary, SessionEvidenceData,

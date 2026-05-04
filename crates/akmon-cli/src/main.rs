@@ -36,7 +36,7 @@ use akmon_models::{
 };
 use akmon_query::{
     AgentSession, SessionRunExit, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
-    ToolCallSummary, default_journal_dir, open_default_journal_handle, open_journal_for_verify,
+    ToolCallSummary, default_journal_dir, open_default_journal_handle, open_journal_read_only,
     write_handoff_file,
 };
 #[cfg(feature = "semantic-index")]
@@ -950,7 +950,7 @@ fn run_verify(
         },
     };
 
-    let handle = match open_journal_for_verify(journal_dir.as_path(), session_id) {
+    let handle = match open_journal_read_only(journal_dir.as_path(), session_id) {
         Ok(h) => h,
         Err(err) => {
             let msg = format!(
@@ -1152,6 +1152,171 @@ fn run_verify(
     }
 }
 
+fn truncate_hash(hash: &akmon_journal::Hash) -> String {
+    let hex = hash.to_hex();
+    if hex.len() <= 8 {
+        format!("{hex}...")
+    } else {
+        format!("{}...", &hex[..8])
+    }
+}
+
+fn attempt_status_name(status: &akmon_journal::AttemptStatus) -> String {
+    match status {
+        akmon_journal::AttemptStatus::Success => "Success".to_owned(),
+        akmon_journal::AttemptStatus::RateLimited => "RateLimited".to_owned(),
+        akmon_journal::AttemptStatus::NetworkError => "NetworkError".to_owned(),
+        akmon_journal::AttemptStatus::ServerError => "ServerError".to_owned(),
+        akmon_journal::AttemptStatus::ClientError => "ClientError".to_owned(),
+        akmon_journal::AttemptStatus::Cancelled => "Cancelled".to_owned(),
+        akmon_journal::AttemptStatus::Other(other) => format!("Other({other})"),
+    }
+}
+
+fn summarize_attempts(attempts: &[akmon_journal::AttemptRecord]) -> String {
+    if attempts.is_empty() {
+        return "0 attempts".to_owned();
+    }
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for attempt in attempts {
+        let name = attempt_status_name(&attempt.status);
+        if let Some((_, count)) = counts.iter_mut().find(|(status, _)| *status == name) {
+            *count += 1;
+        } else {
+            counts.push((name, 1));
+        }
+    }
+    let mut parts = Vec::with_capacity(counts.len());
+    for (status, count) in counts {
+        if count == 1 {
+            parts.push(format!("1 {status}"));
+        } else {
+            parts.push(format!("{count} {status}"));
+        }
+    }
+    let noun = if attempts.len() == 1 {
+        "1 attempt"
+    } else {
+        "attempts"
+    };
+    if attempts.len() == 1 {
+        format!("{noun}: {}", parts.join(", "))
+    } else {
+        format!("{} {noun}: {}", attempts.len(), parts.join(", "))
+    }
+}
+
+fn event_kind_name(kind: &akmon_journal::EventKind) -> &'static str {
+    match kind {
+        akmon_journal::EventKind::SessionStart { .. } => "SessionStart",
+        akmon_journal::EventKind::UserTurn { .. } => "UserTurn",
+        akmon_journal::EventKind::ProviderCall { .. } => "ProviderCall",
+        akmon_journal::EventKind::ToolCall { .. } => "ToolCall",
+        akmon_journal::EventKind::RetrievalCall { .. } => "RetrievalCall",
+        akmon_journal::EventKind::PermissionGate { .. } => "PermissionGate",
+        akmon_journal::EventKind::AssistantTurn { .. } => "AssistantTurn",
+        akmon_journal::EventKind::SessionEnd { .. } => "SessionEnd",
+    }
+}
+
+fn format_event_summary(
+    seq: usize,
+    hash: &akmon_journal::Hash,
+    event: &akmon_journal::Event,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "[{seq}] {}  hash={}",
+        event_kind_name(&event.kind),
+        truncate_hash(hash)
+    ));
+    match &event.kind {
+        akmon_journal::EventKind::SessionStart {
+            cwd_hash,
+            config_hash,
+        } => {
+            lines.push(format!("  cwd_hash: {}", truncate_hash(cwd_hash)));
+            lines.push(format!("  config_hash: {}", truncate_hash(config_hash)));
+        }
+        akmon_journal::EventKind::UserTurn { prompt_hash } => {
+            lines.push(format!("  prompt_hash: {}", truncate_hash(prompt_hash)));
+        }
+        akmon_journal::EventKind::ProviderCall {
+            provider_id,
+            attempts,
+            stream_hash,
+        } => {
+            lines.push(format!("  provider: {provider_id}"));
+            lines.push(format!("  attempts: {}", summarize_attempts(attempts)));
+            lines.push(format!(
+                "  stream_hash: {}",
+                stream_hash
+                    .as_ref()
+                    .map_or_else(|| "none".to_owned(), truncate_hash)
+            ));
+        }
+        akmon_journal::EventKind::ToolCall {
+            tool_id,
+            input_hash,
+            output_hash,
+            side_effects_hash,
+        } => {
+            lines.push(format!("  tool: {tool_id}"));
+            lines.push(format!("  input_hash: {}", truncate_hash(input_hash)));
+            lines.push(format!("  output_hash: {}", truncate_hash(output_hash)));
+            lines.push(format!(
+                "  side_effects: {}",
+                if side_effects_hash.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                }
+            ));
+        }
+        akmon_journal::EventKind::RetrievalCall {
+            index_id,
+            query_hash,
+            results_hash,
+        } => {
+            lines.push(format!("  index_id: {index_id}"));
+            lines.push(format!("  query_hash: {}", truncate_hash(query_hash)));
+            lines.push(format!("  results_hash: {}", truncate_hash(results_hash)));
+        }
+        akmon_journal::EventKind::PermissionGate {
+            policy_id,
+            decision,
+            context_hash,
+        } => {
+            lines.push(format!("  policy: {policy_id}"));
+            lines.push(format!("  decision: {decision}"));
+            lines.push(format!("  context_hash: {}", truncate_hash(context_hash)));
+        }
+        akmon_journal::EventKind::AssistantTurn {
+            message_hash,
+            tool_calls_hash,
+        } => {
+            lines.push(format!("  message_hash: {}", truncate_hash(message_hash)));
+            lines.push(format!(
+                "  tool_calls: {}",
+                if tool_calls_hash.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                }
+            ));
+        }
+        akmon_journal::EventKind::SessionEnd { summary_hash } => {
+            lines.push(format!(
+                "  summary_hash: {}",
+                summary_hash
+                    .as_ref()
+                    .map_or_else(|| "none".to_owned(), truncate_hash)
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
 fn run_inspect(
     session_id: uuid::Uuid,
     journal: Option<PathBuf>,
@@ -1164,10 +1329,52 @@ fn run_inspect(
         eprintln!("error: --binary {binary:?} requires --resolve");
         return ExitCode::from(2);
     }
-    eprintln!(
-        "inspect: session_id={session_id} journal={journal:?} format={format:?} verbose={verbose} resolve={resolve} binary={binary:?}",
-    );
-    eprintln!("(layer 1 stub — inspect logic in layer 2)");
+    if !matches!(format, InspectFormat::Human) {
+        eprintln!("akmon: inspect: --format json is not implemented yet (planned for layer 4)");
+        return ExitCode::from(2);
+    }
+    let _ = (verbose, resolve);
+    let journal_dir = match journal {
+        Some(path) => path,
+        None => match default_journal_dir() {
+            Ok(path) => path,
+            Err(err) => {
+                eprintln!("akmon: inspect: cannot resolve default journal directory: {err}");
+                return ExitCode::from(3);
+            }
+        },
+    };
+    let handle = match open_journal_read_only(journal_dir.as_path(), session_id) {
+        Ok(h) => h,
+        Err(err) => {
+            eprintln!(
+                "akmon: inspect: cannot open journal {} for session {}: {err}",
+                journal_dir.display(),
+                session_id
+            );
+            return ExitCode::from(3);
+        }
+    };
+    let graph = handle
+        .graph
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let history = match graph.history() {
+        Ok(h) => h,
+        Err(err) => {
+            eprintln!("akmon: inspect: failed to read session history: {err}");
+            return ExitCode::from(3);
+        }
+    };
+    let journal_display =
+        dunce::canonicalize(journal_dir.as_path()).unwrap_or_else(|_| journal_dir.clone());
+    println!("session: {session_id}");
+    println!("events: {}", history.len());
+    println!("journal: {}", journal_display.display());
+    for (idx, (hash, event)) in history.iter().enumerate() {
+        println!();
+        println!("{}", format_event_summary(idx, hash, event));
+    }
     ExitCode::SUCCESS
 }
 
