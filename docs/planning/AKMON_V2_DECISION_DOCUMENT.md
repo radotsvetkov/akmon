@@ -11,10 +11,11 @@
 - Not a prompt to paste into Cursor. It's a planning document. Cursor reads it as context; your existing Cursor system prompt drives the interaction style.
 - Not a timeline. Estimates are rough (8–10 focused weeks, but you set pace).
 - Not a marketing plan. Positioning only. Marketing is downstream of shipped code.
-**Document version:** 1.1 — April 2026
+**Document version:** 1.2 — May 2026
 **Revision history:**
 - v1.0 (April 2026) — Initial document.
 - v1.1 (April 2026) — Adds D-16, D-17, Item 6.10 in response to repositioning audit findings A and B (`docs/repositioning-audit.md`). No prior decisions altered.
+- v1.2 (May 2026) — Adds Item 4.3 design decisions (F1-F12), renames bundle commands to `akmon bundle ...`, and corrects D-02 manifest serialization wording to align with AGEF v0.1.1 §6.
 ---
  
 # Layer 1 — Locked positioning
@@ -79,7 +80,7 @@ Akmon is **not** for:
 | P0-3 | Full capture — prompts, model responses (incl. streaming chunks), tool I/O, retrieval results, permission decisions — all hashed into the store | The "what happened" evidence |
 | P0-4 | Tamper-evident verification — `akmon verify <session-id>` on the on-disk journal proves chain integrity, object closure, and byte-level object integrity (AGEF Section 13 step 5); portable head-based checks ship with bundle import/export (Item 4.3, manifest carries `head` and session id) | What makes evidence defensible |
 | P0-5 | Session inspection — `akmon inspect <session-id>` reads one on-disk journal session by UUID for human and CI consumption (`--format json`), with optional content resolution for referenced object hashes | Required for review workflows |
-| P0-6 | Portable bundle — `akmon export <head>` produces a self-contained artifact; `akmon import` round-trips | How sessions leave the producer's machine |
+| P0-6 | Portable bundle — `akmon bundle export <session-id>` produces a self-contained artifact; `akmon bundle import` round-trips | How sessions leave the producer's machine |
 | P0-7 | AGEF spec v0.1 published as separate repo | Makes the format a public artifact, not a private detail |
 | P0-8 | CI automation — all verify/inspect/export operations produce JSON with documented exit codes | Laptop + CI parity is a user commitment |
  
@@ -141,11 +142,11 @@ These decisions were settled in product-owner conversation and are now LOCKED. E
  
 **Decision.** **redb.** Pure Rust, actively maintained, ACID, stable 2.x. Sled's maintenance has slowed; redb's activity matters for a project whose selling point is integrity. Users reviewing the code will check for healthy dependencies.
  
-### §5.2 Decision D-02: Serialization for canonical hashing — **LOCKED: postcard internal, CBOR at AGEF boundary**
+### §5.2 Decision D-02: Serialization for canonical hashing — **LOCKED: postcard internal, CBOR for hashed payloads, JSON for manifest metadata**
  
 **Context.** Every hashed artifact needs a canonical byte representation. Considered: bincode 1.x/2.x, postcard, CBOR, custom.
  
-**Decision.** **postcard for Event serialization inside SessionGraph (fast, small, Rust-native). CBOR for anything that crosses the AGEF boundary** — exported bundle's manifest, structured stored blobs, anything external tools will read. Two serialization stacks, each used where it's strongest. Self-describing CBOR (RFC 8949) is friendlier for third-party AGEF implementers.
+**Decision.** **postcard for Event serialization inside SessionGraph (fast, small, Rust-native). Canonical CBOR for hashed/referenced AGEF payloads (`events.bin` records and hash-addressed object references). JSON for human/auditor-readable manifest metadata (`manifest.json`) per AGEF §6.** The manifest is metadata and not part of the event hash chain; integrity-critical linkage remains in canonical-CBOR event hashing and content-addressed object bytes.
  
 ### §5.3 Decision D-03: Hash algorithm — **LOCKED: SHA-256 default, BLAKE3 supported**
  
@@ -511,7 +512,25 @@ Notes:
 - Out of scope for v2.0.0 Item 4.2 initial ship.
 - Item 4.2 ships full-session inspection first; filtering is additive follow-up.
  
-**Item 4.3 — `akmon export` and `akmon import`** (per D-11 bundle format, AGEF spec)
+**Item 4.3 — `akmon bundle export` and `akmon bundle import`** (per D-11 bundle format, AGEF spec)
+
+**Item 4.3 — Design decisions (F1–F12) for traceability**
+
+1. **F1 — Item structure and sequencing:** Item 4.3 remains one backlog item containing both bundle commands. Implementation proceeds sequentially within Item 4.3 (export-focused layers first, then import-focused layers), not as split 4.3a/4.3b tracks.
+2. **F2 — Primary export operand:** `akmon bundle export` uses `<session-id>` (UUID), aligning Item 4.3 addressing with Items 4.1 and 4.2.
+3. **F3 — Import behavior:** `akmon bundle import` mutates by default (ingests into local journal) and supports `--verify-only` for non-mutating verification.
+4. **F4 — Bundle verification entrypoint:** Bundle verification for Item 4.3 is provided via `akmon bundle import --verify-only`. `akmon verify` remains substrate-only (`<session-id>` against on-disk journal).
+5. **F5 — Manifest serialization + bundle layout:** `manifest.json` is JSON metadata per AGEF v0.1.1 §6. Item 4.3 implements AGEF v0.1.1 normative layout (`manifest.json`, `events.bin`, `objects/<hex>`), with `events.bin` using 4-byte big-endian length-delimited canonical-CBOR event framing.
+6. **F6 — Round-trip strictness (v2.0.0):** Required guarantee is semantic equivalence (`event_count`, `object_count`, linkage, object hashes, and `session.head` invariants). Byte-identical tar.zst output is explicitly not required for v2.0.0.
+7. **F7 — Session collision policy:** Default behavior is reject-on-collision when imported `session.id` already exists in target journal (verification violation exit path). Explicit remap is supported via `--rename-to <new-uuid>`.
+8. **F8 — Object collision policy:** Content-addressed dedup with byte verification: if object hash already exists, importer reads existing bytes and verifies digest equality. Match => skip write. Mismatch => hard error (indicates local store corruption).
+9. **F9 — Unknown extra files in bundle:** Strict by default. Unknown top-level or internal files are rejected unless `--allow-extra-files` is explicitly set.
+10. **F10 — Compression determinism (v2.0.0):** No byte-level compression determinism target. Use zstd level 19 default and tar crate defaults; document that archive bytes may vary while semantic content remains stable.
+11. **F11 — Bundle verification JSON schema:** Item 4.3 defines **BundleVerifyReportV1** (separate from `VerifyReportV1`) to represent bundle-specific validation categories (manifest/framing/unknown variant rules) without overloading substrate verify schema.
+12. **F12 — File extension convention:** `akmon bundle export` defaults to `.akmon` output (tar.zst internally). `akmon bundle import` accepts `.akmon` and `.tar.zst` paths (and does not require a specific extension).
+
+**Boundary note (Item 6.10):**
+- The existing `akmon import` / `akmon export` commands (AKMON.md context sync) are not changed by Item 4.3. Any retirement, migration, or rename of those legacy context-sync commands is handled under Item 6.10 (`akmon-core` legacy retirement) with the broader v1.x command-surface cleanup.
  
 **Item 4.4 — `akmon redact`** (per D-07)
  
