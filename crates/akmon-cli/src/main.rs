@@ -321,6 +321,16 @@ enum BundleExportFormat {
     Json,
 }
 
+/// Output format for `akmon bundle import` status messages.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum BundleImportFormat {
+    /// Human-readable status messages.
+    #[default]
+    Human,
+    /// Machine-readable JSON status messages.
+    Json,
+}
+
 /// Stable JSON shape for `akmon bundle export --format json`.
 #[derive(Debug, Serialize, Deserialize)]
 struct BundleExportReportV1 {
@@ -1485,6 +1495,26 @@ Exit codes:\n\
   2 — usage error (e.g., output path already exists)\n\
   3 — journal/session not found, incomplete store, malformed session bounds, or bundle write error")]
     Export(BundleExportArgs),
+    /// Import an AGEF bundle into the local journal.
+    #[command(long_about = "Import an AGEF bundle into the local journal.\n\n\
+Reads the named .akmon bundle file, validates it per AGEF v0.1.1 (manifest schema, framing, \
+hash-chain integrity, object closure, head consistency), and writes its objects and events into \
+the target journal as a new session.\n\n\
+Use --verify-only to validate the bundle without modifying the local journal. Use \
+--rename-to <NEW_UUID> to import a bundle whose session_id already exists locally, assigning a \
+different ID. Use --allow-extra-files to accept bundles that include files outside the AGEF \
+normative set (default behavior is strict reject).\n\n\
+Examples:\n\
+  akmon bundle import audit.akmon\n\
+  akmon bundle import audit.akmon --verify-only\n\
+  akmon bundle import audit.akmon --rename-to 7c9a...\n\
+  akmon bundle import audit.akmon --format json\n\n\
+Exit codes:\n\
+  0 — bundle imported successfully (or verified if --verify-only)\n\
+  1 — verification failed (chain integrity, object closure, head, etc.)\n\
+  2 — usage error (e.g., session_id collision without --rename-to)\n\
+  3 — I/O or environment error (bundle/journal not found, malformed archive, etc.)")]
+    Import(BundleImportArgs),
 }
 
 /// Arguments for `akmon bundle export`.
@@ -1505,6 +1535,39 @@ struct BundleExportArgs {
     /// Output format for status messages: human (default) or json.
     #[arg(long, default_value = "human")]
     format: BundleExportFormat,
+}
+
+/// Arguments for `akmon bundle import`.
+#[derive(Args, Debug, Clone)]
+struct BundleImportArgs {
+    /// Path to the `.akmon` bundle file to import.
+    bundle: PathBuf,
+    /// Path to the journal directory.
+    ///
+    /// Defaults to per-user journal location (`$XDG_STATE_HOME/akmon/journal`).
+    #[arg(long)]
+    journal: Option<PathBuf>,
+    /// Output format for status messages: human (default) or json.
+    #[arg(long, default_value = "human")]
+    format: BundleImportFormat,
+    /// Verify the bundle without modifying the local journal.
+    ///
+    /// When set, the bundle is fully validated per AGEF Sections 13 and 14 but no objects or
+    /// events are written.
+    #[arg(long)]
+    verify_only: bool,
+    /// Allow the import to succeed when the tar archive contains files outside the AGEF normative
+    /// set (`manifest.json`, `events.bin`, `objects/<hex>`).
+    ///
+    /// Default is strict: unknown files cause hard reject.
+    #[arg(long)]
+    allow_extra_files: bool,
+    /// Re-map the bundle's `session_id` to a different UUID during import.
+    ///
+    /// Useful when importing a bundle whose `session_id` already exists in the local journal.
+    /// Required when the local journal already contains the bundle's `session_id`.
+    #[arg(long, value_name = "NEW_UUID")]
+    rename_to: Option<uuid::Uuid>,
 }
 
 fn format_bundle_byte_size(bytes: u64) -> String {
@@ -1830,6 +1893,21 @@ fn run_bundle_export(
         }
     }
 
+    ExitCode::SUCCESS
+}
+
+fn run_bundle_import(
+    bundle: PathBuf,
+    journal: Option<PathBuf>,
+    format: BundleImportFormat,
+    verify_only: bool,
+    allow_extra_files: bool,
+    rename_to: Option<uuid::Uuid>,
+) -> ExitCode {
+    eprintln!(
+        "bundle import: bundle={bundle:?} journal={journal:?} format={format:?} verify_only={verify_only} allow_extra_files={allow_extra_files} rename_to={rename_to:?}",
+    );
+    eprintln!("(layer 4 stub — import logic in layer 5+)");
     ExitCode::SUCCESS
 }
 
@@ -3495,6 +3573,16 @@ async fn main() -> ExitCode {
                     args.format,
                 );
             }
+            BundleCommands::Import(args) => {
+                return run_bundle_import(
+                    args.bundle.clone(),
+                    args.journal.clone(),
+                    args.format,
+                    args.verify_only,
+                    args.allow_extra_files,
+                    args.rename_to,
+                );
+            }
         },
         Some(Commands::New(args)) => {
             return cli_project::run_new(&cli, args, &cwd).await;
@@ -4577,6 +4665,7 @@ mod tests {
     use crate::scout_cmd::{ScoutCandidateFile, ScoutDossier};
     use akmon_journal::{HashAlgorithm, MemoryObjectStore, MemorySessionGraph};
     use akmon_query::JournalHandle;
+    use clap::CommandFactory;
 
     fn test_journal_sid(
         session_id: uuid::Uuid,
@@ -4986,6 +5075,7 @@ mod tests {
                     assert!(args.journal.is_none());
                     assert_eq!(args.format, BundleExportFormat::Human);
                 }
+                BundleCommands::Import(_) => panic!("expected bundle export command"),
             },
             other => panic!("expected bundle export command, got {other:?}"),
         }
@@ -5017,6 +5107,7 @@ mod tests {
                     assert_eq!(args.journal, Some(PathBuf::from("/tmp/journal.redb")));
                     assert_eq!(args.format, BundleExportFormat::Json);
                 }
+                BundleCommands::Import(_) => panic!("expected bundle export command"),
             },
             other => panic!("expected bundle export command, got {other:?}"),
         }
@@ -5075,6 +5166,144 @@ mod tests {
             rendered.contains("invalid value") || rendered.contains("possible values"),
             "unexpected clap error: {rendered}"
         );
+    }
+
+    #[test]
+    fn t_bundle_subcommand_lists_export_and_import() {
+        let mut cmd = Cli::command();
+        let bundle_cmd = cmd
+            .find_subcommand_mut("bundle")
+            .expect("bundle subcommand");
+        let names: std::collections::HashSet<String> = bundle_cmd
+            .get_subcommands()
+            .map(|s| s.get_name().to_owned())
+            .collect();
+        assert!(names.contains("export"));
+        assert!(names.contains("import"));
+    }
+
+    #[test]
+    fn t_bundle_import_subcommand_parses_bundle_path() {
+        let cli = Cli::try_parse_from(["akmon", "bundle", "import", "test.akmon"]).expect("parse");
+        match cli.command {
+            Some(Commands::Bundle(bundle)) => match bundle.command {
+                BundleCommands::Import(args) => {
+                    assert_eq!(args.bundle, PathBuf::from("test.akmon"));
+                    assert!(args.journal.is_none());
+                    assert_eq!(args.format, BundleImportFormat::Human);
+                    assert!(!args.verify_only);
+                    assert!(!args.allow_extra_files);
+                    assert!(args.rename_to.is_none());
+                }
+                BundleCommands::Export(_) => panic!("expected bundle import command"),
+            },
+            other => panic!("expected bundle import command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_bundle_import_subcommand_parses_optional_flags() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "bundle",
+            "import",
+            "audit.akmon",
+            "--journal",
+            "/data/journal",
+            "--format",
+            "json",
+            "--verify-only",
+            "--allow-extra-files",
+            "--rename-to",
+            "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        ])
+        .expect("parse import flags");
+        match cli.command {
+            Some(Commands::Bundle(bundle)) => match bundle.command {
+                BundleCommands::Import(args) => {
+                    assert_eq!(args.bundle, PathBuf::from("audit.akmon"));
+                    assert_eq!(args.journal, Some(PathBuf::from("/data/journal")));
+                    assert_eq!(args.format, BundleImportFormat::Json);
+                    assert!(args.verify_only);
+                    assert!(args.allow_extra_files);
+                    assert_eq!(
+                        args.rename_to,
+                        Some(
+                            uuid::Uuid::parse_str("7c9e6679-7425-40de-944b-e07fc1f90ae7").unwrap()
+                        )
+                    );
+                }
+                BundleCommands::Export(_) => panic!("expected bundle import command"),
+            },
+            other => panic!("expected bundle import command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_bundle_import_subcommand_rejects_missing_bundle_path() {
+        let err = Cli::try_parse_from(["akmon", "bundle", "import"]).expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("required arguments were not provided")
+                || rendered.contains("<BUNDLE>")
+                || rendered.contains("Usage:"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_bundle_import_subcommand_rejects_invalid_rename_uuid() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "bundle",
+            "import",
+            "x.akmon",
+            "--rename-to",
+            "invalid_value",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value")
+                || rendered.contains("invalid character")
+                || rendered.contains("UUID"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_bundle_import_format_invalid_value_rejected() {
+        let err = Cli::try_parse_from(["akmon", "bundle", "import", "x.akmon", "--format", "yaml"])
+            .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value") || rendered.contains("possible values"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_bundle_import_verify_only_flag_default_false() {
+        let cli = Cli::try_parse_from(["akmon", "bundle", "import", "b.akmon"]).expect("parse");
+        match cli.command {
+            Some(Commands::Bundle(bundle)) => match bundle.command {
+                BundleCommands::Import(args) => assert!(!args.verify_only),
+                BundleCommands::Export(_) => panic!("expected import"),
+            },
+            _ => panic!("expected bundle import"),
+        }
+    }
+
+    #[test]
+    fn t_bundle_import_allow_extra_files_flag_default_false() {
+        let cli = Cli::try_parse_from(["akmon", "bundle", "import", "b.akmon"]).expect("parse");
+        match cli.command {
+            Some(Commands::Bundle(bundle)) => match bundle.command {
+                BundleCommands::Import(args) => assert!(!args.allow_extra_files),
+                BundleCommands::Export(_) => panic!("expected import"),
+            },
+            _ => panic!("expected bundle import"),
+        }
     }
 
     #[test]
