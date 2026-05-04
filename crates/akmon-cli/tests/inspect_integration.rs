@@ -11,6 +11,7 @@ use akmon_query::AgentSession;
 use akmon_tools::{Tool, ToolContext, ToolOutput};
 use async_trait::async_trait;
 use futures_util::stream;
+use serde::Deserialize;
 use serde_json::Value;
 use tempfile::tempdir;
 use time::{Duration, OffsetDateTime};
@@ -82,6 +83,86 @@ fn contains_iso_timestamp(text: &str) -> bool {
     text.contains("T") && text.contains("Z") && text.contains("emitted_at:")
 }
 
+#[derive(Debug, Deserialize)]
+struct InspectReportV1 {
+    akmon_version: String,
+    agef_version: String,
+    session_id: String,
+    journal_path: String,
+    events: Vec<InspectEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct InspectEvent {
+    sequence: u64,
+    event_hash: String,
+    parent_hashes: Vec<String>,
+    emitted_at: String,
+    kind: InspectEventKind,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)]
+enum InspectEventKind {
+    SessionStart {
+        cwd_hash: String,
+        config_hash: String,
+    },
+    UserTurn {
+        prompt_hash: String,
+    },
+    ProviderCall {
+        provider_id: String,
+        attempts: Vec<InspectAttempt>,
+        stream_hash: Option<String>,
+    },
+    ToolCall {
+        tool_id: String,
+        input_hash: String,
+        output_hash: String,
+        side_effects_hash: Option<String>,
+    },
+    RetrievalCall {
+        index_id: String,
+        query_hash: String,
+        results_hash: String,
+    },
+    PermissionGate {
+        policy_id: String,
+        decision: String,
+        context_hash: String,
+    },
+    AssistantTurn {
+        message_hash: String,
+        tool_calls_hash: Option<String>,
+    },
+    SessionEnd {
+        summary_hash: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct InspectAttempt {
+    attempt_number: u32,
+    status: String,
+    started_at: String,
+    ended_at: String,
+    request_hash: String,
+    response_hash: Option<String>,
+    stream_hash: Option<String>,
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InspectError {
+    akmon_version: String,
+    category: String,
+    error: String,
+}
+
 #[test]
 fn t_inspect_displays_clean_session() {
     let tmp = tempdir().expect("tempdir");
@@ -102,15 +183,139 @@ fn t_inspect_displays_clean_session() {
 }
 
 #[test]
-fn t_inspect_layer2_format_json_not_yet_supported() {
+fn t_inspect_json_output_for_clean_session() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
     create_clean_session(tmp.path(), sid);
     let out = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    // TODO(Layer 4): update once --format json is implemented for inspect.
-    assert!(stderr.contains("--format json is not implemented yet"));
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: InspectReportV1 = serde_json::from_str(&stdout).expect("parse inspect report");
+    assert!(!parsed.akmon_version.is_empty());
+    assert_eq!(parsed.agef_version, "0.1.1");
+    assert_eq!(parsed.session_id, sid.to_string());
+    assert!(!parsed.journal_path.is_empty());
+    assert_eq!(parsed.events.len(), 3);
+    assert!(matches!(
+        parsed.events[0].kind,
+        InspectEventKind::SessionStart { .. }
+    ));
+    assert!(matches!(
+        parsed.events[1].kind,
+        InspectEventKind::UserTurn { .. }
+    ));
+    assert!(matches!(
+        parsed.events[2].kind,
+        InspectEventKind::SessionEnd { .. }
+    ));
+}
+
+#[test]
+fn t_inspect_json_field_stability() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let value: Value = serde_json::from_slice(&out.stdout).expect("parse generic json");
+    assert!(value.get("akmon_version").is_some());
+    assert!(value.get("agef_version").is_some());
+    assert!(value.get("session_id").is_some());
+    assert!(value.get("journal_path").is_some());
+    assert!(value.get("events").is_some());
+    let events = value
+        .get("events")
+        .and_then(Value::as_array)
+        .expect("events array");
+    assert!(!events.is_empty());
+    let first = &events[0];
+    assert!(first.get("sequence").is_some());
+    assert!(first.get("event_hash").is_some());
+    assert!(first.get("parent_hashes").is_some());
+    assert!(first.get("emitted_at").is_some());
+    assert!(first.get("kind").is_some());
+}
+
+#[test]
+fn t_inspect_json_provider_call_includes_full_attempts() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::ProviderCall {
+                provider_id: "json-provider".to_owned(),
+                attempts: vec![
+                    AttemptRecord {
+                        attempt_number: 1,
+                        started_at: OffsetDateTime::UNIX_EPOCH,
+                        ended_at: OffsetDateTime::UNIX_EPOCH + Duration::seconds(1),
+                        status: AttemptStatus::RateLimited,
+                        request_hash: put_bytes(store.as_ref(), b"req-a"),
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some("429".to_owned()),
+                    },
+                    AttemptRecord {
+                        attempt_number: 2,
+                        started_at: OffsetDateTime::UNIX_EPOCH + Duration::seconds(2),
+                        ended_at: OffsetDateTime::UNIX_EPOCH + Duration::seconds(3),
+                        status: AttemptStatus::Success,
+                        request_hash: put_bytes(store.as_ref(), b"req-b"),
+                        response_hash: Some(put_bytes(store.as_ref(), b"resp-b")),
+                        stream_hash: Some(put_bytes(store.as_ref(), b"stream-b")),
+                        error_message: None,
+                    },
+                ],
+                stream_hash: Some(put_bytes(store.as_ref(), b"outer-stream")),
+            })
+            .expect("append provider call");
+        graph
+            .append(EventKind::SessionEnd {
+                summary_hash: Some(put_bytes(store.as_ref(), b"summary")),
+            })
+            .expect("append end");
+    }
+    drop(journal);
+
+    let out = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(0));
+    let parsed: InspectReportV1 = serde_json::from_slice(&out.stdout).expect("parse inspect json");
+    let provider = parsed
+        .events
+        .iter()
+        .find_map(|event| match &event.kind {
+            InspectEventKind::ProviderCall {
+                provider_id,
+                attempts,
+                stream_hash,
+            } => Some((provider_id, attempts, stream_hash)),
+            _ => None,
+        })
+        .expect("provider call event");
+    assert_eq!(provider.0, "json-provider");
+    assert_eq!(provider.1.len(), 2);
+    assert_eq!(provider.1[0].attempt_number, 1);
+    assert_eq!(provider.1[1].attempt_number, 2);
+    assert!(!provider.1[0].status.is_empty());
+    assert!(!provider.1[0].started_at.is_empty());
+    assert!(!provider.1[0].ended_at.is_empty());
+    assert!(!provider.1[0].request_hash.is_empty());
+    assert!(provider.1[0].response_hash.is_none());
+    assert!(provider.1[1].response_hash.is_some());
+    assert!(provider.1[1].stream_hash.is_some());
+    assert!(provider.2.is_some());
 }
 
 #[test]
@@ -292,6 +497,20 @@ fn t_inspect_fails_for_missing_session() {
 }
 
 #[test]
+fn t_inspect_json_for_missing_session() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let missing = Uuid::new_v4();
+    let out = run_inspect_with(tmp.path(), missing, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(3));
+    let parsed: InspectError = serde_json::from_slice(&out.stdout).expect("parse inspect error");
+    assert!(!parsed.akmon_version.is_empty());
+    assert_eq!(parsed.category, "session_not_found");
+    assert!(!parsed.error.is_empty());
+}
+
+#[test]
 fn t_inspect_fails_for_missing_journal() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
@@ -300,6 +519,31 @@ fn t_inspect_fails_for_missing_journal() {
     assert_eq!(out.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("cannot open journal"));
+}
+
+#[test]
+fn t_inspect_json_for_missing_journal() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let missing_dir = tmp.path().join("does-not-exist");
+    let out = run_inspect_with(missing_dir.as_path(), sid, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(3));
+    let parsed: InspectError = serde_json::from_slice(&out.stdout).expect("parse inspect error");
+    assert!(!parsed.akmon_version.is_empty());
+    assert_eq!(parsed.category, "journal_not_found");
+    assert!(!parsed.error.is_empty());
+}
+
+#[test]
+fn t_inspect_json_with_resolve_layer4() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_inspect_with(tmp.path(), sid, &["--format", "json", "--resolve"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // TODO(Layer 5): update once --resolve is implemented for JSON inspect output.
+    assert!(stderr.contains("planned for layer 5"));
 }
 
 #[test]

@@ -364,6 +364,113 @@ struct VerifyError {
     error: String,
 }
 
+/// Stable JSON shape for `akmon inspect --format json`.
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct InspectReportV1 {
+    /// CLI crate version that produced this report.
+    akmon_version: String,
+    /// AGEF specification version implemented by the journal substrate.
+    agef_version: String,
+    /// Hyphenated session UUID.
+    session_id: String,
+    /// Resolved journal directory used for inspection.
+    journal_path: String,
+    /// Session events in sequence order.
+    events: Vec<InspectEvent>,
+}
+
+/// One inspected event in machine-readable format.
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct InspectEvent {
+    /// Monotonic per-session sequence.
+    sequence: u64,
+    /// Event content hash (hex).
+    event_hash: String,
+    /// Parent event hashes (hex).
+    parent_hashes: Vec<String>,
+    /// Event timestamp (ISO 8601 UTC).
+    emitted_at: String,
+    /// Kind-specific payload.
+    kind: InspectEventKind,
+}
+
+/// Kind-specific event payload for `InspectEvent`.
+#[derive(Debug, Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum InspectEventKind {
+    /// Session start payload.
+    SessionStart {
+        cwd_hash: String,
+        config_hash: String,
+    },
+    /// User turn payload.
+    UserTurn { prompt_hash: String },
+    /// Provider call payload.
+    ProviderCall {
+        provider_id: String,
+        attempts: Vec<InspectAttempt>,
+        stream_hash: Option<String>,
+    },
+    /// Tool call payload.
+    ToolCall {
+        tool_id: String,
+        input_hash: String,
+        output_hash: String,
+        side_effects_hash: Option<String>,
+    },
+    /// Retrieval call payload.
+    RetrievalCall {
+        index_id: String,
+        query_hash: String,
+        results_hash: String,
+    },
+    /// Permission gate payload.
+    PermissionGate {
+        policy_id: String,
+        decision: String,
+        context_hash: String,
+    },
+    /// Assistant turn payload.
+    AssistantTurn {
+        message_hash: String,
+        tool_calls_hash: Option<String>,
+    },
+    /// Session end payload.
+    SessionEnd { summary_hash: Option<String> },
+}
+
+/// Provider attempt details for JSON inspect output.
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct InspectAttempt {
+    /// 1-indexed attempt number.
+    attempt_number: u32,
+    /// Attempt status.
+    status: String,
+    /// Attempt start timestamp (ISO 8601 UTC).
+    started_at: String,
+    /// Attempt end timestamp (ISO 8601 UTC).
+    ended_at: String,
+    /// Request payload hash.
+    request_hash: String,
+    /// Response payload hash when present.
+    response_hash: Option<String>,
+    /// Stream transcript hash when present.
+    stream_hash: Option<String>,
+    /// Human-readable error message when present.
+    error_message: Option<String>,
+}
+
+/// JSON shape emitted when inspect cannot read the session/journal.
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct InspectError {
+    /// CLI crate version that produced this error.
+    akmon_version: String,
+    /// Stable infrastructure error category.
+    category: String,
+    /// Human-readable error description.
+    error: String,
+}
+
 fn verify_report_v1(
     session_id: uuid::Uuid,
     journal_path: &Path,
@@ -493,6 +600,170 @@ fn verify_check_name(check: akmon_journal::VerifyCheck) -> &'static str {
         akmon_journal::VerifyCheck::ObjectByteRehash => "object byte re-hash",
         akmon_journal::VerifyCheck::HeadConsistency => "head consistency",
         akmon_journal::VerifyCheck::SessionEndInvariants => "SessionEnd invariants",
+    }
+}
+
+fn inspect_attempt_status_name(status: &akmon_journal::AttemptStatus) -> String {
+    match status {
+        akmon_journal::AttemptStatus::Success => "success".to_owned(),
+        akmon_journal::AttemptStatus::RateLimited => "rate_limited".to_owned(),
+        akmon_journal::AttemptStatus::NetworkError => "network_error".to_owned(),
+        akmon_journal::AttemptStatus::ServerError => "server_error".to_owned(),
+        akmon_journal::AttemptStatus::ClientError => "client_error".to_owned(),
+        akmon_journal::AttemptStatus::Cancelled => "cancelled".to_owned(),
+        akmon_journal::AttemptStatus::Other(other) => format!("other:{other}"),
+    }
+}
+
+fn inspect_event_kind(kind: &akmon_journal::EventKind) -> InspectEventKind {
+    match kind {
+        akmon_journal::EventKind::SessionStart {
+            cwd_hash,
+            config_hash,
+        } => InspectEventKind::SessionStart {
+            cwd_hash: cwd_hash.to_hex(),
+            config_hash: config_hash.to_hex(),
+        },
+        akmon_journal::EventKind::UserTurn { prompt_hash } => InspectEventKind::UserTurn {
+            prompt_hash: prompt_hash.to_hex(),
+        },
+        akmon_journal::EventKind::ProviderCall {
+            provider_id,
+            attempts,
+            stream_hash,
+        } => InspectEventKind::ProviderCall {
+            provider_id: provider_id.clone(),
+            attempts: attempts
+                .iter()
+                .map(|attempt| InspectAttempt {
+                    attempt_number: attempt.attempt_number,
+                    status: inspect_attempt_status_name(&attempt.status),
+                    started_at: format_iso_utc(
+                        attempt.started_at.unix_timestamp(),
+                        attempt.started_at.nanosecond(),
+                    ),
+                    ended_at: format_iso_utc(
+                        attempt.ended_at.unix_timestamp(),
+                        attempt.ended_at.nanosecond(),
+                    ),
+                    request_hash: attempt.request_hash.to_hex(),
+                    response_hash: attempt
+                        .response_hash
+                        .as_ref()
+                        .map(akmon_journal::Hash::to_hex),
+                    stream_hash: attempt
+                        .stream_hash
+                        .as_ref()
+                        .map(akmon_journal::Hash::to_hex),
+                    error_message: attempt.error_message.clone(),
+                })
+                .collect(),
+            stream_hash: stream_hash.as_ref().map(akmon_journal::Hash::to_hex),
+        },
+        akmon_journal::EventKind::ToolCall {
+            tool_id,
+            input_hash,
+            output_hash,
+            side_effects_hash,
+        } => InspectEventKind::ToolCall {
+            tool_id: tool_id.clone(),
+            input_hash: input_hash.to_hex(),
+            output_hash: output_hash.to_hex(),
+            side_effects_hash: side_effects_hash.as_ref().map(akmon_journal::Hash::to_hex),
+        },
+        akmon_journal::EventKind::RetrievalCall {
+            index_id,
+            query_hash,
+            results_hash,
+        } => InspectEventKind::RetrievalCall {
+            index_id: index_id.clone(),
+            query_hash: query_hash.to_hex(),
+            results_hash: results_hash.to_hex(),
+        },
+        akmon_journal::EventKind::PermissionGate {
+            policy_id,
+            decision,
+            context_hash,
+        } => InspectEventKind::PermissionGate {
+            policy_id: policy_id.clone(),
+            decision: decision.clone(),
+            context_hash: context_hash.to_hex(),
+        },
+        akmon_journal::EventKind::AssistantTurn {
+            message_hash,
+            tool_calls_hash,
+        } => InspectEventKind::AssistantTurn {
+            message_hash: message_hash.to_hex(),
+            tool_calls_hash: tool_calls_hash.as_ref().map(akmon_journal::Hash::to_hex),
+        },
+        akmon_journal::EventKind::SessionEnd { summary_hash } => InspectEventKind::SessionEnd {
+            summary_hash: summary_hash.as_ref().map(akmon_journal::Hash::to_hex),
+        },
+    }
+}
+
+fn inspect_report_v1(
+    session_id: uuid::Uuid,
+    journal_path: &Path,
+    history: &[(akmon_journal::Hash, akmon_journal::Event)],
+) -> InspectReportV1 {
+    let journal_path =
+        dunce::canonicalize(journal_path).unwrap_or_else(|_| journal_path.to_path_buf());
+    let events = history
+        .iter()
+        .map(|(hash, event)| InspectEvent {
+            sequence: event.sequence,
+            event_hash: hash.to_hex(),
+            parent_hashes: event
+                .parents
+                .iter()
+                .map(akmon_journal::Hash::to_hex)
+                .collect(),
+            emitted_at: format_iso_utc(
+                event.emitted_at.unix_timestamp(),
+                event.emitted_at.nanosecond(),
+            ),
+            kind: inspect_event_kind(&event.kind),
+        })
+        .collect();
+    InspectReportV1 {
+        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+        agef_version: akmon_journal::AGEF_SPEC_VERSION.to_owned(),
+        session_id: session_id.to_string(),
+        journal_path: journal_path.display().to_string(),
+        events,
+    }
+}
+
+fn print_inspect_json_report(report: &InspectReportV1) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(report).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
+fn print_inspect_json_error(category: &'static str, error: String) -> std::io::Result<()> {
+    let body = InspectError {
+        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+        category: category.to_owned(),
+        error,
+    };
+    let json =
+        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
+fn inspect_error_category(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("session not found") {
+        "session_not_found"
+    } else if lower.contains("redb open failed") || lower.contains("no such file or directory") {
+        "journal_not_found"
+    } else if lower.contains("history") {
+        "history_read_error"
+    } else {
+        "inspect_infrastructure_error"
     }
 }
 
@@ -1513,17 +1784,24 @@ fn run_inspect(
         eprintln!("error: --binary {binary:?} requires --resolve");
         return ExitCode::from(2);
     }
-    if !matches!(format, InspectFormat::Human) {
-        eprintln!("akmon: inspect: --format json is not implemented yet (planned for layer 4)");
+    if matches!(format, InspectFormat::Json) && resolve {
+        let msg =
+            "akmon: inspect: --resolve with --format json is not implemented yet (planned for layer 5)"
+                .to_owned();
+        eprintln!("{msg}");
         return ExitCode::from(2);
     }
-    let _ = resolve;
     let journal_dir = match journal {
         Some(path) => path,
         None => match default_journal_dir() {
             Ok(path) => path,
             Err(err) => {
-                eprintln!("akmon: inspect: cannot resolve default journal directory: {err}");
+                let msg = format!("cannot resolve default journal directory: {err}");
+                if matches!(format, InspectFormat::Json) {
+                    let _ = print_inspect_json_error(inspect_error_category(&msg), msg);
+                } else {
+                    eprintln!("akmon: inspect: {msg}");
+                }
                 return ExitCode::from(3);
             }
         },
@@ -1531,11 +1809,16 @@ fn run_inspect(
     let handle = match open_journal_read_only(journal_dir.as_path(), session_id) {
         Ok(h) => h,
         Err(err) => {
-            eprintln!(
-                "akmon: inspect: cannot open journal {} for session {}: {err}",
+            let msg = format!(
+                "cannot open journal {} for session {}: {err}",
                 journal_dir.display(),
                 session_id
             );
+            if matches!(format, InspectFormat::Json) {
+                let _ = print_inspect_json_error(inspect_error_category(&msg), msg);
+            } else {
+                eprintln!("akmon: inspect: {msg}");
+            }
             return ExitCode::from(3);
         }
     };
@@ -1546,10 +1829,23 @@ fn run_inspect(
     let history = match graph.history() {
         Ok(h) => h,
         Err(err) => {
-            eprintln!("akmon: inspect: failed to read session history: {err}");
+            let msg = format!("failed to read session history: {err}");
+            if matches!(format, InspectFormat::Json) {
+                let _ = print_inspect_json_error("history_read_error", msg);
+            } else {
+                eprintln!("akmon: inspect: {msg}");
+            }
             return ExitCode::from(3);
         }
     };
+    if matches!(format, InspectFormat::Json) {
+        let body = inspect_report_v1(session_id, journal_dir.as_path(), &history);
+        if let Err(err) = print_inspect_json_report(&body) {
+            eprintln!("akmon: inspect: failed to render JSON output: {err}");
+            return ExitCode::from(3);
+        }
+        return ExitCode::SUCCESS;
+    }
     let journal_display =
         dunce::canonicalize(journal_dir.as_path()).unwrap_or_else(|_| journal_dir.clone());
     println!("session: {session_id}");
