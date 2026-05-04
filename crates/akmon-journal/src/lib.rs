@@ -35,4 +35,6 @@ pub use hash::{BLAKE3_LEN, Hash, HashAlgorithm, SHA256_LEN, WireHash, digest_byt
 pub use object_store::{MemoryObjectStore, ObjectStore, RedbObjectStore};
 #[cfg(any(test, feature = "test-utils"))]
 pub use session_graph::MemorySessionGraph;
-pub use session_graph::{RedbSessionGraph, SessionGraph, VerificationReport};
+pub use session_graph::{
+    MissingObject, RedbSessionGraph, SessionGraph, VerificationReport, VerifyCheck,
+};

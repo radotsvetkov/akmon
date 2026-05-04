@@ -62,6 +62,22 @@ impl MemoryObjectStore {
         Ok(())
     }
 
+    /// Test-only: removes object at `hash` (missing-object simulation).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn remove_object_for_testing(&self, hash: &Hash) -> Result<()> {
+        if hash.algorithm != self.algorithm {
+            return Err(JournalError::HashAlgorithmMismatch {
+                expected: self.algorithm,
+                found: hash.algorithm,
+            });
+        }
+        let mut guard = self.objects.write().map_err(|_| {
+            JournalError::Verification("memory object store lock poisoned".to_owned())
+        })?;
+        guard.remove(&hash.bytes);
+        Ok(())
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.objects.read().map(|g| g.len()).unwrap_or(0)
@@ -233,6 +249,33 @@ impl RedbObjectStore {
         }
         write_txn.commit().map_err(|err| {
             JournalError::Verification(format!("object overwrite commit failed: {err}"))
+        })?;
+        Ok(())
+    }
+
+    /// Test-only: removes object at `hash` (missing-object simulation).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn remove_object_for_testing(&self, hash: &Hash) -> Result<()> {
+        if hash.algorithm != self.algorithm {
+            return Err(JournalError::HashAlgorithmMismatch {
+                expected: self.algorithm,
+                found: hash.algorithm,
+            });
+        }
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|err| JournalError::StorageTx(Box::new(err)))?;
+        {
+            let mut table = write_txn.open_table(OBJECTS_TABLE).map_err(|err| {
+                JournalError::Verification(format!("open objects table failed: {err}"))
+            })?;
+            table.remove(hash.bytes.as_slice()).map_err(|err| {
+                JournalError::Verification(format!("object remove failed: {err}"))
+            })?;
+        }
+        write_txn.commit().map_err(|err| {
+            JournalError::Verification(format!("object remove commit failed: {err}"))
         })?;
         Ok(())
     }

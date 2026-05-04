@@ -23,8 +23,8 @@ pub struct VerificationReport {
     pub events_checked: u64,
     /// Number of object hash references checked.
     pub objects_checked: u64,
-    /// Referenced object hashes that are missing from the object store.
-    pub missing_objects: Vec<Hash>,
+    /// Referenced objects that are missing from the object store.
+    pub missing_objects: Vec<MissingObject>,
     /// Object bytes present but digest does not match the referenced hash (AGEF Section 13 step 5).
     pub object_hash_mismatches: Vec<Hash>,
     /// Event hashes that do not match recomputed canonical CBOR content hash.
@@ -39,6 +39,37 @@ pub struct VerificationReport {
     pub session_end_count: usize,
     /// When `session_end_count == 1`, true iff that sole `SessionEnd` is the last event; otherwise `false`.
     pub session_end_is_terminal: bool,
+    /// Stable list of checks attempted during verification.
+    pub checks_performed: Vec<VerifyCheck>,
+}
+
+/// A missing object hash plus optional event context for where the reference was observed.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MissingObject {
+    /// Referenced object hash that could not be resolved.
+    pub object_hash: Hash,
+    /// Event hash that referenced this object, when available.
+    pub referenced_by_event: Option<Hash>,
+}
+
+/// Named verification checks attempted by [`SessionGraph::verify`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyCheck {
+    /// Validate SessionStart/non-start parent linkage invariants.
+    ParentChain,
+    /// Validate event sequence monotonicity (`0..n-1`).
+    Sequence,
+    /// Recompute and compare event content hashes.
+    EventHashRecompute,
+    /// Resolve all referenced object hashes from the object store.
+    ObjectPresence,
+    /// Re-hash object bytes and compare to referenced hashes (AGEF Section 13 step 5).
+    ObjectByteRehash,
+    /// Compare stored head pointer with the computed terminal event hash.
+    HeadConsistency,
+    /// Validate SessionEnd count and terminal placement invariants.
+    SessionEndInvariants,
 }
 
 impl VerificationReport {
@@ -63,7 +94,18 @@ fn verify_history_against_store(
     stored_head: Option<Hash>,
     store: &dyn ObjectStore,
 ) -> Result<VerificationReport> {
-    let mut report = VerificationReport::default();
+    let mut report = VerificationReport {
+        checks_performed: vec![
+            VerifyCheck::ParentChain,
+            VerifyCheck::Sequence,
+            VerifyCheck::EventHashRecompute,
+            VerifyCheck::ObjectPresence,
+            VerifyCheck::ObjectByteRehash,
+            VerifyCheck::HeadConsistency,
+            VerifyCheck::SessionEndInvariants,
+        ],
+        ..VerificationReport::default()
+    };
     let mut expected_prev: Option<Hash> = None;
     let mut session_end_count = 0usize;
     let mut last_session_end_position: Option<usize> = None;
@@ -103,11 +145,17 @@ fn verify_history_against_store(
         for object_hash in referenced_object_hashes(&event.kind) {
             report.objects_checked += 1;
             if !store.contains(object_hash)? {
-                report.missing_objects.push(object_hash.clone());
+                report.missing_objects.push(MissingObject {
+                    object_hash: object_hash.clone(),
+                    referenced_by_event: Some(stored_hash.clone()),
+                });
                 continue;
             }
             match store.get(object_hash)? {
-                None => report.missing_objects.push(object_hash.clone()),
+                None => report.missing_objects.push(MissingObject {
+                    object_hash: object_hash.clone(),
+                    referenced_by_event: Some(stored_hash.clone()),
+                }),
                 Some(bytes) => {
                     let digest = digest_bytes(store.algorithm(), bytes.as_ref());
                     if digest != *object_hash {

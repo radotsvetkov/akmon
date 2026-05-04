@@ -312,6 +312,8 @@ struct VerifyReportV1 {
     objects_checked: u32,
     /// True when verification found no violations.
     passed: bool,
+    /// Stable list of verification checks attempted.
+    checks_performed: Vec<akmon_journal::VerifyCheck>,
     /// Flattened violations with stable categories.
     violations: Vec<VerifyViolation>,
 }
@@ -347,11 +349,24 @@ fn verify_report_v1(
 ) -> VerifyReportV1 {
     let mut violations = Vec::new();
 
-    violations.extend(report.missing_objects.iter().map(|hash| VerifyViolation {
-        category: "missing_object".to_owned(),
-        event_hash: None,
-        object_hash: Some(hash.to_hex()),
-        message: "Object referenced but not in store".to_owned(),
+    violations.extend(report.missing_objects.iter().map(|missing| {
+        VerifyViolation {
+            category: "missing_object".to_owned(),
+            event_hash: missing
+                .referenced_by_event
+                .as_ref()
+                .map(akmon_journal::Hash::to_hex),
+            object_hash: Some(missing.object_hash.to_hex()),
+            message: match missing.referenced_by_event.as_ref() {
+                Some(event_hash) => {
+                    format!(
+                        "Object referenced by event {} not in store",
+                        event_hash.to_hex()
+                    )
+                }
+                None => "Object referenced but not in store".to_owned(),
+            },
+        }
     }));
 
     violations.extend(
@@ -442,7 +457,20 @@ fn verify_report_v1(
         events_checked: u32::try_from(report.events_checked).unwrap_or(u32::MAX),
         objects_checked: u32::try_from(report.objects_checked).unwrap_or(u32::MAX),
         passed: report.is_clean(),
+        checks_performed: report.checks_performed.clone(),
         violations,
+    }
+}
+
+fn verify_check_name(check: akmon_journal::VerifyCheck) -> &'static str {
+    match check {
+        akmon_journal::VerifyCheck::ParentChain => "parent chain",
+        akmon_journal::VerifyCheck::Sequence => "sequence",
+        akmon_journal::VerifyCheck::EventHashRecompute => "event hash recompute",
+        akmon_journal::VerifyCheck::ObjectPresence => "object presence",
+        akmon_journal::VerifyCheck::ObjectByteRehash => "object byte re-hash",
+        akmon_journal::VerifyCheck::HeadConsistency => "head consistency",
+        akmon_journal::VerifyCheck::SessionEndInvariants => "SessionEnd invariants",
     }
 }
 
@@ -911,12 +939,19 @@ fn run_verify(
                 if verbose {
                     eprintln!();
                     eprintln!("  checks performed:");
-                    eprintln!("    - parent chain: ok");
-                    eprintln!("    - sequence: ok");
-                    eprintln!("    - event hash recompute: ok");
-                    eprintln!("    - object presence: ok ({})", report.objects_checked);
-                    eprintln!("    - object byte re-hash: ok ({})", report.objects_checked);
-                    eprintln!("    - head consistency: ok");
+                    for check in &report.checks_performed {
+                        match check {
+                            akmon_journal::VerifyCheck::ObjectPresence
+                            | akmon_journal::VerifyCheck::ObjectByteRehash => {
+                                eprintln!(
+                                    "    - {}: ok ({})",
+                                    verify_check_name(*check),
+                                    report.objects_checked
+                                );
+                            }
+                            _ => eprintln!("    - {}: ok", verify_check_name(*check)),
+                        }
+                    }
                 }
             } else {
                 eprintln!("verification failed: session {session_id}");
@@ -953,8 +988,17 @@ fn run_verify(
                             ""
                         }
                     );
-                    for hash in &report.missing_objects {
-                        eprintln!("      - {}", hash.to_hex());
+                    for missing in &report.missing_objects {
+                        match missing.referenced_by_event.as_ref() {
+                            Some(event_hash) => {
+                                eprintln!(
+                                    "      - {} (referenced by event {})",
+                                    missing.object_hash.to_hex(),
+                                    event_hash.to_hex()
+                                );
+                            }
+                            None => eprintln!("      - {}", missing.object_hash.to_hex()),
+                        }
                     }
                     eprintln!();
 

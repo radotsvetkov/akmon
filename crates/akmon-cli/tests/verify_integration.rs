@@ -87,6 +87,7 @@ struct VerifyReportV1 {
     events_checked: u32,
     objects_checked: u32,
     passed: bool,
+    checks_performed: Vec<String>,
     violations: Vec<Violation>,
 }
 
@@ -187,6 +188,7 @@ fn t_verify_json_output_for_clean_session() {
     assert!(parsed.events_checked > 0);
     assert!(parsed.objects_checked > 0);
     assert!(parsed.passed);
+    assert!(!parsed.checks_performed.is_empty());
     assert!(parsed.violations.is_empty());
 }
 
@@ -258,6 +260,7 @@ fn t_verify_json_field_stability() {
     assert!(value.get("events_checked").is_some());
     assert!(value.get("objects_checked").is_some());
     assert!(value.get("passed").is_some());
+    assert!(value.get("checks_performed").is_some());
     assert!(value.get("violations").is_some());
 }
 
@@ -271,24 +274,25 @@ fn t_verify_verbose_lists_specific_violations() {
     let store = Arc::new(RedbObjectStore::open(db_path.as_path()).expect("reopen store"));
     let graph = RedbSessionGraph::reopen(Arc::clone(&store), sid).expect("reopen graph");
     let history = graph.history().expect("history");
-    let prompt_hash = history
+    let (user_event_hash, prompt_hash) = history
         .iter()
-        .find_map(|(_, ev)| match &ev.kind {
-            EventKind::UserTurn { prompt_hash } => Some(prompt_hash.clone()),
+        .find_map(|(event_hash, ev)| match &ev.kind {
+            EventKind::UserTurn { prompt_hash } => Some((event_hash.clone(), prompt_hash.clone())),
             _ => None,
         })
         .expect("prompt hash");
     store
-        .overwrite_object_bytes_for_testing(&prompt_hash, b"corrupted-object")
-        .expect("overwrite object");
+        .remove_object_for_testing(&prompt_hash)
+        .expect("remove object");
     drop(graph);
     drop(store);
 
     let out = run_verify_verbose(tmp.path(), sid);
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("object hash mismatches (1):"));
+    assert!(stderr.contains("missing objects (1):"));
     assert!(stderr.contains(&prompt_hash.to_hex()));
+    assert!(stderr.contains(&user_event_hash.to_hex()));
 }
 
 #[test]
@@ -354,4 +358,32 @@ fn t_verify_json_unaffected_by_verbose() {
     let baseline_v: Value = serde_json::from_slice(&baseline.stdout).expect("baseline json");
     let verbose_v: Value = serde_json::from_slice(&with_verbose.stdout).expect("verbose json");
     assert_eq!(baseline_v, verbose_v);
+}
+
+#[test]
+fn t_verify_report_lists_all_checks_performed() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_verify_json(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(0));
+    let parsed: VerifyReportV1 =
+        serde_json::from_slice(&out.stdout).expect("parse VerifyReportV1 checks");
+    let checks = parsed.checks_performed;
+    let expected = [
+        "parent_chain",
+        "sequence",
+        "event_hash_recompute",
+        "object_presence",
+        "object_byte_rehash",
+        "head_consistency",
+        "session_end_invariants",
+    ];
+    for check in expected {
+        assert!(
+            checks.iter().any(|c| c == check),
+            "missing check {check} in {:?}",
+            checks
+        );
+    }
 }
