@@ -22,16 +22,28 @@ mod common;
 use common::*;
 
 fn run_inspect(journal_dir: &Path, session_id: Uuid) -> std::process::Output {
+    run_inspect_with(journal_dir, session_id, &[])
+}
+
+fn run_inspect_verbose(journal_dir: &Path, session_id: Uuid) -> std::process::Output {
+    run_inspect_with(journal_dir, session_id, &["--verbose"])
+}
+
+fn run_inspect_with(
+    journal_dir: &Path,
+    session_id: Uuid,
+    extra_args: &[&str],
+) -> std::process::Output {
     let bin = std::env::var("CARGO_BIN_EXE_akmon").expect("CARGO_BIN_EXE_akmon");
-    Command::new(bin)
-        .args([
-            "inspect",
-            &session_id.to_string(),
-            "--journal",
-            &journal_dir.display().to_string(),
-        ])
-        .output()
-        .expect("run inspect")
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "inspect",
+        &session_id.to_string(),
+        "--journal",
+        &journal_dir.display().to_string(),
+    ]);
+    cmd.args(extra_args);
+    cmd.output().expect("run inspect")
 }
 
 fn contains_truncated_hash(text: &str) -> bool {
@@ -53,6 +65,23 @@ fn contains_truncated_hash(text: &str) -> bool {
     false
 }
 
+fn contains_full_hash(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i + 64 <= bytes.len() {
+        let candidate = &text[i..i + 64];
+        if candidate.chars().all(|c| c.is_ascii_hexdigit()) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn contains_iso_timestamp(text: &str) -> bool {
+    text.contains("T") && text.contains("Z") && text.contains("emitted_at:")
+}
+
 #[test]
 fn t_inspect_displays_clean_session() {
     let tmp = tempdir().expect("tempdir");
@@ -70,6 +99,18 @@ fn t_inspect_displays_clean_session() {
         contains_truncated_hash(&stdout),
         "expected truncated hash (8 hex + ...), got:\n{stdout}"
     );
+}
+
+#[test]
+fn t_inspect_layer2_format_json_not_yet_supported() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // TODO(Layer 4): update once --format json is implemented for inspect.
+    assert!(stderr.contains("--format json is not implemented yet"));
 }
 
 #[test]
@@ -130,6 +171,112 @@ fn t_inspect_displays_provider_call_attempt_summary() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("ProviderCall"));
     assert!(stdout.contains("attempts: 2 attempts: 1 RateLimited, 1 Success"));
+}
+
+#[test]
+fn t_inspect_verbose_shows_full_hashes() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_inspect_verbose(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        contains_full_hash(&stdout),
+        "expected at least one full hash, got:\n{stdout}"
+    );
+    assert!(stdout.contains("parent:"));
+}
+
+#[test]
+fn t_inspect_verbose_shows_attempt_records() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::ProviderCall {
+                provider_id: "integration-provider".to_owned(),
+                attempts: vec![
+                    AttemptRecord {
+                        attempt_number: 1,
+                        started_at: OffsetDateTime::UNIX_EPOCH,
+                        ended_at: OffsetDateTime::UNIX_EPOCH + Duration::seconds(1),
+                        status: AttemptStatus::RateLimited,
+                        request_hash: put_bytes(store.as_ref(), b"req-1"),
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some("429".to_owned()),
+                    },
+                    AttemptRecord {
+                        attempt_number: 2,
+                        started_at: OffsetDateTime::UNIX_EPOCH + Duration::seconds(2),
+                        ended_at: OffsetDateTime::UNIX_EPOCH + Duration::seconds(3),
+                        status: AttemptStatus::Success,
+                        request_hash: put_bytes(store.as_ref(), b"req-2"),
+                        response_hash: Some(put_bytes(store.as_ref(), b"resp-2")),
+                        stream_hash: Some(put_bytes(store.as_ref(), b"stream-2")),
+                        error_message: None,
+                    },
+                ],
+                stream_hash: Some(put_bytes(store.as_ref(), b"stream-outer")),
+            })
+            .expect("append provider");
+        graph
+            .append(EventKind::SessionEnd {
+                summary_hash: Some(put_bytes(store.as_ref(), b"summary")),
+            })
+            .expect("append end");
+    }
+    drop(journal);
+
+    let out = run_inspect_verbose(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("attempts:"));
+    assert!(stdout.contains("[1] RateLimited"));
+    assert!(stdout.contains("[2] Success"));
+    assert!(stdout.contains("request_hash:"));
+    assert!(stdout.contains("response_hash:"));
+}
+
+#[test]
+fn t_inspect_verbose_shows_emitted_at() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_inspect_verbose(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        contains_iso_timestamp(&stdout),
+        "expected emitted_at ISO timestamp, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn t_inspect_non_verbose_unchanged() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_inspect(tmp.path(), sid);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[0] SessionStart  hash="));
+    assert!(contains_truncated_hash(&stdout));
+    assert!(!stdout.contains("emitted_at:"));
+    assert!(!stdout.contains("parent: "));
 }
 
 #[test]
