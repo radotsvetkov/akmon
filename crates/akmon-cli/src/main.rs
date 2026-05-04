@@ -402,14 +402,32 @@ enum InspectEventKind {
     SessionStart {
         cwd_hash: String,
         config_hash: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config_size: Option<u64>,
     },
     /// User turn payload.
-    UserTurn { prompt_hash: String },
+    UserTurn {
+        prompt_hash: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_size: Option<u64>,
+    },
     /// Provider call payload.
     ProviderCall {
         provider_id: String,
         attempts: Vec<InspectAttempt>,
         stream_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream_size: Option<u64>,
     },
     /// Tool call payload.
     ToolCall {
@@ -417,26 +435,64 @@ enum InspectEventKind {
         input_hash: String,
         output_hash: String,
         side_effects_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        side_effects_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        side_effects_size: Option<u64>,
     },
     /// Retrieval call payload.
     RetrievalCall {
         index_id: String,
         query_hash: String,
         results_hash: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        results_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        results_size: Option<u64>,
     },
     /// Permission gate payload.
     PermissionGate {
         policy_id: String,
         decision: String,
         context_hash: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_size: Option<u64>,
     },
     /// Assistant turn payload.
     AssistantTurn {
         message_hash: String,
         tool_calls_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls_size: Option<u64>,
     },
     /// Session end payload.
-    SessionEnd { summary_hash: Option<String> },
+    SessionEnd {
+        summary_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_size: Option<u64>,
+    },
 }
 
 /// Provider attempt details for JSON inspect output.
@@ -454,8 +510,20 @@ struct InspectAttempt {
     request_hash: String,
     /// Response payload hash when present.
     response_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_size: Option<u64>,
     /// Stream transcript hash when present.
     stream_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_size: Option<u64>,
     /// Human-readable error message when present.
     error_message: Option<String>,
 }
@@ -615,96 +683,239 @@ fn inspect_attempt_status_name(status: &akmon_journal::AttemptStatus) -> String 
     }
 }
 
-fn inspect_event_kind(kind: &akmon_journal::EventKind) -> InspectEventKind {
+enum ContentClass {
+    Text(String),
+    Binary(usize),
+    Empty,
+}
+
+#[derive(Clone, Default)]
+struct ResolvedContent {
+    text: Option<String>,
+    size: Option<u64>,
+}
+
+fn resolve_object<S: ObjectStore>(store: &S, hash: &akmon_journal::Hash) -> Option<Vec<u8>> {
+    store
+        .get(hash)
+        .ok()
+        .and_then(|bytes| bytes.map(|b| b.to_vec()))
+}
+
+fn classify_content(bytes: &[u8]) -> ContentClass {
+    match std::str::from_utf8(bytes) {
+        Ok(text) if !text.is_empty() => ContentClass::Text(text.to_owned()),
+        Ok(_) => ContentClass::Empty,
+        Err(_) => ContentClass::Binary(bytes.len()),
+    }
+}
+
+fn resolved_content<S: ObjectStore>(
+    store: &S,
+    hash: &akmon_journal::Hash,
+    resolve: bool,
+) -> ResolvedContent {
+    if !resolve {
+        return ResolvedContent::default();
+    }
+    let Some(bytes) = resolve_object(store, hash) else {
+        return ResolvedContent {
+            text: None,
+            size: None,
+        };
+    };
+    let size = Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    match classify_content(&bytes) {
+        ContentClass::Text(text) => ResolvedContent {
+            text: Some(text),
+            size,
+        },
+        ContentClass::Binary(_) | ContentClass::Empty => ResolvedContent { text: None, size },
+    }
+}
+
+fn inspect_event_kind<S: ObjectStore>(
+    kind: &akmon_journal::EventKind,
+    store: &S,
+    resolve: bool,
+) -> InspectEventKind {
     match kind {
         akmon_journal::EventKind::SessionStart {
             cwd_hash,
             config_hash,
-        } => InspectEventKind::SessionStart {
-            cwd_hash: cwd_hash.to_hex(),
-            config_hash: config_hash.to_hex(),
-        },
-        akmon_journal::EventKind::UserTurn { prompt_hash } => InspectEventKind::UserTurn {
-            prompt_hash: prompt_hash.to_hex(),
-        },
+        } => {
+            let cwd = resolved_content(store, cwd_hash, resolve);
+            let config = resolved_content(store, config_hash, resolve);
+            InspectEventKind::SessionStart {
+                cwd_hash: cwd_hash.to_hex(),
+                config_hash: config_hash.to_hex(),
+                cwd_text: cwd.text,
+                cwd_size: cwd.size,
+                config_text: config.text,
+                config_size: config.size,
+            }
+        }
+        akmon_journal::EventKind::UserTurn { prompt_hash } => {
+            let prompt = resolved_content(store, prompt_hash, resolve);
+            InspectEventKind::UserTurn {
+                prompt_hash: prompt_hash.to_hex(),
+                prompt_text: prompt.text,
+                prompt_size: prompt.size,
+            }
+        }
         akmon_journal::EventKind::ProviderCall {
             provider_id,
             attempts,
             stream_hash,
-        } => InspectEventKind::ProviderCall {
-            provider_id: provider_id.clone(),
-            attempts: attempts
-                .iter()
-                .map(|attempt| InspectAttempt {
-                    attempt_number: attempt.attempt_number,
-                    status: inspect_attempt_status_name(&attempt.status),
-                    started_at: format_iso_utc(
-                        attempt.started_at.unix_timestamp(),
-                        attempt.started_at.nanosecond(),
-                    ),
-                    ended_at: format_iso_utc(
-                        attempt.ended_at.unix_timestamp(),
-                        attempt.ended_at.nanosecond(),
-                    ),
-                    request_hash: attempt.request_hash.to_hex(),
-                    response_hash: attempt
-                        .response_hash
-                        .as_ref()
-                        .map(akmon_journal::Hash::to_hex),
-                    stream_hash: attempt
-                        .stream_hash
-                        .as_ref()
-                        .map(akmon_journal::Hash::to_hex),
-                    error_message: attempt.error_message.clone(),
-                })
-                .collect(),
-            stream_hash: stream_hash.as_ref().map(akmon_journal::Hash::to_hex),
-        },
+        } => {
+            let stream_resolved = stream_hash
+                .as_ref()
+                .map(|h| resolved_content(store, h, resolve))
+                .unwrap_or_default();
+            InspectEventKind::ProviderCall {
+                provider_id: provider_id.clone(),
+                attempts: attempts
+                    .iter()
+                    .map(|attempt| {
+                        let request = resolved_content(store, &attempt.request_hash, resolve);
+                        let response = attempt
+                            .response_hash
+                            .as_ref()
+                            .map(|h| resolved_content(store, h, resolve))
+                            .unwrap_or_default();
+                        let stream = attempt
+                            .stream_hash
+                            .as_ref()
+                            .map(|h| resolved_content(store, h, resolve))
+                            .unwrap_or_default();
+                        InspectAttempt {
+                            attempt_number: attempt.attempt_number,
+                            status: inspect_attempt_status_name(&attempt.status),
+                            started_at: format_iso_utc(
+                                attempt.started_at.unix_timestamp(),
+                                attempt.started_at.nanosecond(),
+                            ),
+                            ended_at: format_iso_utc(
+                                attempt.ended_at.unix_timestamp(),
+                                attempt.ended_at.nanosecond(),
+                            ),
+                            request_hash: attempt.request_hash.to_hex(),
+                            request_text: request.text,
+                            request_size: request.size,
+                            response_hash: attempt
+                                .response_hash
+                                .as_ref()
+                                .map(akmon_journal::Hash::to_hex),
+                            response_text: response.text,
+                            response_size: response.size,
+                            stream_hash: attempt
+                                .stream_hash
+                                .as_ref()
+                                .map(akmon_journal::Hash::to_hex),
+                            stream_text: stream.text,
+                            stream_size: stream.size,
+                            error_message: attempt.error_message.clone(),
+                        }
+                    })
+                    .collect(),
+                stream_hash: stream_hash.as_ref().map(akmon_journal::Hash::to_hex),
+                stream_text: stream_resolved.text,
+                stream_size: stream_resolved.size,
+            }
+        }
         akmon_journal::EventKind::ToolCall {
             tool_id,
             input_hash,
             output_hash,
             side_effects_hash,
-        } => InspectEventKind::ToolCall {
-            tool_id: tool_id.clone(),
-            input_hash: input_hash.to_hex(),
-            output_hash: output_hash.to_hex(),
-            side_effects_hash: side_effects_hash.as_ref().map(akmon_journal::Hash::to_hex),
-        },
+        } => {
+            let input = resolved_content(store, input_hash, resolve);
+            let output = resolved_content(store, output_hash, resolve);
+            let side_effects = side_effects_hash
+                .as_ref()
+                .map(|h| resolved_content(store, h, resolve))
+                .unwrap_or_default();
+            InspectEventKind::ToolCall {
+                tool_id: tool_id.clone(),
+                input_hash: input_hash.to_hex(),
+                output_hash: output_hash.to_hex(),
+                side_effects_hash: side_effects_hash.as_ref().map(akmon_journal::Hash::to_hex),
+                input_text: input.text,
+                input_size: input.size,
+                output_text: output.text,
+                output_size: output.size,
+                side_effects_text: side_effects.text,
+                side_effects_size: side_effects.size,
+            }
+        }
         akmon_journal::EventKind::RetrievalCall {
             index_id,
             query_hash,
             results_hash,
-        } => InspectEventKind::RetrievalCall {
-            index_id: index_id.clone(),
-            query_hash: query_hash.to_hex(),
-            results_hash: results_hash.to_hex(),
-        },
+        } => {
+            let query = resolved_content(store, query_hash, resolve);
+            let results = resolved_content(store, results_hash, resolve);
+            InspectEventKind::RetrievalCall {
+                index_id: index_id.clone(),
+                query_hash: query_hash.to_hex(),
+                results_hash: results_hash.to_hex(),
+                query_text: query.text,
+                query_size: query.size,
+                results_text: results.text,
+                results_size: results.size,
+            }
+        }
         akmon_journal::EventKind::PermissionGate {
             policy_id,
             decision,
             context_hash,
-        } => InspectEventKind::PermissionGate {
-            policy_id: policy_id.clone(),
-            decision: decision.clone(),
-            context_hash: context_hash.to_hex(),
-        },
+        } => {
+            let context = resolved_content(store, context_hash, resolve);
+            InspectEventKind::PermissionGate {
+                policy_id: policy_id.clone(),
+                decision: decision.clone(),
+                context_hash: context_hash.to_hex(),
+                context_text: context.text,
+                context_size: context.size,
+            }
+        }
         akmon_journal::EventKind::AssistantTurn {
             message_hash,
             tool_calls_hash,
-        } => InspectEventKind::AssistantTurn {
-            message_hash: message_hash.to_hex(),
-            tool_calls_hash: tool_calls_hash.as_ref().map(akmon_journal::Hash::to_hex),
-        },
-        akmon_journal::EventKind::SessionEnd { summary_hash } => InspectEventKind::SessionEnd {
-            summary_hash: summary_hash.as_ref().map(akmon_journal::Hash::to_hex),
-        },
+        } => {
+            let message = resolved_content(store, message_hash, resolve);
+            let tool_calls = tool_calls_hash
+                .as_ref()
+                .map(|h| resolved_content(store, h, resolve))
+                .unwrap_or_default();
+            InspectEventKind::AssistantTurn {
+                message_hash: message_hash.to_hex(),
+                tool_calls_hash: tool_calls_hash.as_ref().map(akmon_journal::Hash::to_hex),
+                message_text: message.text,
+                message_size: message.size,
+                tool_calls_text: tool_calls.text,
+                tool_calls_size: tool_calls.size,
+            }
+        }
+        akmon_journal::EventKind::SessionEnd { summary_hash } => {
+            let summary = summary_hash
+                .as_ref()
+                .map(|h| resolved_content(store, h, resolve))
+                .unwrap_or_default();
+            InspectEventKind::SessionEnd {
+                summary_hash: summary_hash.as_ref().map(akmon_journal::Hash::to_hex),
+                summary_text: summary.text,
+                summary_size: summary.size,
+            }
+        }
     }
 }
 
-fn inspect_report_v1(
+fn inspect_report_v1<S: ObjectStore>(
     session_id: uuid::Uuid,
     journal_path: &Path,
+    store: &S,
+    resolve: bool,
     history: &[(akmon_journal::Hash, akmon_journal::Event)],
 ) -> InspectReportV1 {
     let journal_path =
@@ -723,7 +934,7 @@ fn inspect_report_v1(
                 event.emitted_at.unix_timestamp(),
                 event.emitted_at.nanosecond(),
             ),
-            kind: inspect_event_kind(&event.kind),
+            kind: inspect_event_kind(&event.kind, store, resolve),
         })
         .collect();
     InspectReportV1 {
@@ -1440,6 +1651,88 @@ fn format_optional_hash_full(hash: Option<&akmon_journal::Hash>) -> String {
     hash.map_or_else(|| "none".to_owned(), format_hash_full)
 }
 
+const RESOLVE_TEXT_MAX_BYTES: usize = 10 * 1024;
+const RESOLVE_TEXT_PREVIEW_MAX_LINES: usize = 5;
+const RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES: usize = 1024;
+
+fn format_resolved_human(hash: &akmon_journal::Hash, bytes: Option<Vec<u8>>) -> Vec<String> {
+    let Some(bytes) = bytes else {
+        return vec!["  | <unresolved>".to_owned()];
+    };
+    match classify_content(&bytes) {
+        ContentClass::Empty => vec!["  | <empty>".to_owned()],
+        ContentClass::Binary(size) => {
+            vec![format!(
+                "  | <binary, {size} bytes, hash: {}>",
+                truncate_hash(hash)
+            )]
+        }
+        ContentClass::Text(text) => {
+            let lines: Vec<&str> = text.lines().collect();
+            if lines.is_empty() {
+                return vec!["  | <empty>".to_owned()];
+            }
+            if text.len() > RESOLVE_TEXT_MAX_BYTES || lines.len() > RESOLVE_TEXT_PREVIEW_MAX_LINES {
+                let shown = lines
+                    .iter()
+                    .take(RESOLVE_TEXT_PREVIEW_MAX_LINES)
+                    .map(|line| {
+                        if line.len() > RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES {
+                            format!(
+                                "  | {}... (truncated, full hash: {})",
+                                &line[..RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES],
+                                hash.to_hex()
+                            )
+                        } else {
+                            format!("  | {line}")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let more = lines.len().saturating_sub(RESOLVE_TEXT_PREVIEW_MAX_LINES);
+                let mut out = shown;
+                out.push(format!(
+                    "  | ... ({more} more lines, full content via --format json)"
+                ));
+                out
+            } else {
+                lines
+                    .iter()
+                    .map(|line| {
+                        if line.len() > RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES {
+                            format!(
+                                "  | {}... (truncated, full hash: {})",
+                                &line[..RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES],
+                                hash.to_hex()
+                            )
+                        } else {
+                            format!("  | {line}")
+                        }
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+fn push_hash_with_optional_resolution(
+    lines: &mut Vec<String>,
+    label: &str,
+    hash: &akmon_journal::Hash,
+    store: &akmon_journal::RedbObjectStore,
+    resolve: bool,
+    verbose: bool,
+) {
+    let rendered = if verbose {
+        format_hash_full(hash)
+    } else {
+        truncate_hash(hash)
+    };
+    lines.push(format!("  {label}: {rendered}"));
+    if resolve {
+        lines.extend(format_resolved_human(hash, resolve_object(store, hash)));
+    }
+}
+
 fn attempt_status_name(status: &akmon_journal::AttemptStatus) -> String {
     match status {
         akmon_journal::AttemptStatus::Success => "Success".to_owned(),
@@ -1528,6 +1821,8 @@ fn format_event_summary(
     seq: usize,
     hash: &akmon_journal::Hash,
     event: &akmon_journal::Event,
+    store: &akmon_journal::RedbObjectStore,
+    resolve: bool,
 ) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
@@ -1540,11 +1835,27 @@ fn format_event_summary(
             cwd_hash,
             config_hash,
         } => {
-            lines.push(format!("  cwd_hash: {}", truncate_hash(cwd_hash)));
-            lines.push(format!("  config_hash: {}", truncate_hash(config_hash)));
+            push_hash_with_optional_resolution(
+                &mut lines, "cwd_hash", cwd_hash, store, resolve, false,
+            );
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "config_hash",
+                config_hash,
+                store,
+                resolve,
+                false,
+            );
         }
         akmon_journal::EventKind::UserTurn { prompt_hash } => {
-            lines.push(format!("  prompt_hash: {}", truncate_hash(prompt_hash)));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "prompt_hash",
+                prompt_hash,
+                store,
+                resolve,
+                false,
+            );
         }
         akmon_journal::EventKind::ProviderCall {
             provider_id,
@@ -1553,12 +1864,18 @@ fn format_event_summary(
         } => {
             lines.push(format!("  provider: {provider_id}"));
             lines.push(format!("  attempts: {}", summarize_attempts(attempts)));
-            lines.push(format!(
-                "  stream_hash: {}",
-                stream_hash
-                    .as_ref()
-                    .map_or_else(|| "none".to_owned(), truncate_hash)
-            ));
+            if let Some(stream_hash) = stream_hash.as_ref() {
+                push_hash_with_optional_resolution(
+                    &mut lines,
+                    "stream_hash",
+                    stream_hash,
+                    store,
+                    resolve,
+                    false,
+                );
+            } else {
+                lines.push("  stream_hash: none".to_owned());
+            }
         }
         akmon_journal::EventKind::ToolCall {
             tool_id,
@@ -1567,8 +1884,22 @@ fn format_event_summary(
             side_effects_hash,
         } => {
             lines.push(format!("  tool: {tool_id}"));
-            lines.push(format!("  input_hash: {}", truncate_hash(input_hash)));
-            lines.push(format!("  output_hash: {}", truncate_hash(output_hash)));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "input_hash",
+                input_hash,
+                store,
+                resolve,
+                false,
+            );
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "output_hash",
+                output_hash,
+                store,
+                resolve,
+                false,
+            );
             lines.push(format!(
                 "  side_effects: {}",
                 if side_effects_hash.is_some() {
@@ -1577,6 +1908,14 @@ fn format_event_summary(
                     "no"
                 }
             ));
+            if let Some(side_effects_hash) = side_effects_hash.as_ref()
+                && resolve
+            {
+                lines.extend(format_resolved_human(
+                    side_effects_hash,
+                    resolve_object(store, side_effects_hash),
+                ));
+            }
         }
         akmon_journal::EventKind::RetrievalCall {
             index_id,
@@ -1584,8 +1923,22 @@ fn format_event_summary(
             results_hash,
         } => {
             lines.push(format!("  index_id: {index_id}"));
-            lines.push(format!("  query_hash: {}", truncate_hash(query_hash)));
-            lines.push(format!("  results_hash: {}", truncate_hash(results_hash)));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "query_hash",
+                query_hash,
+                store,
+                resolve,
+                false,
+            );
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "results_hash",
+                results_hash,
+                store,
+                resolve,
+                false,
+            );
         }
         akmon_journal::EventKind::PermissionGate {
             policy_id,
@@ -1594,13 +1947,27 @@ fn format_event_summary(
         } => {
             lines.push(format!("  policy: {policy_id}"));
             lines.push(format!("  decision: {decision}"));
-            lines.push(format!("  context_hash: {}", truncate_hash(context_hash)));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "context_hash",
+                context_hash,
+                store,
+                resolve,
+                false,
+            );
         }
         akmon_journal::EventKind::AssistantTurn {
             message_hash,
             tool_calls_hash,
         } => {
-            lines.push(format!("  message_hash: {}", truncate_hash(message_hash)));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "message_hash",
+                message_hash,
+                store,
+                resolve,
+                false,
+            );
             lines.push(format!(
                 "  tool_calls: {}",
                 if tool_calls_hash.is_some() {
@@ -1609,14 +1976,28 @@ fn format_event_summary(
                     "no"
                 }
             ));
+            if let Some(tool_calls_hash) = tool_calls_hash.as_ref()
+                && resolve
+            {
+                lines.extend(format_resolved_human(
+                    tool_calls_hash,
+                    resolve_object(store, tool_calls_hash),
+                ));
+            }
         }
         akmon_journal::EventKind::SessionEnd { summary_hash } => {
-            lines.push(format!(
-                "  summary_hash: {}",
-                summary_hash
-                    .as_ref()
-                    .map_or_else(|| "none".to_owned(), truncate_hash)
-            ));
+            if let Some(summary_hash) = summary_hash.as_ref() {
+                push_hash_with_optional_resolution(
+                    &mut lines,
+                    "summary_hash",
+                    summary_hash,
+                    store,
+                    resolve,
+                    false,
+                );
+            } else {
+                lines.push("  summary_hash: none".to_owned());
+            }
         }
     }
     lines.join("\n")
@@ -1626,6 +2007,8 @@ fn format_event_verbose(
     seq: usize,
     hash: &akmon_journal::Hash,
     event: &akmon_journal::Event,
+    store: &akmon_journal::RedbObjectStore,
+    resolve: bool,
 ) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
@@ -1646,11 +2029,27 @@ fn format_event_verbose(
             cwd_hash,
             config_hash,
         } => {
-            lines.push(format!("  cwd_hash: {}", format_hash_full(cwd_hash)));
-            lines.push(format!("  config_hash: {}", format_hash_full(config_hash)));
+            push_hash_with_optional_resolution(
+                &mut lines, "cwd_hash", cwd_hash, store, resolve, true,
+            );
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "config_hash",
+                config_hash,
+                store,
+                resolve,
+                true,
+            );
         }
         akmon_journal::EventKind::UserTurn { prompt_hash } => {
-            lines.push(format!("  prompt_hash: {}", format_hash_full(prompt_hash)));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "prompt_hash",
+                prompt_hash,
+                store,
+                resolve,
+                true,
+            );
         }
         akmon_journal::EventKind::ProviderCall {
             provider_id,
@@ -1677,14 +2076,36 @@ fn format_event_verbose(
                     "        request_hash: {}",
                     format_hash_full(&attempt.request_hash)
                 ));
+                if resolve {
+                    lines.extend(format_resolved_human(
+                        &attempt.request_hash,
+                        resolve_object(store, &attempt.request_hash),
+                    ));
+                }
                 lines.push(format!(
                     "        response_hash: {}",
                     format_optional_hash_full(attempt.response_hash.as_ref())
                 ));
+                if let Some(response_hash) = attempt.response_hash.as_ref()
+                    && resolve
+                {
+                    lines.extend(format_resolved_human(
+                        response_hash,
+                        resolve_object(store, response_hash),
+                    ));
+                }
                 lines.push(format!(
                     "        stream_hash: {}",
                     format_optional_hash_full(attempt.stream_hash.as_ref())
                 ));
+                if let Some(stream_hash) = attempt.stream_hash.as_ref()
+                    && resolve
+                {
+                    lines.extend(format_resolved_human(
+                        stream_hash,
+                        resolve_object(store, stream_hash),
+                    ));
+                }
                 lines.push(format!(
                     "        error: {}",
                     attempt
@@ -1697,6 +2118,14 @@ fn format_event_verbose(
                 "  stream_hash: {}",
                 format_optional_hash_full(stream_hash.as_ref())
             ));
+            if let Some(stream_hash) = stream_hash.as_ref()
+                && resolve
+            {
+                lines.extend(format_resolved_human(
+                    stream_hash,
+                    resolve_object(store, stream_hash),
+                ));
+            }
         }
         akmon_journal::EventKind::ToolCall {
             tool_id,
@@ -1705,12 +2134,34 @@ fn format_event_verbose(
             side_effects_hash,
         } => {
             lines.push(format!("  tool: {tool_id}"));
-            lines.push(format!("  input_hash: {}", format_hash_full(input_hash)));
-            lines.push(format!("  output_hash: {}", format_hash_full(output_hash)));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "input_hash",
+                input_hash,
+                store,
+                resolve,
+                true,
+            );
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "output_hash",
+                output_hash,
+                store,
+                resolve,
+                true,
+            );
             lines.push(format!(
                 "  side_effects_hash: {}",
                 format_optional_hash_full(side_effects_hash.as_ref())
             ));
+            if let Some(side_effects_hash) = side_effects_hash.as_ref()
+                && resolve
+            {
+                lines.extend(format_resolved_human(
+                    side_effects_hash,
+                    resolve_object(store, side_effects_hash),
+                ));
+            }
         }
         akmon_journal::EventKind::RetrievalCall {
             index_id,
@@ -1718,11 +2169,22 @@ fn format_event_verbose(
             results_hash,
         } => {
             lines.push(format!("  index_id: {index_id}"));
-            lines.push(format!("  query_hash: {}", format_hash_full(query_hash)));
-            lines.push(format!(
-                "  results_hash: {}",
-                format_hash_full(results_hash)
-            ));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "query_hash",
+                query_hash,
+                store,
+                resolve,
+                true,
+            );
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "results_hash",
+                results_hash,
+                store,
+                resolve,
+                true,
+            );
         }
         akmon_journal::EventKind::PermissionGate {
             policy_id,
@@ -1731,29 +2193,53 @@ fn format_event_verbose(
         } => {
             lines.push(format!("  policy: {policy_id}"));
             lines.push(format!("  decision: {decision}"));
-            lines.push(format!(
-                "  context_hash: {}",
-                format_hash_full(context_hash)
-            ));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "context_hash",
+                context_hash,
+                store,
+                resolve,
+                true,
+            );
         }
         akmon_journal::EventKind::AssistantTurn {
             message_hash,
             tool_calls_hash,
         } => {
-            lines.push(format!(
-                "  message_hash: {}",
-                format_hash_full(message_hash)
-            ));
+            push_hash_with_optional_resolution(
+                &mut lines,
+                "message_hash",
+                message_hash,
+                store,
+                resolve,
+                true,
+            );
             lines.push(format!(
                 "  tool_calls_hash: {}",
                 format_optional_hash_full(tool_calls_hash.as_ref())
             ));
+            if let Some(tool_calls_hash) = tool_calls_hash.as_ref()
+                && resolve
+            {
+                lines.extend(format_resolved_human(
+                    tool_calls_hash,
+                    resolve_object(store, tool_calls_hash),
+                ));
+            }
         }
         akmon_journal::EventKind::SessionEnd { summary_hash } => {
             lines.push(format!(
                 "  summary_hash: {}",
                 format_optional_hash_full(summary_hash.as_ref())
             ));
+            if let Some(summary_hash) = summary_hash.as_ref()
+                && resolve
+            {
+                lines.extend(format_resolved_human(
+                    summary_hash,
+                    resolve_object(store, summary_hash),
+                ));
+            }
         }
     }
     lines.join("\n")
@@ -1763,12 +2249,14 @@ fn format_event(
     seq: usize,
     hash: &akmon_journal::Hash,
     event: &akmon_journal::Event,
+    store: &akmon_journal::RedbObjectStore,
+    resolve: bool,
     verbose: bool,
 ) -> String {
     if verbose {
-        format_event_verbose(seq, hash, event)
+        format_event_verbose(seq, hash, event, store, resolve)
     } else {
-        format_event_summary(seq, hash, event)
+        format_event_summary(seq, hash, event, store, resolve)
     }
 }
 
@@ -1782,13 +2270,6 @@ fn run_inspect(
 ) -> ExitCode {
     if matches!(binary, BinaryMode::Hex | BinaryMode::Base64) && !resolve {
         eprintln!("error: --binary {binary:?} requires --resolve");
-        return ExitCode::from(2);
-    }
-    if matches!(format, InspectFormat::Json) && resolve {
-        let msg =
-            "akmon: inspect: --resolve with --format json is not implemented yet (planned for layer 5)"
-                .to_owned();
-        eprintln!("{msg}");
         return ExitCode::from(2);
     }
     let journal_dir = match journal {
@@ -1839,7 +2320,13 @@ fn run_inspect(
         }
     };
     if matches!(format, InspectFormat::Json) {
-        let body = inspect_report_v1(session_id, journal_dir.as_path(), &history);
+        let body = inspect_report_v1(
+            session_id,
+            journal_dir.as_path(),
+            handle.store.as_ref(),
+            resolve,
+            &history,
+        );
         if let Err(err) = print_inspect_json_report(&body) {
             eprintln!("akmon: inspect: failed to render JSON output: {err}");
             return ExitCode::from(3);
@@ -1853,7 +2340,10 @@ fn run_inspect(
     println!("journal: {}", journal_display.display());
     for (idx, (hash, event)) in history.iter().enumerate() {
         println!();
-        println!("{}", format_event(idx, hash, event, verbose));
+        println!(
+            "{}",
+            format_event(idx, hash, event, handle.store.as_ref(), resolve, verbose)
+        );
     }
     ExitCode::SUCCESS
 }

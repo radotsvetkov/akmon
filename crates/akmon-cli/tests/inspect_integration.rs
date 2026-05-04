@@ -112,17 +112,25 @@ enum InspectEventKind {
     },
     UserTurn {
         prompt_hash: String,
+        prompt_text: Option<String>,
+        prompt_size: Option<u64>,
     },
     ProviderCall {
         provider_id: String,
         attempts: Vec<InspectAttempt>,
         stream_hash: Option<String>,
+        stream_text: Option<String>,
+        stream_size: Option<u64>,
     },
     ToolCall {
         tool_id: String,
         input_hash: String,
         output_hash: String,
         side_effects_hash: Option<String>,
+        input_text: Option<String>,
+        input_size: Option<u64>,
+        output_text: Option<String>,
+        output_size: Option<u64>,
     },
     RetrievalCall {
         index_id: String,
@@ -137,6 +145,10 @@ enum InspectEventKind {
     AssistantTurn {
         message_hash: String,
         tool_calls_hash: Option<String>,
+        message_text: Option<String>,
+        message_size: Option<u64>,
+        tool_calls_text: Option<String>,
+        tool_calls_size: Option<u64>,
     },
     SessionEnd {
         summary_hash: Option<String>,
@@ -154,6 +166,12 @@ struct InspectAttempt {
     response_hash: Option<String>,
     stream_hash: Option<String>,
     error_message: Option<String>,
+    request_text: Option<String>,
+    request_size: Option<u64>,
+    response_text: Option<String>,
+    response_size: Option<u64>,
+    stream_text: Option<String>,
+    stream_size: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,7 +205,7 @@ fn t_inspect_json_output_for_clean_session() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
     create_clean_session(tmp.path(), sid);
-    let out = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    let out = run_inspect_with(tmp.path(), sid, &["--format", "json", "--resolve"]);
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let parsed: InspectReportV1 = serde_json::from_str(&stdout).expect("parse inspect report");
@@ -211,11 +229,111 @@ fn t_inspect_json_output_for_clean_session() {
 }
 
 #[test]
+fn t_inspect_resolve_human_shows_text() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_inspect_with(tmp.path(), sid, &["--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("prompt_hash:"));
+    assert!(stdout.contains("| hello"));
+}
+
+#[test]
+fn t_inspect_resolve_human_shows_binary_metadata() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: put_bytes(store.as_ref(), b"assistant"),
+                tool_calls_hash: Some(put_bytes(store.as_ref(), &[0xFF, 0x00, 0x01, 0x02])),
+            })
+            .expect("append assistant");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect_with(tmp.path(), sid, &["--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("<binary, 4 bytes"));
+}
+
+#[test]
+fn t_inspect_resolve_truncates_long_text() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        let long = "l1\nl2\nl3\nl4\nl5\nl6\nl7";
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::UserTurn {
+                prompt_hash: put_bytes(store.as_ref(), long.as_bytes()),
+            })
+            .expect("append user");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect_with(tmp.path(), sid, &["--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("| l1"));
+    assert!(stdout.contains("| l5"));
+    assert!(stdout.contains("more lines"));
+}
+
+#[test]
+fn t_inspect_resolve_handles_missing_object() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+    let store = Arc::new(
+        akmon_journal::RedbObjectStore::open(fixture.journal_db_path.as_path()).expect("open"),
+    );
+    store
+        .remove_object_for_testing(&fixture.prompt_hash)
+        .expect("remove prompt");
+    drop(store);
+    let out = run_inspect_with(tmp.path(), sid, &["--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("<unresolved>"));
+}
+
+#[test]
 fn t_inspect_json_field_stability() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
     create_clean_session(tmp.path(), sid);
-    let out = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    let out = run_inspect_with(tmp.path(), sid, &["--format", "json", "--resolve"]);
     assert_eq!(out.status.code(), Some(0));
     let value: Value = serde_json::from_slice(&out.stdout).expect("parse generic json");
     assert!(value.get("akmon_version").is_some());
@@ -289,7 +407,7 @@ fn t_inspect_json_provider_call_includes_full_attempts() {
     }
     drop(journal);
 
-    let out = run_inspect_with(tmp.path(), sid, &["--format", "json"]);
+    let out = run_inspect_with(tmp.path(), sid, &["--format", "json", "--resolve"]);
     assert_eq!(out.status.code(), Some(0));
     let parsed: InspectReportV1 = serde_json::from_slice(&out.stdout).expect("parse inspect json");
     let provider = parsed
@@ -300,6 +418,7 @@ fn t_inspect_json_provider_call_includes_full_attempts() {
                 provider_id,
                 attempts,
                 stream_hash,
+                ..
             } => Some((provider_id, attempts, stream_hash)),
             _ => None,
         })
@@ -316,6 +435,10 @@ fn t_inspect_json_provider_call_includes_full_attempts() {
     assert!(provider.1[1].response_hash.is_some());
     assert!(provider.1[1].stream_hash.is_some());
     assert!(provider.2.is_some());
+    assert!(
+        provider.1[0].request_size.is_some() || provider.1[0].request_text.is_some(),
+        "expected resolved request payload metadata/text"
+    );
 }
 
 #[test]
@@ -485,6 +608,20 @@ fn t_inspect_non_verbose_unchanged() {
 }
 
 #[test]
+fn t_inspect_resolve_does_not_affect_non_resolve_output() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let baseline = run_inspect(tmp.path(), sid);
+    let with_resolve = run_inspect_with(tmp.path(), sid, &["--resolve"]);
+    assert_eq!(baseline.status.code(), Some(0));
+    assert_eq!(with_resolve.status.code(), Some(0));
+    let baseline_stdout = String::from_utf8_lossy(&baseline.stdout);
+    assert!(!baseline_stdout.contains("| hello"));
+    assert!(baseline_stdout.contains("prompt_hash:"));
+}
+
+#[test]
 fn t_inspect_fails_for_missing_session() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
@@ -535,15 +672,74 @@ fn t_inspect_json_for_missing_journal() {
 }
 
 #[test]
-fn t_inspect_json_with_resolve_layer4() {
+fn t_inspect_json_with_resolve_outputs_text() {
     let tmp = tempdir().expect("tempdir");
     let sid = Uuid::new_v4();
     create_clean_session(tmp.path(), sid);
     let out = run_inspect_with(tmp.path(), sid, &["--format", "json", "--resolve"]);
-    assert_eq!(out.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    // TODO(Layer 5): update once --resolve is implemented for JSON inspect output.
-    assert!(stderr.contains("planned for layer 5"));
+    assert_eq!(out.status.code(), Some(0));
+    let parsed: InspectReportV1 = serde_json::from_slice(&out.stdout).expect("json parse");
+    let user = parsed
+        .events
+        .iter()
+        .find_map(|event| match &event.kind {
+            InspectEventKind::UserTurn {
+                prompt_text,
+                prompt_size,
+                ..
+            } => Some((prompt_text, prompt_size)),
+            _ => None,
+        })
+        .expect("user turn");
+    assert_eq!(user.0.as_deref(), Some("hello"));
+    assert!(user.1.is_some());
+}
+
+#[test]
+fn t_inspect_json_resolve_binary_no_text_field() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: put_bytes(store.as_ref(), b"text-response"),
+                tool_calls_hash: Some(put_bytes(store.as_ref(), &[0xFE, 0xED, 0xFA, 0xCE])),
+            })
+            .expect("append assistant");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect_with(tmp.path(), sid, &["--format", "json", "--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let parsed: InspectReportV1 = serde_json::from_slice(&out.stdout).expect("json parse");
+    let assistant = parsed
+        .events
+        .iter()
+        .find_map(|event| match &event.kind {
+            InspectEventKind::AssistantTurn {
+                tool_calls_text,
+                tool_calls_size,
+                ..
+            } => Some((tool_calls_text, tool_calls_size)),
+            _ => None,
+        })
+        .expect("assistant turn");
+    assert!(assistant.0.is_none());
+    assert_eq!(assistant.1, &Some(4));
 }
 
 #[test]
