@@ -295,6 +295,28 @@ enum VerifyFormat {
     Json,
 }
 
+/// Output format for `akmon inspect`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum InspectFormat {
+    /// Human-readable summary and optional detail output.
+    #[default]
+    Human,
+    /// Machine-readable JSON output for automation.
+    Json,
+}
+
+/// Display mode for resolved binary object content in `akmon inspect`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum BinaryMode {
+    /// Show binary metadata only (`<binary, N bytes, hash: ...>`).
+    #[default]
+    Meta,
+    /// Show a truncated hexadecimal preview.
+    Hex,
+    /// Show a truncated base64 preview.
+    Base64,
+}
+
 /// Stable JSON shape for `akmon verify --format json`.
 #[derive(Debug, Serialize, serde::Deserialize)]
 struct VerifyReportV1 {
@@ -862,6 +884,46 @@ Exit codes:\n\
         #[arg(long)]
         verbose: bool,
     },
+    /// Inspect a session's events and contents.
+    #[command(
+        long_about = "Inspect a session's events and contents from the on-disk\n\
+journal. Shows the event timeline (SessionStart, UserTurn,\n\
+ProviderCall, ToolCall, PermissionGate, AssistantTurn,\n\
+SessionEnd) with kind-specific fields.\n\n\
+Default human output is summary-style. Use --verbose for full\n\
+detail (all hashes, attempt records, metadata). Use --resolve\n\
+to display referenced object content (prompt text, message\n\
+text, tool input/output) instead of just hashes.\n\n\
+Examples:\n\
+  akmon inspect 550e8400-e29b-41d4-a716-446655440000\n\
+  akmon inspect 550e8400-... --verbose\n\
+  akmon inspect 550e8400-... --resolve --binary hex\n\
+  akmon inspect 550e8400-... --format json\n\n\
+Exit codes:\n\
+  0 — session displayed\n\
+  1 — (reserved; not currently emitted by inspect)\n\
+  2 — usage error (e.g., --binary without --resolve)\n\
+  3 — I/O or environment error (journal/session not found)"
+    )]
+    Inspect {
+        /// Session UUID assigned at AgentSession construction.
+        session_id: uuid::Uuid,
+        /// Path to the journal directory. Defaults to per-user journal location ($XDG_STATE_HOME/akmon/journal).
+        #[arg(long)]
+        journal: Option<PathBuf>,
+        /// Output format: human (default) or json.
+        #[arg(long, default_value = "human")]
+        format: InspectFormat,
+        /// Print full event detail (all hashes, attempt records, metadata).
+        #[arg(long)]
+        verbose: bool,
+        /// Resolve referenced object hashes and display content.
+        #[arg(long)]
+        resolve: bool,
+        /// Display mode for non-UTF-8 resolved content. Requires --resolve for `hex`/`base64`.
+        #[arg(long, default_value = "meta")]
+        binary: BinaryMode,
+    },
 }
 
 fn run_verify(
@@ -1088,6 +1150,25 @@ fn run_verify(
     } else {
         ExitCode::from(1)
     }
+}
+
+fn run_inspect(
+    session_id: uuid::Uuid,
+    journal: Option<PathBuf>,
+    format: InspectFormat,
+    verbose: bool,
+    resolve: bool,
+    binary: BinaryMode,
+) -> ExitCode {
+    if matches!(binary, BinaryMode::Hex | BinaryMode::Base64) && !resolve {
+        eprintln!("error: --binary {binary:?} requires --resolve");
+        return ExitCode::from(2);
+    }
+    eprintln!(
+        "inspect: session_id={session_id} journal={journal:?} format={format:?} verbose={verbose} resolve={resolve} binary={binary:?}",
+    );
+    eprintln!("(layer 1 stub — inspect logic in layer 2)");
+    ExitCode::SUCCESS
 }
 
 #[cfg(feature = "semantic-index")]
@@ -1760,6 +1841,23 @@ async fn main() -> ExitCode {
             verbose,
         }) => {
             return run_verify(*session_id, journal.clone(), *format, *verbose);
+        }
+        Some(Commands::Inspect {
+            session_id,
+            journal,
+            format,
+            verbose,
+            resolve,
+            binary,
+        }) => {
+            return run_inspect(
+                *session_id,
+                journal.clone(),
+                *format,
+                *verbose,
+                *resolve,
+                *binary,
+            );
         }
         Some(Commands::Chat) | None => {}
     }
@@ -3048,6 +3146,118 @@ mod tests {
             rendered.contains("invalid value")
                 || rendered.contains("invalid character")
                 || rendered.contains("UUID"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_inspect_subcommand_parses_session_id() {
+        let cli = Cli::try_parse_from(["akmon", "inspect", "550e8400-e29b-41d4-a716-446655440000"])
+            .expect("parse inspect");
+        match cli.command {
+            Some(Commands::Inspect {
+                session_id,
+                journal,
+                format,
+                verbose,
+                resolve,
+                binary,
+            }) => {
+                assert_eq!(
+                    session_id.to_string(),
+                    "550e8400-e29b-41d4-a716-446655440000"
+                );
+                assert!(journal.is_none());
+                assert_eq!(format, InspectFormat::Human);
+                assert!(!verbose);
+                assert!(!resolve);
+                assert_eq!(binary, BinaryMode::Meta);
+            }
+            other => panic!("expected inspect command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_inspect_subcommand_parses_optional_flags() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "inspect",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--journal",
+            "/tmp/journal.redb",
+            "--format",
+            "json",
+            "--verbose",
+            "--resolve",
+            "--binary",
+            "hex",
+        ])
+        .expect("parse inspect flags");
+        match cli.command {
+            Some(Commands::Inspect {
+                session_id,
+                journal,
+                format,
+                verbose,
+                resolve,
+                binary,
+            }) => {
+                assert_eq!(
+                    session_id.to_string(),
+                    "550e8400-e29b-41d4-a716-446655440000"
+                );
+                assert_eq!(journal, Some(PathBuf::from("/tmp/journal.redb")));
+                assert_eq!(format, InspectFormat::Json);
+                assert!(verbose);
+                assert!(resolve);
+                assert_eq!(binary, BinaryMode::Hex);
+            }
+            other => panic!("expected inspect command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_inspect_subcommand_rejects_invalid_uuid() {
+        let err = Cli::try_parse_from(["akmon", "inspect", "not-a-uuid"]).expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value")
+                || rendered.contains("invalid character")
+                || rendered.contains("UUID"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_inspect_subcommand_rejects_invalid_format() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "inspect",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--format",
+            "yaml",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value") || rendered.contains("possible values"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_inspect_subcommand_rejects_invalid_binary_mode() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "inspect",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--binary",
+            "raw",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value") || rendered.contains("possible values"),
             "unexpected clap error: {rendered}"
         );
     }
