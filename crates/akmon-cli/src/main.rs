@@ -284,6 +284,16 @@ enum OutputFormat {
     Json,
 }
 
+/// Output format for `akmon verify`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum VerifyFormat {
+    /// Human-readable summary and optional detail output.
+    #[default]
+    Human,
+    /// Machine-readable JSON output for CI automation.
+    Json,
+}
+
 /// Aggregated token counters for `--output json` (Anthropic cache fields are zero when unused).
 #[derive(Debug, Serialize)]
 struct RunUsageSummary {
@@ -615,6 +625,44 @@ enum Commands {
     Import(import_cmd::ImportArgs),
     /// Write `AKMON.md` into another tool's expected paths (`--all` or `--tool`).
     Export(export_cmd::ExportArgs),
+    /// Verify a session's integrity (chain, hashes, object closure).
+    #[command(
+        long_about = "Verify the on-disk journal for the given session ID. Checks parent chain, \
+sequence, event hashes, and object integrity per AGEF Section 13.\n\n\
+Example:\n\
+  akmon verify 550e8400-e29b-41d4-a716-446655440000\n\n\
+Exit codes:\n\
+  0 — verification passed\n\
+  1 — verification failed (see output for violations)\n\
+  2 — usage error\n\
+  3 — I/O or environment error"
+    )]
+    Verify {
+        /// Session UUID assigned at AgentSession construction.
+        session_id: uuid::Uuid,
+        /// Path to the journal directory. Defaults to per-user journal location ($XDG_STATE_HOME/akmon/journal).
+        #[arg(long)]
+        journal: Option<PathBuf>,
+        /// Output format: human (default) or json.
+        #[arg(long, default_value = "human")]
+        format: VerifyFormat,
+        /// Print per-violation detail.
+        #[arg(long)]
+        verbose: bool,
+    },
+}
+
+fn run_verify(
+    session_id: uuid::Uuid,
+    journal: Option<PathBuf>,
+    format: VerifyFormat,
+    verbose: bool,
+) -> ExitCode {
+    eprintln!(
+        "verify: session_id={session_id} journal={journal:?} format={format:?} verbose={verbose}"
+    );
+    eprintln!("(layer 1 stub — verification logic in layer 2)");
+    ExitCode::SUCCESS
 }
 
 #[cfg(feature = "semantic-index")]
@@ -1279,6 +1327,14 @@ async fn main() -> ExitCode {
         }
         Some(Commands::Spec(sc)) => {
             return spec_cmd::run_spec(&cli, &project_root, sc.clone()).await;
+        }
+        Some(Commands::Verify {
+            session_id,
+            journal,
+            format,
+            verbose,
+        }) => {
+            return run_verify(*session_id, journal.clone(), *format, *verbose);
         }
         Some(Commands::Chat) | None => {}
     }
@@ -2502,6 +2558,73 @@ mod tests {
         let custom = PathBuf::from("/tmp/custom-evidence.json");
         let p = resolve_evidence_path(root, session_id, Some(custom.clone()));
         assert_eq!(p, custom);
+    }
+
+    #[test]
+    fn t_verify_subcommand_parses_session_id() {
+        let cli = Cli::try_parse_from(["akmon", "verify", "550e8400-e29b-41d4-a716-446655440000"])
+            .expect("parse verify");
+        match cli.command {
+            Some(Commands::Verify {
+                session_id,
+                journal,
+                format,
+                verbose,
+            }) => {
+                assert_eq!(
+                    session_id.to_string(),
+                    "550e8400-e29b-41d4-a716-446655440000"
+                );
+                assert!(journal.is_none());
+                assert_eq!(format, VerifyFormat::Human);
+                assert!(!verbose);
+            }
+            other => panic!("expected verify command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_verify_subcommand_parses_optional_flags() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "verify",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--journal",
+            "/tmp/journal.redb",
+            "--format",
+            "json",
+            "--verbose",
+        ])
+        .expect("parse verify flags");
+        match cli.command {
+            Some(Commands::Verify {
+                session_id,
+                journal,
+                format,
+                verbose,
+            }) => {
+                assert_eq!(
+                    session_id.to_string(),
+                    "550e8400-e29b-41d4-a716-446655440000"
+                );
+                assert_eq!(journal, Some(PathBuf::from("/tmp/journal.redb")));
+                assert_eq!(format, VerifyFormat::Json);
+                assert!(verbose);
+            }
+            other => panic!("expected verify command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_verify_subcommand_rejects_invalid_uuid() {
+        let err = Cli::try_parse_from(["akmon", "verify", "not-a-uuid"]).expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value")
+                || rendered.contains("invalid character")
+                || rendered.contains("UUID"),
+            "unexpected clap error: {rendered}"
+        );
     }
 
     #[test]
