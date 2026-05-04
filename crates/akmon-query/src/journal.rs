@@ -44,7 +44,8 @@ fn canonical_cbor_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Age
     Ok(bytes)
 }
 
-fn default_journal_dir() -> Result<PathBuf, AgentError> {
+/// Resolves the per-user journal directory (Decision D-04).
+pub fn default_journal_dir() -> Result<PathBuf, AgentError> {
     #[cfg(windows)]
     {
         let base = std::env::var("LOCALAPPDATA").map_err(|_| AgentError::SessionFailed {
@@ -69,6 +70,12 @@ fn default_journal_dir() -> Result<PathBuf, AgentError> {
     }
 }
 
+/// Resolves the journal database file path inside a journal directory.
+#[must_use]
+pub fn journal_db_path(journal_dir: &std::path::Path) -> PathBuf {
+    journal_dir.join("journal.redb")
+}
+
 /// Opens the per-user default journal (D-04) and creates a new session graph for `session_id`.
 pub fn open_default_journal_handle(
     session_id: Uuid,
@@ -77,7 +84,7 @@ pub fn open_default_journal_handle(
     std::fs::create_dir_all(&dir).map_err(|e| AgentError::SessionFailed {
         message: format!("journal mkdir {}: {e}", dir.display()),
     })?;
-    let db_path = dir.join("journal.redb");
+    let db_path = journal_db_path(&dir);
     let store = if db_path.is_file() {
         RedbObjectStore::open(db_path.as_path()).map_err(journal_err)?
     } else {
@@ -85,6 +92,20 @@ pub fn open_default_journal_handle(
     };
     let store = Arc::new(store);
     let graph = RedbSessionGraph::open_new(Arc::clone(&store), session_id).map_err(journal_err)?;
+    Ok(JournalHandle::new(store, Arc::new(Mutex::new(graph))))
+}
+
+/// Opens an existing journal + session graph for read-only verification by `session_id`.
+///
+/// This function never creates a journal or session. It returns an error when the database file is
+/// missing/unreadable or when `session_id` is not present in the session graph.
+pub fn open_journal_for_verify(
+    journal_dir: &std::path::Path,
+    session_id: Uuid,
+) -> Result<JournalHandle<RedbObjectStore, RedbSessionGraph>, AgentError> {
+    let db_path = journal_db_path(journal_dir);
+    let store = Arc::new(RedbObjectStore::open(db_path.as_path()).map_err(journal_err)?);
+    let graph = RedbSessionGraph::reopen(Arc::clone(&store), session_id).map_err(journal_err)?;
     Ok(JournalHandle::new(store, Arc::new(Mutex::new(graph))))
 }
 

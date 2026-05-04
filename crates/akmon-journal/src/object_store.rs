@@ -43,7 +43,7 @@ impl MemoryObjectStore {
     }
 
     /// Test-only: replaces bytes at `hash` without updating the key (object corruption simulation).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn overwrite_object_bytes_for_testing(
         &self,
         hash: &Hash,
@@ -205,7 +205,7 @@ impl RedbObjectStore {
     }
 
     /// Test-only: replaces bytes at `hash` without updating the key (object corruption simulation).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn overwrite_object_bytes_for_testing(
         &self,
         hash: &Hash,

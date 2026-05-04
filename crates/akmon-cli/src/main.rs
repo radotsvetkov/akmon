@@ -36,7 +36,8 @@ use akmon_models::{
 };
 use akmon_query::{
     AgentSession, SessionRunExit, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
-    ToolCallSummary, open_default_journal_handle, write_handoff_file,
+    ToolCallSummary, default_journal_dir, open_default_journal_handle, open_journal_for_verify,
+    write_handoff_file,
 };
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
@@ -658,11 +659,81 @@ fn run_verify(
     format: VerifyFormat,
     verbose: bool,
 ) -> ExitCode {
+    let _ = (format, verbose);
+    let journal_dir = match journal {
+        Some(path) => path,
+        None => match default_journal_dir() {
+            Ok(path) => path,
+            Err(err) => {
+                eprintln!("akmon: verify: cannot resolve default journal directory: {err}");
+                return ExitCode::from(3);
+            }
+        },
+    };
+
+    let handle = match open_journal_for_verify(journal_dir.as_path(), session_id) {
+        Ok(h) => h,
+        Err(err) => {
+            eprintln!(
+                "akmon: verify: cannot open journal {} for session {}: {err}",
+                journal_dir.display(),
+                session_id
+            );
+            return ExitCode::from(3);
+        }
+    };
+
+    let graph = handle
+        .graph
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let report = match graph.verify() {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("akmon: verify: verification failed with journal error: {err}");
+            return ExitCode::from(3);
+        }
+    };
+
+    if report.is_clean() {
+        eprintln!("verified: session {session_id}");
+        eprintln!("  events checked: {}", report.events_checked);
+        eprintln!("  objects checked: {}", report.objects_checked);
+        eprintln!("  SessionEnd: present and terminal");
+        return ExitCode::SUCCESS;
+    }
+
+    eprintln!("verification failed: session {session_id}");
+    eprintln!("  events checked: {}", report.events_checked);
+    eprintln!("  objects checked: {}", report.objects_checked);
+    eprintln!();
+    eprintln!("  violations:");
+    eprintln!("    - missing objects: {}", report.missing_objects.len());
     eprintln!(
-        "verify: session_id={session_id} journal={journal:?} format={format:?} verbose={verbose}"
+        "    - object hash mismatches: {}",
+        report.object_hash_mismatches.len()
     );
-    eprintln!("(layer 1 stub — verification logic in layer 2)");
-    ExitCode::SUCCESS
+    eprintln!(
+        "    - event hash mismatches: {}",
+        report.hash_mismatches.len()
+    );
+    eprintln!(
+        "    - parent chain breaks: {}",
+        report.broken_parent_links.len()
+    );
+    eprintln!(
+        "    - sequence violations: {}",
+        report.sequence_violations.len()
+    );
+    eprintln!("    - head mismatch: {}", report.head_mismatch.is_some());
+    let session_end_summary = match report.session_end_count {
+        0 => "missing".to_owned(),
+        1 if report.session_end_is_terminal => "present and terminal".to_owned(),
+        1 => "not terminal".to_owned(),
+        n => format!("duplicate (count={n})"),
+    };
+    eprintln!("    - SessionEnd: {session_end_summary}");
+    ExitCode::from(1)
 }
 
 #[cfg(feature = "semantic-index")]
