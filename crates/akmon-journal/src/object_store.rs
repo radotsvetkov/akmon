@@ -42,6 +42,26 @@ impl MemoryObjectStore {
         }
     }
 
+    /// Test-only: replaces bytes at `hash` without updating the key (object corruption simulation).
+    #[cfg(test)]
+    pub fn overwrite_object_bytes_for_testing(
+        &self,
+        hash: &Hash,
+        corrupt_bytes: &[u8],
+    ) -> Result<()> {
+        if hash.algorithm != self.algorithm {
+            return Err(JournalError::HashAlgorithmMismatch {
+                expected: self.algorithm,
+                found: hash.algorithm,
+            });
+        }
+        let mut guard = self.objects.write().map_err(|_| {
+            JournalError::Verification("memory object store lock poisoned".to_owned())
+        })?;
+        guard.insert(hash.bytes, Bytes::copy_from_slice(corrupt_bytes));
+        Ok(())
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.objects.read().map(|g| g.len()).unwrap_or(0)
@@ -182,6 +202,39 @@ impl RedbObjectStore {
 
     pub(crate) fn database(&self) -> &Database {
         &self.db
+    }
+
+    /// Test-only: replaces bytes at `hash` without updating the key (object corruption simulation).
+    #[cfg(test)]
+    pub fn overwrite_object_bytes_for_testing(
+        &self,
+        hash: &Hash,
+        corrupt_bytes: &[u8],
+    ) -> Result<()> {
+        if hash.algorithm != self.algorithm {
+            return Err(JournalError::HashAlgorithmMismatch {
+                expected: self.algorithm,
+                found: hash.algorithm,
+            });
+        }
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|err| JournalError::StorageTx(Box::new(err)))?;
+        {
+            let mut table = write_txn.open_table(OBJECTS_TABLE).map_err(|err| {
+                JournalError::Verification(format!("open objects table failed: {err}"))
+            })?;
+            table
+                .insert(hash.bytes.as_slice(), corrupt_bytes)
+                .map_err(|err| {
+                    JournalError::Verification(format!("object overwrite failed: {err}"))
+                })?;
+        }
+        write_txn.commit().map_err(|err| {
+            JournalError::Verification(format!("object overwrite commit failed: {err}"))
+        })?;
+        Ok(())
     }
 }
 

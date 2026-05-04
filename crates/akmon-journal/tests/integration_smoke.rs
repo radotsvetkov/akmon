@@ -78,9 +78,11 @@ fn full_journal_roundtrip() {
 
         let verify = graph.verify().unwrap_or_else(|_| unreachable!());
         assert!(verify.missing_objects.is_empty());
+        assert!(verify.object_hash_mismatches.is_empty());
         assert!(verify.hash_mismatches.is_empty());
         assert!(verify.broken_parent_links.is_empty());
         assert!(verify.sequence_violations.is_empty());
+        assert!(verify.is_clean());
         end_hash
     };
 

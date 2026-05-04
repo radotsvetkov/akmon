@@ -11,6 +11,9 @@
 //!
 //! Quickstart: import common APIs from [`prelude`] and create a [`RedbObjectStore`], then
 //! open a [`RedbSessionGraph`] and append [`EventKind`] values.
+//!
+//! Verification (v2.0): [`session_graph::SessionGraph::verify`] recomputes digests for stored
+//! object bytes (AGEF Section 13 step 5) and enforces terminal [`EventKind::SessionEnd`] invariants.
 
 pub mod error;
 pub mod event;
@@ -19,6 +22,12 @@ mod journal_meta;
 pub mod object_store;
 pub mod prelude;
 pub mod session_graph;
+
+/// AGEF specification version this crate implements.
+///
+/// Update when bumping the spec version (see <https://github.com/radotsvetkov/agef>). The CLI's
+/// `VerifyReportV1.agef_version` field reads from this constant.
+pub const AGEF_SPEC_VERSION: &str = "0.1.1";
 
 pub use error::{JournalError, Result};
 pub use event::{AttemptRecord, AttemptStatus, Event, EventKind};

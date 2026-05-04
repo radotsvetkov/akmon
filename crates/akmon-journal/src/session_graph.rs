@@ -2,7 +2,7 @@
 
 use crate::error::{JournalError, Result};
 use crate::event::{Event, EventKind};
-use crate::hash::Hash;
+use crate::hash::{Hash, digest_bytes};
 use crate::object_store::{ObjectStore, RedbObjectStore};
 use redb::{Database, ReadableTable, TableDefinition};
 use std::sync::Arc;
@@ -25,6 +25,8 @@ pub struct VerificationReport {
     pub objects_checked: u64,
     /// Referenced object hashes that are missing from the object store.
     pub missing_objects: Vec<Hash>,
+    /// Object bytes present but digest does not match the referenced hash (AGEF Section 13 step 5).
+    pub object_hash_mismatches: Vec<Hash>,
     /// Event hashes that do not match recomputed canonical CBOR content hash.
     pub hash_mismatches: Vec<Hash>,
     /// Parent-link violations as `(event_hash, expected_parent_hash)`.
@@ -33,6 +35,103 @@ pub struct VerificationReport {
     pub sequence_violations: Vec<u64>,
     /// Stored session head differs from computed terminal event hash `(stored, computed)`.
     pub head_mismatch: Option<(Hash, Hash)>,
+    /// Count of [`EventKind::SessionEnd`] events in session order.
+    pub session_end_count: usize,
+    /// When `session_end_count == 1`, true iff that sole `SessionEnd` is the last event; otherwise `false`.
+    pub session_end_is_terminal: bool,
+}
+
+impl VerificationReport {
+    /// Returns true when there are no structural or integrity violations and SessionEnd invariants hold.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.missing_objects.is_empty()
+            && self.object_hash_mismatches.is_empty()
+            && self.hash_mismatches.is_empty()
+            && self.broken_parent_links.is_empty()
+            && self.sequence_violations.is_empty()
+            && self.head_mismatch.is_none()
+            && self.session_end_count == 1
+            && self.session_end_is_terminal
+    }
+}
+
+/// Linear session history verification: parent chain, sequence, event hashes, object closure and
+/// byte-level digests, head consistency, and terminal `SessionEnd` invariants.
+fn verify_history_against_store(
+    history: &[(Hash, Event)],
+    stored_head: Option<Hash>,
+    store: &dyn ObjectStore,
+) -> Result<VerificationReport> {
+    let mut report = VerificationReport::default();
+    let mut expected_prev: Option<Hash> = None;
+    let mut session_end_count = 0usize;
+    let mut last_session_end_position: Option<usize> = None;
+
+    for (idx, (stored_hash, event)) in history.iter().enumerate() {
+        if matches!(event.kind, EventKind::SessionEnd { .. }) {
+            session_end_count += 1;
+            last_session_end_position = Some(idx);
+        }
+
+        report.events_checked += 1;
+        let expected_seq = idx as u64;
+        if event.sequence != expected_seq {
+            report.sequence_violations.push(event.sequence);
+        }
+
+        if idx == 0 {
+            if !matches!(event.kind, EventKind::SessionStart { .. }) || !event.parents.is_empty() {
+                let expected = Hash::from_bytes(store.algorithm(), [0_u8; 32]);
+                report
+                    .broken_parent_links
+                    .push((stored_hash.clone(), expected));
+            }
+        } else if let Some(prev_hash) = expected_prev.as_ref()
+            && (event.parents.len() != 1 || event.parents.first() != Some(prev_hash))
+        {
+            report
+                .broken_parent_links
+                .push((stored_hash.clone(), prev_hash.clone()));
+        }
+
+        let recomputed = event.content_hash(store.algorithm())?;
+        if recomputed != *stored_hash {
+            report.hash_mismatches.push(stored_hash.clone());
+        }
+
+        for object_hash in referenced_object_hashes(&event.kind) {
+            report.objects_checked += 1;
+            if !store.contains(object_hash)? {
+                report.missing_objects.push(object_hash.clone());
+                continue;
+            }
+            match store.get(object_hash)? {
+                None => report.missing_objects.push(object_hash.clone()),
+                Some(bytes) => {
+                    let digest = digest_bytes(store.algorithm(), bytes.as_ref());
+                    if digest != *object_hash {
+                        report.object_hash_mismatches.push(object_hash.clone());
+                    }
+                }
+            }
+        }
+
+        expected_prev = Some(stored_hash.clone());
+    }
+
+    report.session_end_count = session_end_count;
+    report.session_end_is_terminal = session_end_count == 1
+        && last_session_end_position == Some(history.len().saturating_sub(1));
+
+    let computed_head = history.last().map(|(hash, _)| hash.clone());
+    if let (Some(stored), Some(computed)) = (stored_head, computed_head)
+        && stored != computed
+    {
+        report.head_mismatch = Some((stored, computed));
+    }
+
+    Ok(report)
 }
 
 /// Session graph operations.
@@ -48,8 +147,9 @@ pub trait SessionGraph: Send + Sync {
     /// Verifies graph and object integrity, collecting all violations.
     ///
     /// This method intentionally treats hash-algorithm mismatches differently from ordinary
-    /// tamper-evidence findings. Structural inconsistencies (missing objects, parent-link breaks,
-    /// sequence gaps, hash mismatches, head mismatch) are accumulated into the report. A
+    /// tamper-evidence findings. Structural inconsistencies (missing objects, object byte digests,
+    /// parent-link breaks, sequence gaps, hash mismatches, head mismatch, SessionEnd invariants) are
+    /// accumulated into the report. A
     /// `HashAlgorithmMismatch` from the object store is returned as `Err(...)` because it indicates
     /// infrastructure-level corruption/configuration failure (the store and graph no longer agree
     /// on the active algorithm), not a recoverable per-event inconsistency.
@@ -245,58 +345,9 @@ impl SessionGraph for RedbSessionGraph {
     }
 
     fn verify(&self) -> Result<VerificationReport> {
-        let mut report = VerificationReport::default();
         let history = self.history()?;
         let stored_head = self.head()?;
-        let mut expected_prev: Option<Hash> = None;
-
-        for (idx, (stored_hash, event)) in history.iter().enumerate() {
-            report.events_checked += 1;
-            let expected_seq = idx as u64;
-            if event.sequence != expected_seq {
-                report.sequence_violations.push(event.sequence);
-            }
-
-            if idx == 0 {
-                if !matches!(event.kind, EventKind::SessionStart { .. })
-                    || !event.parents.is_empty()
-                {
-                    let expected = Hash::from_bytes(self.store.algorithm(), [0_u8; 32]);
-                    report
-                        .broken_parent_links
-                        .push((stored_hash.clone(), expected));
-                }
-            } else if let Some(prev_hash) = expected_prev.as_ref()
-                && (event.parents.len() != 1 || event.parents.first() != Some(prev_hash))
-            {
-                report
-                    .broken_parent_links
-                    .push((stored_hash.clone(), prev_hash.clone()));
-            }
-
-            let recomputed = event.content_hash(self.store.algorithm())?;
-            if recomputed != *stored_hash {
-                report.hash_mismatches.push(stored_hash.clone());
-            }
-
-            for object_hash in referenced_object_hashes(&event.kind) {
-                report.objects_checked += 1;
-                if !self.store.contains(object_hash)? {
-                    report.missing_objects.push(object_hash.clone());
-                }
-            }
-
-            expected_prev = Some(stored_hash.clone());
-        }
-
-        let computed_head = history.last().map(|(hash, _)| hash.clone());
-        if let (Some(stored), Some(computed)) = (stored_head, computed_head)
-            && stored != computed
-        {
-            report.head_mismatch = Some((stored, computed));
-        }
-
-        Ok(report)
+        verify_history_against_store(&history, stored_head, self.store.as_ref())
     }
 }
 
@@ -366,17 +417,8 @@ impl SessionGraph for MemorySessionGraph {
     }
 
     fn verify(&self) -> Result<VerificationReport> {
-        let mut report = VerificationReport::default();
-        for (_, event) in &self.events {
-            report.events_checked += 1;
-            for hash in referenced_object_hashes(&event.kind) {
-                report.objects_checked += 1;
-                if !self.store.contains(hash)? {
-                    report.missing_objects.push(hash.clone());
-                }
-            }
-        }
-        Ok(report)
+        let stored_head = self.head()?;
+        verify_history_against_store(&self.events, stored_head, self.store.as_ref())
     }
 }
 
@@ -717,13 +759,20 @@ mod tests {
                 prompt_hash: make_hash(store.as_ref(), 0x50),
             })
             .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
         let report = graph.verify().unwrap_or_else(|_| unreachable!());
         assert_eq!(report.hash_mismatches.len(), 0);
         assert_eq!(report.broken_parent_links.len(), 0);
         assert_eq!(report.sequence_violations.len(), 0);
         assert!(report.head_mismatch.is_none());
         assert_eq!(report.missing_objects.len(), 0);
-        assert_eq!(report.events_checked, 2);
+        assert_eq!(report.object_hash_mismatches.len(), 0);
+        assert_eq!(report.session_end_count, 1);
+        assert!(report.session_end_is_terminal);
+        assert!(report.is_clean());
+        assert_eq!(report.events_checked, 3);
         assert!(report.objects_checked >= 3);
     }
 
@@ -963,5 +1012,131 @@ mod tests {
 
         let report = graph.verify().unwrap_or_else(|_| unreachable!());
         assert_eq!(report.head_mismatch, Some((corrupted_stored, computed_end)));
+    }
+
+    #[test]
+    fn t_verify_detects_corrupted_object_bytes() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("verify_object_corrupt.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let sid = uuid::Uuid::new_v4();
+        let mut graph =
+            RedbSessionGraph::open_new(Arc::clone(&store), sid).unwrap_or_else(|_| unreachable!());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        let prompt = make_hash(store.as_ref(), 0x80);
+        graph
+            .append(EventKind::UserTurn {
+                prompt_hash: prompt.clone(),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
+        store
+            .overwrite_object_bytes_for_testing(&prompt, b"tampered-prompt")
+            .unwrap_or_else(|_| unreachable!());
+        let report = graph.verify().unwrap_or_else(|_| unreachable!());
+        assert!(
+            report.object_hash_mismatches.contains(&prompt),
+            "expected object hash mismatch for {:?}",
+            report.object_hash_mismatches
+        );
+        assert!(!report.is_clean());
+    }
+
+    #[test]
+    fn t_verify_flags_missing_session_end() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(store.clone(), uuid::Uuid::new_v4());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::UserTurn {
+                prompt_hash: make_hash(store.as_ref(), 0x81),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        let report = graph.verify().unwrap_or_else(|_| unreachable!());
+        assert_eq!(report.session_end_count, 0);
+        assert!(!report.session_end_is_terminal);
+        assert!(!report.is_clean());
+    }
+
+    #[test]
+    fn t_verify_flags_duplicate_session_end() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(store.clone(), uuid::Uuid::new_v4());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
+        let report = graph.verify().unwrap_or_else(|_| unreachable!());
+        assert_eq!(report.session_end_count, 2);
+        assert!(!report.session_end_is_terminal);
+        assert!(!report.is_clean());
+    }
+
+    #[test]
+    fn t_verify_flags_session_end_not_terminal() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(store.clone(), uuid::Uuid::new_v4());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::UserTurn {
+                prompt_hash: make_hash(store.as_ref(), 0x82),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        let report = graph.verify().unwrap_or_else(|_| unreachable!());
+        assert_eq!(report.session_end_count, 1);
+        assert!(!report.session_end_is_terminal);
+        assert!(!report.is_clean());
+    }
+
+    #[test]
+    fn t_verify_passes_for_correct_session() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut graph = MemorySessionGraph::open_new(store.clone(), uuid::Uuid::new_v4());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::UserTurn {
+                prompt_hash: make_hash(store.as_ref(), 0x83),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(provider_call(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: make_hash(store.as_ref(), 0x84),
+                tool_calls_hash: None,
+            })
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::SessionEnd {
+                summary_hash: Some(make_hash(store.as_ref(), 0x85)),
+            })
+            .unwrap_or_else(|_| unreachable!());
+        let report = graph.verify().unwrap_or_else(|_| unreachable!());
+        assert!(report.object_hash_mismatches.is_empty());
+        assert_eq!(report.session_end_count, 1);
+        assert!(report.session_end_is_terminal);
+        assert!(report.is_clean());
     }
 }

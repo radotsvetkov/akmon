@@ -297,6 +297,12 @@ async fn t_full_session_produces_complete_event_sequence_via_end() {
         "sequence_violations: {:?}",
         report.sequence_violations
     );
+    assert!(
+        report.object_hash_mismatches.is_empty(),
+        "object_hash_mismatches: {:?}",
+        report.object_hash_mismatches
+    );
+    assert!(report.is_clean(), "verify report: {report:?}");
 
     let ut1 = history
         .iter()
@@ -445,4 +451,5 @@ async fn t_full_session_produces_complete_event_sequence_via_drop() {
     assert!(report.missing_objects.is_empty());
     assert!(report.hash_mismatches.is_empty());
     assert!(report.broken_parent_links.is_empty());
+    assert!(report.is_clean());
 }

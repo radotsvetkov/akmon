@@ -1,5 +1,6 @@
 //! Curated imports for common journal usage.
 
+pub use crate::AGEF_SPEC_VERSION;
 pub use crate::error::{JournalError, Result};
 pub use crate::event::{Event, EventKind};
 pub use crate::hash::{Hash, HashAlgorithm};
