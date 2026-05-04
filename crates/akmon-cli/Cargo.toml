@@ -23,6 +23,7 @@ semantic-index = [
 ]
 
 [dependencies]
+akmon-bundle = { path = "../akmon-bundle" }
 akmon-config = { path = "../akmon-config" }
 akmon-core = { path = "../akmon-core" }
 akmon-index = { path = "../akmon-index", optional = true }

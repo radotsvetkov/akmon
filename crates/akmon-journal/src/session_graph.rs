@@ -1,7 +1,7 @@
 //! Merkle-linked per-session graph storage and verification.
 
 use crate::error::{JournalError, Result};
-use crate::event::{Event, EventKind};
+use crate::event::{Event, EventKind, referenced_object_hashes_for_kind};
 use crate::hash::{Hash, digest_bytes};
 use crate::object_store::{ObjectStore, RedbObjectStore};
 use redb::{Database, ReadableTable, TableDefinition};
@@ -142,23 +142,23 @@ fn verify_history_against_store(
             report.hash_mismatches.push(stored_hash.clone());
         }
 
-        for object_hash in referenced_object_hashes(&event.kind) {
+        for object_hash in referenced_object_hashes_for_kind(&event.kind) {
             report.objects_checked += 1;
-            if !store.contains(object_hash)? {
+            if !store.contains(&object_hash)? {
                 report.missing_objects.push(MissingObject {
                     object_hash: object_hash.clone(),
                     referenced_by_event: Some(stored_hash.clone()),
                 });
                 continue;
             }
-            match store.get(object_hash)? {
+            match store.get(&object_hash)? {
                 None => report.missing_objects.push(MissingObject {
                     object_hash: object_hash.clone(),
                     referenced_by_event: Some(stored_hash.clone()),
                 }),
                 Some(bytes) => {
                     let digest = digest_bytes(store.algorithm(), bytes.as_ref());
-                    if digest != *object_hash {
+                    if digest != object_hash {
                         report.object_hash_mismatches.push(object_hash.clone());
                     }
                 }
@@ -594,74 +594,6 @@ fn validate_event_kind_invariants(kind: &EventKind) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn referenced_object_hashes(kind: &EventKind) -> Vec<&Hash> {
-    let mut hashes = Vec::new();
-    match kind {
-        EventKind::SessionStart {
-            cwd_hash,
-            config_hash,
-        } => {
-            hashes.push(cwd_hash);
-            hashes.push(config_hash);
-        }
-        EventKind::UserTurn { prompt_hash } => hashes.push(prompt_hash),
-        EventKind::ProviderCall {
-            attempts,
-            stream_hash,
-            ..
-        } => {
-            for attempt in attempts {
-                hashes.push(&attempt.request_hash);
-                if let Some(response) = attempt.response_hash.as_ref() {
-                    hashes.push(response);
-                }
-                if let Some(stream) = attempt.stream_hash.as_ref() {
-                    hashes.push(stream);
-                }
-            }
-            if let Some(stream) = stream_hash.as_ref() {
-                hashes.push(stream);
-            }
-        }
-        EventKind::ToolCall {
-            input_hash,
-            output_hash,
-            side_effects_hash,
-            ..
-        } => {
-            hashes.push(input_hash);
-            hashes.push(output_hash);
-            if let Some(side_effects) = side_effects_hash.as_ref() {
-                hashes.push(side_effects);
-            }
-        }
-        EventKind::RetrievalCall {
-            query_hash,
-            results_hash,
-            ..
-        } => {
-            hashes.push(query_hash);
-            hashes.push(results_hash);
-        }
-        EventKind::PermissionGate { context_hash, .. } => hashes.push(context_hash),
-        EventKind::AssistantTurn {
-            message_hash,
-            tool_calls_hash,
-        } => {
-            hashes.push(message_hash);
-            if let Some(tool_calls) = tool_calls_hash.as_ref() {
-                hashes.push(tool_calls);
-            }
-        }
-        EventKind::SessionEnd { summary_hash } => {
-            if let Some(summary) = summary_hash.as_ref() {
-                hashes.push(summary);
-            }
-        }
-    }
-    hashes
 }
 
 fn ensure_graph_tables(db: &Database) -> Result<()> {

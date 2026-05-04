@@ -84,6 +84,76 @@ pub enum EventKind {
     SessionEnd { summary_hash: Option<Hash> },
 }
 
+/// Content-addressed object hashes referenced by `kind` (verification, bundle export).
+#[must_use]
+pub fn referenced_object_hashes_for_kind(kind: &EventKind) -> Vec<Hash> {
+    let mut hashes = Vec::new();
+    match kind {
+        EventKind::SessionStart {
+            cwd_hash,
+            config_hash,
+        } => {
+            hashes.push(cwd_hash.clone());
+            hashes.push(config_hash.clone());
+        }
+        EventKind::UserTurn { prompt_hash } => hashes.push(prompt_hash.clone()),
+        EventKind::ProviderCall {
+            attempts,
+            stream_hash,
+            ..
+        } => {
+            for attempt in attempts {
+                hashes.push(attempt.request_hash.clone());
+                if let Some(response) = attempt.response_hash.as_ref() {
+                    hashes.push(response.clone());
+                }
+                if let Some(stream) = attempt.stream_hash.as_ref() {
+                    hashes.push(stream.clone());
+                }
+            }
+            if let Some(stream) = stream_hash.as_ref() {
+                hashes.push(stream.clone());
+            }
+        }
+        EventKind::ToolCall {
+            input_hash,
+            output_hash,
+            side_effects_hash,
+            ..
+        } => {
+            hashes.push(input_hash.clone());
+            hashes.push(output_hash.clone());
+            if let Some(side_effects) = side_effects_hash.as_ref() {
+                hashes.push(side_effects.clone());
+            }
+        }
+        EventKind::RetrievalCall {
+            query_hash,
+            results_hash,
+            ..
+        } => {
+            hashes.push(query_hash.clone());
+            hashes.push(results_hash.clone());
+        }
+        EventKind::PermissionGate { context_hash, .. } => hashes.push(context_hash.clone()),
+        EventKind::AssistantTurn {
+            message_hash,
+            tool_calls_hash,
+        } => {
+            hashes.push(message_hash.clone());
+            if let Some(tool_calls) = tool_calls_hash.as_ref() {
+                hashes.push(tool_calls.clone());
+            }
+        }
+        EventKind::SessionEnd { summary_hash } => {
+            if let Some(summary) = summary_hash.as_ref() {
+                hashes.push(summary.clone());
+            }
+        }
+    }
+    hashes
+}
+
 /// A single provider HTTP/model attempt within one logical provider call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {

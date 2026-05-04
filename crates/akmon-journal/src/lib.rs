@@ -30,7 +30,9 @@ pub mod session_graph;
 pub const AGEF_SPEC_VERSION: &str = "0.1.1";
 
 pub use error::{JournalError, Result};
-pub use event::{AttemptRecord, AttemptStatus, Event, EventKind};
+pub use event::{
+    AttemptRecord, AttemptStatus, Event, EventKind, referenced_object_hashes_for_kind,
+};
 pub use hash::{BLAKE3_LEN, Hash, HashAlgorithm, SHA256_LEN, WireHash, digest_bytes};
 pub use object_store::{MemoryObjectStore, ObjectStore, RedbObjectStore};
 #[cfg(any(test, feature = "test-utils"))]
