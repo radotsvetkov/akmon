@@ -24,7 +24,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use akmon_bundle::{
-    BundleError, Manifest, Producer, SessionMetadata, WriteBundleOptions, write_bundle,
+    BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest, Producer,
+    ReadBundleOptions, SessionMetadata, WriteBundleOptions, read_bundle, write_bundle,
 };
 use akmon_config::AkmonGlobalConfig;
 use akmon_core::{
@@ -35,7 +36,9 @@ use akmon_core::{
     write_evidence_json,
 };
 use akmon_journal::{
-    AGEF_SPEC_VERSION, EventKind, ObjectStore, SessionGraph, referenced_object_hashes_for_kind,
+    AGEF_SPEC_VERSION, Event, EventKind, Hash, HashAlgorithm, MemoryObjectStore, ObjectStore,
+    SessionGraph, VerificationReport, digest_bytes, referenced_object_hashes_for_kind,
+    verify_linear_history_against_store,
 };
 use akmon_models::{
     LlmConnectConfig, LlmProvider, Message, MessageRole, ProviderError, ProviderResolutionTrace,
@@ -359,6 +362,51 @@ struct BundleExportError {
     error: String,
     /// Stable error category for automation.
     category: String,
+}
+
+/// Machine-readable bundle verification result (`akmon bundle import --verify-only --format json`).
+#[derive(Debug, Serialize, Deserialize)]
+struct BundleVerifyReportV1 {
+    /// CLI crate version that produced this report.
+    akmon_version: String,
+    /// AGEF specification version declared by the bundle manifest.
+    agef_version: String,
+    /// Path to the bundle file that was verified.
+    bundle_path: String,
+    /// Session UUID from the bundle manifest.
+    session_id: String,
+    /// Number of events decoded from `events.bin`.
+    events_in_bundle: u64,
+    /// Number of objects decoded from `objects/`.
+    objects_in_bundle: u64,
+    /// Whether all structural and integrity checks passed.
+    passed: bool,
+    /// Collected violations (empty when `passed` is true).
+    violations: Vec<BundleViolation>,
+}
+
+/// One bundle verification violation for JSON output.
+#[derive(Debug, Serialize, Deserialize)]
+struct BundleViolation {
+    /// Stable category identifier.
+    category: String,
+    /// Event content hash in hex when applicable.
+    event_hash: Option<String>,
+    /// Object hash in hex when applicable.
+    object_hash: Option<String>,
+    /// Human-readable explanation.
+    message: String,
+}
+
+/// JSON shape emitted when bundle import cannot read or parse the archive.
+#[derive(Debug, Serialize)]
+struct BundleImportInfraError {
+    /// CLI crate version that produced this error object.
+    akmon_version: String,
+    /// Stable infrastructure error category.
+    category: String,
+    /// Human-readable error description.
+    error: String,
 }
 
 /// Display mode for resolved binary object content in `akmon inspect`.
@@ -1896,6 +1944,177 @@ fn run_bundle_export(
     ExitCode::SUCCESS
 }
 
+fn bundle_read_bundle_error_category(err: &BundleError) -> &'static str {
+    match err {
+        BundleError::Io(_) => "io_error",
+        BundleError::InvalidArchive(_) => "invalid_archive",
+        BundleError::InvalidCompression(_) => "invalid_compression",
+        BundleError::InvalidManifest(_) => "invalid_manifest",
+        BundleError::UnsupportedAgefVersion(_) => "unsupported_agef_version",
+        BundleError::UnsupportedHashAlgorithm(_) => "unsupported_hash_algorithm",
+        BundleError::MalformedFraming(_) => "malformed_framing",
+        BundleError::FrameTooLarge(_) => "frame_too_large",
+        BundleError::NonCanonicalCbor => "non_canonical_cbor",
+        BundleError::UnknownEventKind(_) => "unknown_event_kind",
+        BundleError::UnknownAttemptStatus(_) => "unknown_attempt_status",
+        BundleError::MissingObject(_) => "missing_object",
+        BundleError::ObjectHashMismatch(_) => "object_hash_mismatch",
+        BundleError::HeadMismatch { .. } => "head_mismatch",
+        BundleError::UnknownBundleFile(_) => "unknown_bundle_file",
+    }
+}
+
+fn bundle_read_bundle_exit_code(err: &BundleError) -> u8 {
+    match err {
+        BundleError::Io(_) => 3,
+        _ => 1,
+    }
+}
+
+fn print_bundle_import_infra_json_error(
+    category: &'static str,
+    error: String,
+) -> std::io::Result<()> {
+    let body = BundleImportInfraError {
+        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+        category: category.to_owned(),
+        error,
+    };
+    let json =
+        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
+fn print_bundle_verify_json_report(report: &BundleVerifyReportV1) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(report).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
+fn bundle_violations_from_verification_report(report: &VerificationReport) -> Vec<BundleViolation> {
+    let mut violations = Vec::new();
+
+    violations.extend(
+        report
+            .missing_objects
+            .iter()
+            .map(|missing| BundleViolation {
+                category: "missing_object".to_owned(),
+                event_hash: missing.referenced_by_event.as_ref().map(Hash::to_hex),
+                object_hash: Some(missing.object_hash.to_hex()),
+                message: match missing.referenced_by_event.as_ref() {
+                    Some(event_hash) => {
+                        format!(
+                            "Object referenced by event {} not in store",
+                            event_hash.to_hex()
+                        )
+                    }
+                    None => "Object referenced but not in store".to_owned(),
+                },
+            }),
+    );
+
+    violations.extend(
+        report
+            .object_hash_mismatches
+            .iter()
+            .map(|hash| BundleViolation {
+                category: "object_hash_mismatch".to_owned(),
+                event_hash: None,
+                object_hash: Some(hash.to_hex()),
+                message: "Object bytes do not match hash".to_owned(),
+            }),
+    );
+
+    violations.extend(report.hash_mismatches.iter().map(|hash| BundleViolation {
+        category: "event_hash_mismatch".to_owned(),
+        event_hash: Some(hash.to_hex()),
+        object_hash: None,
+        message: "Event hash does not match recomputed value".to_owned(),
+    }));
+
+    violations.extend(report.broken_parent_links.iter().map(
+        |(event_hash, expected_parent_hash)| BundleViolation {
+            category: "broken_parent_chain".to_owned(),
+            event_hash: Some(event_hash.to_hex()),
+            object_hash: None,
+            message: format!(
+                "Event parent does not match prior event hash (expected parent {})",
+                expected_parent_hash.to_hex()
+            ),
+        },
+    ));
+
+    violations.extend(
+        report
+            .sequence_violations
+            .iter()
+            .map(|seq| BundleViolation {
+                category: "sequence".to_owned(),
+                event_hash: None,
+                object_hash: None,
+                message: format!("Event sequence number incorrect: {seq}"),
+            }),
+    );
+
+    if let Some((stored, computed)) = report.head_mismatch.as_ref() {
+        violations.push(BundleViolation {
+            category: "head_mismatch".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: format!(
+                "Declared head does not match terminal event hash (declared {}, terminal {})",
+                stored.to_hex(),
+                computed.to_hex()
+            ),
+        });
+    }
+
+    match report.session_end_count {
+        0 => violations.push(BundleViolation {
+            category: "session_end_missing".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: "SessionEnd event is missing".to_owned(),
+        }),
+        n if n > 1 => violations.push(BundleViolation {
+            category: "session_end_duplicate".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: format!("SessionEnd appears multiple times (count={n})"),
+        }),
+        1 if !report.session_end_is_terminal => violations.push(BundleViolation {
+            category: "session_end_not_terminal".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: "SessionEnd is not the terminal event".to_owned(),
+        }),
+        _ => {}
+    }
+
+    violations
+}
+
+fn build_bundle_verify_report_v1(
+    bundle_path: &Path,
+    contents: &BundleContents,
+    passed: bool,
+    violations: Vec<BundleViolation>,
+) -> BundleVerifyReportV1 {
+    BundleVerifyReportV1 {
+        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+        agef_version: contents.manifest.agef_version.clone(),
+        bundle_path: bundle_export_output_display(bundle_path),
+        session_id: contents.manifest.session.id.clone(),
+        events_in_bundle: contents.events.len() as u64,
+        objects_in_bundle: contents.objects.len() as u64,
+        passed,
+        violations,
+    }
+}
+
 fn run_bundle_import(
     bundle: PathBuf,
     journal: Option<PathBuf>,
@@ -1904,11 +2123,207 @@ fn run_bundle_import(
     allow_extra_files: bool,
     rename_to: Option<uuid::Uuid>,
 ) -> ExitCode {
-    eprintln!(
-        "bundle import: bundle={bundle:?} journal={journal:?} format={format:?} verify_only={verify_only} allow_extra_files={allow_extra_files} rename_to={rename_to:?}",
-    );
-    eprintln!("(layer 4 stub — import logic in layer 5+)");
-    ExitCode::SUCCESS
+    if !verify_only {
+        let _ = (journal, rename_to);
+        let msg = "bundle import without --verify-only is not implemented yet (Item 4.3 layer 5b); use --verify-only to validate a bundle";
+        if matches!(format, BundleImportFormat::Json) {
+            let _ = print_bundle_import_infra_json_error("not_implemented", msg.to_owned());
+        } else {
+            eprintln!("akmon: bundle import: {msg}");
+        }
+        return ExitCode::from(2);
+    }
+
+    let _ = (journal, rename_to);
+
+    let mut file = match std::fs::File::open(&bundle) {
+        Ok(f) => f,
+        Err(err) => {
+            let msg = format!("cannot open bundle {}: {err}", bundle.display());
+            if matches!(format, BundleImportFormat::Json) {
+                let _ = print_bundle_import_infra_json_error("io_error", msg.clone());
+            } else {
+                eprintln!("akmon: bundle import: {msg}");
+            }
+            return ExitCode::from(3);
+        }
+    };
+
+    let options = ReadBundleOptions {
+        allow_extra_files,
+        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
+    };
+
+    let contents = match read_bundle(&mut file, &options) {
+        Ok(c) => c,
+        Err(err) => {
+            let msg = err.to_string();
+            let category = bundle_read_bundle_error_category(&err);
+            let code = bundle_read_bundle_exit_code(&err);
+            if matches!(format, BundleImportFormat::Json) {
+                let _ = print_bundle_import_infra_json_error(category, msg.clone());
+            } else {
+                eprintln!("akmon: bundle import: {msg}");
+            }
+            return ExitCode::from(code);
+        }
+    };
+
+    let algorithm = match contents.manifest.hash_algorithm.as_str() {
+        "sha256" => HashAlgorithm::Sha256,
+        "blake3" => HashAlgorithm::Blake3,
+        other => {
+            let msg = format!("unsupported hash algorithm in manifest: {other}");
+            if matches!(format, BundleImportFormat::Json) {
+                let _ =
+                    print_bundle_import_infra_json_error("unsupported_hash_algorithm", msg.clone());
+            } else {
+                eprintln!("akmon: bundle import: {msg}");
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut violations: Vec<BundleViolation> = Vec::new();
+
+    if contents.manifest.event_count != contents.events.len() as u64 {
+        violations.push(BundleViolation {
+            category: "manifest_event_count_mismatch".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: format!(
+                "manifest event_count {} does not match decoded event list length {}",
+                contents.manifest.event_count,
+                contents.events.len()
+            ),
+        });
+    }
+
+    if contents.manifest.object_count != contents.objects.len() as u64 {
+        violations.push(BundleViolation {
+            category: "manifest_object_count_mismatch".to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: format!(
+                "manifest object_count {} does not match objects/ entry count {}",
+                contents.manifest.object_count,
+                contents.objects.len()
+            ),
+        });
+    }
+
+    let head_declared = match Hash::parse_hex(algorithm, &contents.manifest.session.head) {
+        Ok(h) => Some(h),
+        Err(err) => {
+            violations.push(BundleViolation {
+                category: "invalid_manifest_head".to_owned(),
+                event_hash: None,
+                object_hash: None,
+                message: format!(
+                    "manifest session.head is not a valid digest for {algorithm}: {err}"
+                ),
+            });
+            None
+        }
+    };
+
+    let store = Arc::new(MemoryObjectStore::new(algorithm));
+    for (hash, bytes) in &contents.objects {
+        let digest = digest_bytes(algorithm, bytes.as_slice());
+        if digest != *hash {
+            violations.push(BundleViolation {
+                category: "object_key_hash_mismatch".to_owned(),
+                event_hash: None,
+                object_hash: Some(hash.to_hex()),
+                message: "object bytes do not match object path digest".to_owned(),
+            });
+            continue;
+        }
+        if let Err(err) = store.put(bytes.as_slice()) {
+            let msg = format!("object store insert failed: {err}");
+            if matches!(format, BundleImportFormat::Json) {
+                let _ = print_bundle_import_infra_json_error("io_error", msg.clone());
+            } else {
+                eprintln!("akmon: bundle import: {msg}");
+            }
+            return ExitCode::from(3);
+        }
+    }
+
+    let mut history: Vec<(Hash, Event)> = Vec::new();
+    for event in &contents.events {
+        match event.content_hash(algorithm) {
+            Ok(h) => history.push((h, event.clone())),
+            Err(err) => {
+                violations.push(BundleViolation {
+                    category: "event_content_hash".to_owned(),
+                    event_hash: None,
+                    object_hash: None,
+                    message: format!("event content hash failed: {err}"),
+                });
+            }
+        }
+    }
+
+    let ran_graph_verify = history.len() == contents.events.len();
+    let graph_report = if ran_graph_verify {
+        match verify_linear_history_against_store(&history, head_declared, store.as_ref()) {
+            Ok(r) => r,
+            Err(err) => {
+                let msg = format!("bundle graph verification failed: {err}");
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error("verification_error", msg.clone());
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        VerificationReport::default()
+    };
+
+    if ran_graph_verify {
+        violations.extend(bundle_violations_from_verification_report(&graph_report));
+    }
+
+    let passed = violations.is_empty() && (!ran_graph_verify || graph_report.is_clean());
+
+    let report = build_bundle_verify_report_v1(&bundle, &contents, passed, violations);
+
+    match format {
+        BundleImportFormat::Json => {
+            if let Err(err) = print_bundle_verify_json_report(&report) {
+                eprintln!("akmon: bundle import: failed to render JSON output: {err}");
+                return ExitCode::from(3);
+            }
+        }
+        BundleImportFormat::Human => {
+            let bundle_disp = bundle_export_output_display(bundle.as_path());
+            if passed {
+                eprintln!("verified bundle: {bundle_disp}");
+                eprintln!("  session_id: {}", contents.manifest.session.id);
+                eprintln!("  events: {}", contents.events.len());
+                eprintln!("  objects: {}", contents.objects.len());
+            } else {
+                eprintln!("bundle verification failed: {bundle_disp}");
+                eprintln!("  session_id: {}", contents.manifest.session.id);
+                eprintln!("  events in bundle: {}", contents.events.len());
+                eprintln!("  objects in bundle: {}", contents.objects.len());
+                eprintln!();
+                eprintln!("  violations:");
+                for v in &report.violations {
+                    eprintln!("    - [{}] {}", v.category, v.message);
+                }
+            }
+        }
+    }
+
+    if passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 fn run_verify(

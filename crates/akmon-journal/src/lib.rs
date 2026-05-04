@@ -39,4 +39,5 @@ pub use object_store::{MemoryObjectStore, ObjectStore, RedbObjectStore};
 pub use session_graph::MemorySessionGraph;
 pub use session_graph::{
     MissingObject, RedbSessionGraph, SessionGraph, VerificationReport, VerifyCheck,
+    verify_linear_history_against_store,
 };

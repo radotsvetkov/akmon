@@ -182,6 +182,19 @@ fn verify_history_against_store(
     Ok(report)
 }
 
+/// Verifies a linear `[(event_hash, event)]` history and object store using the same rules as
+/// [`SessionGraph::verify`] for persisted graphs.
+///
+/// `declared_head` is the head hash asserted by the producer (for example from a bundle manifest);
+/// when `Some`, it must equal the content hash of the terminal event or a head mismatch is recorded.
+pub fn verify_linear_history_against_store(
+    history: &[(Hash, Event)],
+    declared_head: Option<Hash>,
+    store: &dyn ObjectStore,
+) -> Result<VerificationReport> {
+    verify_history_against_store(history, declared_head, store)
+}
+
 /// Session graph operations.
 pub trait SessionGraph: Send + Sync {
     /// Returns the session identifier.
