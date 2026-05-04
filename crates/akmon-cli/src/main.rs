@@ -1654,18 +1654,67 @@ fn format_optional_hash_full(hash: Option<&akmon_journal::Hash>) -> String {
 const RESOLVE_TEXT_MAX_BYTES: usize = 10 * 1024;
 const RESOLVE_TEXT_PREVIEW_MAX_LINES: usize = 5;
 const RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES: usize = 1024;
+const RESOLVE_BINARY_HEX_MAX_BYTES: usize = 64;
+const RESOLVE_BINARY_BASE64_MAX_CHARS: usize = 128;
 
-fn format_resolved_human(hash: &akmon_journal::Hash, bytes: Option<Vec<u8>>) -> Vec<String> {
+fn format_hex_preview(bytes: &[u8], max_bytes: usize) -> String {
+    let preview_len = bytes.len().min(max_bytes);
+    let preview = bytes[..preview_len]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if bytes.len() > max_bytes {
+        format!(
+            "{preview}... (truncated, {} more bytes)",
+            bytes.len() - max_bytes
+        )
+    } else {
+        preview
+    }
+}
+
+fn format_base64_preview(bytes: &[u8], max_chars: usize) -> String {
+    use base64::Engine;
+    let full = base64::engine::general_purpose::STANDARD.encode(bytes);
+    if full.len() > max_chars {
+        format!(
+            "{}... (truncated, {} more chars)",
+            &full[..max_chars],
+            full.len() - max_chars
+        )
+    } else {
+        full
+    }
+}
+
+fn format_resolved_human(
+    hash: &akmon_journal::Hash,
+    bytes: Option<Vec<u8>>,
+    binary: BinaryMode,
+) -> Vec<String> {
     let Some(bytes) = bytes else {
         return vec!["  | <unresolved>".to_owned()];
     };
     match classify_content(&bytes) {
         ContentClass::Empty => vec!["  | <empty>".to_owned()],
         ContentClass::Binary(size) => {
-            vec![format!(
+            let mut out = vec![format!(
                 "  | <binary, {size} bytes, hash: {}>",
                 truncate_hash(hash)
-            )]
+            )];
+            match binary {
+                BinaryMode::Meta => {}
+                BinaryMode::Hex => out.push(format!(
+                    "  | {}",
+                    format_hex_preview(&bytes, RESOLVE_BINARY_HEX_MAX_BYTES)
+                )),
+                BinaryMode::Base64 => out.push(format!(
+                    "  | {}",
+                    format_base64_preview(&bytes, RESOLVE_BINARY_BASE64_MAX_CHARS)
+                )),
+            }
+            out
         }
         ContentClass::Text(text) => {
             let lines: Vec<&str> = text.lines().collect();
@@ -1721,6 +1770,7 @@ fn push_hash_with_optional_resolution(
     store: &akmon_journal::RedbObjectStore,
     resolve: bool,
     verbose: bool,
+    binary: BinaryMode,
 ) {
     let rendered = if verbose {
         format_hash_full(hash)
@@ -1729,7 +1779,11 @@ fn push_hash_with_optional_resolution(
     };
     lines.push(format!("  {label}: {rendered}"));
     if resolve {
-        lines.extend(format_resolved_human(hash, resolve_object(store, hash)));
+        lines.extend(format_resolved_human(
+            hash,
+            resolve_object(store, hash),
+            binary,
+        ));
     }
 }
 
@@ -1823,6 +1877,7 @@ fn format_event_summary(
     event: &akmon_journal::Event,
     store: &akmon_journal::RedbObjectStore,
     resolve: bool,
+    binary: BinaryMode,
 ) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
@@ -1836,7 +1891,7 @@ fn format_event_summary(
             config_hash,
         } => {
             push_hash_with_optional_resolution(
-                &mut lines, "cwd_hash", cwd_hash, store, resolve, false,
+                &mut lines, "cwd_hash", cwd_hash, store, resolve, false, binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
@@ -1845,6 +1900,7 @@ fn format_event_summary(
                 store,
                 resolve,
                 false,
+                binary,
             );
         }
         akmon_journal::EventKind::UserTurn { prompt_hash } => {
@@ -1855,6 +1911,7 @@ fn format_event_summary(
                 store,
                 resolve,
                 false,
+                binary,
             );
         }
         akmon_journal::EventKind::ProviderCall {
@@ -1872,6 +1929,7 @@ fn format_event_summary(
                     store,
                     resolve,
                     false,
+                    binary,
                 );
             } else {
                 lines.push("  stream_hash: none".to_owned());
@@ -1891,6 +1949,7 @@ fn format_event_summary(
                 store,
                 resolve,
                 false,
+                binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
@@ -1899,6 +1958,7 @@ fn format_event_summary(
                 store,
                 resolve,
                 false,
+                binary,
             );
             lines.push(format!(
                 "  side_effects: {}",
@@ -1914,6 +1974,7 @@ fn format_event_summary(
                 lines.extend(format_resolved_human(
                     side_effects_hash,
                     resolve_object(store, side_effects_hash),
+                    binary,
                 ));
             }
         }
@@ -1930,6 +1991,7 @@ fn format_event_summary(
                 store,
                 resolve,
                 false,
+                binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
@@ -1938,6 +2000,7 @@ fn format_event_summary(
                 store,
                 resolve,
                 false,
+                binary,
             );
         }
         akmon_journal::EventKind::PermissionGate {
@@ -1954,6 +2017,7 @@ fn format_event_summary(
                 store,
                 resolve,
                 false,
+                binary,
             );
         }
         akmon_journal::EventKind::AssistantTurn {
@@ -1967,6 +2031,7 @@ fn format_event_summary(
                 store,
                 resolve,
                 false,
+                binary,
             );
             lines.push(format!(
                 "  tool_calls: {}",
@@ -1982,6 +2047,7 @@ fn format_event_summary(
                 lines.extend(format_resolved_human(
                     tool_calls_hash,
                     resolve_object(store, tool_calls_hash),
+                    binary,
                 ));
             }
         }
@@ -1994,6 +2060,7 @@ fn format_event_summary(
                     store,
                     resolve,
                     false,
+                    binary,
                 );
             } else {
                 lines.push("  summary_hash: none".to_owned());
@@ -2009,6 +2076,7 @@ fn format_event_verbose(
     event: &akmon_journal::Event,
     store: &akmon_journal::RedbObjectStore,
     resolve: bool,
+    binary: BinaryMode,
 ) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
@@ -2030,7 +2098,7 @@ fn format_event_verbose(
             config_hash,
         } => {
             push_hash_with_optional_resolution(
-                &mut lines, "cwd_hash", cwd_hash, store, resolve, true,
+                &mut lines, "cwd_hash", cwd_hash, store, resolve, true, binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
@@ -2039,6 +2107,7 @@ fn format_event_verbose(
                 store,
                 resolve,
                 true,
+                binary,
             );
         }
         akmon_journal::EventKind::UserTurn { prompt_hash } => {
@@ -2049,6 +2118,7 @@ fn format_event_verbose(
                 store,
                 resolve,
                 true,
+                binary,
             );
         }
         akmon_journal::EventKind::ProviderCall {
@@ -2080,6 +2150,7 @@ fn format_event_verbose(
                     lines.extend(format_resolved_human(
                         &attempt.request_hash,
                         resolve_object(store, &attempt.request_hash),
+                        binary,
                     ));
                 }
                 lines.push(format!(
@@ -2092,6 +2163,7 @@ fn format_event_verbose(
                     lines.extend(format_resolved_human(
                         response_hash,
                         resolve_object(store, response_hash),
+                        binary,
                     ));
                 }
                 lines.push(format!(
@@ -2104,6 +2176,7 @@ fn format_event_verbose(
                     lines.extend(format_resolved_human(
                         stream_hash,
                         resolve_object(store, stream_hash),
+                        binary,
                     ));
                 }
                 lines.push(format!(
@@ -2124,6 +2197,7 @@ fn format_event_verbose(
                 lines.extend(format_resolved_human(
                     stream_hash,
                     resolve_object(store, stream_hash),
+                    binary,
                 ));
             }
         }
@@ -2141,6 +2215,7 @@ fn format_event_verbose(
                 store,
                 resolve,
                 true,
+                binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
@@ -2149,6 +2224,7 @@ fn format_event_verbose(
                 store,
                 resolve,
                 true,
+                binary,
             );
             lines.push(format!(
                 "  side_effects_hash: {}",
@@ -2160,6 +2236,7 @@ fn format_event_verbose(
                 lines.extend(format_resolved_human(
                     side_effects_hash,
                     resolve_object(store, side_effects_hash),
+                    binary,
                 ));
             }
         }
@@ -2176,6 +2253,7 @@ fn format_event_verbose(
                 store,
                 resolve,
                 true,
+                binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
@@ -2184,6 +2262,7 @@ fn format_event_verbose(
                 store,
                 resolve,
                 true,
+                binary,
             );
         }
         akmon_journal::EventKind::PermissionGate {
@@ -2200,6 +2279,7 @@ fn format_event_verbose(
                 store,
                 resolve,
                 true,
+                binary,
             );
         }
         akmon_journal::EventKind::AssistantTurn {
@@ -2213,6 +2293,7 @@ fn format_event_verbose(
                 store,
                 resolve,
                 true,
+                binary,
             );
             lines.push(format!(
                 "  tool_calls_hash: {}",
@@ -2224,6 +2305,7 @@ fn format_event_verbose(
                 lines.extend(format_resolved_human(
                     tool_calls_hash,
                     resolve_object(store, tool_calls_hash),
+                    binary,
                 ));
             }
         }
@@ -2238,6 +2320,7 @@ fn format_event_verbose(
                 lines.extend(format_resolved_human(
                     summary_hash,
                     resolve_object(store, summary_hash),
+                    binary,
                 ));
             }
         }
@@ -2252,11 +2335,12 @@ fn format_event(
     store: &akmon_journal::RedbObjectStore,
     resolve: bool,
     verbose: bool,
+    binary: BinaryMode,
 ) -> String {
     if verbose {
-        format_event_verbose(seq, hash, event, store, resolve)
+        format_event_verbose(seq, hash, event, store, resolve, binary)
     } else {
-        format_event_summary(seq, hash, event, store, resolve)
+        format_event_summary(seq, hash, event, store, resolve, binary)
     }
 }
 
@@ -2342,7 +2426,15 @@ fn run_inspect(
         println!();
         println!(
             "{}",
-            format_event(idx, hash, event, handle.store.as_ref(), resolve, verbose)
+            format_event(
+                idx,
+                hash,
+                event,
+                handle.store.as_ref(),
+                resolve,
+                verbose,
+                binary
+            )
         );
     }
     ExitCode::SUCCESS

@@ -45,6 +45,7 @@ dependencies = [
  "akmon-tui",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "dirs 6.0.0",

@@ -83,6 +83,14 @@ fn contains_iso_timestamp(text: &str) -> bool {
     text.contains("T") && text.contains("Z") && text.contains("emitted_at:")
 }
 
+fn looks_like_hex_pairs(text: &str) -> bool {
+    text.contains("fe ed fa ce") || text.contains("ff 00 01 02")
+}
+
+fn looks_like_base64_preview(text: &str) -> bool {
+    text.contains("/wABAg==") || text.contains("/u36zg==")
+}
+
 #[derive(Debug, Deserialize)]
 struct InspectReportV1 {
     akmon_version: String,
@@ -272,6 +280,181 @@ fn t_inspect_resolve_human_shows_binary_metadata() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("<binary, 4 bytes"));
+}
+
+#[test]
+fn t_inspect_resolve_binary_hex_mode() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: put_bytes(store.as_ref(), b"assistant"),
+                tool_calls_hash: Some(put_bytes(store.as_ref(), &[0xFE, 0xED, 0xFA, 0xCE])),
+            })
+            .expect("append assistant");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect_with(tmp.path(), sid, &["--resolve", "--binary", "hex"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(looks_like_hex_pairs(&stdout));
+}
+
+#[test]
+fn t_inspect_resolve_binary_base64_mode() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: put_bytes(store.as_ref(), b"assistant"),
+                tool_calls_hash: Some(put_bytes(store.as_ref(), &[0xFF, 0x00, 0x01, 0x02])),
+            })
+            .expect("append assistant");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect_with(tmp.path(), sid, &["--resolve", "--binary", "base64"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(looks_like_base64_preview(&stdout));
+}
+
+#[test]
+fn t_inspect_resolve_binary_meta_default() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: put_bytes(store.as_ref(), b"assistant"),
+                tool_calls_hash: Some(put_bytes(store.as_ref(), &[0xFF, 0x00, 0x01, 0x02])),
+            })
+            .expect("append assistant");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect_with(tmp.path(), sid, &["--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("<binary, 4 bytes"));
+    assert!(!looks_like_hex_pairs(&stdout));
+    assert!(!looks_like_base64_preview(&stdout));
+}
+
+#[test]
+fn t_inspect_resolve_binary_truncation() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        let large: Vec<u8> = vec![0xFF; 120];
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: put_bytes(store.as_ref(), b"assistant"),
+                tool_calls_hash: Some(put_bytes(store.as_ref(), large.as_slice())),
+            })
+            .expect("append assistant");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect_with(tmp.path(), sid, &["--resolve", "--binary", "hex"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("truncated"));
+    assert!(stdout.contains("more bytes"));
+}
+
+#[test]
+fn t_inspect_resolve_binary_short_content_no_truncation() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let journal = open_journal_handle(tmp.path(), sid).expect("journal");
+    {
+        let mut graph = journal
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = &journal.store;
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+                config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+            })
+            .expect("append start");
+        graph
+            .append(EventKind::AssistantTurn {
+                message_hash: put_bytes(store.as_ref(), b"assistant"),
+                tool_calls_hash: Some(put_bytes(store.as_ref(), &[0xFE, 0xED, 0xFA, 0xCE])),
+            })
+            .expect("append assistant");
+        graph
+            .append(EventKind::SessionEnd { summary_hash: None })
+            .expect("append end");
+    }
+    drop(journal);
+    let out = run_inspect_with(tmp.path(), sid, &["--resolve", "--binary", "hex"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(looks_like_hex_pairs(&stdout));
+    assert!(!stdout.contains("more bytes"));
 }
 
 #[test]
@@ -740,6 +923,43 @@ fn t_inspect_json_resolve_binary_no_text_field() {
         .expect("assistant turn");
     assert!(assistant.0.is_none());
     assert_eq!(assistant.1, &Some(4));
+}
+
+#[test]
+fn t_inspect_json_resolve_unaffected_by_binary_mode() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let base = run_inspect_with(tmp.path(), sid, &["--format", "json", "--resolve"]);
+    let hex = run_inspect_with(
+        tmp.path(),
+        sid,
+        &["--format", "json", "--resolve", "--binary", "hex"],
+    );
+    let b64 = run_inspect_with(
+        tmp.path(),
+        sid,
+        &["--format", "json", "--resolve", "--binary", "base64"],
+    );
+    assert_eq!(base.status.code(), Some(0));
+    assert_eq!(hex.status.code(), Some(0));
+    assert_eq!(b64.status.code(), Some(0));
+    let v_base: Value = serde_json::from_slice(&base.stdout).expect("base json");
+    let v_hex: Value = serde_json::from_slice(&hex.stdout).expect("hex json");
+    let v_b64: Value = serde_json::from_slice(&b64.stdout).expect("b64 json");
+    assert_eq!(v_base, v_hex);
+    assert_eq!(v_base, v_b64);
+}
+
+#[test]
+fn t_inspect_binary_hex_without_resolve_still_fails() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out = run_inspect_with(tmp.path(), sid, &["--binary", "hex"]);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("requires --resolve"));
 }
 
 #[test]
