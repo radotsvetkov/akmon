@@ -195,6 +195,30 @@ pub fn verify_linear_history_against_store(
     verify_history_against_store(history, declared_head, store)
 }
 
+fn ensure_empty_import_target(head: Option<Hash>, history_len: usize) -> Result<()> {
+    if head.is_some() || history_len > 0 {
+        return Err(JournalError::Verification(
+            "import target session is not empty".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_import_precondition(events: &[(Hash, Event)], store: &dyn ObjectStore) -> Result<()> {
+    if events.is_empty() {
+        return Err(JournalError::Verification(
+            "cannot import empty event history".into(),
+        ));
+    }
+    let report = verify_linear_history_against_store(events, None, store)?;
+    if !report.is_clean() {
+        return Err(JournalError::Verification(
+            "import precondition: linear history verification not clean".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Session graph operations.
 pub trait SessionGraph: Send + Sync {
     /// Returns the session identifier.
@@ -215,6 +239,16 @@ pub trait SessionGraph: Send + Sync {
     /// infrastructure-level corruption/configuration failure (the store and graph no longer agree
     /// on the active algorithm), not a recoverable per-event inconsistency.
     fn verify(&self) -> Result<VerificationReport>;
+    /// Persists a producer-verified linear `[(event_hash, event)]` chain without recomputing hashes
+    /// or mutating fields such as parents, sequence, or `emitted_at`.
+    ///
+    /// # Preconditions
+    /// - The graph is empty: [`SessionGraph::head`] is [`None`] and [`SessionGraph::history`] is
+    ///   empty (the state immediately after [`RedbSessionGraph::open_new`] /
+    ///   [`MemorySessionGraph::open_new`] with no [`SessionGraph::append`] calls).
+    /// - `events` is non-empty and [`verify_linear_history_against_store`] with `declared_head: None`
+    ///   yields [`VerificationReport::is_clean`] against this graph's object store.
+    fn import_verified_linear_history(&mut self, events: &[(Hash, Event)]) -> Result<()>;
 }
 
 /// redb-backed session graph for persisted journals.
@@ -481,6 +515,85 @@ impl SessionGraph for RedbSessionGraph {
         let stored_head = self.head()?;
         verify_history_against_store(&history, stored_head, self.store.as_ref())
     }
+
+    fn import_verified_linear_history(&mut self, events: &[(Hash, Event)]) -> Result<()> {
+        ensure_empty_import_target(self.head()?, self.history()?.len())?;
+        verify_import_precondition(events, self.store.as_ref())?;
+
+        let session_key = session_key_bytes(self.session_id);
+        let write_txn = self
+            .store
+            .database()
+            .begin_write()
+            .map_err(|err| JournalError::StorageTx(Box::new(err)))?;
+        {
+            let mut heads = write_txn.open_table(SESSION_HEADS_TABLE).map_err(|err| {
+                JournalError::Verification(format!("open session_heads failed: {err}"))
+            })?;
+            let stored_head: Option<Hash> = {
+                let head_row = heads
+                    .get(session_key.as_slice())
+                    .map_err(|err| {
+                        JournalError::Verification(format!("read session_heads failed: {err}"))
+                    })?
+                    .ok_or(JournalError::SessionNotFound(self.session_id))?;
+                postcard::from_bytes(head_row.value())?
+            };
+            if stored_head.is_some() {
+                return Err(JournalError::Verification(
+                    "import target session is not empty".into(),
+                ));
+            }
+
+            let mut events_table = write_txn.open_table(SESSION_EVENTS_TABLE).map_err(|err| {
+                JournalError::Verification(format!("open session_events failed: {err}"))
+            })?;
+            for item in events_table.iter().map_err(|err| {
+                JournalError::Verification(format!("iterate session_events failed: {err}"))
+            })? {
+                let (k, _) = item.map_err(|err| {
+                    JournalError::Verification(format!("iterate session_events item failed: {err}"))
+                })?;
+                let (sid, _) = parse_event_key(k.value())?;
+                if sid == self.session_id {
+                    return Err(JournalError::Verification(
+                        "import target session is not empty".into(),
+                    ));
+                }
+            }
+
+            for (seq, (hash, event)) in events.iter().enumerate() {
+                let seq = u64::try_from(seq).map_err(|_| {
+                    JournalError::Verification("import event index overflow".into())
+                })?;
+                let key = event_key(self.session_id, seq);
+                let stored = StoredEvent {
+                    hash: hash.clone(),
+                    event: event.clone(),
+                };
+                let value = postcard::to_allocvec(&stored)?;
+                events_table
+                    .insert(key.as_slice(), value.as_slice())
+                    .map_err(|err| {
+                        JournalError::Verification(format!("insert session event failed: {err}"))
+                    })?;
+            }
+
+            let terminal = events.last().map(|(h, _)| h.clone()).ok_or_else(|| {
+                JournalError::Verification("internal: empty events after precondition".into())
+            })?;
+            let head_bytes = postcard::to_allocvec(&Some(terminal))?;
+            heads
+                .insert(session_key.as_slice(), head_bytes.as_slice())
+                .map_err(|err| {
+                    JournalError::Verification(format!("update session head failed: {err}"))
+                })?;
+        }
+        write_txn.commit().map_err(|err| {
+            JournalError::Verification(format!("commit session import failed: {err}"))
+        })?;
+        Ok(())
+    }
 }
 
 /// In-memory session graph implementation for tests and consumer test utilities.
@@ -581,6 +694,14 @@ impl SessionGraph for MemorySessionGraph {
     fn verify(&self) -> Result<VerificationReport> {
         let stored_head = self.head()?;
         verify_history_against_store(&self.events, stored_head, self.store.as_ref())
+    }
+
+    fn import_verified_linear_history(&mut self, events: &[(Hash, Event)]) -> Result<()> {
+        ensure_empty_import_target(self.head()?, self.events.len())?;
+        verify_import_precondition(events, self.store.as_ref())?;
+        self.events
+            .extend(events.iter().map(|(h, e)| (h.clone(), e.clone())));
+        Ok(())
     }
 }
 
@@ -1232,5 +1353,173 @@ mod tests {
         assert_eq!(report.session_end_count, 1);
         assert!(report.session_end_is_terminal);
         assert!(report.is_clean());
+    }
+
+    fn linear_history_three_events_redb(
+        store: &Arc<RedbObjectStore>,
+        sid: uuid::Uuid,
+    ) -> Vec<(Hash, Event)> {
+        let mut g =
+            RedbSessionGraph::open_new(Arc::clone(store), sid).unwrap_or_else(|_| unreachable!());
+        g.append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        g.append(EventKind::UserTurn {
+            prompt_hash: make_hash(store.as_ref(), 0xA0),
+        })
+        .unwrap_or_else(|_| unreachable!());
+        g.append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
+        g.history().unwrap_or_else(|_| unreachable!())
+    }
+
+    #[test]
+    fn reopen_succeeds_for_empty_session_after_open_new() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("reopen_empty.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let sid = uuid::Uuid::new_v4();
+        {
+            let _g = RedbSessionGraph::open_new(Arc::clone(&store), sid)
+                .unwrap_or_else(|_| unreachable!());
+        }
+        let reopened = RedbSessionGraph::reopen(store, sid).unwrap_or_else(|_| unreachable!());
+        assert!(reopened.head().unwrap_or_else(|_| unreachable!()).is_none());
+        assert!(
+            reopened
+                .history()
+                .unwrap_or_else(|_| unreachable!())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn import_verified_linear_history_redb_roundtrip_second_session() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("import_two_sids.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let sid_src = uuid::Uuid::new_v4();
+        let events = linear_history_three_events_redb(&store, sid_src);
+        let sid_dst = uuid::Uuid::new_v4();
+        let mut dst = RedbSessionGraph::open_new(Arc::clone(&store), sid_dst)
+            .unwrap_or_else(|_| unreachable!());
+        dst.import_verified_linear_history(&events)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(dst.verify().unwrap_or_else(|_| unreachable!()).is_clean());
+        assert_eq!(dst.history().unwrap_or_else(|_| unreachable!()), events);
+    }
+
+    #[test]
+    fn import_verified_linear_history_redb_rejects_non_empty_target() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("import_nonempty.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let sid_src = uuid::Uuid::new_v4();
+        let events = linear_history_three_events_redb(&store, sid_src);
+        let sid_dst = uuid::Uuid::new_v4();
+        let mut dst = RedbSessionGraph::open_new(Arc::clone(&store), sid_dst)
+            .unwrap_or_else(|_| unreachable!());
+        dst.append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        let err = dst
+            .import_verified_linear_history(&events)
+            .expect_err("non-empty target");
+        assert!(
+            err.to_string().contains("not empty"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn import_verified_linear_history_redb_rejects_bad_content_hash_tuple() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("import_bad_hash.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let sid_src = uuid::Uuid::new_v4();
+        let mut events = linear_history_three_events_redb(&store, sid_src);
+        events[0].0 = Hash::from_bytes(HashAlgorithm::Sha256, [0xEE; 32]);
+        let sid_dst = uuid::Uuid::new_v4();
+        let mut dst = RedbSessionGraph::open_new(Arc::clone(&store), sid_dst)
+            .unwrap_or_else(|_| unreachable!());
+        let err = dst
+            .import_verified_linear_history(&events)
+            .expect_err("bad hash");
+        assert!(
+            err.to_string().contains("not clean"),
+            "unexpected err: {err}"
+        );
+    }
+
+    #[test]
+    fn import_verified_linear_history_redb_rejects_empty_events() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("import_empty_slice.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let sid_dst = uuid::Uuid::new_v4();
+        let mut dst = RedbSessionGraph::open_new(Arc::clone(&store), sid_dst)
+            .unwrap_or_else(|_| unreachable!());
+        let err = dst
+            .import_verified_linear_history(&[])
+            .expect_err("empty slice");
+        assert!(err.to_string().contains("empty"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn import_verified_linear_history_memory_roundtrip() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sid_src = uuid::Uuid::new_v4();
+        let mut src = MemorySessionGraph::open_new(Arc::clone(&store), sid_src);
+        src.append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        src.append(EventKind::UserTurn {
+            prompt_hash: make_hash(store.as_ref(), 0xB1),
+        })
+        .unwrap_or_else(|_| unreachable!());
+        src.append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
+        let events = src.history().unwrap_or_else(|_| unreachable!());
+        let sid_dst = uuid::Uuid::new_v4();
+        let mut dst = MemorySessionGraph::open_new(store, sid_dst);
+        dst.import_verified_linear_history(&events)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(dst.verify().unwrap_or_else(|_| unreachable!()).is_clean());
+        assert_eq!(dst.history().unwrap_or_else(|_| unreachable!()), events);
+    }
+
+    #[test]
+    fn import_verified_linear_history_second_call_fails() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sid_src = uuid::Uuid::new_v4();
+        let mut src = MemorySessionGraph::open_new(Arc::clone(&store), sid_src);
+        src.append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        src.append(EventKind::SessionEnd { summary_hash: None })
+            .unwrap_or_else(|_| unreachable!());
+        let events = src.history().unwrap_or_else(|_| unreachable!());
+        let sid_dst = uuid::Uuid::new_v4();
+        let mut dst = MemorySessionGraph::open_new(store, sid_dst);
+        dst.import_verified_linear_history(&events)
+            .unwrap_or_else(|_| unreachable!());
+        let err = dst
+            .import_verified_linear_history(&events)
+            .expect_err("second import");
+        assert!(
+            err.to_string().contains("not empty"),
+            "unexpected err: {err}"
+        );
     }
 }

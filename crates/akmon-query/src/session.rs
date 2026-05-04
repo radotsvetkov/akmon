@@ -3294,6 +3294,13 @@ mod tests {
         fn verify(&self) -> akmon_journal::Result<VerificationReport> {
             self.inner.verify()
         }
+
+        fn import_verified_linear_history(
+            &mut self,
+            events: &[(Hash, akmon_journal::Event)],
+        ) -> akmon_journal::Result<()> {
+            self.inner.import_verified_linear_history(events)
+        }
     }
 
     fn test_journal_reject_user_turn_append(
@@ -3335,6 +3342,13 @@ mod tests {
         fn verify(&self) -> akmon_journal::Result<VerificationReport> {
             self.inner.verify()
         }
+
+        fn import_verified_linear_history(
+            &mut self,
+            events: &[(Hash, akmon_journal::Event)],
+        ) -> akmon_journal::Result<()> {
+            self.inner.import_verified_linear_history(events)
+        }
     }
 
     fn test_journal_reject_permission_gate(
@@ -3375,6 +3389,13 @@ mod tests {
 
         fn verify(&self) -> akmon_journal::Result<VerificationReport> {
             self.inner.verify()
+        }
+
+        fn import_verified_linear_history(
+            &mut self,
+            events: &[(Hash, akmon_journal::Event)],
+        ) -> akmon_journal::Result<()> {
+            self.inner.import_verified_linear_history(events)
         }
     }
 
