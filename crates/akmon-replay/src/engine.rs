@@ -6,9 +6,8 @@ use akmon_core::{
     AgentConfig, AgentEvent, InteractivePolicyReply, PolicyEngine, PolicyEngineMode, Sandbox,
 };
 use akmon_journal::{
-    AttemptRecord, Event, EventKind, Hash, HashAlgorithm, MemoryObjectStore, MemorySessionGraph,
-    ObjectStore, RedbObjectStore, RedbSessionGraph, SessionGraph, digest_bytes,
-    referenced_object_hashes_for_kind,
+    AttemptRecord, Event, EventKind, Hash, HashAlgorithm, ObjectStore, RedbObjectStore,
+    RedbSessionGraph, SessionGraph, digest_bytes, referenced_object_hashes_for_kind,
 };
 use akmon_models::LlmProvider;
 use akmon_query::{AgentSession, JournalHandle, journal_db_path, open_journal_read_only};
@@ -108,6 +107,34 @@ where
 struct SourceIndex {
     user_prompts: Vec<String>,
     source_config_hash: Hash,
+    source_cwd: std::path::PathBuf,
+}
+
+struct NullReplayProvider;
+
+#[async_trait::async_trait]
+impl LlmProvider for NullReplayProvider {
+    fn name(&self) -> &str {
+        "replay-null-provider"
+    }
+
+    fn context_window_tokens(&self) -> usize {
+        0
+    }
+
+    fn completion_model_id(&self) -> &str {
+        "replay-null-provider"
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[akmon_models::Message],
+        _config: &akmon_models::CompletionConfig,
+    ) -> Result<akmon_models::CompletionStream, akmon_models::ModelError> {
+        Err(akmon_models::ModelError::BackendUnavailable {
+            message: "null replay provider invoked unexpectedly".to_owned(),
+        })
+    }
 }
 
 type PlaybackProviderMap<S> = HashMap<String, Arc<PlaybackProvider<S>>>;
@@ -943,11 +970,22 @@ where
 
     /// Runs source user turns against playback primitives and captures replay history.
     pub async fn drive_replay(self) -> Result<ReplayRunOutput, ReplayError> {
-        let provider = self.select_single_provider()?;
+        let provider: Arc<dyn LlmProvider> = if self.source_index.user_prompts.is_empty() {
+            self.provider_playbacks
+                .values()
+                .next()
+                .cloned()
+                .map(|p| p as Arc<dyn LlmProvider>)
+                .unwrap_or_else(|| Arc::new(NullReplayProvider))
+        } else {
+            self.select_single_provider()?
+        };
         let tools = self.replay_tools();
         let mut replay_config = self.replay_agent_config.clone();
-        let replay_session_id = Uuid::new_v4();
-        replay_config.session_id = replay_session_id;
+        if self.config.persist {
+            replay_config.session_id = Uuid::new_v4();
+        }
+        let replay_session_id = replay_config.session_id;
 
         let replay_history = if self.config.persist {
             let journal_dir = self.config.persist_journal_dir.as_ref().ok_or(
@@ -962,33 +1000,25 @@ where
                 tools,
                 journal,
                 replay_session_id,
-                Arc::new(Sandbox::new(std::env::current_dir().map_err(|err| {
-                    ReplayError::SessionRunFailed {
-                        reason: format!("resolve current_dir: {err}"),
-                    }
-                })?)),
+                Arc::new(Sandbox::new(&self.source_index.source_cwd)),
             )
             .await?
         } else {
-            let replay_store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
-            let replay_graph = Arc::new(Mutex::new(MemorySessionGraph::open_new(
-                Arc::clone(&replay_store),
-                replay_session_id,
-            )));
-            let journal = JournalHandle::new(replay_store, replay_graph);
-            self.drive_with_journal(
-                replay_config,
-                provider,
-                tools,
-                journal,
-                replay_session_id,
-                Arc::new(Sandbox::new(std::env::current_dir().map_err(|err| {
-                    ReplayError::SessionRunFailed {
-                        reason: format!("resolve current_dir: {err}"),
-                    }
-                })?)),
-            )
-            .await?
+            let ephemeral_dir =
+                std::env::temp_dir().join(format!("akmon-replay-run-{replay_session_id}"));
+            let journal = open_persist_journal_handle(ephemeral_dir.as_path(), replay_session_id)?;
+            let history = self
+                .drive_with_journal(
+                    replay_config,
+                    provider,
+                    tools,
+                    journal,
+                    replay_session_id,
+                    Arc::new(Sandbox::new(&self.source_index.source_cwd)),
+                )
+                .await?;
+            let _ = std::fs::remove_dir_all(ephemeral_dir);
+            history
         };
 
         let divergences = self
@@ -1151,11 +1181,31 @@ fn build_playback_maps<S: ObjectStore + Send + Sync + 'static>(
     let mut tool_ids = BTreeSet::new();
     let mut user_prompts = Vec::new();
     let mut source_config_hash: Option<Hash> = None;
+    let mut source_cwd = None;
     for (_, event) in history {
         match &event.kind {
-            EventKind::SessionStart { config_hash, .. } => {
+            EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            } => {
                 if source_config_hash.is_none() {
                     source_config_hash = Some(config_hash.clone());
+                }
+                if source_cwd.is_none() {
+                    let cwd_bytes = store
+                        .get(cwd_hash)
+                        .map_err(|err| ReplayError::StoreReadFailed {
+                            hash: cwd_hash.clone(),
+                            reason: err.to_string(),
+                        })?
+                        .ok_or_else(|| ReplayError::MissingSourceObject(cwd_hash.clone()))?;
+                    let cwd = std::str::from_utf8(cwd_bytes.as_ref()).map_err(|err| {
+                        ReplayError::MalformedSourceEvent {
+                            event_seq: event.sequence,
+                            reason: format!("SessionStart cwd bytes are not UTF-8: {err}"),
+                        }
+                    })?;
+                    source_cwd = Some(std::path::PathBuf::from(cwd));
                 }
             }
             EventKind::UserTurn { prompt_hash } => {
@@ -1188,6 +1238,10 @@ fn build_playback_maps<S: ObjectStore + Send + Sync + 'static>(
             event_seq: 0,
             reason: "SessionStart with config_hash is required".to_owned(),
         })?;
+    let source_cwd = source_cwd.ok_or_else(|| ReplayError::MalformedSourceEvent {
+        event_seq: 0,
+        reason: "SessionStart with cwd_hash is required".to_owned(),
+    })?;
 
     let mut provider_playbacks = HashMap::new();
     for provider_id in &provider_ids {
@@ -1239,6 +1293,7 @@ fn build_playback_maps<S: ObjectStore + Send + Sync + 'static>(
         SourceIndex {
             user_prompts,
             source_config_hash,
+            source_cwd,
         },
     ))
 }
