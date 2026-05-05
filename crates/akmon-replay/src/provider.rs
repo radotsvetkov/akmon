@@ -110,6 +110,18 @@ struct RecordedResponse {
     stop_reason: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct RecordedStreamChunk {
+    kind: String,
+    provider: Option<String>,
+    model: Option<String>,
+    message: Option<String>,
+    text: Option<String>,
+    stop_reason: Option<String>,
+    tool_calls: Option<Vec<ModelToolCall>>,
+    usage: Option<akmon_models::UsageReport>,
+}
+
 impl<S: ObjectStore> PlaybackProvider<S> {
     /// Builds provider playback state from source history.
     pub fn from_history(
@@ -257,36 +269,16 @@ impl<S: ObjectStore + 'static> LlmProvider for PlaybackProvider<S> {
                 message: "recorded provider call has no successful attempt".to_owned(),
             });
         };
-        let response = read_response(self.store.as_ref(), &success)?;
+        let attempts_to_replay: Vec<&AttemptRecord> =
+            if matches!(self.config.mode, ReplayMode::Strict) {
+                call.attempts.iter().collect()
+            } else {
+                vec![&success]
+            };
         let mut events = Vec::new();
-        events.push(Ok(StreamEvent::ProviderReady {
-            provider: self.config.provider_name.clone(),
-            model: self.config.model_id.clone(),
-        }));
-        if matches!(self.config.mode, ReplayMode::Strict) {
-            // Strict mode currently exposes retry history within a single stream as status hints.
-            // It is intentionally informational for v2.0.0; it does not yet require multiple
-            // complete() calls to reach the final successful payload.
-            for attempt in &call.attempts {
-                if !matches!(attempt.status, AttemptStatus::Success) {
-                    events.push(Ok(StreamEvent::StatusHint {
-                        message: format!(
-                            "strict replay attempt {}: {:?}",
-                            attempt.attempt_number, attempt.status
-                        ),
-                    }));
-                }
-            }
+        for attempt in attempts_to_replay {
+            events.extend(replay_stream_for_attempt(self.store.as_ref(), attempt)?);
         }
-        if !response.text.is_empty() {
-            events.push(Ok(StreamEvent::TextDelta {
-                text: response.text.clone(),
-            }));
-        }
-        events.push(Ok(StreamEvent::Done {
-            stop_reason: parse_stop_reason(response.stop_reason.as_deref()),
-            tool_calls: response.tool_calls,
-        }));
         Ok(Box::pin(stream::iter(events)))
     }
 }
@@ -357,6 +349,176 @@ fn parse_stop_reason(value: Option<&str>) -> StopReason {
     }
 }
 
+fn replay_stream_for_attempt<S: ObjectStore>(
+    store: &S,
+    attempt: &AttemptRecord,
+) -> Result<Vec<Result<StreamEvent, ModelError>>, ModelError> {
+    let mut out = Vec::new();
+    if let Some(stream_hash) = attempt.stream_hash.as_ref() {
+        let Some(stream_bytes) =
+            store
+                .get(stream_hash)
+                .map_err(|err| ModelError::BackendUnavailable {
+                    message: format!("replay stream read failed: {err}"),
+                })?
+        else {
+            return Err(ModelError::BackendUnavailable {
+                message: format!("replay stream object missing: {}", stream_hash.to_hex()),
+            });
+        };
+        let chunk_hashes: Vec<Hash> =
+            ciborium::de::from_reader(stream_bytes.as_ref()).map_err(|err| {
+                ModelError::BackendUnavailable {
+                    message: format!("replay stream chunk list decode failed: {err}"),
+                }
+            })?;
+        for chunk_hash in chunk_hashes {
+            let Some(chunk_bytes) =
+                store
+                    .get(&chunk_hash)
+                    .map_err(|err| ModelError::BackendUnavailable {
+                        message: format!("replay stream chunk read failed: {err}"),
+                    })?
+            else {
+                return Err(ModelError::BackendUnavailable {
+                    message: format!("replay stream chunk missing: {}", chunk_hash.to_hex()),
+                });
+            };
+            let chunk: RecordedStreamChunk = ciborium::de::from_reader(chunk_bytes.as_ref())
+                .map_err(|err| ModelError::BackendUnavailable {
+                    message: format!("replay stream chunk decode failed: {err}"),
+                })?;
+            out.push(Ok(stream_event_from_chunk(chunk)));
+        }
+        return Ok(out);
+    }
+    if attempt.response_hash.is_some() {
+        let response = read_response(store, attempt)?;
+        if !response.text.is_empty() {
+            out.push(Ok(StreamEvent::TextDelta {
+                text: response.text.clone(),
+            }));
+        }
+        out.push(Ok(StreamEvent::Done {
+            stop_reason: parse_stop_reason(response.stop_reason.as_deref()),
+            tool_calls: response.tool_calls,
+        }));
+    }
+    Ok(out)
+}
+
+fn stream_event_from_chunk(chunk: RecordedStreamChunk) -> StreamEvent {
+    match chunk.kind.as_str() {
+        "provider_ready" => StreamEvent::ProviderReady {
+            provider: chunk.provider.unwrap_or_default(),
+            model: chunk.model.unwrap_or_default(),
+        },
+        "status_hint" => StreamEvent::StatusHint {
+            message: chunk.message.unwrap_or_default(),
+        },
+        "text_delta" => StreamEvent::TextDelta {
+            text: chunk.text.unwrap_or_default(),
+        },
+        "done" => StreamEvent::Done {
+            stop_reason: parse_stop_reason(chunk.stop_reason.as_deref()),
+            tool_calls: chunk.tool_calls.unwrap_or_default(),
+        },
+        "usage_report" => {
+            StreamEvent::UsageReport(chunk.usage.unwrap_or(akmon_models::UsageReport {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+            }))
+        }
+        "error" => StreamEvent::Error {
+            error: ModelError::StreamInterrupted {
+                message: chunk
+                    .message
+                    .unwrap_or_else(|| "replayed stream error".to_owned()),
+            },
+        },
+        _ => StreamEvent::Error {
+            error: ModelError::StreamInterrupted {
+                message: format!("unknown replay stream chunk kind: {}", chunk.kind),
+            },
+        },
+    }
+}
+
+#[cfg(test)]
+fn stream_chunk_from_event(event: &StreamEvent) -> RecordedStreamChunk {
+    match event {
+        StreamEvent::ProviderReady { provider, model } => RecordedStreamChunk {
+            kind: "provider_ready".to_owned(),
+            provider: Some(provider.clone()),
+            model: Some(model.clone()),
+            message: None,
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+            usage: None,
+        },
+        StreamEvent::StatusHint { message } => RecordedStreamChunk {
+            kind: "status_hint".to_owned(),
+            provider: None,
+            model: None,
+            message: Some(message.clone()),
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+            usage: None,
+        },
+        StreamEvent::TextDelta { text } => RecordedStreamChunk {
+            kind: "text_delta".to_owned(),
+            provider: None,
+            model: None,
+            message: None,
+            text: Some(text.clone()),
+            stop_reason: None,
+            tool_calls: None,
+            usage: None,
+        },
+        StreamEvent::Done {
+            stop_reason,
+            tool_calls,
+        } => RecordedStreamChunk {
+            kind: "done".to_owned(),
+            provider: None,
+            model: None,
+            message: None,
+            text: None,
+            stop_reason: Some(match stop_reason {
+                StopReason::EndTurn => "end_turn".to_owned(),
+                StopReason::MaxTokens => "max_tokens".to_owned(),
+                StopReason::ToolUse => "tool_use".to_owned(),
+            }),
+            tool_calls: Some(tool_calls.clone()),
+            usage: None,
+        },
+        StreamEvent::UsageReport(usage) => RecordedStreamChunk {
+            kind: "usage_report".to_owned(),
+            provider: None,
+            model: None,
+            message: None,
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+            usage: Some(usage.clone()),
+        },
+        StreamEvent::Error { error } => RecordedStreamChunk {
+            kind: "error".to_owned(),
+            provider: None,
+            model: None,
+            message: Some(error.to_string()),
+            text: None,
+            stop_reason: None,
+            tool_calls: None,
+            usage: None,
+        },
+    }
+}
+
 fn record_divergence(collector: &ReplayDivergenceCollector, divergence: ReplayDivergence) {
     let mut guard = collector.lock().unwrap_or_else(|p| p.into_inner());
     guard.push(divergence);
@@ -414,6 +576,20 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&response, &mut bytes).expect("encode");
         store.put(&bytes).expect("put response")
+    }
+
+    fn stream_hash_for_events<S: ObjectStore>(store: &S, events: &[StreamEvent]) -> Hash {
+        let mut chunk_hashes = Vec::new();
+        for event in events {
+            let chunk = stream_chunk_from_event(event);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&chunk, &mut bytes).expect("encode chunk");
+            let hash = store.put(&bytes).expect("put chunk");
+            chunk_hashes.push(hash);
+        }
+        let mut stream_bytes = Vec::new();
+        ciborium::ser::into_writer(&chunk_hashes, &mut stream_bytes).expect("encode stream");
+        store.put(&stream_bytes).expect("put stream")
     }
 
     fn request_hash_for<S: ObjectStore>(
@@ -514,13 +690,17 @@ mod tests {
             .complete(&messages, &completion)
             .await
             .expect("complete");
-        let mut status_hints = 0usize;
+        let mut got_text = String::new();
+        let mut saw_done = false;
         while let Some(item) = stream.next().await {
-            if matches!(item, Ok(StreamEvent::StatusHint { .. })) {
-                status_hints = status_hints.saturating_add(1);
+            match item.expect("item") {
+                StreamEvent::TextDelta { text } => got_text.push_str(&text),
+                StreamEvent::Done { .. } => saw_done = true,
+                _ => {}
             }
         }
-        assert_eq!(status_hints, 1);
+        assert_eq!(got_text, "ok");
+        assert!(saw_done);
     }
 
     #[tokio::test]
@@ -669,5 +849,162 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d.kind, ReplayDivergenceKind::ProviderRequestMismatch))
         );
+    }
+
+    #[tokio::test]
+    async fn t_playback_provider_emits_recorded_chunks_faithfully() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let messages = sample_messages();
+        let completion = CompletionConfig::default();
+        let req = request_hash_for(store.as_ref(), &messages, &completion);
+        let recorded_events = vec![
+            StreamEvent::TextDelta {
+                text: "hello".to_owned(),
+            },
+            StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: Vec::new(),
+            },
+        ];
+        let stream_hash = stream_hash_for_events(store.as_ref(), &recorded_events);
+        let attempts = vec![AttemptRecord {
+            attempt_number: 1,
+            started_at: OffsetDateTime::UNIX_EPOCH,
+            ended_at: OffsetDateTime::UNIX_EPOCH,
+            status: AttemptStatus::Success,
+            request_hash: req,
+            response_hash: None,
+            stream_hash: Some(stream_hash.clone()),
+            error_message: None,
+        }];
+        let event = sample_event(attempts);
+        let playback = PlaybackProvider::from_history(
+            &[(Hash::from_bytes(HashAlgorithm::Sha256, [7_u8; 32]), event)],
+            Arc::clone(&store),
+            provider_config(ReplayMode::Default),
+            collector(),
+        )
+        .expect("construct");
+        let mut stream = playback
+            .complete(&messages, &completion)
+            .await
+            .expect("complete");
+        let mut emitted = Vec::new();
+        while let Some(item) = stream.next().await {
+            emitted.push(item.expect("stream item"));
+        }
+        assert_eq!(emitted, recorded_events);
+        let replayed_stream_hash = stream_hash_for_events(store.as_ref(), &emitted);
+        assert_eq!(replayed_stream_hash, stream_hash);
+    }
+
+    #[tokio::test]
+    async fn t_playback_provider_does_not_inject_provider_ready_when_not_recorded() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let messages = sample_messages();
+        let completion = CompletionConfig::default();
+        let req = request_hash_for(store.as_ref(), &messages, &completion);
+        let recorded_events = vec![
+            StreamEvent::TextDelta {
+                text: "no-ready".to_owned(),
+            },
+            StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: Vec::new(),
+            },
+        ];
+        let stream_hash = stream_hash_for_events(store.as_ref(), &recorded_events);
+        let attempts = vec![AttemptRecord {
+            attempt_number: 1,
+            started_at: OffsetDateTime::UNIX_EPOCH,
+            ended_at: OffsetDateTime::UNIX_EPOCH,
+            status: AttemptStatus::Success,
+            request_hash: req,
+            response_hash: None,
+            stream_hash: Some(stream_hash),
+            error_message: None,
+        }];
+        let event = sample_event(attempts);
+        let playback = PlaybackProvider::from_history(
+            &[(Hash::from_bytes(HashAlgorithm::Sha256, [8_u8; 32]), event)],
+            Arc::clone(&store),
+            provider_config(ReplayMode::Default),
+            collector(),
+        )
+        .expect("construct");
+        let mut stream = playback
+            .complete(&messages, &completion)
+            .await
+            .expect("complete");
+        let first = stream.next().await.expect("first").expect("item");
+        assert!(matches!(first, StreamEvent::TextDelta { .. }));
+    }
+
+    #[tokio::test]
+    async fn t_playback_provider_strict_mode_replays_attempt_streams() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let messages = sample_messages();
+        let completion = CompletionConfig::default();
+        let req = request_hash_for(store.as_ref(), &messages, &completion);
+        let first_attempt_stream = stream_hash_for_events(
+            store.as_ref(),
+            &[StreamEvent::TextDelta {
+                text: "attempt-1".to_owned(),
+            }],
+        );
+        let second_attempt_stream = stream_hash_for_events(
+            store.as_ref(),
+            &[
+                StreamEvent::TextDelta {
+                    text: "attempt-2".to_owned(),
+                },
+                StreamEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: Vec::new(),
+                },
+            ],
+        );
+        let attempts = vec![
+            AttemptRecord {
+                attempt_number: 1,
+                started_at: OffsetDateTime::UNIX_EPOCH,
+                ended_at: OffsetDateTime::UNIX_EPOCH,
+                status: AttemptStatus::RateLimited,
+                request_hash: req.clone(),
+                response_hash: None,
+                stream_hash: Some(first_attempt_stream),
+                error_message: Some("429".to_owned()),
+            },
+            AttemptRecord {
+                attempt_number: 2,
+                started_at: OffsetDateTime::UNIX_EPOCH,
+                ended_at: OffsetDateTime::UNIX_EPOCH,
+                status: AttemptStatus::Success,
+                request_hash: req,
+                response_hash: None,
+                stream_hash: Some(second_attempt_stream),
+                error_message: None,
+            },
+        ];
+        let event = sample_event(attempts);
+        let playback = PlaybackProvider::from_history(
+            &[(Hash::from_bytes(HashAlgorithm::Sha256, [9_u8; 32]), event)],
+            Arc::clone(&store),
+            provider_config(ReplayMode::Strict),
+            collector(),
+        )
+        .expect("construct");
+        let mut stream = playback
+            .complete(&messages, &completion)
+            .await
+            .expect("complete");
+        let mut text = String::new();
+        while let Some(item) = stream.next().await {
+            if let StreamEvent::TextDelta { text: chunk } = item.expect("item") {
+                text.push_str(&chunk);
+            }
+        }
+        assert!(text.contains("attempt-1"));
+        assert!(text.contains("attempt-2"));
     }
 }
