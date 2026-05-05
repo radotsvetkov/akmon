@@ -2090,11 +2090,9 @@ struct ReplayArgs {
     #[arg(long, value_enum, default_value_t = ReplayModeArg::Default)]
     mode: ReplayModeArg,
     /// Persist replay session to journal (default: report-only).
-    #[arg(long)]
+    #[arg(long, requires = "persist_to")]
     persist: bool,
     /// Target journal directory for persisted replay session.
-    ///
-    /// Defaults to source `--journal` directory when `--persist` is set.
     #[arg(long, requires = "persist")]
     persist_to: Option<PathBuf>,
     /// Output format.
@@ -2852,8 +2850,14 @@ fn resolve_replay_persist_journal_dir(
     if !persist {
         return None;
     }
-    // Q1 resolution: when --persist is set without --persist-to, persist into source journal dir.
-    Some(persist_to.unwrap_or_else(|| source_journal_dir.to_path_buf()))
+    // Q1 revised: clap enforces --persist <=> --persist-to. If this invariant is
+    // violated, fail fast with a usage-contract panic rather than silently
+    // defaulting to source journal, which is disallowed.
+    let _ = source_journal_dir;
+    Some(
+        persist_to
+            .expect("Q1 revised: --persist requires --persist-to <path>; enforced at parse time"),
+    )
 }
 
 const REPLAY_HUMAN_DIVERGENCE_CAP: usize = 10;
@@ -7240,6 +7244,22 @@ mod tests {
     }
 
     #[test]
+    fn t_replay_subcommand_rejects_persist_without_persist_to() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "replay",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--persist",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--persist") && rendered.contains("--persist-to"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
     fn t_replay_subcommand_rejects_invalid_mode() {
         let err = Cli::try_parse_from([
             "akmon",
@@ -7254,13 +7274,6 @@ mod tests {
             rendered.contains("invalid value") || rendered.contains("possible values"),
             "unexpected clap error: {rendered}"
         );
-    }
-
-    #[test]
-    fn t_replay_persist_dir_resolution_defaults_to_source_journal() {
-        let source = Path::new("/tmp/source-journal");
-        let resolved = resolve_replay_persist_journal_dir(true, None, source);
-        assert_eq!(resolved, Some(PathBuf::from("/tmp/source-journal")));
     }
 
     #[test]
