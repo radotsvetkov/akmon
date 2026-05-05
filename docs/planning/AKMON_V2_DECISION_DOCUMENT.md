@@ -184,18 +184,19 @@ These decisions were settled in product-owner conversation and are now LOCKED. E
  
 **Decision.** **Benevolent dictator for v0.1, documented intent to transition to core maintainers by v1.0.** The spec repo's `GOVERNANCE.md` explicitly says "governance currently informal, see roadmap to formalize by v1.0." Honest, doesn't overclaim, leaves room to grow.
  
-### §5.9 Decision D-09: Replay determinism contract — **LOCKED: best-effort with divergence report (P1-P10)**
+### §5.9 Decision D-09: Replay determinism contract — **LOCKED: best-effort with divergence report (P1-P11)**
 
 **Context.** Strict replay requires model determinism support. Many local backends don't have it. The initial wording left key implementation details open (equivalence level, timestamp handling, retry handling, mismatch policy, persistence, and mode semantics), which blocked Phase 5 implementation sequencing.
 
-**Decision.** **Best-effort with explicit divergence report**, concretized by Phase 5 decisions P1-P10:
+**Decision.** **Best-effort with explicit divergence report**, concretized by Phase 5 decisions P1-P11:
 
 - **P1 — Equivalence levels:**
   - **Default mode** compares semantic equivalence: same event kinds in the same order with matching content references (for example `prompt_hash`, `tool_id`, `input_hash`, `output_hash`).
+  - For `ProviderCall`, default comparison matches `response_hash` and `stream_hash`; it does **not** compare `request_hash`.
   - Producer-stamped fields (timestamps and timing) are excluded from default comparisons.
   - **Strict mode** compares event content hashes after normalization (see P2).
   - Behavioral-equivalence mode is out of scope for v2.0.0.
-- **P2 — Timestamp normalization in strict mode:** normalize `emitted_at`, `AttemptRecord.started_at`, `AttemptRecord.ended_at`, and any other timestamp-bearing event content fields to placeholder values before hash comparison. Strict means "hash-identical after normalization."
+- **P2 — Normalization in strict mode:** normalize `emitted_at`, `AttemptRecord.started_at`, `AttemptRecord.ended_at`, `session_id` where present in event-linked content, and any other runtime-variable timestamp-bearing content fields to placeholder values before hash comparison. Strict means "hash-identical after normalization."
 - **P3 — Provider attempt replay policy:**
   - **Default mode:** final-success-only playback.
   - **Strict mode:** replay full recorded attempt sequence, including failures.
@@ -208,6 +209,15 @@ These decisions were settled in product-owner conversation and are now LOCKED. E
 - **P8 — Source preconditions:** replay refuses incomplete/corrupted/unresolvable source sessions (exit path `3`, with actionable message categories).
 - **P9 — Surface location:** playback primitives implement existing provider/tool traits; orchestration lives in ReplayEngine as a distinct primitive.
 - **P10 — Report coupling:** ReplayReportV1 is independent; Phase 6 diff defines its own schema.
+- **P11 — Replay comparison scope:**
+  - Replay does **not** compare provider request bytes directly.
+  - Request payloads contain runtime-variable content (session identifiers, environment paths, potentially timestamps and request IDs) that cannot be faithfully reconstructed during replay without retrofitting the agent loop to be replay-aware.
+  - Replay comparison focuses on:
+    - What playback returns: `response_hash`, `stream_hash`, `output_hash`;
+    - What the agent loop decides: event kind sequence, call ordering, tool invocations;
+    - Decisions that should be deterministic given equivalent inputs.
+  - Sessions where the agent loop's decision-making is faithful to recorded responses produce zero divergences. Sessions where the agent loop diverges (different tool calls, different message sequences, etc.) produce specific divergences locating the decision point.
+  - This is the v2.0.0 fidelity contract. Stronger fidelity (request-byte-identical replay) is potentially achievable via agent loop retrofit but is out of scope for v2.0.0. See Item 5.7.
 
 This contract is intentionally explicit so replay reports are useful without claiming impossible guarantees from non-deterministic providers/tools.
  
@@ -649,7 +659,7 @@ Each item: design first, implement, document under `docs/src/commands/` or `docs
 
 Goal: Introduce replay playback primitives that substitute for live providers/tools at existing trait boundaries.
 
-When to start: After Phase 4 completes and D-09/P1-P10 replay contract is documented.
+When to start: After Phase 4 completes and D-09/P1-P11 replay contract is documented.
 
 When done:
 - `PlaybackProvider` implements the provider trait and supports mode-aware behavior:
@@ -664,7 +674,7 @@ Notes for Cursor:
 - Keep replay substitutions transparent to `AgentSession` via existing trait boundaries.
 - Surface mismatch taxonomy before implementation; do not invent category names ad hoc in code.
 
-**Item 5.2 — ReplayEngine** (per D-09/P1-P10: best-effort with divergence report)
+**Item 5.2 — ReplayEngine** (per D-09/P1-P11: best-effort with divergence report)
 
 Goal: Orchestrate replay execution against source-session evidence and generate `ReplayReportV1`.
 
@@ -730,6 +740,18 @@ Approach: Build a router `PlaybackProvider` that wraps multiple per-id playback 
 When to start: When real-world replay usage demonstrates demand for multi-provider session support. Not blocking v2.0.0 release.
 
 Estimated scope: 4-6 commits across `akmon-replay` (router primitive, engine integration, tests, docs update).
+
+**Item 5.7 — Agent-loop replay-faithfulness retrofit** (deferred follow-up, out of v2.0.0)
+
+Goal: Achieve byte-identical request reconstruction during replay by making the agent loop's request construction replay-aware (eliminate runtime-variable content like `session_id` from request payloads, or substitute source's values during replay).
+
+Background: Item 5.2 Layer 7 surfaced that replay's request payloads diverge from source's due to runtime-variable content (`session_id`, environment paths, system prompt construction). Per P11, v2.0.0 replay does not claim request-byte fidelity; it focuses on response and structural equivalence.
+
+Approach: Audit agent loop's request construction. Identify all sources of runtime variance. Either (a) eliminate them from request content where possible, or (b) make the agent loop accept replay context that substitutes source values during replay.
+
+When to start: When stronger fidelity claims are needed (for example replay used as security audit tooling requiring exact payload reproduction). Not blocking v2.0.0 release.
+
+Estimated scope: Substantial. Likely 8-12 commits and touches multiple crates (`akmon-query`, `akmon-models`, `akmon-journal`, possibly `akmon-tools`). Architectural review required before starting.
  
 ---
  
