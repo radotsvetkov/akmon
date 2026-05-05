@@ -777,6 +777,8 @@ Estimated scope: 3-5 commits across `akmon-replay` (projection hook infrastructu
  
 ### §6.7 Phase 6 — Diff Engine
 
+**Phase 6 Status: Complete.** `akmon diff` ships in v2.0.0 with structural and field-level session comparison, optional content dereferencing per locked P12, and full CLI integration. Backlog items 6.V, 6.W, 6.X, 6.Y, 6.Z carry forward to post-v2.0.0; Item 7.6 tracks Phase 7 inspect cleanup.
+
 ## Phase 6 thesis
 
 Phase 6 introduces a general-purpose session diff engine for regulated developers who need to compare two recorded runs and explain what changed. In v2.0.0, `akmon diff <session-a> <session-b>` delivers deterministic structural and field-level differences across arbitrary journal sessions, with optional content dereferencing for deeper inspection. The goal is practical evidence: fast, explicit divergence reporting for source-vs-replay validation and run-over-time regression checks, without overreaching into alignment-heavy or object-inventory analysis.
@@ -823,6 +825,8 @@ These questions are expected to surface during Item 6.2 implementation and are i
 **Status: Complete.** Delivered in `akmon-diff` across seven layers (`16c2887`–`ac734eb`). Locked **P12** resolve architecture is recorded in §6.7.1 (`c754271`, `be6bcfe`). Post-v2.0.0 backlog: **6.V** (pre-load memory protection for resolve), **6.W** (structured field decoding in resolve). Phase 7 **7.6** tracks shared resolve preview helpers and inspect UTF-8-safe truncation.
 
 **Item 6.3 — `akmon diff` CLI command.** Add the command surface, argument parsing tests, engine wiring, human and JSON output formatting, integration tests, and reference docs. Keep command composition aligned with Phase 5 replay command layering so report semantics remain stable between terminal use and CI automation.
+
+**Status: Complete.** Delivered across five layers (`855a366`–`ead948f`). Layer 4 includes a bundled substrate fix (`load_two_source_sessions_from_journal`) resolving redb single-process lock when loading two sessions from one journal directory; JournalReader N-session refactor deferred until a third caller appears. Reference docs at `docs/src/reference/diff.md`.
 
 Backlog (deferred to post-v2.0.0):
 - **Item 6.X — Sequence alignment for structurally different sessions.** Deferred to post-v2.0.0.
