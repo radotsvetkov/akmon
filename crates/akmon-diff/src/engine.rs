@@ -225,30 +225,111 @@ where
 
     /// Runs diff comparison and returns the intermediate comparison artifact.
     ///
-    /// Layer 2 scope: handles identical-history happy path and records lockstep
-    /// comparison cardinality. Divergence/structural-break handling is layered in
-    /// later item steps.
+    /// Layer 3 scope: lockstep structural comparison. Stops at first structural
+    /// break and records the break location and divergence.
     pub fn run(&self) -> Result<DiffComparison, DiffError> {
-        let events_compared = self
-            .source_a
-            .history()
-            .len()
-            .min(self.source_b.history().len());
         let mut comparison = DiffComparison::new(
             self.source_a.session_id().to_string(),
             self.source_b.session_id().to_string(),
             self.mode,
         );
-        comparison.events_compared = events_compared;
+        let history_a = self.source_a.history();
+        let history_b = self.source_b.history();
+        let max_len = history_a.len().max(history_b.len());
+        for position in 0..max_len {
+            match (history_a.get(position), history_b.get(position)) {
+                (Some((_, event_a)), Some((_, event_b))) => {
+                    if !same_event_kind_variant(&event_a.kind, &event_b.kind) {
+                        let expected = kind_label(&event_a.kind).to_owned();
+                        let actual = kind_label(&event_b.kind).to_owned();
+                        comparison.structural_break = Some(crate::StructuralBreak {
+                            position: position as u64,
+                            expected: expected.clone(),
+                            actual: actual.clone(),
+                        });
+                        comparison.divergences.push(crate::DiffDivergence {
+                            position: Some(position as u64),
+                            kind: crate::DiffDivergenceKind::EventKindMismatchAtPosition,
+                            field: None,
+                            expected,
+                            actual,
+                        });
+                        break;
+                    }
+                    comparison.events_compared = position + 1;
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    let expected = history_a.len().to_string();
+                    let actual = history_b.len().to_string();
+                    comparison.structural_break = Some(crate::StructuralBreak {
+                        position: position as u64,
+                        expected: format!("len={expected}"),
+                        actual: format!("len={actual}"),
+                    });
+                    comparison.divergences.push(crate::DiffDivergence {
+                        position: Some(position as u64),
+                        kind: crate::DiffDivergenceKind::EventCountMismatch,
+                        field: None,
+                        expected,
+                        actual,
+                    });
+                    break;
+                }
+                (None, None) => unreachable!(),
+            }
+        }
         Ok(comparison)
+    }
+}
+
+fn same_event_kind_variant(a: &EventKind, b: &EventKind) -> bool {
+    matches!(
+        (a, b),
+        (
+            EventKind::SessionStart { .. },
+            EventKind::SessionStart { .. }
+        ) | (EventKind::UserTurn { .. }, EventKind::UserTurn { .. })
+            | (
+                EventKind::ProviderCall { .. },
+                EventKind::ProviderCall { .. }
+            )
+            | (EventKind::ToolCall { .. }, EventKind::ToolCall { .. })
+            | (
+                EventKind::RetrievalCall { .. },
+                EventKind::RetrievalCall { .. }
+            )
+            | (
+                EventKind::PermissionGate { .. },
+                EventKind::PermissionGate { .. }
+            )
+            | (
+                EventKind::AssistantTurn { .. },
+                EventKind::AssistantTurn { .. }
+            )
+            | (EventKind::SessionEnd { .. }, EventKind::SessionEnd { .. })
+    )
+}
+
+fn kind_label(kind: &EventKind) -> &'static str {
+    match kind {
+        EventKind::SessionStart { .. } => "SessionStart",
+        EventKind::UserTurn { .. } => "UserTurn",
+        EventKind::ProviderCall { .. } => "ProviderCall",
+        EventKind::ToolCall { .. } => "ToolCall",
+        EventKind::RetrievalCall { .. } => "RetrievalCall",
+        EventKind::PermissionGate { .. } => "PermissionGate",
+        EventKind::AssistantTurn { .. } => "AssistantTurn",
+        EventKind::SessionEnd { .. } => "SessionEnd",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use akmon_journal::{
-        EventKind, HashAlgorithm, MemoryObjectStore, MemorySessionGraph, ObjectStore, SessionGraph,
+        AttemptRecord, AttemptStatus, EventKind, HashAlgorithm, MemoryObjectStore,
+        MemorySessionGraph, ObjectStore, SessionGraph,
     };
+    use time::OffsetDateTime;
 
     use super::*;
 
@@ -284,6 +365,42 @@ mod tests {
                 },
             ],
         )
+    }
+
+    fn provider_call(store: &MemoryObjectStore) -> EventKind {
+        let request_hash = store.put(b"provider-request").expect("request put");
+        let response_hash = store.put(b"provider-response").expect("response put");
+        EventKind::ProviderCall {
+            provider_id: "anthropic".to_owned(),
+            attempts: vec![AttemptRecord {
+                attempt_number: 1,
+                started_at: OffsetDateTime::UNIX_EPOCH,
+                ended_at: OffsetDateTime::UNIX_EPOCH,
+                status: AttemptStatus::Success,
+                request_hash,
+                response_hash: Some(response_hash),
+                stream_hash: None,
+                error_message: None,
+            }],
+            stream_hash: None,
+        }
+    }
+
+    fn assistant_turn(store: &MemoryObjectStore) -> EventKind {
+        let message_hash = store.put(b"assistant").expect("assistant put");
+        EventKind::AssistantTurn {
+            message_hash,
+            tool_calls_hash: None,
+        }
+    }
+
+    fn permission_gate(store: &MemoryObjectStore) -> EventKind {
+        let context_hash = store.put(b"permission-context").expect("context put");
+        EventKind::PermissionGate {
+            policy_id: "policy".to_owned(),
+            decision: "allowed".to_owned(),
+            context_hash,
+        }
     }
 
     #[test]
@@ -446,5 +563,261 @@ mod tests {
         let engine = DiffEngine::new(source_a, source_b).expect("valid sources");
         let out = engine.run().expect("run succeeds");
         assert_eq!(out.events_compared, expected_n);
+    }
+
+    #[test]
+    fn t_run_detects_event_count_mismatch_a_longer() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/tmp").expect("cwd");
+        let cfg_a = store_a.put(b"cfg").expect("cfg");
+        let prompt_a = store_a.put(b"prompt").expect("prompt");
+        let summary_a = store_a.put(b"summary").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: cfg_a,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_a,
+                },
+                assistant_turn(store_a.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/tmp").expect("cwd");
+        let cfg_b = store_b.put(b"cfg").expect("cfg");
+        let prompt_b = store_b.put(b"prompt").expect("prompt");
+        let summary_b = store_b.put(b"summary").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: cfg_b,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_b,
+                },
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        let out = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run()
+            .expect("run");
+        assert_eq!(out.events_compared, 2);
+        assert_eq!(out.structural_break.as_ref().map(|b| b.position), Some(2));
+        assert_eq!(out.divergences.len(), 1);
+        assert_eq!(
+            out.divergences[0].kind,
+            crate::DiffDivergenceKind::EventKindMismatchAtPosition
+        );
+    }
+
+    #[test]
+    fn t_run_detects_event_kind_mismatch() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/tmp").expect("cwd");
+        let cfg_a = store_a.put(b"cfg").expect("cfg");
+        let summary_a = store_a.put(b"summary").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: cfg_a,
+                },
+                assistant_turn(store_a.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/tmp").expect("cwd");
+        let cfg_b = store_b.put(b"cfg").expect("cfg");
+        let summary_b = store_b.put(b"summary").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: cfg_b,
+                },
+                provider_call(store_b.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        let out = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run()
+            .expect("run");
+        assert_eq!(out.events_compared, 1);
+        assert_eq!(out.structural_break.as_ref().map(|b| b.position), Some(1));
+        assert_eq!(out.divergences.len(), 1);
+        assert_eq!(
+            out.divergences[0].kind,
+            crate::DiffDivergenceKind::EventKindMismatchAtPosition
+        );
+        assert_eq!(out.divergences[0].expected, "AssistantTurn");
+        assert_eq!(out.divergences[0].actual, "ProviderCall");
+    }
+
+    #[test]
+    fn t_run_stops_at_first_structural_break() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/tmp").expect("cwd");
+        let cfg_a = store_a.put(b"cfg").expect("cfg");
+        let summary_a = store_a.put(b"summary").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: cfg_a,
+                },
+                assistant_turn(store_a.as_ref()),
+                permission_gate(store_a.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/tmp").expect("cwd");
+        let cfg_b = store_b.put(b"cfg").expect("cfg");
+        let summary_b = store_b.put(b"summary").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: cfg_b,
+                },
+                provider_call(store_b.as_ref()),
+                EventKind::UserTurn {
+                    prompt_hash: store_b.put(b"later-diff").expect("prompt"),
+                },
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        let out = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run()
+            .expect("run");
+        assert_eq!(out.events_compared, 1);
+        assert_eq!(out.structural_break.as_ref().map(|b| b.position), Some(1));
+        assert_eq!(out.divergences.len(), 1);
+    }
+
+    #[test]
+    fn t_run_events_compared_reflects_walker_progress() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/tmp").expect("cwd");
+        let cfg_a = store_a.put(b"cfg").expect("cfg");
+        let summary_a = store_a.put(b"summary").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: cfg_a,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: store_a.put(b"prompt-a").expect("prompt"),
+                },
+                assistant_turn(store_a.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/tmp").expect("cwd");
+        let cfg_b = store_b.put(b"cfg").expect("cfg");
+        let summary_b = store_b.put(b"summary").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: cfg_b,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: store_b.put(b"prompt-b").expect("prompt"),
+                },
+                provider_call(store_b.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+        let out = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run()
+            .expect("run");
+        assert_eq!(out.events_compared, 2);
+    }
+
+    #[test]
+    fn t_run_kind_labels_stable_across_calls() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/tmp").expect("cwd");
+        let cfg_a = store_a.put(b"cfg").expect("cfg");
+        let summary_a = store_a.put(b"summary").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: cfg_a,
+                },
+                assistant_turn(store_a.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/tmp").expect("cwd");
+        let cfg_b = store_b.put(b"cfg").expect("cfg");
+        let summary_b = store_b.put(b"summary").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: cfg_b,
+                },
+                provider_call(store_b.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        let engine = DiffEngine::new(source_a, source_b).expect("valid");
+        let first = engine.run().expect("first");
+        let second = engine.run().expect("second");
+        assert_eq!(first, second);
     }
 }
