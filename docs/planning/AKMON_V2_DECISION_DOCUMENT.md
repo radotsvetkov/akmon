@@ -227,11 +227,11 @@ These decisions were settled in product-owner conversation and are now LOCKED. E
 
 This contract is intentionally explicit so replay reports are useful without claiming impossible guarantees from non-deterministic providers/tools.
  
-### §5.10 Decision D-10: Diff algorithm — **LOCKED: greedy same-kind-next**
- 
-**Context.** Pairing algorithm for SessionDiff: greedy, LCS, hash-aware.
- 
-**Decision.** **Greedy same-kind-next for v2.0.** Fast, predictable. Hash-aware pairing kept as an obvious extension point for v2.1 if usage demands. LCS not built unless asked.
+### §5.10 Decision D-10: Diff algorithm — **LOCKED: lockstep with structural break reporting (revised; see D6-C)**
+
+**Context.** Earlier planning language referenced "greedy same-kind-next" pairing for session diff. Phase 6 opener decisions now lock v2.0.0 behavior as position-based lockstep comparison with explicit structural break handling.
+
+**Decision.** **Lockstep with structural break reporting for v2.0.0.** Diff compares events by sequence position. If sessions diverge structurally (event-count mismatch or event-kind mismatch at the same position), diff reports the first structural break and stops further event comparison. Sequence-alignment recovery is deferred to Item 6.X (post-v2.0.0). Rationale and scope authority live in §6.7 D6-C.
  
 ### §5.11 Decision D-11: Bundle format — **LOCKED: tar.zst**
  
@@ -775,13 +775,61 @@ Estimated scope: 3-5 commits across `akmon-replay` (projection hook infrastructu
  
 ---
  
-### §6.7 Phase 6 — Diff
- 
-**Item 6.1 — SessionDiff algorithm** (per D-10: greedy same-kind-next)
- 
-**Item 6.2 — Diff rendering** (text, JSON, HTML — HTML self-contained)
- 
-**Item 6.3 — `akmon diff`**
+### §6.7 Phase 6 — Diff Engine
+
+## Phase 6 thesis
+
+Phase 6 introduces a general-purpose session diff engine for regulated developers who need to compare two recorded runs and explain what changed. In v2.0.0, `akmon diff <session-a> <session-b>` delivers deterministic structural and field-level differences across arbitrary journal sessions, with optional content dereferencing for deeper inspection. The goal is practical evidence: fast, explicit divergence reporting for source-vs-replay validation and run-over-time regression checks, without overreaching into alignment-heavy or object-inventory analysis.
+
+## Phase 6 locked decisions
+
+### D6-A: General session-vs-session comparison
+
+**Decision.** `akmon diff <session-a> <session-b>` compares two arbitrary sessions identified by UUID. Both sessions must be present in the active journal scope (default journal or journals addressed via `--journal`).
+
+**Rationale.** A general comparator avoids baking in one narrow workflow (for example source-vs-replay-only) while still serving that workflow directly. The same primitive supports multiple high-value use cases: replay validation, regression checks between repeated runs, and operational investigation of behavioral drift. This keeps Phase 6 reusable across workflows without expanding into specialized orchestration or scenario-specific command families.
+
+### D6-B: Event + field granularity, `--resolve` for content
+
+**Decision.** v2.0.0 diff operates at event and field granularity:
+- Event level: whether event kinds match in order.
+- Field level: which fields differ inside matched events.
+
+Content-level dereferencing remains opt-in via `--resolve`, consistent with inspect behavior. Object-store inventory comparison (for example "objects in A but not B") is out of scope for v2.0.0.
+
+**Rationale.** Event + field granularity is the minimum useful fidelity for review and audit workflows without forcing heavy object loads by default. Making dereferencing opt-in protects baseline performance and keeps default output focused on decision-relevant differences first. Deferring object-store-level diff prevents Phase 6 from expanding into storage-forensics scope before core comparison UX is stable.
+
+### D6-C: Lockstep with structural break reporting
+
+**Decision.** v2.0.0 uses lockstep comparison. If sessions diverge structurally (event count mismatch or event-kind mismatch at the same sequence position), diff reports the first structural break position and stops further event comparison.
+
+**Rationale.** Lockstep is deterministic, straightforward to reason about, and easy to validate in CI. It provides clear early-failure evidence when control flow diverges, which is often the most important signal for review. Sequence-alignment logic (LCS-style common-subsequence recovery) is intentionally deferred to avoid algorithmic complexity and ambiguous pairing behavior in the initial release.
+
+## Phase 6 anticipated questions
+
+These questions are expected to surface during Item 6.2 implementation and are intentionally tracked without pre-answering in this opener:
+
+- **Q1:** How should diff handle chained content-reference differences (for example `parent_hashes`) when one session legitimately extends further than the other?
+- **Q2:** How should diff report differences in `ProviderCall` attempt sequences when retries differ between sessions?
+- **Q3:** Under `--resolve`, how should diff surface store divergence when a referenced object exists in one session graph but cannot be loaded from that journal's object store?
+- **Q4:** What is the schema-versioning policy for `DiffReportV1`, and how should it relate to existing report families such as `ReplayReportV1`?
+
+## Phase 6 item structure
+
+**Item 6.1 — Diff primitives.** Introduce foundational diff types and schema surface: `DiffEngine`, `DiffComparison` model types, and a first report contract (`DiffReportV1`). Include field-level comparison helpers per event kind so later layers can compose deterministic differences without embedding comparison rules in CLI code. Expected placement is a dedicated `akmon-diff` crate parallel to replay-oriented structure.
+
+**Item 6.2 — Diff engine implementation.** Implement two-session source loading, lockstep walking with structural-break detection, event-kind-specific field comparators, and optional content dereferencing for `--resolve`. Keep layering explicit (source intake, walk/comparison core, dereference path, report assembly) to preserve testability and avoid CLI-coupled business logic.
+
+**Item 6.3 — `akmon diff` CLI command.** Add the command surface, argument parsing tests, engine wiring, human and JSON output formatting, integration tests, and reference docs. Keep command composition aligned with Phase 5 replay command layering so report semantics remain stable between terminal use and CI automation.
+
+Backlog (deferred to post-v2.0.0):
+- **Item 6.X — Sequence alignment for structurally different sessions.** Deferred to post-v2.0.0.
+- **Item 6.Y — Object-store-level diff (objects in A but not B).** Deferred to post-v2.0.0.
+- **Item 6.Z — Diff visualization/output formats beyond text + JSON.** Deferred to post-v2.0.0.
+
+## Lessons from Phase 5
+
+Phase-level D-decisions are starting constraints, not exhaustive implementation contracts. As with Phase 5, real code paths will force additional scoped decisions that should be recorded explicitly when they appear, not guessed upfront. Expect targeted P-style decision additions during Item 6.2 and additional backlog entries when non-blocking complexity is discovered. The planning document remains a living artifact for the phase, with revisions made deliberately as implementation reality surfaces.
  
 ---
  
