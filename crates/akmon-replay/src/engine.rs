@@ -326,6 +326,10 @@ fn compare_event_pair(source: &Event, replay: &Event, divergences: &mut Vec<Repl
                     actual: format!("ProviderCall.provider_id={replay_provider_id}"),
                 });
             }
+            // Per P11 (replay comparison scope), request_hash is not compared.
+            // Request payloads contain runtime-variable content that cannot be
+            // faithfully reconstructed during replay. Comparison focuses on
+            // response_hash and stream_hash, which playback returns faithfully.
             let source_final_response =
                 source_attempts.last().and_then(|a| a.response_hash.clone());
             let replay_final_response =
@@ -596,14 +600,9 @@ fn compare_attempt_fields(
             actual: format!("attempt[{idx}].status={:?}", replay.status),
         });
     }
-    if source.request_hash != replay.request_hash {
-        divergences.push(ReplayDivergence {
-            event_seq: Some(event_seq),
-            kind: ReplayDivergenceKind::ContentReferenceMismatch,
-            expected: format!("attempt[{idx}].request_hash={}", source.request_hash),
-            actual: format!("attempt[{idx}].request_hash={}", replay.request_hash),
-        });
-    }
+    // Per P11 (replay comparison scope), request_hash is intentionally excluded.
+    // Request payload bytes vary by runtime context; strict replay compares the
+    // attempt structure plus response and stream outputs.
     if source.response_hash != replay.response_hash {
         divergences.push(ReplayDivergence {
             event_seq: Some(event_seq),
@@ -2187,6 +2186,92 @@ mod tests {
     }
 
     #[test]
+    fn t_compare_default_provider_call_ignores_request_hash_difference() {
+        let source = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: AttemptStatus::Success,
+                    request_hash: hash_of(10),
+                    response_hash: Some(hash_of(11)),
+                    stream_hash: Some(hash_of(12)),
+                    error_message: None,
+                }],
+                stream_hash: Some(hash_of(12)),
+            },
+        )];
+        let replay = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: AttemptStatus::Success,
+                    request_hash: hash_of(99),
+                    response_hash: Some(hash_of(11)),
+                    stream_hash: Some(hash_of(12)),
+                    error_message: None,
+                }],
+                stream_hash: Some(hash_of(12)),
+            },
+        )];
+        let out = output_for_compare_mode(ReplayMode::Default, source, replay);
+        let diffs = compare_default_mode(&out);
+        assert!(diffs.is_empty(), "{diffs:?}");
+    }
+
+    #[test]
+    fn t_compare_default_provider_call_detects_response_mismatch() {
+        let source = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: AttemptStatus::Success,
+                    request_hash: hash_of(10),
+                    response_hash: Some(hash_of(11)),
+                    stream_hash: None,
+                    error_message: None,
+                }],
+                stream_hash: None,
+            },
+        )];
+        let replay = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: AttemptStatus::Success,
+                    request_hash: hash_of(99),
+                    response_hash: Some(hash_of(12)),
+                    stream_hash: None,
+                    error_message: None,
+                }],
+                stream_hash: None,
+            },
+        )];
+        let out = output_for_compare_mode(ReplayMode::Default, source, replay);
+        let diffs = compare_default_mode(&out);
+        assert!(
+            diffs
+                .iter()
+                .any(|d| matches!(d.kind, ReplayDivergenceKind::AssistantContentMismatch))
+        );
+    }
+
+    #[test]
     fn t_compare_detects_permission_gate_decision_mismatch() {
         let out = output_for_compare(
             vec![sample_event(
@@ -2408,6 +2493,92 @@ mod tests {
                     | ReplayDivergenceKind::AttemptStatusDivergence
             )
         }));
+    }
+
+    #[test]
+    fn t_compare_strict_provider_call_ignores_request_hash_difference() {
+        let source = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: AttemptStatus::Success,
+                    request_hash: hash_of(10),
+                    response_hash: Some(hash_of(11)),
+                    stream_hash: Some(hash_of(12)),
+                    error_message: None,
+                }],
+                stream_hash: Some(hash_of(12)),
+            },
+        )];
+        let replay = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: AttemptStatus::Success,
+                    request_hash: hash_of(99),
+                    response_hash: Some(hash_of(11)),
+                    stream_hash: Some(hash_of(12)),
+                    error_message: None,
+                }],
+                stream_hash: Some(hash_of(12)),
+            },
+        )];
+        let out = output_for_compare_mode(ReplayMode::Strict, source, replay);
+        let diffs = compare_strict_mode(&out);
+        assert!(diffs.is_empty(), "{diffs:?}");
+    }
+
+    #[test]
+    fn t_compare_strict_provider_call_detects_attempt_status_mismatch() {
+        let source = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: AttemptStatus::RateLimited,
+                    request_hash: hash_of(10),
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: Some("429".to_owned()),
+                }],
+                stream_hash: None,
+            },
+        )];
+        let replay = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: AttemptStatus::Success,
+                    request_hash: hash_of(99),
+                    response_hash: Some(hash_of(11)),
+                    stream_hash: None,
+                    error_message: None,
+                }],
+                stream_hash: None,
+            },
+        )];
+        let out = output_for_compare_mode(ReplayMode::Strict, source, replay);
+        let diffs = compare_strict_mode(&out);
+        assert!(
+            diffs
+                .iter()
+                .any(|d| matches!(d.kind, ReplayDivergenceKind::AttemptStatusDivergence))
+        );
     }
 
     #[test]
