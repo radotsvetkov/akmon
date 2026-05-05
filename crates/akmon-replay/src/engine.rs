@@ -6,14 +6,16 @@ use akmon_core::{
     AgentConfig, AgentEvent, InteractivePolicyReply, PolicyEngine, PolicyEngineMode, Sandbox,
 };
 use akmon_journal::{
-    Event, EventKind, Hash, HashAlgorithm, MemoryObjectStore, MemorySessionGraph, ObjectStore,
-    RedbObjectStore, RedbSessionGraph, SessionGraph, referenced_object_hashes_for_kind,
+    AttemptRecord, Event, EventKind, Hash, HashAlgorithm, MemoryObjectStore, MemorySessionGraph,
+    ObjectStore, RedbObjectStore, RedbSessionGraph, SessionGraph, digest_bytes,
+    referenced_object_hashes_for_kind,
 };
 use akmon_models::LlmProvider;
 use akmon_query::{
     AgentSession, JournalHandle, open_default_journal_handle, open_journal_read_only,
 };
 use akmon_tools::Tool;
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -137,6 +139,57 @@ pub fn compare_default_mode(output: &ReplayRunOutput) -> Vec<ReplayDivergence> {
         let (_, source_event) = &output.source_history[idx];
         let (_, replay_event) = &output.replay_history[idx];
         compare_event_pair(source_event, replay_event, &mut divergences);
+    }
+    if output.source_history.len() > shared_len {
+        for (_, source_event) in &output.source_history[shared_len..] {
+            divergences.push(ReplayDivergence {
+                event_seq: Some(source_event.sequence),
+                kind: ReplayDivergenceKind::MissingReplayEvent,
+                expected: format!("event at source seq {}", source_event.sequence),
+                actual: "replay history ended before this event".to_owned(),
+            });
+        }
+    }
+    if output.replay_history.len() > shared_len {
+        for (_, replay_event) in &output.replay_history[shared_len..] {
+            divergences.push(ReplayDivergence {
+                event_seq: Some(replay_event.sequence),
+                kind: ReplayDivergenceKind::UnexpectedReplayEvent,
+                expected: "no additional replay events".to_owned(),
+                actual: format!("unexpected replay event at seq {}", replay_event.sequence),
+            });
+        }
+    }
+    if output.source_history.len() != output.replay_history.len() {
+        divergences.push(ReplayDivergence {
+            event_seq: None,
+            kind: ReplayDivergenceKind::EventCountMismatch,
+            expected: format!("source event_count={}", output.source_history.len()),
+            actual: format!("replay event_count={}", output.replay_history.len()),
+        });
+    }
+    divergences
+}
+
+/// Compares source and replay histories according to `ReplayRunOutput.mode`.
+pub fn compare(output: &ReplayRunOutput) -> Vec<ReplayDivergence> {
+    match output.mode {
+        ReplayMode::Default => compare_default_mode(output),
+        ReplayMode::Strict => compare_strict_mode(output),
+    }
+}
+
+/// Compares source and replay histories in strict mode using normalized projection hashes.
+pub fn compare_strict_mode(output: &ReplayRunOutput) -> Vec<ReplayDivergence> {
+    let mut divergences = Vec::new();
+    let shared_len = output.source_history.len().min(output.replay_history.len());
+    for idx in 0..shared_len {
+        let (_, source_event) = &output.source_history[idx];
+        let (_, replay_event) = &output.replay_history[idx];
+        let algorithm = projection_algorithm(source_event, replay_event);
+        if projection_hash(source_event, algorithm) != projection_hash(replay_event, algorithm) {
+            compare_event_pair_strict(source_event, replay_event, &mut divergences);
+        }
     }
     if output.source_history.len() > shared_len {
         for (_, source_event) in &output.source_history[shared_len..] {
@@ -425,6 +478,276 @@ fn compare_event_pair(source: &Event, replay: &Event, divergences: &mut Vec<Repl
         }
         _ => {}
     }
+}
+
+fn compare_event_pair_strict(
+    source: &Event,
+    replay: &Event,
+    divergences: &mut Vec<ReplayDivergence>,
+) {
+    if std::mem::discriminant(&source.kind) != std::mem::discriminant(&replay.kind) {
+        divergences.push(ReplayDivergence {
+            event_seq: Some(source.sequence),
+            kind: ReplayDivergenceKind::EventKindMismatch,
+            expected: kind_name(&source.kind).to_owned(),
+            actual: kind_name(&replay.kind).to_owned(),
+        });
+        return;
+    }
+    match (&source.kind, &replay.kind) {
+        (
+            EventKind::ProviderCall {
+                provider_id: source_provider_id,
+                attempts: source_attempts,
+                stream_hash: source_stream_hash,
+            },
+            EventKind::ProviderCall {
+                provider_id: replay_provider_id,
+                attempts: replay_attempts,
+                stream_hash: replay_stream_hash,
+            },
+        ) => {
+            if source_provider_id != replay_provider_id {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::ContentReferenceMismatch,
+                    expected: format!("ProviderCall.provider_id={source_provider_id}"),
+                    actual: format!("ProviderCall.provider_id={replay_provider_id}"),
+                });
+            }
+            if source_attempts.len() != replay_attempts.len() {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::AttemptCountDivergence,
+                    expected: format!("ProviderCall.attempt_count={}", source_attempts.len()),
+                    actual: format!("ProviderCall.attempt_count={}", replay_attempts.len()),
+                });
+            }
+            for (idx, (source_attempt, replay_attempt)) in source_attempts
+                .iter()
+                .zip(replay_attempts.iter())
+                .enumerate()
+            {
+                compare_attempt_fields(
+                    source.sequence,
+                    idx,
+                    source_attempt,
+                    replay_attempt,
+                    divergences,
+                );
+            }
+            if source_stream_hash != replay_stream_hash {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::AssistantContentMismatch,
+                    expected: format!("ProviderCall.stream_hash={source_stream_hash:?}"),
+                    actual: format!("ProviderCall.stream_hash={replay_stream_hash:?}"),
+                });
+            }
+        }
+        _ => compare_event_pair(source, replay, divergences),
+    }
+}
+
+fn compare_attempt_fields(
+    event_seq: u64,
+    idx: usize,
+    source: &AttemptRecord,
+    replay: &AttemptRecord,
+    divergences: &mut Vec<ReplayDivergence>,
+) {
+    if source.status != replay.status {
+        divergences.push(ReplayDivergence {
+            event_seq: Some(event_seq),
+            kind: ReplayDivergenceKind::AttemptStatusDivergence,
+            expected: format!("attempt[{idx}].status={:?}", source.status),
+            actual: format!("attempt[{idx}].status={:?}", replay.status),
+        });
+    }
+    if source.request_hash != replay.request_hash {
+        divergences.push(ReplayDivergence {
+            event_seq: Some(event_seq),
+            kind: ReplayDivergenceKind::ContentReferenceMismatch,
+            expected: format!("attempt[{idx}].request_hash={}", source.request_hash),
+            actual: format!("attempt[{idx}].request_hash={}", replay.request_hash),
+        });
+    }
+    if source.response_hash != replay.response_hash {
+        divergences.push(ReplayDivergence {
+            event_seq: Some(event_seq),
+            kind: ReplayDivergenceKind::AssistantContentMismatch,
+            expected: format!("attempt[{idx}].response_hash={:?}", source.response_hash),
+            actual: format!("attempt[{idx}].response_hash={:?}", replay.response_hash),
+        });
+    }
+    if source.stream_hash != replay.stream_hash {
+        divergences.push(ReplayDivergence {
+            event_seq: Some(event_seq),
+            kind: ReplayDivergenceKind::AssistantContentMismatch,
+            expected: format!("attempt[{idx}].stream_hash={:?}", source.stream_hash),
+            actual: format!("attempt[{idx}].stream_hash={:?}", replay.stream_hash),
+        });
+    }
+}
+
+fn normalize_event_timestamps(event: &Event) -> Event {
+    let mut normalized = event.clone();
+    normalized.emitted_at = OffsetDateTime::UNIX_EPOCH;
+    if let EventKind::ProviderCall { attempts, .. } = &mut normalized.kind {
+        for attempt in attempts {
+            attempt.started_at = OffsetDateTime::UNIX_EPOCH;
+            attempt.ended_at = OffsetDateTime::UNIX_EPOCH;
+        }
+    }
+    normalized
+}
+
+#[derive(serde::Serialize)]
+struct EventProjection<'a> {
+    kind: EventKindProjection<'a>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", content = "data")]
+enum EventKindProjection<'a> {
+    SessionStart {
+        cwd_hash: &'a Hash,
+        config_hash: &'a Hash,
+    },
+    UserTurn {
+        prompt_hash: &'a Hash,
+    },
+    ProviderCall {
+        provider_id: &'a str,
+        attempts: Vec<AttemptProjection<'a>>,
+        stream_hash: &'a Option<Hash>,
+    },
+    ToolCall {
+        tool_id: &'a str,
+        input_hash: &'a Hash,
+        output_hash: &'a Hash,
+        side_effects_hash: &'a Option<Hash>,
+    },
+    RetrievalCall {
+        index_id: &'a str,
+        query_hash: &'a Hash,
+        results_hash: &'a Hash,
+    },
+    PermissionGate {
+        policy_id: &'a str,
+        decision: &'a str,
+        context_hash: &'a Hash,
+    },
+    AssistantTurn {
+        message_hash: &'a Hash,
+        tool_calls_hash: &'a Option<Hash>,
+    },
+    SessionEnd {
+        summary_hash: &'a Option<Hash>,
+    },
+}
+
+#[derive(serde::Serialize)]
+struct AttemptProjection<'a> {
+    attempt_number: u32,
+    started_at_unix_s: i64,
+    ended_at_unix_s: i64,
+    status: &'a akmon_journal::AttemptStatus,
+    request_hash: &'a Hash,
+    response_hash: &'a Option<Hash>,
+    stream_hash: &'a Option<Hash>,
+    error_message: &'a Option<String>,
+}
+
+fn projection_hash(event: &Event, algorithm: HashAlgorithm) -> Hash {
+    let normalized = normalize_event_timestamps(event);
+    let projection = EventProjection {
+        kind: project_kind(&normalized.kind),
+    };
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(&projection, &mut encoded).expect("projection encode");
+    digest_bytes(algorithm, &encoded)
+}
+
+fn project_kind(kind: &EventKind) -> EventKindProjection<'_> {
+    match kind {
+        EventKind::SessionStart {
+            cwd_hash,
+            config_hash,
+        } => EventKindProjection::SessionStart {
+            cwd_hash,
+            config_hash,
+        },
+        EventKind::UserTurn { prompt_hash } => EventKindProjection::UserTurn { prompt_hash },
+        EventKind::ProviderCall {
+            provider_id,
+            attempts,
+            stream_hash,
+        } => EventKindProjection::ProviderCall {
+            provider_id,
+            attempts: attempts.iter().map(project_attempt).collect(),
+            stream_hash,
+        },
+        EventKind::ToolCall {
+            tool_id,
+            input_hash,
+            output_hash,
+            side_effects_hash,
+        } => EventKindProjection::ToolCall {
+            tool_id,
+            input_hash,
+            output_hash,
+            side_effects_hash,
+        },
+        EventKind::RetrievalCall {
+            index_id,
+            query_hash,
+            results_hash,
+        } => EventKindProjection::RetrievalCall {
+            index_id,
+            query_hash,
+            results_hash,
+        },
+        EventKind::PermissionGate {
+            policy_id,
+            decision,
+            context_hash,
+        } => EventKindProjection::PermissionGate {
+            policy_id,
+            decision,
+            context_hash,
+        },
+        EventKind::AssistantTurn {
+            message_hash,
+            tool_calls_hash,
+        } => EventKindProjection::AssistantTurn {
+            message_hash,
+            tool_calls_hash,
+        },
+        EventKind::SessionEnd { summary_hash } => EventKindProjection::SessionEnd { summary_hash },
+    }
+}
+
+fn project_attempt(attempt: &AttemptRecord) -> AttemptProjection<'_> {
+    AttemptProjection {
+        attempt_number: attempt.attempt_number,
+        started_at_unix_s: attempt.started_at.unix_timestamp(),
+        ended_at_unix_s: attempt.ended_at.unix_timestamp(),
+        status: &attempt.status,
+        request_hash: &attempt.request_hash,
+        response_hash: &attempt.response_hash,
+        stream_hash: &attempt.stream_hash,
+        error_message: &attempt.error_message,
+    }
+}
+
+fn projection_algorithm(source: &Event, replay: &Event) -> HashAlgorithm {
+    referenced_object_hashes_for_kind(&source.kind)
+        .into_iter()
+        .chain(referenced_object_hashes_for_kind(&replay.kind))
+        .map(|h| h.algorithm)
+        .next()
+        .unwrap_or(HashAlgorithm::Sha256)
 }
 
 fn compare_hash_field(
@@ -931,11 +1254,15 @@ mod tests {
         }
     }
 
-    fn output_for_compare(source_events: Vec<Event>, replay_events: Vec<Event>) -> ReplayRunOutput {
+    fn output_for_compare_mode(
+        mode: ReplayMode,
+        source_events: Vec<Event>,
+        replay_events: Vec<Event>,
+    ) -> ReplayRunOutput {
         ReplayRunOutput {
             source_session_id: Uuid::new_v4(),
             replay_session_id: Uuid::new_v4(),
-            mode: ReplayMode::Default,
+            mode,
             source_history: source_events
                 .into_iter()
                 .map(|e| (hash_of(e.sequence as u8), e))
@@ -946,6 +1273,10 @@ mod tests {
                 .collect(),
             divergences: Vec::new(),
         }
+    }
+
+    fn output_for_compare(source_events: Vec<Event>, replay_events: Vec<Event>) -> ReplayRunOutput {
+        output_for_compare_mode(ReplayMode::Default, source_events, replay_events)
     }
 
     fn request_hash(store: &MemoryObjectStore) -> Hash {
@@ -1718,5 +2049,245 @@ mod tests {
         let out = output_for_compare(vec![source_event], vec![replay_event]);
         let diffs = compare_default_mode(&out);
         assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn t_strict_compare_identical_histories_no_divergences() {
+        let source = vec![
+            sample_event(
+                0,
+                EventKind::SessionStart {
+                    cwd_hash: hash_of(1),
+                    config_hash: hash_of(2),
+                },
+            ),
+            sample_event(
+                1,
+                EventKind::UserTurn {
+                    prompt_hash: hash_of(3),
+                },
+            ),
+            sample_event(2, EventKind::SessionEnd { summary_hash: None }),
+        ];
+        let out = output_for_compare_mode(ReplayMode::Strict, source.clone(), source);
+        let diffs = compare_strict_mode(&out);
+        assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn t_strict_compare_detects_timestamp_normalization_works() {
+        let mut source = sample_event(
+            1,
+            EventKind::AssistantTurn {
+                message_hash: hash_of(8),
+                tool_calls_hash: None,
+            },
+        );
+        let mut replay = source.clone();
+        source.emitted_at = OffsetDateTime::UNIX_EPOCH;
+        replay.emitted_at = OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(45);
+        let out = output_for_compare_mode(ReplayMode::Strict, vec![source], vec![replay]);
+        let diffs = compare_strict_mode(&out);
+        assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn t_strict_compare_detects_attempt_sequence_difference() {
+        let source = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![
+                    AttemptRecord {
+                        attempt_number: 1,
+                        started_at: OffsetDateTime::UNIX_EPOCH,
+                        ended_at: OffsetDateTime::UNIX_EPOCH,
+                        status: akmon_journal::AttemptStatus::RateLimited,
+                        request_hash: hash_of(11),
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some("429".to_owned()),
+                    },
+                    AttemptRecord {
+                        attempt_number: 2,
+                        started_at: OffsetDateTime::UNIX_EPOCH,
+                        ended_at: OffsetDateTime::UNIX_EPOCH,
+                        status: akmon_journal::AttemptStatus::Success,
+                        request_hash: hash_of(12),
+                        response_hash: Some(hash_of(13)),
+                        stream_hash: None,
+                        error_message: None,
+                    },
+                ],
+                stream_hash: None,
+            },
+        )];
+        let replay = vec![sample_event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: akmon_journal::AttemptStatus::Success,
+                    request_hash: hash_of(12),
+                    response_hash: Some(hash_of(13)),
+                    stream_hash: None,
+                    error_message: None,
+                }],
+                stream_hash: None,
+            },
+        )];
+        let out = output_for_compare_mode(ReplayMode::Strict, source, replay);
+        let diffs = compare_strict_mode(&out);
+        assert!(diffs.iter().any(|d| {
+            matches!(
+                d.kind,
+                ReplayDivergenceKind::AttemptCountDivergence
+                    | ReplayDivergenceKind::AttemptStatusDivergence
+            )
+        }));
+    }
+
+    #[test]
+    fn t_strict_compare_detects_content_difference_default_misses() {
+        let source = vec![sample_event(
+            5,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![
+                    AttemptRecord {
+                        attempt_number: 1,
+                        started_at: OffsetDateTime::UNIX_EPOCH,
+                        ended_at: OffsetDateTime::UNIX_EPOCH,
+                        status: akmon_journal::AttemptStatus::RateLimited,
+                        request_hash: hash_of(9),
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some("429".to_owned()),
+                    },
+                    AttemptRecord {
+                        attempt_number: 2,
+                        started_at: OffsetDateTime::UNIX_EPOCH,
+                        ended_at: OffsetDateTime::UNIX_EPOCH,
+                        status: akmon_journal::AttemptStatus::Success,
+                        request_hash: hash_of(10),
+                        response_hash: Some(hash_of(11)),
+                        stream_hash: None,
+                        error_message: None,
+                    },
+                ],
+                stream_hash: None,
+            },
+        )];
+        let replay = vec![sample_event(
+            5,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![
+                    AttemptRecord {
+                        attempt_number: 1,
+                        started_at: OffsetDateTime::UNIX_EPOCH,
+                        ended_at: OffsetDateTime::UNIX_EPOCH,
+                        status: akmon_journal::AttemptStatus::NetworkError,
+                        request_hash: hash_of(9),
+                        response_hash: None,
+                        stream_hash: None,
+                        error_message: Some("timeout".to_owned()),
+                    },
+                    AttemptRecord {
+                        attempt_number: 2,
+                        started_at: OffsetDateTime::UNIX_EPOCH,
+                        ended_at: OffsetDateTime::UNIX_EPOCH,
+                        status: akmon_journal::AttemptStatus::Success,
+                        request_hash: hash_of(10),
+                        response_hash: Some(hash_of(11)),
+                        stream_hash: None,
+                        error_message: None,
+                    },
+                ],
+                stream_hash: None,
+            },
+        )];
+        let out_default =
+            output_for_compare_mode(ReplayMode::Default, source.clone(), replay.clone());
+        let out_strict = output_for_compare_mode(ReplayMode::Strict, source, replay);
+        let default_diffs = compare_default_mode(&out_default);
+        let strict_diffs = compare_strict_mode(&out_strict);
+        assert!(default_diffs.is_empty());
+        assert!(!strict_diffs.is_empty());
+    }
+
+    #[test]
+    fn t_strict_compare_excludes_chain_fields() {
+        let mut source = sample_event(
+            2,
+            EventKind::UserTurn {
+                prompt_hash: hash_of(1),
+            },
+        );
+        let mut replay = source.clone();
+        source.parents = vec![hash_of(2)];
+        replay.parents = vec![hash_of(3)];
+        let out = output_for_compare_mode(ReplayMode::Strict, vec![source], vec![replay]);
+        let diffs = compare_strict_mode(&out);
+        assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn t_strict_compare_excludes_sequence() {
+        let source = sample_event(
+            10,
+            EventKind::UserTurn {
+                prompt_hash: hash_of(1),
+            },
+        );
+        let replay = sample_event(
+            999,
+            EventKind::UserTurn {
+                prompt_hash: hash_of(1),
+            },
+        );
+        let out = output_for_compare_mode(ReplayMode::Strict, vec![source], vec![replay]);
+        let diffs = compare_strict_mode(&out);
+        assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn t_strict_compare_uses_projection_hash() {
+        let mut a = sample_event(
+            1,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: OffsetDateTime::UNIX_EPOCH,
+                    ended_at: OffsetDateTime::UNIX_EPOCH,
+                    status: akmon_journal::AttemptStatus::Success,
+                    request_hash: hash_of(12),
+                    response_hash: Some(hash_of(13)),
+                    stream_hash: None,
+                    error_message: None,
+                }],
+                stream_hash: None,
+            },
+        );
+        let mut b = a.clone();
+        a.parents = vec![hash_of(4)];
+        b.parents = vec![hash_of(5)];
+        a.sequence = 3;
+        b.sequence = 44;
+        a.emitted_at = OffsetDateTime::UNIX_EPOCH;
+        b.emitted_at = OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(8);
+        let h_a = projection_hash(&a, HashAlgorithm::Sha256);
+        let h_b = projection_hash(&b, HashAlgorithm::Sha256);
+        assert_eq!(h_a, h_b);
+
+        if let EventKind::ProviderCall { attempts, .. } = &mut b.kind {
+            attempts[0].request_hash = hash_of(99);
+        }
+        let h_b2 = projection_hash(&b, HashAlgorithm::Sha256);
+        assert_ne!(h_a, h_b2);
     }
 }
