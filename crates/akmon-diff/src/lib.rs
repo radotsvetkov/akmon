@@ -11,8 +11,8 @@ mod report;
 
 pub use comparison::{
     DiffComparison, StructuralBreak, compare_assistant_turn, compare_permission_gate,
-    compare_provider_call, compare_session_end, compare_session_start, compare_tool_call,
-    compare_user_turn,
+    compare_provider_call, compare_retrieval_call, compare_session_end, compare_session_start,
+    compare_tool_call, compare_user_turn,
 };
 pub use divergence::{DiffDivergence, DiffDivergenceKind};
 pub use engine::{DiffEngine, SourceSession, load_source_session_from_journal};

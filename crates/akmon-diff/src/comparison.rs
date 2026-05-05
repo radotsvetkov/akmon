@@ -273,6 +273,51 @@ pub fn compare_tool_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
     out
 }
 
+/// Compares `RetrievalCall` events at one lockstep position.
+#[must_use]
+pub fn compare_retrieval_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
+    let mut out = Vec::new();
+    if let (
+        EventKind::RetrievalCall {
+            index_id: a_index,
+            query_hash: a_query,
+            results_hash: a_results,
+        },
+        EventKind::RetrievalCall {
+            index_id: b_index,
+            query_hash: b_query,
+            results_hash: b_results,
+        },
+    ) = (&a.kind, &b.kind)
+    {
+        if a_index != b_index {
+            out.push(content_ref_diff(
+                a.sequence,
+                "index_id",
+                a_index.clone(),
+                b_index.clone(),
+            ));
+        }
+        if a_query != b_query {
+            out.push(content_ref_diff(
+                a.sequence,
+                "query_hash",
+                hash_hex(a_query),
+                hash_hex(b_query),
+            ));
+        }
+        if a_results != b_results {
+            out.push(content_ref_diff(
+                a.sequence,
+                "results_hash",
+                hash_hex(a_results),
+                hash_hex(b_results),
+            ));
+        }
+    }
+    out
+}
+
 /// Compares `PermissionGate` events at one lockstep position.
 #[must_use]
 pub fn compare_permission_gate(a: &Event, b: &Event) -> Vec<DiffDivergence> {
@@ -565,6 +610,49 @@ mod tests {
         assert_eq!(diffs.len(), 4);
         assert_eq!(diffs[1].kind, DiffDivergenceKind::ToolCallInputDifference);
         assert_eq!(diffs[2].kind, DiffDivergenceKind::ToolCallOutputDifference);
+    }
+
+    #[test]
+    fn t_compare_retrieval_call_identical_no_divergences() {
+        let a = event(
+            4,
+            EventKind::RetrievalCall {
+                index_id: "idx".to_owned(),
+                query_hash: hash(30),
+                results_hash: hash(31),
+            },
+        );
+        let b = a.clone();
+        assert!(compare_retrieval_call(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn t_compare_retrieval_call_detects_field_differences() {
+        let a = event(
+            4,
+            EventKind::RetrievalCall {
+                index_id: "idx-a".to_owned(),
+                query_hash: hash(30),
+                results_hash: hash(31),
+            },
+        );
+        let b = event(
+            4,
+            EventKind::RetrievalCall {
+                index_id: "idx-b".to_owned(),
+                query_hash: hash(32),
+                results_hash: hash(33),
+            },
+        );
+        let diffs = compare_retrieval_call(&a, &b);
+        assert_eq!(diffs.len(), 3);
+        assert_eq!(diffs[0].field.as_deref(), Some("index_id"));
+        assert_eq!(diffs[1].field.as_deref(), Some("query_hash"));
+        assert_eq!(diffs[2].field.as_deref(), Some("results_hash"));
+        assert_eq!(
+            diffs[0].kind,
+            DiffDivergenceKind::ContentReferenceDifference
+        );
     }
 
     #[test]
