@@ -172,11 +172,11 @@ These decisions were settled in product-owner conversation and are now LOCKED. E
  
 **Decision.** **Per-chunk for v2.0.** Each SSE chunk is a content-addressed blob; stream artifact is a `Vec<Hash>` plus per-chunk timing metadata if D-17 attempts contain stream timing. Simplicity wins. If storage bloat becomes real, application-level zstd compression on blobs above 4KB is trivial to add without format change.
  
-### §5.7 Decision D-07: Redaction — **LOCKED: post-hoc via `akmon redact`**
+### §5.7 Decision D-07: Redaction — **LOCKED: post-hoc derivative bundle via `akmon redact`**
  
 **Context.** Sessions capture full prompts and tool I/O. Pre-capture redaction breaks reproducibility. Post-hoc preserves it.
  
-**Decision.** **Post-hoc redaction.** Full capture in the raw store (lives on user's machine, under their control). `akmon redact` produces a sanitized derivative bundle for sharing. Explicit documentation that the raw store must be treated as sensitive (same class as source code). Two-tier encrypted storage deferred to v2.1+ if asked.
+**Decision.** **Post-hoc redaction via derivative bundle (R3).** Full capture in the raw store (lives on user's machine, under their control). `akmon redact` reads a journal session and writes a new sanitized derivative `.akmon` bundle for sharing; it does **not** mutate journal events or object bytes in place. Explicit documentation that the raw store must be treated as sensitive (same class as source code). Two-tier encrypted storage and vault-style reversible access are deferred to v2.1+ if asked.
  
 ### §5.8 Decision D-08: AGEF spec governance — **LOCKED: benevolent dictator for v0.1**
  
@@ -533,6 +533,79 @@ Notes:
 - The existing `akmon import` / `akmon export` commands (AKMON.md context sync) are not changed by Item 4.3. Any retirement, migration, or rename of those legacy context-sync commands is handled under Item 6.10 (`akmon-core` legacy retirement) with the broader v1.x command-surface cleanup.
  
 **Item 4.4 — `akmon redact`** (per D-07)
+
+**Scope (v2.0.0, journal-session input only):**
+
+- **Architecture:** Derivative bundle only (R3). `akmon redact` reads one source session from the local journal and writes a new sanitized `.akmon` bundle. Source journal remains bit-identical.
+- **Granularity:** Object-level redaction only for v2.0.0. Field-level and span-level redaction are deferred.
+- **Selectors:** One or more explicit object hashes via repeatable `--object <hash>`. No pattern selectors or policy-profile selectors in v2.0.0.
+- **Audit reason:** `--reason <text>` is required. Redaction without explicit operator reason is out of scope.
+- **Sentinel substitution model:** For each selected object hash in the source session closure, the derivative bundle replaces references to that object with a canonical redaction sentinel object; event hashes and parent linkage are recomputed in the derivative artifact as normal AGEF content addressing requires.
+- **Verification semantics:** Unchanged. `akmon verify <session-id>` continues to verify source journals; `akmon bundle import --verify-only` validates redacted bundles using existing AGEF integrity checks.
+- **Bundle boundary:** Redacted bundles are ordinary AGEF bundles containing sentinel objects; no special import/export codepath or protocol mode.
+- **Input operand boundary:** v2.0.0 `akmon redact` accepts session-id only. Direct bundle-to-bundle redaction is deferred to Item 4.4.1.
+
+**Invocation (v2.0.0):**
+
+```bash
+akmon redact <session-id> \
+  --output <path> \
+  --object <hash> [--object <hash> ...] \
+  --reason <text> \
+  [--journal <path>] \
+  [--format <human|json>]
+```
+
+- `<session-id>` required (UUID, same convention as Items 4.1–4.3).
+- `--output` required (explicit destination path).
+- `--object` required and repeatable (at least one).
+- `--reason` required.
+- `--journal` optional; default per D-04.
+- `--format` default `human`.
+
+**Exit codes (v2.0.0):**
+
+- `0` derivative bundle written successfully
+- `1` reserved (not currently emitted)
+- `2` usage error (including missing required flags, output path exists, or selected `--object` hash not referenced in source session closure)
+- `3` I/O or environment error (journal/session not found, read/write failures)
+
+**Item 4.4 — Design decisions (R1–R10) for traceability**
+
+1. **R1 — Architecture:** R3. Derivative bundle workflow only; no in-place journal mutation.
+2. **R2 — Granularity:** Object-level redaction for v2.0.0. Field/span-level redaction deferred.
+3. **R3 — Selector model:** Repeatable explicit `--object <hash>` flags; no pattern/policy selectors.
+4. **R4 — Reason requirement:** `--reason <text>` is mandatory.
+5. **R5 — Sentinel format:** Canonical-CBOR object payload:
+
+   ```
+   {
+     "akmon_redacted": true,
+     "original_hash": "<hex>",
+     "original_size": <bytes>,
+     "reason": "<text>",
+     "redacted_at": "<rfc3339>"
+   }
+   ```
+
+   Sentinel object hash is computed by the active hash algorithm (`sha256` or `blake3`) for the producing journal/bundle pipeline.
+   Sentinel object format is Akmon-specific: sentinels are valid AGEF objects (canonical CBOR, content-addressed), but the `akmon_redacted` marker convention is not part of AGEF v0.1.1. Future AGEF versions may standardize redaction sentinels; until then, other AGEF readers may not interpret this marker.
+6. **R6 — Reversibility:** One-way at the derivative bundle layer. Originals remain only in source journal; if that source is destroyed, redacted payload is unrecoverable by design.
+7. **R7 — Verify behavior:** Existing verify flows unchanged and strict.
+8. **R8 — Inspect behavior:** `inspect --resolve` detects sentinel content and renders redaction-aware fields/output without changing inspect's overall schema shape.
+9. **R9 — Bundle handling:** No special bundle protocol mode; redacted bundles remain normal AGEF bundles.
+10. **R10 — Input scope:** Bundle-path input for redact deferred.
+
+**Item 4.4.1 — `akmon redact` on existing bundles** (deferred follow-up)
+
+Goal: allow `akmon redact` to accept an existing bundle as input and produce a further redacted derivative bundle.
+
+When to start: after Item 4.4 ships for v2.0.0 session-id/journal input.
+
+Notes:
+- Out of scope for v2.0.0 Item 4.4.
+- Primary use case: forwarding partially redacted bundles with additional redactions.
+- Must preserve AGEF verification semantics equivalent to Item 4.4 outputs.
  
 Each item: design first, implement, document under `docs/src/commands/` or `docs/src/reference/` (per item; Item 4.1 command docs live in `docs/src/reference/`), verification gate of fmt+clippy+test.
  
