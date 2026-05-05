@@ -12,6 +12,7 @@ description = "Replay primitives for deterministic session playback in Akmon."
 akmon-core = { path = "../akmon-core" }
 akmon-journal = { path = "../akmon-journal" }
 akmon-models = { path = "../akmon-models" }
+akmon-query = { path = "../akmon-query" }
 akmon-tools = { path = "../akmon-tools" }
 async-trait = "0.1"
 futures = "0.3"
@@ -21,6 +22,7 @@ thiserror.workspace = true
 ciborium.workspace = true
 tracing.workspace = true
 time.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
