@@ -220,7 +220,8 @@ These decisions were settled in product-owner conversation and are now LOCKED. E
     - Decisions that should be deterministic given equivalent inputs.
   - Mode treatment for excluded fields:
     - Default mode: skip direct comparison.
-    - Strict mode: compare normalized projections where runtime-variable identifiers (including config/session identifiers) are normalized to placeholder values before projection hashing.
+    - Strict mode (v2.0.0): skip excluded fields from projection as well.
+    - Field-level normalization inside serialized payloads (for example normalizing `session_id` inside serialized `AgentConfig` bytes before projection hashing) is deferred to Item 5.8.
   - Sessions where the agent loop's decision-making is faithful to recorded responses produce zero divergences. Sessions where the agent loop diverges (different tool calls, different message sequences, etc.) produce specific divergences locating the decision point.
   - This is the v2.0.0 fidelity contract. Stronger fidelity (request-byte-identical replay) is potentially achievable via agent loop retrofit but is out of scope for v2.0.0. See Item 5.7.
 
@@ -759,6 +760,18 @@ Approach: Audit agent loop's request construction. Identify all sources of runti
 When to start: When stronger fidelity claims are needed (for example replay used as security audit tooling requiring exact payload reproduction). Not blocking v2.0.0 release.
 
 Estimated scope: Substantial. Likely 8-12 commits and touches multiple crates (`akmon-query`, `akmon-models`, `akmon-journal`, possibly `akmon-tools`). Architectural review required before starting.
+
+**Item 5.8 — Field-level normalization in strict-mode replay projection** (deferred follow-up, out of v2.0.0)
+
+Goal: Achieve true strict-mode projection comparison for hash fields whose underlying payload contains runtime-variable identifiers, by normalizing those identifiers field-by-field before projection hashing.
+
+Background: Item 5.3 Issue 2 surfaced that the current `projection_hash` architecture compares event/hash references directly and does not include store-backed decode hooks needed to normalize fields inside serialized payloads (for example `session_id` inside serialized `AgentConfig`) before projection. v2.0.0 strict mode therefore skips excluded fields entirely, matching default mode for those fields.
+
+Approach: Extend strict projection hashing with field-level normalization hooks. For `SessionStart.config_hash`, decode config bytes, replace `session_id` with a placeholder UUID, re-encode, and use the normalized content identity inside projection comparison.
+
+When to start: When users need stricter divergence detection for config-related changes beyond session-id-only variance. Not blocking v2.0.0 release.
+
+Estimated scope: 3-5 commits across `akmon-replay` (projection hook infrastructure, per-field normalization functions, tests, docs).
  
 ---
  
