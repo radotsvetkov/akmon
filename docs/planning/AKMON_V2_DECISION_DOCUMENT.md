@@ -184,11 +184,32 @@ These decisions were settled in product-owner conversation and are now LOCKED. E
  
 **Decision.** **Benevolent dictator for v0.1, documented intent to transition to core maintainers by v1.0.** The spec repo's `GOVERNANCE.md` explicitly says "governance currently informal, see roadmap to formalize by v1.0." Honest, doesn't overclaim, leaves room to grow.
  
-### §5.9 Decision D-09: Replay determinism contract — **LOCKED: best-effort with divergence report**
- 
-**Context.** Strict replay requires model determinism support. Many local backends don't have it.
- 
-**Decision.** **Best-effort with explicit divergence report.** Strict mode attempts byte-identical and returns a categorized report: "model non-determinism," "tool non-determinism," "timestamp," etc. Users learn what's real. Don't overclaim guarantees that depend on provider features that may not exist.
+### §5.9 Decision D-09: Replay determinism contract — **LOCKED: best-effort with divergence report (P1-P10)**
+
+**Context.** Strict replay requires model determinism support. Many local backends don't have it. The initial wording left key implementation details open (equivalence level, timestamp handling, retry handling, mismatch policy, persistence, and mode semantics), which blocked Phase 5 implementation sequencing.
+
+**Decision.** **Best-effort with explicit divergence report**, concretized by Phase 5 decisions P1-P10:
+
+- **P1 — Equivalence levels:**
+  - **Default mode** compares semantic equivalence: same event kinds in the same order with matching content references (for example `prompt_hash`, `tool_id`, `input_hash`, `output_hash`).
+  - Producer-stamped fields (timestamps and timing) are excluded from default comparisons.
+  - **Strict mode** compares event content hashes after normalization (see P2).
+  - Behavioral-equivalence mode is out of scope for v2.0.0.
+- **P2 — Timestamp normalization in strict mode:** normalize `emitted_at`, `AttemptRecord.started_at`, `AttemptRecord.ended_at`, and any other timestamp-bearing event content fields to placeholder values before hash comparison. Strict means "hash-identical after normalization."
+- **P3 — Provider attempt replay policy:**
+  - **Default mode:** final-success-only playback.
+  - **Strict mode:** replay full recorded attempt sequence, including failures.
+- **P4 — Tool input mismatch policy:**
+  - **Default mode:** record divergence and continue (return recorded output).
+  - **Strict mode:** hard-fail with divergence report (exit path `1`).
+- **P5 — Persistence policy:** report-only by default; optional `--persist` writes a replay-derived session with a new auto-generated UUID.
+- **P6 — Input contract for v2.0.0:** journal session-id only (`akmon replay <session-id>`). Bundle replay flows through `akmon bundle import` first.
+- **P7 — Modes for v2.0.0:** only `default` and `strict`. "regenerate" and "dry" are deferred (Items 5.4/5.5 scope notes below).
+- **P8 — Source preconditions:** replay refuses incomplete/corrupted/unresolvable source sessions (exit path `3`, with actionable message categories).
+- **P9 — Surface location:** playback primitives implement existing provider/tool traits; orchestration lives in ReplayEngine as a distinct primitive.
+- **P10 — Report coupling:** ReplayReportV1 is independent; Phase 6 diff defines its own schema.
+
+This contract is intentionally explicit so replay reports are useful without claiming impossible guarantees from non-deterministic providers/tools.
  
 ### §5.10 Decision D-10: Diff algorithm — **LOCKED: greedy same-kind-next**
  
@@ -613,11 +634,89 @@ Each item: design first, implement, document under `docs/src/commands/` or `docs
  
 ### §6.6 Phase 5 — Replay
  
+**Phase 5 scope statement (v2.0.0):**
+
+- Replay re-executes one recorded journal session using playback substitutes (`PlaybackProvider`, `PlaybackTool`) and emits a **ReplayReportV1** with divergence categories.
+- Replay input is **session-id only** in v2.0.0 (`akmon replay <session-id>`). Direct bundle input is deferred.
+- Replay default behavior is **report-only** (no journal mutation). `--persist` opt-in writes a replay-derived session with a new UUID.
+- Replay supports **two modes** in v2.0.0:
+  - `default`: semantic comparison, final-success-only provider playback, divergence-and-continue tool mismatch handling.
+  - `strict`: hash-identical-after-normalization comparison, full provider attempt-sequence playback, hard-fail on tool input mismatch.
+- Replay refuses incomplete/corrupted/unresolvable source sessions (error path; see P8/D-09).
+
 **Item 5.1 — PlaybackProvider and PlaybackTool** (inert, no real side effects)
- 
-**Item 5.2 — ReplayEngine** (per D-09: best-effort with divergence report)
- 
+
+Goal: Introduce replay playback primitives that substitute for live providers/tools at existing trait boundaries.
+
+When to start: After Phase 4 completes and D-09/P1-P10 replay contract is documented.
+
+When done:
+- `PlaybackProvider` implements the provider trait and supports mode-aware behavior:
+  - default: final-success-only call playback
+  - strict: full recorded attempt sequence playback
+- `PlaybackTool` implements the tool trait and supports mode-aware mismatch handling:
+  - default: divergence-and-continue
+  - strict: hard-fail
+- Both primitives are deterministic, side-effect-inert, and fully unit-tested against recorded event fixtures.
+
+Notes for Cursor:
+- Keep replay substitutions transparent to `AgentSession` via existing trait boundaries.
+- Surface mismatch taxonomy before implementation; do not invent category names ad hoc in code.
+
+**Item 5.2 — ReplayEngine** (per D-09/P1-P10: best-effort with divergence report)
+
+Goal: Orchestrate replay execution against source-session evidence and generate `ReplayReportV1`.
+
+When to start: After Item 5.1 primitives land.
+
+When done:
+- Engine validates replay preconditions (source session completeness and basic resolvability) before execution.
+- Engine compares source vs replay according to mode semantics (default/strict) and records categorized divergences.
+- Engine supports report-only default and optional persistence (`--persist`) with replay-derived session UUID.
+- Engine output schema is stabilized as `ReplayReportV1` and documented.
+
+Notes for Cursor:
+- ReplayReportV1 is replay-specific and independent of Phase 6 diff schema decisions (P10).
+- Do not silently expand into live-provider regeneration behavior (deferred Item 5.4).
+
 **Item 5.3 — `akmon replay`**
+
+Goal: Add replay command surface for v2.0.0 with explicit mode and report behavior.
+
+When to start: After Item 5.2 engine and schema stabilize.
+
+When done:
+- Command shape: `akmon replay <session-id> [--journal <path>] [--mode <default|strict>] [--persist] [--format <human|json>]`.
+- Exit-code contract follows v2 pattern:
+  - `0` replay completed with no divergences (or acceptable mode-defined clean result),
+  - `1` divergences found / strict-mode replay mismatch failure,
+  - `2` usage error,
+  - `3` I/O/environment/source-precondition failure.
+- Human and JSON output implemented and documented under `docs/src/reference/`.
+
+Notes for Cursor:
+- Keep `--format json` explicit per D-12.
+- Report-first UX by default; persistence is opt-in only (`--persist`).
+
+**Item 5.4 — Live regeneration command (`akmon regenerate`)** (deferred follow-up, out of v2.0.0)
+
+Goal: Re-run a recorded session against live providers/tools and compare outcomes to recorded evidence.
+
+When to start: After v2.0.0 Phase 5 replay scope ships, and only with explicit demand.
+
+Notes:
+- This is distinct from replay-by-playback semantics.
+- This item absorbs the previously listed "regenerate" mode concept from P1-1 wording.
+
+**Item 5.5 — Direct bundle-input replay** (deferred follow-up, out of v2.0.0)
+
+Goal: Support `akmon replay <bundle-path>` without requiring prior bundle import.
+
+When to start: After v2.0.0 Phase 5 replay scope ships, and only with explicit demand.
+
+Notes:
+- v2.0.0 composition path remains: `akmon bundle import` -> `akmon replay <session-id>`.
+- Avoid dual-path complexity in initial replay implementation.
  
 ---
  
