@@ -896,6 +896,8 @@ Commit: `refactor(core): retire legacy audit/replay/evidence; render from journa
 **Item 7.4 — Case study publication** (with tester written approval)
  
 **Item 7.5 — DCO setup** (per D-14)
+
+**Item 7.6 — Shared resolve preview helpers and inspect UTF-8 safety.** Promote human-resolve preview constants and UTF-8-safe line truncation (same semantics as `akmon-diff::resolve`) into a shared module. Fix `crates/akmon-cli/src/main.rs` inspect `--resolve` text preview, which still uses `&line[..RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES]` and can panic when that byte index falls inside a multi-byte UTF-8 character. Pair with P12’s deferred promotion of duplicated `RESOLVE_*` values from Layer 5.
  
 ---
  
