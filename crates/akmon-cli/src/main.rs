@@ -25,8 +25,9 @@ use std::time::Duration;
 
 use akmon_bundle::{
     BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest, Producer,
-    ReadBundleOptions, SessionMetadata, WriteBundleOptions, read_bundle, sentinel_from_original,
-    sentinel_to_canonical_cbor, write_bundle,
+    ReadBundleOptions, SentinelMarker, SessionMetadata, WriteBundleOptions, is_sentinel,
+    read_bundle, sentinel_from_original, sentinel_to_canonical_cbor, try_parse_sentinel,
+    write_bundle,
 };
 use akmon_config::AkmonGlobalConfig;
 use akmon_core::{
@@ -605,9 +606,29 @@ enum InspectEventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         cwd_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        cwd_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cwd_redacted_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         config_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         config_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config_redacted_at: Option<String>,
     },
     /// User turn payload.
     UserTurn {
@@ -616,6 +637,16 @@ enum InspectEventKind {
         prompt_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         prompt_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_redacted_at: Option<String>,
     },
     /// Provider call payload.
     ProviderCall {
@@ -626,6 +657,16 @@ enum InspectEventKind {
         stream_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         stream_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream_redacted_at: Option<String>,
     },
     /// Tool call payload.
     ToolCall {
@@ -638,13 +679,43 @@ enum InspectEventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         input_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        input_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_redacted_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         output_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         output_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        output_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_redacted_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         side_effects_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         side_effects_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        side_effects_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        side_effects_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        side_effects_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        side_effects_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        side_effects_redacted_at: Option<String>,
     },
     /// Retrieval call payload.
     RetrievalCall {
@@ -656,9 +727,29 @@ enum InspectEventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         query_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        query_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query_redacted_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         results_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         results_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        results_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        results_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        results_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        results_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        results_redacted_at: Option<String>,
     },
     /// Permission gate payload.
     PermissionGate {
@@ -669,6 +760,16 @@ enum InspectEventKind {
         context_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         context_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_redacted_at: Option<String>,
     },
     /// Assistant turn payload.
     AssistantTurn {
@@ -679,9 +780,29 @@ enum InspectEventKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         message_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        message_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_redacted_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls_redacted_at: Option<String>,
     },
     /// Session end payload.
     SessionEnd {
@@ -690,6 +811,16 @@ enum InspectEventKind {
         summary_text: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         summary_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_redacted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_redaction_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_original_hash: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_original_size: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_redacted_at: Option<String>,
     },
 }
 
@@ -712,6 +843,16 @@ struct InspectAttempt {
     response_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_redacted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_redaction_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_original_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_original_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_redacted_at: Option<String>,
     /// Stream transcript hash when present.
     stream_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -719,9 +860,29 @@ struct InspectAttempt {
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream_redacted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_redaction_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_original_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_original_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_redacted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     request_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_redacted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_redaction_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_original_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_original_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_redacted_at: Option<String>,
     /// Human-readable error message when present.
     error_message: Option<String>,
 }
@@ -887,10 +1048,22 @@ enum ContentClass {
     Empty,
 }
 
+enum ResolvedContentClass {
+    Text(String, usize),
+    Binary(usize),
+    Empty,
+    Sentinel(SentinelMarker, usize),
+}
+
 #[derive(Clone, Default)]
 struct ResolvedContent {
     text: Option<String>,
     size: Option<u64>,
+    redacted: Option<bool>,
+    redaction_reason: Option<String>,
+    original_hash: Option<String>,
+    original_size: Option<u64>,
+    redacted_at: Option<String>,
 }
 
 fn resolve_object<S: ObjectStore>(store: &S, hash: &akmon_journal::Hash) -> Option<Vec<u8>> {
@@ -908,6 +1081,19 @@ fn classify_content(bytes: &[u8]) -> ContentClass {
     }
 }
 
+fn classify_resolved(bytes: &[u8]) -> ResolvedContentClass {
+    if is_sentinel(bytes)
+        && let Ok(Some(marker)) = try_parse_sentinel(bytes)
+    {
+        return ResolvedContentClass::Sentinel(marker, bytes.len());
+    }
+    match classify_content(bytes) {
+        ContentClass::Text(text) => ResolvedContentClass::Text(text, bytes.len()),
+        ContentClass::Binary(size) => ResolvedContentClass::Binary(size),
+        ContentClass::Empty => ResolvedContentClass::Empty,
+    }
+}
+
 fn resolved_content<S: ObjectStore>(
     store: &S,
     hash: &akmon_journal::Hash,
@@ -917,18 +1103,33 @@ fn resolved_content<S: ObjectStore>(
         return ResolvedContent::default();
     }
     let Some(bytes) = resolve_object(store, hash) else {
-        return ResolvedContent {
-            text: None,
-            size: None,
-        };
+        return ResolvedContent::default();
     };
-    let size = Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-    match classify_content(&bytes) {
-        ContentClass::Text(text) => ResolvedContent {
+    match classify_resolved(&bytes) {
+        ResolvedContentClass::Text(text, size) => ResolvedContent {
             text: Some(text),
-            size,
+            size: Some(u64::try_from(size).unwrap_or(u64::MAX)),
+            ..ResolvedContent::default()
         },
-        ContentClass::Binary(_) | ContentClass::Empty => ResolvedContent { text: None, size },
+        ResolvedContentClass::Binary(size) => ResolvedContent {
+            text: None,
+            size: Some(u64::try_from(size).unwrap_or(u64::MAX)),
+            ..ResolvedContent::default()
+        },
+        ResolvedContentClass::Empty => ResolvedContent {
+            text: None,
+            size: Some(0),
+            ..ResolvedContent::default()
+        },
+        ResolvedContentClass::Sentinel(marker, size) => ResolvedContent {
+            text: None,
+            size: Some(u64::try_from(size).unwrap_or(u64::MAX)),
+            redacted: Some(true),
+            redaction_reason: Some(marker.reason),
+            original_hash: Some(marker.original_hash),
+            original_size: Some(marker.original_size),
+            redacted_at: Some(marker.redacted_at),
+        },
     }
 }
 
@@ -949,8 +1150,18 @@ fn inspect_event_kind<S: ObjectStore>(
                 config_hash: config_hash.to_hex(),
                 cwd_text: cwd.text,
                 cwd_size: cwd.size,
+                cwd_redacted: cwd.redacted,
+                cwd_redaction_reason: cwd.redaction_reason,
+                cwd_original_hash: cwd.original_hash,
+                cwd_original_size: cwd.original_size,
+                cwd_redacted_at: cwd.redacted_at,
                 config_text: config.text,
                 config_size: config.size,
+                config_redacted: config.redacted,
+                config_redaction_reason: config.redaction_reason,
+                config_original_hash: config.original_hash,
+                config_original_size: config.original_size,
+                config_redacted_at: config.redacted_at,
             }
         }
         akmon_journal::EventKind::UserTurn { prompt_hash } => {
@@ -959,6 +1170,11 @@ fn inspect_event_kind<S: ObjectStore>(
                 prompt_hash: prompt_hash.to_hex(),
                 prompt_text: prompt.text,
                 prompt_size: prompt.size,
+                prompt_redacted: prompt.redacted,
+                prompt_redaction_reason: prompt.redaction_reason,
+                prompt_original_hash: prompt.original_hash,
+                prompt_original_size: prompt.original_size,
+                prompt_redacted_at: prompt.redacted_at,
             }
         }
         akmon_journal::EventKind::ProviderCall {
@@ -1000,18 +1216,33 @@ fn inspect_event_kind<S: ObjectStore>(
                             request_hash: attempt.request_hash.to_hex(),
                             request_text: request.text,
                             request_size: request.size,
+                            request_redacted: request.redacted,
+                            request_redaction_reason: request.redaction_reason,
+                            request_original_hash: request.original_hash,
+                            request_original_size: request.original_size,
+                            request_redacted_at: request.redacted_at,
                             response_hash: attempt
                                 .response_hash
                                 .as_ref()
                                 .map(akmon_journal::Hash::to_hex),
                             response_text: response.text,
                             response_size: response.size,
+                            response_redacted: response.redacted,
+                            response_redaction_reason: response.redaction_reason,
+                            response_original_hash: response.original_hash,
+                            response_original_size: response.original_size,
+                            response_redacted_at: response.redacted_at,
                             stream_hash: attempt
                                 .stream_hash
                                 .as_ref()
                                 .map(akmon_journal::Hash::to_hex),
                             stream_text: stream.text,
                             stream_size: stream.size,
+                            stream_redacted: stream.redacted,
+                            stream_redaction_reason: stream.redaction_reason,
+                            stream_original_hash: stream.original_hash,
+                            stream_original_size: stream.original_size,
+                            stream_redacted_at: stream.redacted_at,
                             error_message: attempt.error_message.clone(),
                         }
                     })
@@ -1019,6 +1250,11 @@ fn inspect_event_kind<S: ObjectStore>(
                 stream_hash: stream_hash.as_ref().map(akmon_journal::Hash::to_hex),
                 stream_text: stream_resolved.text,
                 stream_size: stream_resolved.size,
+                stream_redacted: stream_resolved.redacted,
+                stream_redaction_reason: stream_resolved.redaction_reason,
+                stream_original_hash: stream_resolved.original_hash,
+                stream_original_size: stream_resolved.original_size,
+                stream_redacted_at: stream_resolved.redacted_at,
             }
         }
         akmon_journal::EventKind::ToolCall {
@@ -1040,10 +1276,25 @@ fn inspect_event_kind<S: ObjectStore>(
                 side_effects_hash: side_effects_hash.as_ref().map(akmon_journal::Hash::to_hex),
                 input_text: input.text,
                 input_size: input.size,
+                input_redacted: input.redacted,
+                input_redaction_reason: input.redaction_reason,
+                input_original_hash: input.original_hash,
+                input_original_size: input.original_size,
+                input_redacted_at: input.redacted_at,
                 output_text: output.text,
                 output_size: output.size,
+                output_redacted: output.redacted,
+                output_redaction_reason: output.redaction_reason,
+                output_original_hash: output.original_hash,
+                output_original_size: output.original_size,
+                output_redacted_at: output.redacted_at,
                 side_effects_text: side_effects.text,
                 side_effects_size: side_effects.size,
+                side_effects_redacted: side_effects.redacted,
+                side_effects_redaction_reason: side_effects.redaction_reason,
+                side_effects_original_hash: side_effects.original_hash,
+                side_effects_original_size: side_effects.original_size,
+                side_effects_redacted_at: side_effects.redacted_at,
             }
         }
         akmon_journal::EventKind::RetrievalCall {
@@ -1059,8 +1310,18 @@ fn inspect_event_kind<S: ObjectStore>(
                 results_hash: results_hash.to_hex(),
                 query_text: query.text,
                 query_size: query.size,
+                query_redacted: query.redacted,
+                query_redaction_reason: query.redaction_reason,
+                query_original_hash: query.original_hash,
+                query_original_size: query.original_size,
+                query_redacted_at: query.redacted_at,
                 results_text: results.text,
                 results_size: results.size,
+                results_redacted: results.redacted,
+                results_redaction_reason: results.redaction_reason,
+                results_original_hash: results.original_hash,
+                results_original_size: results.original_size,
+                results_redacted_at: results.redacted_at,
             }
         }
         akmon_journal::EventKind::PermissionGate {
@@ -1075,6 +1336,11 @@ fn inspect_event_kind<S: ObjectStore>(
                 context_hash: context_hash.to_hex(),
                 context_text: context.text,
                 context_size: context.size,
+                context_redacted: context.redacted,
+                context_redaction_reason: context.redaction_reason,
+                context_original_hash: context.original_hash,
+                context_original_size: context.original_size,
+                context_redacted_at: context.redacted_at,
             }
         }
         akmon_journal::EventKind::AssistantTurn {
@@ -1091,8 +1357,18 @@ fn inspect_event_kind<S: ObjectStore>(
                 tool_calls_hash: tool_calls_hash.as_ref().map(akmon_journal::Hash::to_hex),
                 message_text: message.text,
                 message_size: message.size,
+                message_redacted: message.redacted,
+                message_redaction_reason: message.redaction_reason,
+                message_original_hash: message.original_hash,
+                message_original_size: message.original_size,
+                message_redacted_at: message.redacted_at,
                 tool_calls_text: tool_calls.text,
                 tool_calls_size: tool_calls.size,
+                tool_calls_redacted: tool_calls.redacted,
+                tool_calls_redaction_reason: tool_calls.redaction_reason,
+                tool_calls_original_hash: tool_calls.original_hash,
+                tool_calls_original_size: tool_calls.original_size,
+                tool_calls_redacted_at: tool_calls.redacted_at,
             }
         }
         akmon_journal::EventKind::SessionEnd { summary_hash } => {
@@ -1104,6 +1380,11 @@ fn inspect_event_kind<S: ObjectStore>(
                 summary_hash: summary_hash.as_ref().map(akmon_journal::Hash::to_hex),
                 summary_text: summary.text,
                 summary_size: summary.size,
+                summary_redacted: summary.redacted,
+                summary_redaction_reason: summary.redaction_reason,
+                summary_original_hash: summary.original_hash,
+                summary_original_size: summary.original_size,
+                summary_redacted_at: summary.redacted_at,
             }
         }
     }
@@ -3890,6 +4171,7 @@ fn format_base64_preview(bytes: &[u8], max_chars: usize) -> String {
 }
 
 fn format_resolved_human(
+    value_label: &str,
     hash: &akmon_journal::Hash,
     bytes: Option<Vec<u8>>,
     binary: BinaryMode,
@@ -3897,9 +4179,15 @@ fn format_resolved_human(
     let Some(bytes) = bytes else {
         return vec!["  | <unresolved>".to_owned()];
     };
-    match classify_content(&bytes) {
-        ContentClass::Empty => vec!["  | <empty>".to_owned()],
-        ContentClass::Binary(size) => {
+    match classify_resolved(&bytes) {
+        ResolvedContentClass::Sentinel(marker, _) => vec![
+            format!("  {value_label}: [REDACTED: {}]", marker.reason),
+            format!("  | original size: {} bytes", marker.original_size),
+            format!("  | original hash: {}", marker.original_hash),
+            format!("  | redacted at: {}", marker.redacted_at),
+        ],
+        ResolvedContentClass::Empty => vec!["  | <empty>".to_owned()],
+        ResolvedContentClass::Binary(size) => {
             let mut out = vec![format!(
                 "  | <binary, {size} bytes, hash: {}>",
                 truncate_hash(hash)
@@ -3917,7 +4205,7 @@ fn format_resolved_human(
             }
             out
         }
-        ContentClass::Text(text) => {
+        ResolvedContentClass::Text(text, _) => {
             let lines: Vec<&str> = text.lines().collect();
             if lines.is_empty() {
                 return vec!["  | <empty>".to_owned()];
@@ -3967,20 +4255,17 @@ fn format_resolved_human(
 fn push_hash_with_optional_resolution(
     lines: &mut Vec<String>,
     label: &str,
+    value_label: &str,
     hash: &akmon_journal::Hash,
     store: &akmon_journal::RedbObjectStore,
     resolve: bool,
-    verbose: bool,
     binary: BinaryMode,
 ) {
-    let rendered = if verbose {
-        format_hash_full(hash)
-    } else {
-        truncate_hash(hash)
-    };
+    let rendered = truncate_hash(hash);
     lines.push(format!("  {label}: {rendered}"));
     if resolve {
         lines.extend(format_resolved_human(
+            value_label,
             hash,
             resolve_object(store, hash),
             binary,
@@ -4092,15 +4377,15 @@ fn format_event_summary(
             config_hash,
         } => {
             push_hash_with_optional_resolution(
-                &mut lines, "cwd_hash", cwd_hash, store, resolve, false, binary,
+                &mut lines, "cwd_hash", "cwd", cwd_hash, store, resolve, binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
                 "config_hash",
+                "config",
                 config_hash,
                 store,
                 resolve,
-                false,
                 binary,
             );
         }
@@ -4108,10 +4393,10 @@ fn format_event_summary(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "prompt_hash",
+                "prompt",
                 prompt_hash,
                 store,
                 resolve,
-                false,
                 binary,
             );
         }
@@ -4126,10 +4411,10 @@ fn format_event_summary(
                 push_hash_with_optional_resolution(
                     &mut lines,
                     "stream_hash",
+                    "stream",
                     stream_hash,
                     store,
                     resolve,
-                    false,
                     binary,
                 );
             } else {
@@ -4146,19 +4431,19 @@ fn format_event_summary(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "input_hash",
+                "input",
                 input_hash,
                 store,
                 resolve,
-                false,
                 binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
                 "output_hash",
+                "output",
                 output_hash,
                 store,
                 resolve,
-                false,
                 binary,
             );
             lines.push(format!(
@@ -4173,6 +4458,7 @@ fn format_event_summary(
                 && resolve
             {
                 lines.extend(format_resolved_human(
+                    "side_effects",
                     side_effects_hash,
                     resolve_object(store, side_effects_hash),
                     binary,
@@ -4188,19 +4474,19 @@ fn format_event_summary(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "query_hash",
+                "query",
                 query_hash,
                 store,
                 resolve,
-                false,
                 binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
                 "results_hash",
+                "results",
                 results_hash,
                 store,
                 resolve,
-                false,
                 binary,
             );
         }
@@ -4214,10 +4500,10 @@ fn format_event_summary(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "context_hash",
+                "context",
                 context_hash,
                 store,
                 resolve,
-                false,
                 binary,
             );
         }
@@ -4228,10 +4514,10 @@ fn format_event_summary(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "message_hash",
+                "message",
                 message_hash,
                 store,
                 resolve,
-                false,
                 binary,
             );
             lines.push(format!(
@@ -4246,6 +4532,7 @@ fn format_event_summary(
                 && resolve
             {
                 lines.extend(format_resolved_human(
+                    "tool_calls",
                     tool_calls_hash,
                     resolve_object(store, tool_calls_hash),
                     binary,
@@ -4257,10 +4544,10 @@ fn format_event_summary(
                 push_hash_with_optional_resolution(
                     &mut lines,
                     "summary_hash",
+                    "summary",
                     summary_hash,
                     store,
                     resolve,
-                    false,
                     binary,
                 );
             } else {
@@ -4299,15 +4586,15 @@ fn format_event_verbose(
             config_hash,
         } => {
             push_hash_with_optional_resolution(
-                &mut lines, "cwd_hash", cwd_hash, store, resolve, true, binary,
+                &mut lines, "cwd_hash", "cwd", cwd_hash, store, resolve, binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
                 "config_hash",
+                "config",
                 config_hash,
                 store,
                 resolve,
-                true,
                 binary,
             );
         }
@@ -4315,10 +4602,10 @@ fn format_event_verbose(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "prompt_hash",
+                "prompt",
                 prompt_hash,
                 store,
                 resolve,
-                true,
                 binary,
             );
         }
@@ -4349,6 +4636,7 @@ fn format_event_verbose(
                 ));
                 if resolve {
                     lines.extend(format_resolved_human(
+                        "request",
                         &attempt.request_hash,
                         resolve_object(store, &attempt.request_hash),
                         binary,
@@ -4362,6 +4650,7 @@ fn format_event_verbose(
                     && resolve
                 {
                     lines.extend(format_resolved_human(
+                        "response",
                         response_hash,
                         resolve_object(store, response_hash),
                         binary,
@@ -4375,6 +4664,7 @@ fn format_event_verbose(
                     && resolve
                 {
                     lines.extend(format_resolved_human(
+                        "stream",
                         stream_hash,
                         resolve_object(store, stream_hash),
                         binary,
@@ -4396,6 +4686,7 @@ fn format_event_verbose(
                 && resolve
             {
                 lines.extend(format_resolved_human(
+                    "stream",
                     stream_hash,
                     resolve_object(store, stream_hash),
                     binary,
@@ -4412,19 +4703,19 @@ fn format_event_verbose(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "input_hash",
+                "input",
                 input_hash,
                 store,
                 resolve,
-                true,
                 binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
                 "output_hash",
+                "output",
                 output_hash,
                 store,
                 resolve,
-                true,
                 binary,
             );
             lines.push(format!(
@@ -4435,6 +4726,7 @@ fn format_event_verbose(
                 && resolve
             {
                 lines.extend(format_resolved_human(
+                    "side_effects",
                     side_effects_hash,
                     resolve_object(store, side_effects_hash),
                     binary,
@@ -4450,19 +4742,19 @@ fn format_event_verbose(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "query_hash",
+                "query",
                 query_hash,
                 store,
                 resolve,
-                true,
                 binary,
             );
             push_hash_with_optional_resolution(
                 &mut lines,
                 "results_hash",
+                "results",
                 results_hash,
                 store,
                 resolve,
-                true,
                 binary,
             );
         }
@@ -4476,10 +4768,10 @@ fn format_event_verbose(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "context_hash",
+                "context",
                 context_hash,
                 store,
                 resolve,
-                true,
                 binary,
             );
         }
@@ -4490,10 +4782,10 @@ fn format_event_verbose(
             push_hash_with_optional_resolution(
                 &mut lines,
                 "message_hash",
+                "message",
                 message_hash,
                 store,
                 resolve,
-                true,
                 binary,
             );
             lines.push(format!(
@@ -4504,6 +4796,7 @@ fn format_event_verbose(
                 && resolve
             {
                 lines.extend(format_resolved_human(
+                    "tool_calls",
                     tool_calls_hash,
                     resolve_object(store, tool_calls_hash),
                     binary,
@@ -4519,6 +4812,7 @@ fn format_event_verbose(
                 && resolve
             {
                 lines.extend(format_resolved_human(
+                    "summary",
                     summary_hash,
                     resolve_object(store, summary_hash),
                     binary,

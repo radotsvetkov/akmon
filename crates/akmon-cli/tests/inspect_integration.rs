@@ -47,6 +47,50 @@ fn run_inspect_with(
     cmd.output().expect("run inspect")
 }
 
+fn run_redact_with(
+    journal_dir: &Path,
+    session_id: Uuid,
+    output_path: &Path,
+    objects: &[&str],
+    reason: &str,
+    extra: &[&str],
+) -> std::process::Output {
+    let bin = akmon_bin_path();
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "redact",
+        &session_id.to_string(),
+        "--journal",
+        &journal_dir.display().to_string(),
+        "--output",
+        &output_path.display().to_string(),
+    ]);
+    for object in objects {
+        cmd.args(["--object", object]);
+    }
+    cmd.args(["--reason", reason]);
+    cmd.args(extra);
+    cmd.output().expect("run redact")
+}
+
+fn run_bundle_import_with(
+    bundle: &Path,
+    journal_dir: &Path,
+    extra: &[&str],
+) -> std::process::Output {
+    let bin = akmon_bin_path();
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "bundle",
+        "import",
+        bundle.to_str().expect("utf8 path"),
+        "--journal",
+        &journal_dir.display().to_string(),
+    ]);
+    cmd.args(extra);
+    cmd.output().expect("run bundle import")
+}
+
 fn parse_human_summary_event_kinds(stdout: &str) -> Vec<String> {
     stdout
         .lines()
@@ -1363,6 +1407,206 @@ fn t_inspect_json_resolve_unaffected_by_binary_mode() {
     let v_b64: Value = serde_json::from_slice(&b64.stdout).expect("b64 json");
     assert_eq!(v_base, v_hex);
     assert_eq!(v_base, v_b64);
+}
+
+#[test]
+fn t_inspect_displays_sentinel_in_human_output() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+    let bundle = tmp.path().join("redacted.akmon");
+    let redaction_reason = "PII removal";
+    let redact = run_redact_with(
+        tmp.path(),
+        sid,
+        bundle.as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        redaction_reason,
+        &[],
+    );
+    assert_eq!(redact.status.code(), Some(0));
+
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).expect("mkdir");
+    let renamed = Uuid::new_v4();
+    let import = run_bundle_import_with(
+        bundle.as_path(),
+        dst.as_path(),
+        &["--rename-to", &renamed.to_string()],
+    );
+    assert_eq!(import.status.code(), Some(0));
+
+    let out = run_inspect_with(dst.as_path(), renamed, &["--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[REDACTED:"));
+    assert!(stdout.contains(redaction_reason));
+    assert!(stdout.contains("original size:"));
+    assert!(stdout.contains("original hash:"));
+    assert!(stdout.contains("redacted at:"));
+}
+
+#[test]
+fn t_inspect_displays_sentinel_in_json_output() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+    let bundle = tmp.path().join("redacted.akmon");
+    let redaction_reason = "Trade secret";
+    let redact = run_redact_with(
+        tmp.path(),
+        sid,
+        bundle.as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        redaction_reason,
+        &["--format", "json"],
+    );
+    assert_eq!(redact.status.code(), Some(0));
+
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).expect("mkdir");
+    let renamed = Uuid::new_v4();
+    let import = run_bundle_import_with(
+        bundle.as_path(),
+        dst.as_path(),
+        &["--rename-to", &renamed.to_string()],
+    );
+    assert_eq!(import.status.code(), Some(0));
+
+    let out = run_inspect_with(dst.as_path(), renamed, &["--format", "json", "--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let value: Value = serde_json::from_slice(&out.stdout).expect("json");
+    let events = value
+        .get("events")
+        .and_then(Value::as_array)
+        .expect("events array");
+    let user_kind = events
+        .iter()
+        .filter_map(|event| event.get("kind").and_then(Value::as_object))
+        .find(|kind| kind.get("type").and_then(Value::as_str) == Some("user_turn"))
+        .expect("user turn kind");
+    assert_eq!(
+        user_kind.get("prompt_redacted").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        user_kind
+            .get("prompt_redaction_reason")
+            .and_then(Value::as_str),
+        Some(redaction_reason)
+    );
+    let original_hash = fixture.prompt_hash.to_hex();
+    assert_eq!(
+        user_kind
+            .get("prompt_original_hash")
+            .and_then(Value::as_str),
+        Some(original_hash.as_str())
+    );
+    assert!(user_kind.get("prompt_original_size").is_some());
+    assert!(user_kind.get("prompt_redacted_at").is_some());
+    assert!(user_kind.get("prompt_size").is_some());
+}
+
+#[test]
+fn t_inspect_non_sentinel_objects_unchanged() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+    let bundle = tmp.path().join("redacted.akmon");
+    let redact = run_redact_with(
+        tmp.path(),
+        sid,
+        bundle.as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        "PII",
+        &[],
+    );
+    assert_eq!(redact.status.code(), Some(0));
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).expect("mkdir");
+    let renamed = Uuid::new_v4();
+    let import = run_bundle_import_with(
+        bundle.as_path(),
+        dst.as_path(),
+        &["--rename-to", &renamed.to_string()],
+    );
+    assert_eq!(import.status.code(), Some(0));
+    let out = run_inspect_with(dst.as_path(), renamed, &["--format", "json", "--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let value: Value = serde_json::from_slice(&out.stdout).expect("json");
+    let events = value
+        .get("events")
+        .and_then(Value::as_array)
+        .expect("events array");
+    let summary_kind = events
+        .iter()
+        .filter_map(|event| event.get("kind").and_then(Value::as_object))
+        .find(|kind| kind.get("type").and_then(Value::as_str) == Some("session_end"))
+        .expect("session_end kind");
+    assert!(summary_kind.get("summary_redacted").is_none());
+    assert!(summary_kind.get("summary_redaction_reason").is_none());
+}
+
+#[test]
+fn t_inspect_verbose_with_sentinel_shows_both_timestamps() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+    let bundle = tmp.path().join("redacted.akmon");
+    let redact = run_redact_with(
+        tmp.path(),
+        sid,
+        bundle.as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        "PII",
+        &[],
+    );
+    assert_eq!(redact.status.code(), Some(0));
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).expect("mkdir");
+    let renamed = Uuid::new_v4();
+    let import = run_bundle_import_with(
+        bundle.as_path(),
+        dst.as_path(),
+        &["--rename-to", &renamed.to_string()],
+    );
+    assert_eq!(import.status.code(), Some(0));
+    let out = run_inspect_with(dst.as_path(), renamed, &["--verbose", "--resolve"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("emitted_at:"));
+    assert!(stdout.contains("redacted at:"));
+}
+
+#[test]
+fn t_inspect_binary_hex_with_sentinel_still_shows_redacted_ui() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+    let bundle = tmp.path().join("redacted.akmon");
+    let redact = run_redact_with(
+        tmp.path(),
+        sid,
+        bundle.as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        "PII",
+        &[],
+    );
+    assert_eq!(redact.status.code(), Some(0));
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).expect("mkdir");
+    let renamed = Uuid::new_v4();
+    let import = run_bundle_import_with(
+        bundle.as_path(),
+        dst.as_path(),
+        &["--rename-to", &renamed.to_string()],
+    );
+    assert_eq!(import.status.code(), Some(0));
+    let out = run_inspect_with(dst.as_path(), renamed, &["--resolve", "--binary", "hex"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("[REDACTED:"));
+    assert!(!stdout.contains("a4 6b 61 6b 6d 6f 6e"));
 }
 
 #[test]
