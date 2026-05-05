@@ -826,6 +826,7 @@ Backlog (deferred to post-v2.0.0):
 - **Item 6.X — Sequence alignment for structurally different sessions.** Deferred to post-v2.0.0.
 - **Item 6.Y — Object-store-level diff (objects in A but not B).** Deferred to post-v2.0.0.
 - **Item 6.Z — Diff visualization/output formats beyond text + JSON.** Deferred to post-v2.0.0.
+- **Item 6.V — Pre-load memory protection for resolve mode.** Extend `ObjectStore` trait with size or streaming API so the resolve cap can prevent peak memory allocation rather than just controlling retention. Requires substrate-level changes to akmon-journal, akmon-replay, and akmon-bundle. Deferred to post-v2.0.0.
 - **Item 6.W — Structured field decoding in resolve mode.** Per-field CBOR/JSON decoding for diff resolve output (for example `config.timeout_seconds: 30 → 60` instead of raw byte mismatch). Deferred to post-v2.0.0.
 
 ### §6.7.1 P-style decisions
@@ -845,13 +846,13 @@ Backlog (deferred to post-v2.0.0):
 2. **Decoding policy.** Raw bytes only. v2.0.0 does not decode CBOR or JSON content for field-level structural diff. Structured decoding deferred to **Item 6.W** (post-v2.0.0).
 
 3. **Limits and previews.**
-   - **Read cap:** 10 MiB per object per side. If either side exceeds the cap: `resolved = None`, `resolved_skip_reason = Some("exceeds 10 MiB cap")`. This is a diff-specific constraint not present in inspect, justified as fail-soft protection in an opt-in inspection workflow.
+   - **Read cap:** 10 MiB per object per side, enforced post-load via the `ObjectStore::get` interface. `resolve_object_capped` discards bytes that exceed the cap rather than retaining them or generating previews. Peak memory during `store.get` is unbounded by the diff layer; this is a known limitation inherited from the current `ObjectStore` substrate (no size or streaming API). Real pre-load memory protection requires a substrate change deferred to Item 6.V (post-v2.0.0). If either side exceeds the cap after load: `resolved = None`, `resolved_skip_reason = Some("exceeds 10 MiB cap")`. This is a diff-specific constraint not present in inspect, justified as fail-soft retention control in an opt-in inspection workflow.
    - **Preview rules:** Mirror `akmon inspect` human resolve constants in `crates/akmon-cli/src/main.rs` (`RESOLVE_TEXT_MAX_BYTES`, `RESOLVE_TEXT_PREVIEW_MAX_LINES`, `RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES`). Text vs binary: valid UTF-8 → text path; otherwise binary. For binary previews in diff output, use **hex** (64 bytes of input, matching inspect’s hex preview width) for byte-level readability. Layer 5 duplicates these numeric values in `akmon-diff` with an explicit comment to keep inspect unchanged; promotion to a shared crate is deferred to Phase 7 cleanup (no suitable shared resolve-preview module exists in `akmon-tools` or `akmon-journal` today).
    - **Timeout:** None for v2.0.0 over local `ObjectStore`.
 
 **Rationale.** Option A (extend comparators with optional store pair so resolution runs where hashes already diverged) is chosen over B (engine pre-resolves all fields), C (parallel `*_resolved` comparators), and D (post-pass enricher only) because it keeps a single source of truth per event kind, aligns additive schema with backward-compatible report extensions, and matches inspect preview behavior for user consistency.
 
-The 10 MiB cap is diff-specific (replay and inspect perform uncapped `get` today) and explicit fail-soft prevents pathological-object resource exhaustion. Raw-bytes-only decoding bounds v2.0.0 scope; structured decoding is isolated for a future P-style decision via Item 6.W.
+The 10 MiB cap is diff-specific (replay and inspect perform uncapped `get` today) and explicit fail-soft limits what diff retains and surfaces after load; peak allocation during `get` remains a substrate concern (Item 6.V). Raw-bytes-only decoding bounds v2.0.0 scope; structured decoding is isolated for a future P-style decision via Item 6.W.
 
 ## Lessons from Phase 5
 
