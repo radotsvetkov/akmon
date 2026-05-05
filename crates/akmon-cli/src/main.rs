@@ -2844,16 +2844,62 @@ fn run_redact(
     ExitCode::SUCCESS
 }
 
-fn run_replay(args: ReplayArgs) -> ExitCode {
-    let _mode: akmon_replay::ReplayMode = args.mode.into();
-    let _ = (
-        args.session_id,
-        args.journal,
+fn resolve_replay_persist_journal_dir(
+    persist: bool,
+    persist_to: Option<PathBuf>,
+    source_journal_dir: &Path,
+) -> Option<PathBuf> {
+    if !persist {
+        return None;
+    }
+    // Q1 resolution: when --persist is set without --persist-to, persist into source journal dir.
+    Some(persist_to.unwrap_or_else(|| source_journal_dir.to_path_buf()))
+}
+
+async fn run_replay_result(
+    args: ReplayArgs,
+) -> Result<akmon_replay::ReplayReportV1, akmon_replay::ReplayInfraError> {
+    let source_journal_dir = match args.journal {
+        Some(path) => path,
+        None => default_journal_dir().map_err(|err| akmon_replay::ReplayInfraError {
+            akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+            error: format!("cannot resolve default journal directory: {err}"),
+            category: "journal_not_found".to_owned(),
+            source_session_id: Some(args.session_id.to_string()),
+            missing_provider_id: None,
+            missing_tool_id: None,
+            missing_object_hash: None,
+        })?,
+    };
+    let persist_journal_dir = resolve_replay_persist_journal_dir(
         args.persist,
         args.persist_to,
-        args.format,
+        source_journal_dir.as_path(),
     );
-    unimplemented!("akmon replay handler — implemented in Item 5.3 layer 2")
+    let source = akmon_replay::load_source_session_from_journal(
+        source_journal_dir.as_path(),
+        args.session_id,
+    )
+    .map_err(|err| {
+        akmon_replay::ReplayInfraError::from_replay_error(&err, Some(args.session_id.to_string()))
+    })?;
+    let config = akmon_replay::ReplayEngineConfig {
+        mode: args.mode.into(),
+        persist: args.persist,
+        persist_journal_dir,
+    };
+    let engine = akmon_replay::ReplayEngine::new(source, config).map_err(|err| {
+        akmon_replay::ReplayInfraError::from_replay_error(&err, Some(args.session_id.to_string()))
+    })?;
+    engine.run_to_report().await.map_err(|err| {
+        akmon_replay::ReplayInfraError::from_replay_error(&err, Some(args.session_id.to_string()))
+    })
+}
+
+async fn run_replay(args: ReplayArgs) -> ExitCode {
+    let _format = args.format;
+    let _result = run_replay_result(args).await;
+    unimplemented!("output formatting — implemented in Item 5.3 layer 3")
 }
 
 fn parse_requested_redact_hashes(
@@ -5718,7 +5764,7 @@ async fn main() -> ExitCode {
             );
         }
         Some(Commands::Replay(args)) => {
-            return run_replay(args.clone());
+            return run_replay(args.clone()).await;
         }
         Some(Commands::Chat) | None => {}
     }
@@ -7049,6 +7095,30 @@ mod tests {
             rendered.contains("invalid value") || rendered.contains("possible values"),
             "unexpected clap error: {rendered}"
         );
+    }
+
+    #[test]
+    fn t_replay_persist_dir_resolution_defaults_to_source_journal() {
+        let source = Path::new("/tmp/source-journal");
+        let resolved = resolve_replay_persist_journal_dir(true, None, source);
+        assert_eq!(resolved, Some(PathBuf::from("/tmp/source-journal")));
+    }
+
+    #[test]
+    fn t_replay_persist_dir_resolution_prefers_explicit_target() {
+        let source = Path::new("/tmp/source-journal");
+        let resolved = resolve_replay_persist_journal_dir(
+            true,
+            Some(PathBuf::from("/tmp/replay-journal")),
+            source,
+        );
+        assert_eq!(resolved, Some(PathBuf::from("/tmp/replay-journal")));
+        let not_persisted = resolve_replay_persist_journal_dir(
+            false,
+            Some(PathBuf::from("/tmp/replay-journal")),
+            source,
+        );
+        assert_eq!(not_persisted, None);
     }
 
     #[test]
