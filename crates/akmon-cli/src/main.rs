@@ -37,8 +37,8 @@ use akmon_core::{
 };
 use akmon_journal::{
     AGEF_SPEC_VERSION, Event, EventKind, Hash, HashAlgorithm, MemoryObjectStore, ObjectStore,
-    SessionGraph, VerificationReport, digest_bytes, referenced_object_hashes_for_kind,
-    verify_linear_history_against_store,
+    RedbObjectStore, RedbSessionGraph, SessionGraph, VerificationReport, digest_bytes,
+    referenced_object_hashes_for_kind, verify_linear_history_against_store,
 };
 use akmon_models::{
     LlmConnectConfig, LlmProvider, Message, MessageRole, ProviderError, ProviderResolutionTrace,
@@ -383,6 +383,31 @@ struct BundleVerifyReportV1 {
     passed: bool,
     /// Collected violations (empty when `passed` is true).
     violations: Vec<BundleViolation>,
+}
+
+/// Machine-readable bundle import result (`akmon bundle import --format json`).
+#[derive(Debug, Serialize, Deserialize)]
+struct BundleImportReportV1 {
+    /// CLI crate version that produced this report.
+    akmon_version: String,
+    /// AGEF specification version declared by the bundle manifest.
+    agef_version: String,
+    /// Path to the bundle file that was imported.
+    bundle_path: String,
+    /// Session UUID from the bundle manifest before any rename.
+    original_session_id: String,
+    /// Session UUID written into the target journal (rename target or original).
+    imported_session_id: String,
+    /// Number of events imported from `events.bin`.
+    events_imported: u64,
+    /// Number of objects decoded from `objects/`.
+    objects_total: u64,
+    /// Number of objects newly written into the local store.
+    objects_new: u64,
+    /// Number of objects already present in the local store with matching bytes.
+    objects_existing: u64,
+    /// Resolved journal directory where import was written.
+    journal_path: String,
 }
 
 /// One bundle verification violation for JSON output.
@@ -1998,6 +2023,13 @@ fn print_bundle_verify_json_report(report: &BundleVerifyReportV1) -> std::io::Re
     Ok(())
 }
 
+fn print_bundle_import_json_report(report: &BundleImportReportV1) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(report).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
 fn bundle_violations_from_verification_report(report: &VerificationReport) -> Vec<BundleViolation> {
     let mut violations = Vec::new();
 
@@ -2237,14 +2269,399 @@ fn run_bundle_import(
             }
         }
 
-        // TODO(Layer 5b-3): Replace placeholder with ingest logic.
-        let msg = "bundle import without --verify-only is not implemented yet (Item 4.3 layer 5b-3); use --verify-only to validate a bundle";
-        if matches!(format, BundleImportFormat::Json) {
-            let _ = print_bundle_import_infra_json_error("not_implemented", msg.to_owned(), None);
-        } else {
-            eprintln!("akmon: bundle import: {msg}");
+        let algorithm = match contents.manifest.hash_algorithm.as_str() {
+            "sha256" => HashAlgorithm::Sha256,
+            "blake3" => HashAlgorithm::Blake3,
+            other => {
+                let msg = format!("unsupported hash algorithm in manifest: {other}");
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error(
+                        "unsupported_hash_algorithm",
+                        msg.clone(),
+                        None,
+                    );
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(1);
+            }
+        };
+
+        let mut violations: Vec<BundleViolation> = Vec::new();
+        if contents.manifest.event_count != contents.events.len() as u64 {
+            violations.push(BundleViolation {
+                category: "manifest_event_count_mismatch".to_owned(),
+                event_hash: None,
+                object_hash: None,
+                message: format!(
+                    "manifest event_count {} does not match decoded event list length {}",
+                    contents.manifest.event_count,
+                    contents.events.len()
+                ),
+            });
         }
-        return ExitCode::from(2);
+        if contents.manifest.object_count != contents.objects.len() as u64 {
+            violations.push(BundleViolation {
+                category: "manifest_object_count_mismatch".to_owned(),
+                event_hash: None,
+                object_hash: None,
+                message: format!(
+                    "manifest object_count {} does not match objects/ entry count {}",
+                    contents.manifest.object_count,
+                    contents.objects.len()
+                ),
+            });
+        }
+        let head_declared = match Hash::parse_hex(algorithm, &contents.manifest.session.head) {
+            Ok(h) => Some(h),
+            Err(err) => {
+                violations.push(BundleViolation {
+                    category: "invalid_manifest_head".to_owned(),
+                    event_hash: None,
+                    object_hash: None,
+                    message: format!(
+                        "manifest session.head is not a valid digest for {algorithm}: {err}"
+                    ),
+                });
+                None
+            }
+        };
+        let verify_store = Arc::new(MemoryObjectStore::new(algorithm));
+        for (hash, bytes) in &contents.objects {
+            let digest = digest_bytes(algorithm, bytes.as_slice());
+            if digest != *hash {
+                violations.push(BundleViolation {
+                    category: "object_key_hash_mismatch".to_owned(),
+                    event_hash: None,
+                    object_hash: Some(hash.to_hex()),
+                    message: "object bytes do not match object path digest".to_owned(),
+                });
+                continue;
+            }
+            if let Err(err) = verify_store.put(bytes.as_slice()) {
+                let msg = format!("object store insert failed during pre-import verify: {err}");
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error("io_error", msg.clone(), None);
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        }
+        let mut history: Vec<(Hash, Event)> = Vec::new();
+        for event in &contents.events {
+            match event.content_hash(algorithm) {
+                Ok(h) => history.push((h, event.clone())),
+                Err(err) => violations.push(BundleViolation {
+                    category: "event_content_hash".to_owned(),
+                    event_hash: None,
+                    object_hash: None,
+                    message: format!("event content hash failed: {err}"),
+                }),
+            }
+        }
+        let ran_graph_verify = history.len() == contents.events.len();
+        let graph_report = if ran_graph_verify {
+            match verify_linear_history_against_store(
+                &history,
+                head_declared,
+                verify_store.as_ref(),
+            ) {
+                Ok(r) => r,
+                Err(err) => {
+                    let msg = format!("bundle graph verification failed: {err}");
+                    if matches!(format, BundleImportFormat::Json) {
+                        let _ = print_bundle_import_infra_json_error(
+                            "verification_error",
+                            msg.clone(),
+                            None,
+                        );
+                    } else {
+                        eprintln!("akmon: bundle import: {msg}");
+                    }
+                    return ExitCode::from(1);
+                }
+            }
+        } else {
+            VerificationReport::default()
+        };
+        if ran_graph_verify {
+            violations.extend(bundle_violations_from_verification_report(&graph_report));
+        }
+        let preflight_passed =
+            violations.is_empty() && (!ran_graph_verify || graph_report.is_clean());
+        if !preflight_passed {
+            let report = build_bundle_verify_report_v1(&bundle, &contents, false, violations);
+            match format {
+                BundleImportFormat::Json => {
+                    if let Err(err) = print_bundle_verify_json_report(&report) {
+                        eprintln!("akmon: bundle import: failed to render JSON output: {err}");
+                        return ExitCode::from(3);
+                    }
+                }
+                BundleImportFormat::Human => {
+                    let bundle_disp = bundle_export_output_display(bundle.as_path());
+                    eprintln!("bundle verification failed: {bundle_disp}");
+                    eprintln!("  session_id: {}", contents.manifest.session.id);
+                    eprintln!("  events in bundle: {}", contents.events.len());
+                    eprintln!("  objects in bundle: {}", contents.objects.len());
+                    eprintln!();
+                    eprintln!("  violations:");
+                    for v in &report.violations {
+                        eprintln!("    - [{}] {}", v.category, v.message);
+                    }
+                }
+            }
+            return ExitCode::from(1);
+        }
+
+        if let Err(err) = std::fs::create_dir_all(journal_dir.as_path()) {
+            let msg = format!(
+                "cannot create journal directory {}: {err}",
+                journal_dir.display()
+            );
+            if matches!(format, BundleImportFormat::Json) {
+                let _ = print_bundle_import_infra_json_error("journal_access", msg.clone(), None);
+            } else {
+                eprintln!("akmon: bundle import: {msg}");
+            }
+            return ExitCode::from(3);
+        }
+        let journal_db = journal_dir.join("journal.redb");
+        let store = if journal_db.is_file() {
+            match RedbObjectStore::open(journal_db.as_path()) {
+                Ok(s) => Arc::new(s),
+                Err(err) => {
+                    let msg = format!("cannot open journal store {}: {err}", journal_db.display());
+                    if matches!(format, BundleImportFormat::Json) {
+                        let _ = print_bundle_import_infra_json_error(
+                            "journal_access",
+                            msg.clone(),
+                            None,
+                        );
+                    } else {
+                        eprintln!("akmon: bundle import: {msg}");
+                    }
+                    return ExitCode::from(3);
+                }
+            }
+        } else {
+            match RedbObjectStore::create(journal_db.as_path(), algorithm) {
+                Ok(s) => Arc::new(s),
+                Err(err) => {
+                    let msg = format!(
+                        "cannot create journal store {}: {err}",
+                        journal_db.display()
+                    );
+                    if matches!(format, BundleImportFormat::Json) {
+                        let _ = print_bundle_import_infra_json_error(
+                            "journal_access",
+                            msg.clone(),
+                            None,
+                        );
+                    } else {
+                        eprintln!("akmon: bundle import: {msg}");
+                    }
+                    return ExitCode::from(3);
+                }
+            }
+        };
+
+        let mut objects_new: u64 = 0;
+        let mut objects_existing: u64 = 0;
+        for (hash, bytes) in &contents.objects {
+            match store.contains(hash) {
+                Ok(true) => {
+                    let existing = match store.get(hash) {
+                        Ok(Some(b)) => b,
+                        Ok(None) => {
+                            let msg = format!(
+                                "local store returned contains=true but missing object {}",
+                                hash.to_hex()
+                            );
+                            if matches!(format, BundleImportFormat::Json) {
+                                let _ = print_bundle_import_infra_json_error(
+                                    "local_store_corrupt",
+                                    msg.clone(),
+                                    None,
+                                );
+                            } else {
+                                eprintln!("akmon: bundle import: {msg}");
+                            }
+                            return ExitCode::from(3);
+                        }
+                        Err(err) => {
+                            let msg =
+                                format!("cannot read existing object {}: {err}", hash.to_hex());
+                            if matches!(format, BundleImportFormat::Json) {
+                                let _ = print_bundle_import_infra_json_error(
+                                    "journal_access",
+                                    msg.clone(),
+                                    None,
+                                );
+                            } else {
+                                eprintln!("akmon: bundle import: {msg}");
+                            }
+                            return ExitCode::from(3);
+                        }
+                    };
+                    if existing.as_ref() != bytes.as_slice() {
+                        let msg = format!(
+                            "local object bytes mismatch for hash {}; refusing import (local_store_corrupt)",
+                            hash.to_hex()
+                        );
+                        if matches!(format, BundleImportFormat::Json) {
+                            let _ = print_bundle_import_infra_json_error(
+                                "local_store_corrupt",
+                                msg.clone(),
+                                None,
+                            );
+                        } else {
+                            eprintln!("akmon: bundle import: {msg}");
+                        }
+                        return ExitCode::from(3);
+                    }
+                    objects_existing += 1;
+                }
+                Ok(false) => {
+                    if let Err(err) = store.put(bytes.as_slice()) {
+                        let msg = format!("cannot write object {}: {err}", hash.to_hex());
+                        if matches!(format, BundleImportFormat::Json) {
+                            let _ = print_bundle_import_infra_json_error(
+                                "journal_access",
+                                msg.clone(),
+                                None,
+                            );
+                        } else {
+                            eprintln!("akmon: bundle import: {msg}");
+                        }
+                        return ExitCode::from(3);
+                    }
+                    objects_new += 1;
+                }
+                Err(err) => {
+                    let msg = format!("cannot probe existing object {}: {err}", hash.to_hex());
+                    if matches!(format, BundleImportFormat::Json) {
+                        let _ = print_bundle_import_infra_json_error(
+                            "journal_access",
+                            msg.clone(),
+                            None,
+                        );
+                    } else {
+                        eprintln!("akmon: bundle import: {msg}");
+                    }
+                    return ExitCode::from(3);
+                }
+            }
+        }
+        // NOTE(Item 4.3 layer 5b-3): object staging and graph import are intentionally not a
+        // single transaction. Failures can leave orphan objects, which are content-addressed and
+        // harmless; a future GC command may reclaim them.
+
+        let mut graph = match RedbSessionGraph::open_new(Arc::clone(&store), target_session_id) {
+            Ok(g) => g,
+            Err(err) => {
+                let msg = format!("cannot open target session {}: {err}", target_session_id);
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error(
+                        "session_open_failed",
+                        msg.clone(),
+                        None,
+                    );
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        };
+        if let Err(err) = graph.import_verified_linear_history(&history) {
+            let msg = format!(
+                "cannot import event history for session {}: {err}",
+                target_session_id
+            );
+            if matches!(format, BundleImportFormat::Json) {
+                let _ = print_bundle_import_infra_json_error("import_failed", msg.clone(), None);
+            } else {
+                eprintln!("akmon: bundle import: {msg}");
+            }
+            return ExitCode::from(3);
+        }
+
+        let post = match graph.verify() {
+            Ok(r) => r,
+            Err(err) => {
+                let msg = format!(
+                    "post-import verification errored for session {}: {err}; manual cleanup may be required",
+                    target_session_id
+                );
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error(
+                        "post_import_verify_failed",
+                        msg.clone(),
+                        Some(target_session_id),
+                    );
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        };
+        if !post.is_clean() {
+            let msg = format!(
+                "post-import verification failed for session {}; journal may contain a broken imported session and may require manual cleanup",
+                target_session_id
+            );
+            if matches!(format, BundleImportFormat::Json) {
+                let _ = print_bundle_import_infra_json_error(
+                    "post_import_verify_failed",
+                    msg.clone(),
+                    Some(target_session_id),
+                );
+            } else {
+                eprintln!("akmon: bundle import: {msg}");
+            }
+            return ExitCode::from(3);
+        }
+
+        let report = BundleImportReportV1 {
+            akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+            agef_version: contents.manifest.agef_version.clone(),
+            bundle_path: bundle_export_output_display(bundle.as_path()),
+            original_session_id: contents.manifest.session.id.clone(),
+            imported_session_id: target_session_id.as_hyphenated().to_string(),
+            events_imported: contents.events.len() as u64,
+            objects_total: contents.objects.len() as u64,
+            objects_new,
+            objects_existing,
+            journal_path: bundle_export_output_display(journal_dir.as_path()),
+        };
+        match format {
+            BundleImportFormat::Json => {
+                if let Err(err) = print_bundle_import_json_report(&report) {
+                    eprintln!("akmon: bundle import: failed to render JSON output: {err}");
+                    return ExitCode::from(3);
+                }
+            }
+            BundleImportFormat::Human => {
+                eprintln!("imported bundle: {}", report.bundle_path);
+                eprintln!("  original session: {}", report.original_session_id);
+                if report.original_session_id == report.imported_session_id {
+                    eprintln!(
+                        "  imported as: {} (same as original)",
+                        report.imported_session_id
+                    );
+                } else {
+                    eprintln!("  imported as: {} (renamed)", report.imported_session_id);
+                }
+                eprintln!("  events: {}", report.events_imported);
+                eprintln!(
+                    "  objects: {} ({} new, {} existing in store)",
+                    report.objects_total, report.objects_new, report.objects_existing
+                );
+                eprintln!("  target journal: {}", report.journal_path);
+            }
+        }
+        return ExitCode::SUCCESS;
     }
 
     let mut file = match std::fs::File::open(&bundle) {
