@@ -3,7 +3,10 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use akmon_diff::{DiffDivergenceKind, DiffEngine, DiffError, load_source_session_from_journal};
+use akmon_diff::{
+    DiffDivergenceKind, DiffEngine, DiffError, load_source_session_from_journal,
+    load_two_source_sessions_from_journal,
+};
 use akmon_journal::{
     AttemptRecord, AttemptStatus, EventKind, Hash, HashAlgorithm, ObjectStore, RedbObjectStore,
     RedbSessionGraph, SessionGraph,
@@ -207,6 +210,49 @@ fn t_diff_full_session_via_real_journal() {
     assert!(report.matches, "{report:?}");
     assert!(report.divergences.is_empty());
     assert!(report.structural_break.is_none());
+}
+
+#[test]
+fn t_diff_two_sessions_one_journal_shared_store_load() {
+    let tmp = tempdir().expect("tempdir");
+    let sid_a = Uuid::new_v4();
+    let sid_b = Uuid::new_v4();
+    write_minimal_three_event_session_with_prompt(tmp.path(), sid_a, b"hello");
+    {
+        let store = Arc::new(
+            RedbObjectStore::open(journal_db_path(tmp.path()).as_path()).expect("open store"),
+        );
+        let mut graph = RedbSessionGraph::open_new(Arc::clone(&store), sid_b).expect("graph b");
+        let cwd = put(store.as_ref(), b"/tmp");
+        let cfg = put(store.as_ref(), b"cfg");
+        let prompt_hash = put(store.as_ref(), b"hello");
+        let summary = put(store.as_ref(), b"done");
+        graph
+            .append(EventKind::SessionStart {
+                cwd_hash: cwd,
+                config_hash: cfg,
+            })
+            .expect("SessionStart");
+        graph
+            .append(EventKind::UserTurn { prompt_hash })
+            .expect("UserTurn");
+        graph
+            .append(EventKind::SessionEnd {
+                summary_hash: Some(summary),
+            })
+            .expect("SessionEnd");
+    }
+
+    let (source_a, source_b) =
+        load_two_source_sessions_from_journal(tmp.path(), sid_a, sid_b).expect("pair");
+    assert_eq!(source_a.session_id(), sid_a);
+    assert_eq!(source_b.session_id(), sid_b);
+    assert!(Arc::ptr_eq(source_a.store(), source_b.store()));
+    let report = DiffEngine::new(source_a, source_b)
+        .expect("engine")
+        .run_to_report()
+        .expect("report");
+    assert!(report.matches, "{report:?}");
 }
 
 #[test]

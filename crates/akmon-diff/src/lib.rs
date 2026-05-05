@@ -16,7 +16,10 @@ pub use comparison::{
     compare_tool_call, compare_user_turn,
 };
 pub use divergence::{DiffDivergence, DiffDivergenceKind, ResolvedContent};
-pub use engine::{DiffEngine, SourceSession, load_source_session_from_journal};
+pub use engine::{
+    DiffEngine, RedbSourceSessionPair, SourceSession, load_source_session_from_journal,
+    load_two_source_sessions_from_journal,
+};
 pub use error::DiffError;
 pub use mode::DiffMode;
 pub use report::DiffReportV1;

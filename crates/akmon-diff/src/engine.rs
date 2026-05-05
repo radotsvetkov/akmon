@@ -5,7 +5,7 @@ use akmon_journal::{
     Event, EventKind, Hash, ObjectStore, RedbObjectStore, RedbSessionGraph, SessionGraph,
     referenced_object_hashes_for_kind,
 };
-use akmon_query::{journal_contains_session, open_journal_read_only};
+use akmon_query::{journal_contains_session, journal_db_path, open_journal_read_only};
 use uuid::Uuid;
 
 use crate::resolve::ResolveContext;
@@ -100,6 +100,81 @@ pub fn load_source_session_from_journal(
         Arc::clone(&handle.store),
         Arc::clone(&handle.graph),
         history,
+    ))
+}
+
+fn source_session_load_failed(
+    session_id: Uuid,
+    source: impl std::error::Error + Send + Sync + 'static,
+) -> DiffError {
+    DiffError::SourceSessionLoadFailed {
+        session_id: session_id.to_string(),
+        source: Box::new(source),
+    }
+}
+
+/// Two [`SourceSession`] values backed by the on-disk redb journal (pairwise diff loading).
+pub type RedbSourceSessionPair = (
+    SourceSession<RedbObjectStore, RedbSessionGraph>,
+    SourceSession<RedbObjectStore, RedbSessionGraph>,
+);
+
+/// Loads two source sessions from the same journal directory with a single `journal.redb` open.
+///
+/// Redb allows only **one** live [`RedbObjectStore`] handle per database file in a process.
+/// Calling [`load_source_session_from_journal`] twice for the same `journal_dir` while the first
+/// [`SourceSession`] is still alive attempts a second `open` and fails with a lock error (e.g.
+/// "Database already open"). CLI `akmon diff` compares two UUIDs under one `--journal`, so it must
+/// use this function (or equivalent) instead of two independent loads.
+///
+/// A `JournalReader`-style API (open once, then `load_session` for *N* UUIDs) is deferred until a
+/// third in-process caller needs multi-session access; today only pairwise diff requires it.
+pub fn load_two_source_sessions_from_journal(
+    journal_dir: &Path,
+    session_a_id: Uuid,
+    session_b_id: Uuid,
+) -> Result<RedbSourceSessionPair, DiffError> {
+    for sid in [session_a_id, session_b_id] {
+        let exists = journal_contains_session(journal_dir, sid).map_err(|err| {
+            DiffError::StoreAccessFailed {
+                source: Box::new(std::io::Error::other(err.to_string())),
+            }
+        })?;
+        if !exists {
+            return Err(DiffError::SourceSessionMissing {
+                session_id: sid.to_string(),
+            });
+        }
+    }
+    let db_path = journal_db_path(journal_dir);
+    let store = Arc::new(RedbObjectStore::open(db_path.as_path()).map_err(|e| {
+        DiffError::StoreAccessFailed {
+            source: Box::new(std::io::Error::other(e.to_string())),
+        }
+    })?);
+    let graph_a = Arc::new(Mutex::new(
+        RedbSessionGraph::reopen(Arc::clone(&store), session_a_id)
+            .map_err(|e| source_session_load_failed(session_a_id, e))?,
+    ));
+    let history_a = {
+        let guard = graph_a.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .history()
+            .map_err(|e| source_session_load_failed(session_a_id, e))?
+    };
+    let graph_b = Arc::new(Mutex::new(
+        RedbSessionGraph::reopen(Arc::clone(&store), session_b_id)
+            .map_err(|e| source_session_load_failed(session_b_id, e))?,
+    ));
+    let history_b = {
+        let guard = graph_b.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .history()
+            .map_err(|e| source_session_load_failed(session_b_id, e))?
+    };
+    Ok((
+        SourceSession::new(session_a_id, Arc::clone(&store), graph_a, history_a),
+        SourceSession::new(session_b_id, store, graph_b, history_b),
     ))
 }
 

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use akmon_diff::{DiffEngine, DiffError, DiffReportV1, load_source_session_from_journal};
+use akmon_diff::{DiffEngine, DiffError, DiffReportV1, load_two_source_sessions_from_journal};
 use akmon_query::default_journal_dir;
 use clap::{Args, ValueEnum};
 use uuid::Uuid;
@@ -153,8 +153,8 @@ fn print_diff_report(report: &DiffReportV1, format: DiffFormat) -> std::io::Resu
 }
 
 fn run_diff_engine(journal_dir: &Path, args: &DiffArgs) -> Result<DiffReportV1, DiffError> {
-    let source_a = load_source_session_from_journal(journal_dir, args.session_a)?;
-    let source_b = load_source_session_from_journal(journal_dir, args.session_b)?;
+    let (source_a, source_b) =
+        load_two_source_sessions_from_journal(journal_dir, args.session_a, args.session_b)?;
     let engine = DiffEngine::new(source_a, source_b)?;
     if args.resolve {
         engine.run_with_resolve_to_report()
