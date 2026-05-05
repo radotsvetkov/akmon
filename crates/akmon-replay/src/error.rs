@@ -52,4 +52,22 @@ pub enum ReplayError {
         /// Error detail.
         reason: String,
     },
+    /// Replay engine currently expects one provider for one replay run.
+    #[error("replay provider multiplicity unsupported (count={count})")]
+    UnsupportedProviderMultiplicity {
+        /// Number of providers discovered in source session.
+        count: usize,
+    },
+    /// Replay engine failed while driving AgentSession for one source user turn.
+    #[error("replay session run failed: {reason}")]
+    SessionRunFailed {
+        /// Failure detail.
+        reason: String,
+    },
+    /// Replay session history is malformed after orchestration.
+    #[error("replay session malformed: {reason}")]
+    ReplaySessionMalformed {
+        /// Validation detail.
+        reason: String,
+    },
 }

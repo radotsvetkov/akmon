@@ -2,12 +2,19 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use akmon_core::AgentConfig;
-use akmon_journal::{
-    Event, EventKind, Hash, ObjectStore, RedbObjectStore, RedbSessionGraph, SessionGraph,
-    referenced_object_hashes_for_kind,
+use akmon_core::{
+    AgentConfig, AgentEvent, InteractivePolicyReply, PolicyEngine, PolicyEngineMode, Sandbox,
 };
-use akmon_query::open_journal_read_only;
+use akmon_journal::{
+    Event, EventKind, Hash, HashAlgorithm, MemoryObjectStore, MemorySessionGraph, ObjectStore,
+    RedbObjectStore, RedbSessionGraph, SessionGraph, referenced_object_hashes_for_kind,
+};
+use akmon_models::LlmProvider;
+use akmon_query::{
+    AgentSession, JournalHandle, open_default_journal_handle, open_journal_read_only,
+};
+use akmon_tools::Tool;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::{
@@ -27,6 +34,7 @@ where
     provider_playbacks: HashMap<String, Arc<PlaybackProvider<S>>>,
     tool_playbacks: HashMap<String, Arc<PlaybackTool<S>>>,
     replay_agent_config: AgentConfig,
+    source_index: SourceIndex,
 }
 
 /// Replay engine configuration.
@@ -93,16 +101,30 @@ where
 
 #[derive(Debug, Clone)]
 struct SourceIndex {
-    provider_ids: BTreeSet<String>,
-    tool_ids: BTreeSet<String>,
     user_prompts: Vec<String>,
-    source_head: Hash,
     source_config_hash: Hash,
 }
 
 type PlaybackProviderMap<S> = HashMap<String, Arc<PlaybackProvider<S>>>;
 type PlaybackToolMap<S> = HashMap<String, Arc<PlaybackTool<S>>>;
 type BuildPlaybackMapsOutput<S> = (PlaybackProviderMap<S>, PlaybackToolMap<S>, SourceIndex);
+
+/// Layer-2 replay execution output used as Layer-3 comparison input.
+#[derive(Debug)]
+pub struct ReplayRunOutput {
+    /// Source session id used as replay input.
+    pub source_session_id: Uuid,
+    /// Replay session id generated for this replay run.
+    pub replay_session_id: Uuid,
+    /// Effective replay mode.
+    pub mode: ReplayMode,
+    /// Source event history loaded for replay.
+    pub source_history: Vec<(Hash, Event)>,
+    /// Replay event history emitted by replay AgentSession.
+    pub replay_history: Vec<(Hash, Event)>,
+    /// Runtime divergences recorded by replay primitives.
+    pub divergences: Vec<crate::ReplayDivergence>,
+}
 
 /// Load a source session from an on-disk journal directory.
 ///
@@ -155,12 +177,6 @@ where
             config.mode,
             Arc::clone(&divergences),
         )?;
-        let _ = (
-            &index.provider_ids,
-            &index.tool_ids,
-            &index.user_prompts,
-            &index.source_head,
-        );
         let replay_agent_config =
             reconstruct_agent_config_from_source(source.store.as_ref(), &index.source_config_hash)?;
         Ok(Self {
@@ -170,6 +186,7 @@ where
             provider_playbacks,
             tool_playbacks,
             replay_agent_config,
+            source_index: index,
         })
     }
 
@@ -257,6 +274,169 @@ where
     pub fn replay_agent_config(&self) -> &AgentConfig {
         &self.replay_agent_config
     }
+
+    /// Runs source user turns against playback primitives and captures replay history.
+    pub async fn drive_replay(self) -> Result<ReplayRunOutput, ReplayError> {
+        let provider = self.select_single_provider()?;
+        let tools = self.replay_tools();
+        let mut replay_config = self.replay_agent_config.clone();
+        let replay_session_id = Uuid::new_v4();
+        replay_config.session_id = replay_session_id;
+
+        let replay_history = if self.config.persist {
+            let journal = open_default_journal_handle(replay_session_id).map_err(|err| {
+                ReplayError::SessionRunFailed {
+                    reason: format!("open persist journal: {err}"),
+                }
+            })?;
+            self.drive_with_journal(
+                replay_config,
+                provider,
+                tools,
+                journal,
+                replay_session_id,
+                Arc::new(Sandbox::new(std::env::current_dir().map_err(|err| {
+                    ReplayError::SessionRunFailed {
+                        reason: format!("resolve current_dir: {err}"),
+                    }
+                })?)),
+            )
+            .await?
+        } else {
+            let replay_store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+            let replay_graph = Arc::new(Mutex::new(MemorySessionGraph::open_new(
+                Arc::clone(&replay_store),
+                replay_session_id,
+            )));
+            let journal = JournalHandle::new(replay_store, replay_graph);
+            self.drive_with_journal(
+                replay_config,
+                provider,
+                tools,
+                journal,
+                replay_session_id,
+                Arc::new(Sandbox::new(std::env::current_dir().map_err(|err| {
+                    ReplayError::SessionRunFailed {
+                        reason: format!("resolve current_dir: {err}"),
+                    }
+                })?)),
+            )
+            .await?
+        };
+
+        let divergences = self
+            .divergences
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        Ok(ReplayRunOutput {
+            source_session_id: self.source.session_id(),
+            replay_session_id,
+            mode: self.config.mode,
+            source_history: self.source.history().to_vec(),
+            replay_history,
+            divergences,
+        })
+    }
+
+    fn select_single_provider(&self) -> Result<Arc<dyn LlmProvider>, ReplayError> {
+        match self.provider_playbacks.len() {
+            1 => {
+                let provider = self
+                    .provider_playbacks
+                    .values()
+                    .next()
+                    .cloned()
+                    .ok_or(ReplayError::UnsupportedProviderMultiplicity { count: 0 })?;
+                Ok(provider)
+            }
+            n => Err(ReplayError::UnsupportedProviderMultiplicity { count: n }),
+        }
+    }
+
+    fn replay_tools(&self) -> Vec<Box<dyn Tool>> {
+        self.tool_playbacks
+            .values()
+            .map(|tool| {
+                let dyn_tool: Arc<dyn Tool> = tool.clone();
+                Box::new(dyn_tool) as Box<dyn Tool>
+            })
+            .collect()
+    }
+
+    async fn drive_with_journal<RS, RG>(
+        &self,
+        replay_config: AgentConfig,
+        provider: Arc<dyn LlmProvider>,
+        tools: Vec<Box<dyn Tool>>,
+        journal: JournalHandle<RS, RG>,
+        replay_session_id: Uuid,
+        sandbox: Arc<Sandbox>,
+    ) -> Result<Vec<(Hash, Event)>, ReplayError>
+    where
+        RS: ObjectStore + Send + Sync + 'static,
+        RG: SessionGraph + Send + 'static,
+    {
+        let policy = Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll));
+        let replay_graph = Arc::clone(&journal.graph);
+        let mut session = AgentSession::new(
+            replay_config,
+            policy,
+            provider,
+            tools,
+            sandbox,
+            None,
+            false,
+            journal,
+        )
+        .map_err(|err| ReplayError::SessionRunFailed {
+            reason: format!("create replay session: {err}"),
+        })?;
+        let (event_tx, _event_rx): (mpsc::Sender<AgentEvent>, mpsc::Receiver<AgentEvent>) =
+            mpsc::channel(32);
+        let mut interactive_policy_rx: Option<mpsc::Receiver<InteractivePolicyReply>> = None;
+        let mut question_answer_rx: Option<mpsc::Receiver<String>> = None;
+        for prompt in &self.source_index.user_prompts {
+            session
+                .run(
+                    prompt.clone(),
+                    event_tx.clone(),
+                    &mut interactive_policy_rx,
+                    &mut question_answer_rx,
+                    None,
+                )
+                .await
+                .map_err(|err| ReplayError::SessionRunFailed {
+                    reason: format!("run replay user turn: {err}"),
+                })?;
+        }
+        session
+            .end(None)
+            .map_err(|err| ReplayError::SessionRunFailed {
+                reason: format!("end replay session: {err}"),
+            })?;
+        if session.session_id() != replay_session_id {
+            return Err(ReplayError::ReplaySessionMalformed {
+                reason: "replay session id mismatch".to_owned(),
+            });
+        }
+        drop(session);
+        let guard = replay_graph.lock().unwrap_or_else(|p| p.into_inner());
+        let history = guard
+            .history()
+            .map_err(|err| ReplayError::SessionRunFailed {
+                reason: format!("read replay history: {err}"),
+            })?;
+        if !matches!(
+            history.last().map(|(_, e)| &e.kind),
+            Some(EventKind::SessionEnd { .. })
+        ) {
+            return Err(ReplayError::ReplaySessionMalformed {
+                reason: "replay history missing terminal SessionEnd".to_owned(),
+            });
+        }
+        Ok(history)
+    }
 }
 
 fn build_playback_maps<S: ObjectStore + Send + Sync + 'static>(
@@ -301,10 +481,6 @@ fn build_playback_maps<S: ObjectStore + Send + Sync + 'static>(
             _ => {}
         }
     }
-    let source_head = history
-        .last()
-        .map(|(h, _)| h.clone())
-        .ok_or(ReplayError::EmptySource)?;
     let source_config_hash =
         source_config_hash.ok_or_else(|| ReplayError::MalformedSourceEvent {
             event_seq: 0,
@@ -359,10 +535,7 @@ fn build_playback_maps<S: ObjectStore + Send + Sync + 'static>(
         provider_playbacks,
         tool_playbacks,
         SourceIndex {
-            provider_ids,
-            tool_ids,
             user_prompts,
-            source_head,
             source_config_hash,
         },
     ))
@@ -414,19 +587,59 @@ mod tests {
         }
     }
 
+    fn request_hash(store: &MemoryObjectStore) -> Hash {
+        let payload = serde_json::json!({
+            "provider_id":"p1",
+            "messages":[],
+            "config":{
+                "max_tokens":1000_u32,
+                "session_id":Uuid::nil(),
+                "temperature":0.0_f32,
+                "first_token_deadline_ms":10000_u64,
+                "stream":true,
+                "tools":[]
+            }
+        });
+        put_cbor(store, &payload)
+    }
+
+    fn response_hash_text(store: &MemoryObjectStore, text: &str) -> Hash {
+        put_cbor(
+            store,
+            &serde_json::json!({
+                "text":text,
+                "tool_calls":[],
+                "stop_reason":"end_turn"
+            }),
+        )
+    }
+
+    fn response_hash_tool_use(
+        store: &MemoryObjectStore,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Hash {
+        put_cbor(
+            store,
+            &serde_json::json!({
+                "text":"",
+                "tool_calls":[{
+                    "id":"call_1",
+                    "name":tool_name,
+                    "arguments":args
+                }],
+                "stop_reason":"tool_use"
+            }),
+        )
+    }
+
     fn valid_history(store: &MemoryObjectStore) -> Vec<(Hash, Event)> {
         let cfg = AgentConfig::default();
         let config_hash = put_cbor(store, &cfg);
         let cwd_hash = put_bytes(store, b"/tmp/replay");
         let prompt_hash = put_bytes(store, b"hello");
-        let req_hash = put_cbor(
-            store,
-            &serde_json::json!({"provider_id":"p1","messages":[],"config":{}}),
-        );
-        let rsp_hash = put_cbor(
-            store,
-            &serde_json::json!({"text":"ok","tool_calls":[],"stop_reason":"end_turn"}),
-        );
+        let req_hash = request_hash(store);
+        let rsp_hash = response_hash_text(store, "ok");
         let tool_in = put_cbor(store, &serde_json::json!({"x":1}));
         let tool_out = put_cbor(
             store,
@@ -482,6 +695,84 @@ mod tests {
         };
         let h4 = e4.content_hash(store.algorithm()).expect("hash4");
         vec![(h0, e0), (h1, e1), (h2, e2), (h3, e3), (h4, e4)]
+    }
+
+    fn tool_flow_history(store: &MemoryObjectStore) -> Vec<(Hash, Event)> {
+        let cfg = AgentConfig::default();
+        let config_hash = put_cbor(store, &cfg);
+        let cwd_hash = put_bytes(store, b"/tmp/replay");
+        let prompt_hash = put_bytes(store, b"use a tool");
+        let req1_hash = request_hash(store);
+        let req2_hash = request_hash(store);
+        let tool_input_hash = put_cbor(store, &serde_json::json!({"path":"Cargo.toml"}));
+        let tool_output_hash = put_cbor(
+            store,
+            &akmon_tools::ToolOutput::Success {
+                content: "tool output".to_owned(),
+            },
+        );
+        let rsp1_hash =
+            response_hash_tool_use(store, "t1", serde_json::json!({"path":"Cargo.toml"}));
+        let rsp2_hash = response_hash_text(store, "done");
+        let e0 = Event {
+            parents: vec![],
+            kind: EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 0,
+        };
+        let h0 = e0.content_hash(store.algorithm()).expect("hash0");
+        let e1 = Event {
+            parents: vec![h0.clone()],
+            kind: EventKind::UserTurn { prompt_hash },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 1,
+        };
+        let h1 = e1.content_hash(store.algorithm()).expect("hash1");
+        let e2 = Event {
+            parents: vec![h1.clone()],
+            kind: EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![sample_attempt(req1_hash, Some(rsp1_hash))],
+                stream_hash: None,
+            },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 2,
+        };
+        let h2 = e2.content_hash(store.algorithm()).expect("hash2");
+        let e3 = Event {
+            parents: vec![h2.clone()],
+            kind: EventKind::ToolCall {
+                tool_id: "t1".to_owned(),
+                input_hash: tool_input_hash,
+                output_hash: tool_output_hash,
+                side_effects_hash: None,
+            },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 3,
+        };
+        let h3 = e3.content_hash(store.algorithm()).expect("hash3");
+        let e4 = Event {
+            parents: vec![h3.clone()],
+            kind: EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![sample_attempt(req2_hash, Some(rsp2_hash))],
+                stream_hash: None,
+            },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 4,
+        };
+        let h4 = e4.content_hash(store.algorithm()).expect("hash4");
+        let e5 = Event {
+            parents: vec![h4.clone()],
+            kind: EventKind::SessionEnd { summary_hash: None },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 5,
+        };
+        let h5 = e5.content_hash(store.algorithm()).expect("hash5");
+        vec![(h0, e0), (h1, e1), (h2, e2), (h3, e3), (h4, e4), (h5, e5)]
     }
 
     fn source_session() -> SourceSession<MemoryObjectStore, akmon_journal::MemorySessionGraph> {
@@ -551,5 +842,213 @@ mod tests {
         let cfg_hash = put_bytes(&store, b"not-cbor");
         let err = reconstruct_agent_config_from_source(&store, &cfg_hash).expect_err("must fail");
         assert!(matches!(err, ReplayError::MalformedSourceConfig { .. }));
+    }
+
+    #[tokio::test]
+    async fn t_drive_replay_clean_session_completes() {
+        let source = source_session();
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+            },
+        )
+        .expect("engine");
+        let out = engine.drive_replay().await.expect("drive");
+        assert!(!out.replay_history.is_empty());
+        assert!(matches!(
+            out.replay_history.last().map(|(_, e)| &e.kind),
+            Some(EventKind::SessionEnd { .. })
+        ));
+        assert_eq!(out.mode, ReplayMode::Default);
+    }
+
+    #[tokio::test]
+    async fn t_drive_replay_captures_provider_responses() {
+        let source = source_session();
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+            },
+        )
+        .expect("engine");
+        let out = engine.drive_replay().await.expect("drive");
+        let provider_calls = out
+            .replay_history
+            .iter()
+            .filter(|(_, e)| matches!(e.kind, EventKind::ProviderCall { .. }))
+            .count();
+        assert!(provider_calls >= 1);
+    }
+
+    #[tokio::test]
+    async fn t_drive_replay_captures_tool_outputs() {
+        let store = MemoryObjectStore::new(HashAlgorithm::Sha256);
+        let history = tool_flow_history(&store);
+        let source = SourceSession::new(
+            Uuid::new_v4(),
+            Arc::new(store),
+            Arc::new(Mutex::new(akmon_journal::MemorySessionGraph::open_new(
+                Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256)),
+                Uuid::new_v4(),
+            ))),
+            history,
+        );
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+            },
+        )
+        .expect("engine");
+        let out = engine.drive_replay().await.expect("drive");
+        assert!(
+            out.replay_history
+                .iter()
+                .any(|(_, e)| matches!(e.kind, EventKind::ToolCall { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn t_drive_replay_records_divergences_on_unexpected_calls() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cfg_hash = put_cbor(store.as_ref(), &AgentConfig::default());
+        let cwd_hash = put_bytes(store.as_ref(), b"/tmp/replay");
+        let prompt_hash = put_bytes(store.as_ref(), b"hello");
+        let req_hash = request_hash(store.as_ref());
+        let rsp_hash = response_hash_tool_use(store.as_ref(), "t1", serde_json::json!({"x":1}));
+        let tool_in = put_cbor(store.as_ref(), &serde_json::json!({"x":1}));
+        let tool_out = put_cbor(
+            store.as_ref(),
+            &akmon_tools::ToolOutput::Success {
+                content: "ok".to_owned(),
+            },
+        );
+        let e0 = Event {
+            parents: vec![],
+            kind: EventKind::SessionStart {
+                cwd_hash,
+                config_hash: cfg_hash,
+            },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 0,
+        };
+        let h0 = e0.content_hash(store.algorithm()).expect("h0");
+        let e1 = Event {
+            parents: vec![h0.clone()],
+            kind: EventKind::UserTurn { prompt_hash },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 1,
+        };
+        let h1 = e1.content_hash(store.algorithm()).expect("h1");
+        let e2 = Event {
+            parents: vec![h1.clone()],
+            kind: EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![sample_attempt(req_hash, Some(rsp_hash))],
+                stream_hash: None,
+            },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 2,
+        };
+        let h2 = e2.content_hash(store.algorithm()).expect("h2");
+        let e3 = Event {
+            parents: vec![h2.clone()],
+            kind: EventKind::ToolCall {
+                tool_id: "t1".to_owned(),
+                input_hash: tool_in,
+                output_hash: tool_out,
+                side_effects_hash: None,
+            },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 3,
+        };
+        let h3 = e3.content_hash(store.algorithm()).expect("h3");
+        let e4 = Event {
+            parents: vec![h3.clone()],
+            kind: EventKind::SessionEnd { summary_hash: None },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 4,
+        };
+        let h4 = e4.content_hash(store.algorithm()).expect("h4");
+        let history = vec![(h0, e0), (h1, e1), (h2, e2), (h3, e3), (h4, e4)];
+        let graph = Arc::new(Mutex::new(akmon_journal::MemorySessionGraph::open_new(
+            Arc::clone(&store),
+            Uuid::new_v4(),
+        )));
+        let source = SourceSession::new(Uuid::new_v4(), store, graph, history);
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+            },
+        )
+        .expect("engine");
+        let out = engine.drive_replay().await.expect("drive");
+        assert!(
+            out.divergences
+                .iter()
+                .any(|d| { matches!(d.kind, crate::ReplayDivergenceKind::ProviderCallUnexpected) })
+        );
+    }
+
+    #[tokio::test]
+    async fn t_drive_replay_handles_replay_errors_gracefully() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cfg_hash = put_cbor(store.as_ref(), &AgentConfig::default());
+        let cwd_hash = put_bytes(store.as_ref(), b"/tmp/replay");
+        let prompt_hash = put_bytes(store.as_ref(), b"hello");
+        let e0 = Event {
+            parents: vec![],
+            kind: EventKind::SessionStart {
+                cwd_hash,
+                config_hash: cfg_hash,
+            },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 0,
+        };
+        let h0 = e0.content_hash(store.algorithm()).expect("h0");
+        let e1 = Event {
+            parents: vec![h0.clone()],
+            kind: EventKind::UserTurn { prompt_hash },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 1,
+        };
+        let h1 = e1.content_hash(store.algorithm()).expect("h1");
+        let e2 = Event {
+            parents: vec![h1.clone()],
+            kind: EventKind::SessionEnd { summary_hash: None },
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence: 2,
+        };
+        let h2 = e2.content_hash(store.algorithm()).expect("h2");
+        let graph = Arc::new(Mutex::new(akmon_journal::MemorySessionGraph::open_new(
+            Arc::clone(&store),
+            Uuid::new_v4(),
+        )));
+        let source = SourceSession::new(
+            Uuid::new_v4(),
+            store,
+            graph,
+            vec![(h0, e0), (h1, e1), (h2, e2)],
+        );
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+            },
+        )
+        .expect("engine");
+        let err = engine.drive_replay().await.expect_err("must fail");
+        assert!(matches!(
+            err,
+            ReplayError::UnsupportedProviderMultiplicity { count: 0 }
+        ));
     }
 }

@@ -11,7 +11,8 @@ mod tool;
 
 pub use divergence::{ReplayDivergence, ReplayDivergenceCollector, ReplayDivergenceKind};
 pub use engine::{
-    ReplayEngine, ReplayEngineConfig, SourceSession, load_source_session_from_journal,
+    ReplayEngine, ReplayEngineConfig, ReplayRunOutput, SourceSession,
+    load_source_session_from_journal,
 };
 pub use error::ReplayError;
 pub use mode::ReplayMode;
