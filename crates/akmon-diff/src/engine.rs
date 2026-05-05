@@ -9,7 +9,7 @@ use akmon_query::{journal_contains_session, open_journal_read_only};
 use uuid::Uuid;
 
 use crate::resolve::ResolveContext;
-use crate::{DiffComparison, DiffError, DiffMode};
+use crate::{DiffComparison, DiffError, DiffMode, DiffReportV1};
 
 /// Loaded source-session material used by diff setup and execution.
 #[derive(Debug)]
@@ -239,6 +239,26 @@ where
             store_b: self.source_b.store().as_ref(),
         };
         self.run_inner(Some(ctx))
+    }
+
+    /// Runs comparison and builds a [`DiffReportV1`] with per-session event counts from source histories.
+    pub fn run_to_report(&self) -> Result<DiffReportV1, DiffError> {
+        let comparison = self.run()?;
+        Ok(DiffReportV1::from_comparison(
+            comparison,
+            self.source_a.history().len(),
+            self.source_b.history().len(),
+        ))
+    }
+
+    /// Like [`Self::run_to_report`], using [`Self::run_with_resolve`] for comparison.
+    pub fn run_with_resolve_to_report(&self) -> Result<DiffReportV1, DiffError> {
+        let comparison = self.run_with_resolve()?;
+        Ok(DiffReportV1::from_comparison(
+            comparison,
+            self.source_a.history().len(),
+            self.source_b.history().len(),
+        ))
     }
 
     fn run_inner(&self, resolve: Option<ResolveContext<'_>>) -> Result<DiffComparison, DiffError> {
@@ -1612,5 +1632,274 @@ mod tests {
             .run_with_resolve()
             .expect("run");
         assert!(out.divergences.is_empty());
+    }
+
+    #[test]
+    fn t_run_to_report_identical_sessions() {
+        let source_a = minimal_valid_source();
+        let source_b = minimal_valid_source();
+        let n = source_a.history().len();
+        let engine = DiffEngine::new(source_a, source_b).expect("valid");
+        let report = engine.run_to_report().expect("report");
+        assert!(report.matches);
+        assert!(report.divergences.is_empty());
+        assert!(report.structural_break.is_none());
+        assert_eq!(report.divergence_count, 0);
+        assert_eq!(report.events_compared, n);
+    }
+
+    #[test]
+    fn t_run_to_report_diverging_sessions() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/tmp").expect("cwd");
+        let config_a = store_a.put(b"cfg").expect("cfg");
+        let summary_a = store_a.put(b"done").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: config_a,
+                },
+                permission_gate_decision(store_a.as_ref(), "allowed"),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/tmp").expect("cwd");
+        let config_b = store_b.put(b"cfg").expect("cfg");
+        let summary_b = store_b.put(b"done").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: config_b,
+                },
+                permission_gate_decision(store_b.as_ref(), "denied"),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        let report = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run_to_report()
+            .expect("report");
+        assert!(!report.matches);
+        assert_eq!(report.divergence_count, report.divergences.len());
+        assert_eq!(report.divergences.len(), 1);
+        assert!(report.structural_break.is_none());
+    }
+
+    #[test]
+    fn t_run_to_report_structural_break() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/tmp").expect("cwd");
+        let cfg_a = store_a.put(b"cfg").expect("cfg");
+        let summary_a = store_a.put(b"summary").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: cfg_a,
+                },
+                assistant_turn(store_a.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/tmp").expect("cwd");
+        let cfg_b = store_b.put(b"cfg").expect("cfg");
+        let summary_b = store_b.put(b"summary").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: cfg_b,
+                },
+                provider_call(store_b.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        let report = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run_to_report()
+            .expect("report");
+        assert!(report.structural_break.is_some());
+        assert!(report.divergence_count >= 1);
+    }
+
+    #[test]
+    fn t_run_with_resolve_to_report_includes_resolved() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/a").expect("cwd");
+        let config_a = store_a.put(b"cfg").expect("cfg");
+        let prompt_a = store_a.put(b"hello").expect("prompt");
+        let summary_a = store_a.put(b"done").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: config_a,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_a,
+                },
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/b").expect("cwd");
+        let config_b = store_b.put(b"cfg").expect("cfg");
+        let prompt_b = store_b.put(b"hello").expect("prompt");
+        let summary_b = store_b.put(b"done").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: config_b,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_b,
+                },
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        let report = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run_with_resolve_to_report()
+            .expect("report");
+        assert_eq!(report.divergences.len(), 1);
+        assert!(report.divergences[0].resolved.is_some());
+    }
+
+    #[test]
+    fn t_run_with_resolve_to_report_serializes_resolved_in_json() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/a").expect("cwd");
+        let config_a = store_a.put(b"cfg").expect("cfg");
+        let prompt_a = store_a.put(b"hello").expect("prompt");
+        let summary_a = store_a.put(b"done").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: config_a,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_a,
+                },
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/b").expect("cwd");
+        let config_b = store_b.put(b"cfg").expect("cfg");
+        let prompt_b = store_b.put(b"hello").expect("prompt");
+        let summary_b = store_b.put(b"done").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: config_b,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_b,
+                },
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        let report = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run_with_resolve_to_report()
+            .expect("report");
+        let value: serde_json::Value = serde_json::to_value(&report).expect("serialize");
+        let resolved = &value["divergences"][0]["resolved"];
+        assert!(!resolved.is_null(), "expected non-null resolved in JSON");
+    }
+
+    #[test]
+    fn t_run_to_report_session_event_counts_correct() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/tmp").expect("cwd");
+        let cfg_a = store_a.put(b"cfg").expect("cfg");
+        let prompt_a = store_a.put(b"hi").expect("prompt");
+        let summary_a = store_a.put(b"done").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: cfg_a,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_a,
+                },
+                assistant_turn(store_a.as_ref()),
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/tmp").expect("cwd");
+        let cfg_b = store_b.put(b"cfg").expect("cfg");
+        let prompt_b = store_b.put(b"hi").expect("prompt");
+        let summary_b = store_b.put(b"done").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: cfg_b,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_b,
+                },
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        assert_eq!(source_a.history().len(), 4);
+        assert_eq!(source_b.history().len(), 3);
+
+        let report = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run_to_report()
+            .expect("report");
+        assert_eq!(report.session_a_event_count, 4);
+        assert_eq!(report.session_b_event_count, 3);
     }
 }
