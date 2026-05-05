@@ -9,6 +9,7 @@ use akmon_journal::{
     referenced_object_hashes_for_kind,
 };
 use serde::Deserialize;
+use serde_json::Value;
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -60,6 +61,24 @@ fn run_bundle_import_with(
     cmd.output().expect("run bundle import")
 }
 
+fn run_bundle_export_with(
+    journal_dir: &Path,
+    session_id: Uuid,
+    extra: &[&str],
+) -> std::process::Output {
+    let bin = akmon_bin_path();
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "bundle",
+        "export",
+        &session_id.to_string(),
+        "--journal",
+        &journal_dir.display().to_string(),
+    ]);
+    cmd.args(extra);
+    cmd.output().expect("run bundle export")
+}
+
 fn run_verify_with(journal_dir: &Path, session_id: Uuid, extra: &[&str]) -> std::process::Output {
     let bin = akmon_bin_path();
     let mut cmd = Command::new(bin);
@@ -71,6 +90,19 @@ fn run_verify_with(journal_dir: &Path, session_id: Uuid, extra: &[&str]) -> std:
     ]);
     cmd.args(extra);
     cmd.output().expect("run verify")
+}
+
+fn run_inspect_with(journal_dir: &Path, session_id: Uuid, extra: &[&str]) -> std::process::Output {
+    let bin = akmon_bin_path();
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "inspect",
+        &session_id.to_string(),
+        "--journal",
+        &journal_dir.display().to_string(),
+    ]);
+    cmd.args(extra);
+    cmd.output().expect("run inspect")
 }
 
 fn source_session_head(journal_dir: &Path, session_id: Uuid) -> String {
@@ -114,6 +146,47 @@ struct RedactError {
     category: String,
     invalid_object_hash: Option<String>,
     missing_object_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BundleVerifyReportV1 {
+    passed: bool,
+}
+
+fn parse_redact_human_counts(stderr: &str) -> Option<(u64, u64)> {
+    // NOTE: Coupled to redact human output wording in main.rs.
+    // If labels change during Phase 7 polish, update this parser.
+    let mut events_rewritten = None;
+    let mut objects_redacted = None;
+    for line in stderr.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("events rewritten: ") {
+            events_rewritten = rest.parse::<u64>().ok();
+        }
+        if let Some(rest) = t.strip_prefix("objects redacted: ") {
+            objects_redacted = rest.parse::<u64>().ok();
+        }
+    }
+    Some((events_rewritten?, objects_redacted?))
+}
+
+fn contains_redacted_reason(value: &Value, reason: &str) -> bool {
+    match value {
+        Value::Object(map) => {
+            let has_redacted_true = map
+                .iter()
+                .any(|(k, v)| k.ends_with("_redacted") && v.as_bool() == Some(true));
+            let has_reason = map
+                .iter()
+                .any(|(k, v)| k.ends_with("_redaction_reason") && v.as_str() == Some(reason));
+            if has_redacted_true && has_reason {
+                return true;
+            }
+            map.values().any(|v| contains_redacted_reason(v, reason))
+        }
+        Value::Array(arr) => arr.iter().any(|v| contains_redacted_reason(v, reason)),
+        _ => false,
+    }
 }
 
 #[test]
@@ -467,4 +540,186 @@ fn t_redact_multiple_objects_one_invocation() {
         .collect();
     assert!(redacted_originals.contains(&fixture.prompt_hash.to_hex()));
     assert!(redacted_originals.contains(&summary_hash.to_hex()));
+}
+
+#[test]
+fn t_redact_derivative_bundle_passes_verify_only() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+    let bundle = tmp.path().join("derivative.akmon");
+    let redact = run_redact_with(
+        tmp.path(),
+        sid,
+        bundle.as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        "verify-only-check",
+        &[],
+    );
+    assert_eq!(redact.status.code(), Some(0));
+    let verify_only = run_bundle_import_with(
+        bundle.as_path(),
+        tmp.path(),
+        &["--verify-only", "--format", "json"],
+    );
+    assert_eq!(
+        verify_only.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&verify_only.stderr)
+    );
+    let report: BundleVerifyReportV1 =
+        serde_json::from_slice(&verify_only.stdout).expect("parse verify-only json");
+    assert!(report.passed);
+}
+
+#[test]
+fn t_redact_imported_session_can_be_exported() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+    let derivative = tmp.path().join("redacted.akmon");
+    let redact = run_redact_with(
+        tmp.path(),
+        sid,
+        derivative.as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        "re-export-check",
+        &["--format", "json"],
+    );
+    assert_eq!(redact.status.code(), Some(0));
+    let report: RedactReportV1 = serde_json::from_slice(&redact.stdout).expect("redact report");
+    let sentinel_hash = report.redacted_objects[0].sentinel_hash.clone();
+
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).expect("mkdir");
+    let renamed = Uuid::new_v4();
+    let import = run_bundle_import_with(
+        derivative.as_path(),
+        dst.as_path(),
+        &["--rename-to", &renamed.to_string()],
+    );
+    assert_eq!(import.status.code(), Some(0));
+
+    let re_export = dst.join("reexport.akmon");
+    let export = run_bundle_export_with(
+        dst.as_path(),
+        renamed,
+        &["--output", &re_export.display().to_string()],
+    );
+    assert_eq!(
+        export.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let file = std::fs::File::open(&re_export).expect("open re-exported bundle");
+    let contents =
+        read_bundle(file, &ReadBundleOptions::default()).expect("read re-exported bundle");
+    let sentinel_entry = contents
+        .objects
+        .iter()
+        .find(|(hash, _)| hash.to_hex() == sentinel_hash)
+        .expect("sentinel hash present in re-export");
+    assert!(is_sentinel(sentinel_entry.1.as_slice()));
+}
+
+#[test]
+fn t_redact_round_trip_preserves_sentinels() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+    let reason = "round-trip-redaction";
+    let bundle_a = tmp.path().join("bundle_a.akmon");
+    let redact = run_redact_with(
+        tmp.path(),
+        sid,
+        bundle_a.as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        reason,
+        &[],
+    );
+    assert_eq!(redact.status.code(), Some(0));
+
+    let journal_a = tmp.path().join("journal_a");
+    std::fs::create_dir_all(&journal_a).expect("mkdir a");
+    let sid_a = Uuid::new_v4();
+    let import_a = run_bundle_import_with(
+        bundle_a.as_path(),
+        journal_a.as_path(),
+        &["--rename-to", &sid_a.to_string()],
+    );
+    assert_eq!(import_a.status.code(), Some(0));
+
+    let bundle_b = tmp.path().join("bundle_b.akmon");
+    let export_b = run_bundle_export_with(
+        journal_a.as_path(),
+        sid_a,
+        &["--output", &bundle_b.display().to_string()],
+    );
+    assert_eq!(export_b.status.code(), Some(0));
+
+    let journal_b = tmp.path().join("journal_b");
+    std::fs::create_dir_all(&journal_b).expect("mkdir b");
+    let sid_b = Uuid::new_v4();
+    let import_b = run_bundle_import_with(
+        bundle_b.as_path(),
+        journal_b.as_path(),
+        &["--rename-to", &sid_b.to_string()],
+    );
+    assert_eq!(import_b.status.code(), Some(0));
+
+    let inspect = run_inspect_with(
+        journal_b.as_path(),
+        sid_b,
+        &["--resolve", "--format", "json"],
+    );
+    assert_eq!(
+        inspect.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let value: Value = serde_json::from_slice(&inspect.stdout).expect("inspect json");
+    assert!(contains_redacted_reason(&value, reason));
+}
+
+#[test]
+fn t_redact_human_and_json_describe_same_outcome() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let fixture = create_clean_session(tmp.path(), sid);
+
+    let human_out = run_redact_with(
+        tmp.path(),
+        sid,
+        tmp.path().join("human.akmon").as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        "parity-check",
+        &[],
+    );
+    assert_eq!(
+        human_out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&human_out.stderr)
+    );
+    let (events_h, objects_h) =
+        parse_redact_human_counts(&String::from_utf8_lossy(&human_out.stderr))
+            .expect("parse human redact counts");
+
+    let json_out = run_redact_with(
+        tmp.path(),
+        sid,
+        tmp.path().join("json.akmon").as_path(),
+        &[&fixture.prompt_hash.to_hex()],
+        "parity-check",
+        &["--format", "json"],
+    );
+    assert_eq!(json_out.status.code(), Some(0));
+    let report: RedactReportV1 =
+        serde_json::from_slice(&json_out.stdout).expect("parse json report");
+
+    assert_eq!(report.events_rewritten_count, events_h);
+    assert_eq!(report.objects_redacted_count, objects_h);
 }
