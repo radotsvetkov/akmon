@@ -8,7 +8,7 @@ use akmon_journal::{
 use akmon_query::{journal_contains_session, open_journal_read_only};
 use uuid::Uuid;
 
-use crate::{DiffError, DiffMode};
+use crate::{DiffComparison, DiffError, DiffMode};
 
 /// Loaded source-session material used by diff setup and execution.
 #[derive(Debug)]
@@ -222,6 +222,26 @@ where
     pub fn mode(&self) -> DiffMode {
         self.mode
     }
+
+    /// Runs diff comparison and returns the intermediate comparison artifact.
+    ///
+    /// Layer 2 scope: handles identical-history happy path and records lockstep
+    /// comparison cardinality. Divergence/structural-break handling is layered in
+    /// later item steps.
+    pub fn run(&self) -> Result<DiffComparison, DiffError> {
+        let events_compared = self
+            .source_a
+            .history()
+            .len()
+            .min(self.source_b.history().len());
+        let mut comparison = DiffComparison::new(
+            self.source_a.session_id().to_string(),
+            self.source_b.session_id().to_string(),
+            self.mode,
+        );
+        comparison.events_compared = events_compared;
+        Ok(comparison)
+    }
 }
 
 #[cfg(test)]
@@ -392,5 +412,39 @@ mod tests {
         assert_eq!(engine.mode(), DiffMode::Default);
         assert!(!engine.source_a().history().is_empty());
         assert!(!engine.source_b().history().is_empty());
+    }
+
+    #[test]
+    fn t_run_identical_histories_no_divergences() {
+        let source_a = minimal_valid_source();
+        let source_b = minimal_valid_source();
+        let engine = DiffEngine::new(source_a, source_b).expect("valid sources");
+        let out = engine.run().expect("run succeeds");
+        assert!(out.events_compared > 0);
+        assert!(out.divergences.is_empty());
+        assert!(out.structural_break.is_none());
+        assert_eq!(out.mode, DiffMode::Default);
+    }
+
+    #[test]
+    fn t_run_returns_correct_session_ids() {
+        let source_a = minimal_valid_source();
+        let source_b = minimal_valid_source();
+        let expected_a = source_a.session_id().to_string();
+        let expected_b = source_b.session_id().to_string();
+        let engine = DiffEngine::new(source_a, source_b).expect("valid sources");
+        let out = engine.run().expect("run succeeds");
+        assert_eq!(out.session_a_id, expected_a);
+        assert_eq!(out.session_b_id, expected_b);
+    }
+
+    #[test]
+    fn t_run_records_events_compared() {
+        let source_a = minimal_valid_source();
+        let source_b = minimal_valid_source();
+        let expected_n = source_a.history().len().min(source_b.history().len());
+        let engine = DiffEngine::new(source_a, source_b).expect("valid sources");
+        let out = engine.run().expect("run succeeds");
+        assert_eq!(out.events_compared, expected_n);
     }
 }
