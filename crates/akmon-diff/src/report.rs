@@ -81,6 +81,8 @@ mod tests {
                 field: None,
                 expected: "AssistantTurn".to_owned(),
                 actual: "ToolCall".to_owned(),
+                resolved: None,
+                resolved_skip_reason: None,
             });
         }
         comparison

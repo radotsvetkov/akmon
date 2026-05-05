@@ -8,6 +8,7 @@ use akmon_journal::{
 use akmon_query::{journal_contains_session, open_journal_read_only};
 use uuid::Uuid;
 
+use crate::resolve::ResolveContext;
 use crate::{DiffComparison, DiffError, DiffMode};
 
 /// Loaded source-session material used by diff setup and execution.
@@ -228,6 +229,19 @@ where
     /// Lockstep structural walk stops at the first structural break. When event
     /// kinds match at a position, field-level comparison runs for that pair.
     pub fn run(&self) -> Result<DiffComparison, DiffError> {
+        self.run_inner(None)
+    }
+
+    /// Like [`Self::run`], but loads object bytes for hash-backed field divergences (opt-in resolve).
+    pub fn run_with_resolve(&self) -> Result<DiffComparison, DiffError> {
+        let ctx = ResolveContext {
+            store_a: self.source_a.store().as_ref(),
+            store_b: self.source_b.store().as_ref(),
+        };
+        self.run_inner(Some(ctx))
+    }
+
+    fn run_inner(&self, resolve: Option<ResolveContext<'_>>) -> Result<DiffComparison, DiffError> {
         let mut comparison = DiffComparison::new(
             self.source_a.session_id().to_string(),
             self.source_b.session_id().to_string(),
@@ -253,12 +267,14 @@ where
                             field: None,
                             expected,
                             actual,
+                            resolved: None,
+                            resolved_skip_reason: None,
                         });
                         break;
                     }
                     comparison
                         .divergences
-                        .extend(field_differences_at_position(event_a, event_b));
+                        .extend(field_differences_at_position(event_a, event_b, resolve)?);
                     comparison.events_compared = position + 1;
                 }
                 (Some(_), None) | (None, Some(_)) => {
@@ -275,6 +291,8 @@ where
                         field: None,
                         expected,
                         actual,
+                        resolved: None,
+                        resolved_skip_reason: None,
                     });
                     break;
                 }
@@ -285,33 +303,37 @@ where
     }
 }
 
-fn field_differences_at_position(event_a: &Event, event_b: &Event) -> Vec<crate::DiffDivergence> {
+fn field_differences_at_position(
+    event_a: &Event,
+    event_b: &Event,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<Vec<crate::DiffDivergence>, DiffError> {
     match (&event_a.kind, &event_b.kind) {
         (EventKind::SessionStart { .. }, EventKind::SessionStart { .. }) => {
-            crate::compare_session_start(event_a, event_b)
+            crate::compare_session_start(event_a, event_b, resolve)
         }
         (EventKind::UserTurn { .. }, EventKind::UserTurn { .. }) => {
-            crate::compare_user_turn(event_a, event_b)
+            crate::compare_user_turn(event_a, event_b, resolve)
         }
         (EventKind::ProviderCall { .. }, EventKind::ProviderCall { .. }) => {
-            crate::compare_provider_call(event_a, event_b)
+            crate::compare_provider_call(event_a, event_b, resolve)
         }
         (EventKind::ToolCall { .. }, EventKind::ToolCall { .. }) => {
-            crate::compare_tool_call(event_a, event_b)
+            crate::compare_tool_call(event_a, event_b, resolve)
         }
         (EventKind::RetrievalCall { .. }, EventKind::RetrievalCall { .. }) => {
-            crate::compare_retrieval_call(event_a, event_b)
+            crate::compare_retrieval_call(event_a, event_b, resolve)
         }
         (EventKind::PermissionGate { .. }, EventKind::PermissionGate { .. }) => {
-            crate::compare_permission_gate(event_a, event_b)
+            crate::compare_permission_gate(event_a, event_b, resolve)
         }
         (EventKind::AssistantTurn { .. }, EventKind::AssistantTurn { .. }) => {
-            crate::compare_assistant_turn(event_a, event_b)
+            crate::compare_assistant_turn(event_a, event_b, resolve)
         }
         (EventKind::SessionEnd { .. }, EventKind::SessionEnd { .. }) => {
-            crate::compare_session_end(event_a, event_b)
+            crate::compare_session_end(event_a, event_b, resolve)
         }
-        _ => Vec::new(),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -1516,5 +1538,79 @@ mod tests {
         assert_eq!(out.events_compared, 3);
         assert!(!out.divergences.is_empty());
         assert!(out.structural_break.is_none());
+    }
+
+    #[test]
+    fn t_run_resolved_matches_run_when_identical_sessions() {
+        let source_a = minimal_valid_source();
+        let source_b = minimal_valid_source();
+        let engine = DiffEngine::new(source_a, source_b).expect("valid");
+        let plain = engine.run().expect("run");
+        let resolved = engine.run_with_resolve().expect("resolved");
+        assert_eq!(plain, resolved);
+    }
+
+    #[test]
+    fn t_run_resolved_populates_resolved_on_field_divergence() {
+        let store_a = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_a = store_a.put(b"/a").expect("cwd");
+        let config_a = store_a.put(b"cfg").expect("cfg");
+        let prompt_a = store_a.put(b"hello").expect("prompt");
+        let summary_a = store_a.put(b"done").expect("summary");
+        let source_a = setup_source_with_history(
+            Arc::clone(&store_a),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_a,
+                    config_hash: config_a,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_a,
+                },
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_a),
+                },
+            ],
+        );
+
+        let store_b = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let cwd_b = store_b.put(b"/b").expect("cwd");
+        let config_b = store_b.put(b"cfg").expect("cfg");
+        let prompt_b = store_b.put(b"hello").expect("prompt");
+        let summary_b = store_b.put(b"done").expect("summary");
+        let source_b = setup_source_with_history(
+            Arc::clone(&store_b),
+            &[
+                EventKind::SessionStart {
+                    cwd_hash: cwd_b,
+                    config_hash: config_b,
+                },
+                EventKind::UserTurn {
+                    prompt_hash: prompt_b,
+                },
+                EventKind::SessionEnd {
+                    summary_hash: Some(summary_b),
+                },
+            ],
+        );
+
+        let out = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run_with_resolve()
+            .expect("run");
+        assert_eq!(out.divergences.len(), 1);
+        assert!(out.divergences[0].resolved.is_some());
+        assert!(out.divergences[0].resolved_skip_reason.is_none());
+    }
+
+    #[test]
+    fn t_run_resolved_no_divergences_leaves_resolved_none() {
+        let source_a = minimal_valid_source();
+        let source_b = minimal_valid_source();
+        let out = DiffEngine::new(source_a, source_b)
+            .expect("valid")
+            .run_with_resolve()
+            .expect("run");
+        assert!(out.divergences.is_empty());
     }
 }

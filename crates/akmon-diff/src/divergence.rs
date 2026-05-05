@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+/// Byte-level summary for a resolved hash-field divergence (`--resolve` mode).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedContent {
+    /// Size of session A object bytes.
+    pub a_size_bytes: usize,
+    /// Size of session B object bytes.
+    pub b_size_bytes: usize,
+    /// Preview for A (UTF-8 or hex).
+    pub a_preview: Option<String>,
+    /// Preview for B (UTF-8 or hex).
+    pub b_preview: Option<String>,
+    /// True when loaded bytes are identical (investigate when hashes differ).
+    pub bytes_match: bool,
+}
+
 /// Divergence categories emitted by diff comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,11 +56,48 @@ pub struct DiffDivergence {
     pub expected: String,
     /// Actual value summary.
     pub actual: String,
+    /// Resolved byte summary when `run_with_resolve` populated this row.
+    pub resolved: Option<ResolvedContent>,
+    /// Skip reason when resolve was requested but bytes were not attached.
+    pub resolved_skip_reason: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DiffDivergenceKind;
+    use super::{DiffDivergenceKind, ResolvedContent};
+
+    #[test]
+    fn t_resolved_content_json_round_trip() {
+        let value = ResolvedContent {
+            a_size_bytes: 3,
+            b_size_bytes: 4,
+            a_preview: Some("abc".to_owned()),
+            b_preview: None,
+            bytes_match: false,
+        };
+        let json = serde_json::to_string(&value).expect("serialize");
+        let back: ResolvedContent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, value);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("value");
+        assert_eq!(v["a_size_bytes"], 3);
+        assert_eq!(v["bytes_match"], false);
+    }
+
+    #[test]
+    fn t_divergence_json_includes_resolved_nullable() {
+        let d = super::DiffDivergence {
+            position: Some(1),
+            kind: DiffDivergenceKind::ContentReferenceDifference,
+            field: Some("prompt_hash".to_owned()),
+            expected: "a".to_owned(),
+            actual: "b".to_owned(),
+            resolved: None,
+            resolved_skip_reason: None,
+        };
+        let json = serde_json::to_string(&d).expect("serialize");
+        assert!(json.contains("\"resolved\":null"));
+        assert!(json.contains("\"resolved_skip_reason\":null"));
+    }
 
     #[test]
     fn t_kind_serializes_to_expected_strings() {

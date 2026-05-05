@@ -1,7 +1,8 @@
 use akmon_journal::{Event, EventKind, Hash};
 use serde::{Deserialize, Serialize};
 
-use crate::{DiffDivergence, DiffDivergenceKind, DiffMode};
+use crate::resolve::ResolveContext;
+use crate::{DiffDivergence, DiffDivergenceKind, DiffError, DiffMode};
 
 /// Structural break details for lockstep diff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,24 +51,47 @@ fn hash_hex(hash: &Hash) -> String {
     hash.to_hex()
 }
 
+fn divergence(
+    position: Option<u64>,
+    kind: DiffDivergenceKind,
+    field: Option<String>,
+    expected: String,
+    actual: String,
+) -> DiffDivergence {
+    DiffDivergence {
+        position,
+        kind,
+        field,
+        expected,
+        actual,
+        resolved: None,
+        resolved_skip_reason: None,
+    }
+}
+
 fn content_ref_diff(
     position: u64,
     field: &str,
     expected: String,
     actual: String,
 ) -> DiffDivergence {
-    DiffDivergence {
-        position: Some(position),
-        kind: DiffDivergenceKind::ContentReferenceDifference,
-        field: Some(field.to_owned()),
+    divergence(
+        Some(position),
+        DiffDivergenceKind::ContentReferenceDifference,
+        Some(field.to_owned()),
         expected,
         actual,
-    }
+    )
 }
 
 /// Compares `SessionStart` events at one lockstep position.
-#[must_use]
-pub fn compare_session_start(a: &Event, b: &Event) -> Vec<DiffDivergence> {
+pub fn compare_session_start(
+    a: &Event,
+    b: &Event,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<Vec<DiffDivergence>, DiffError> {
+    use crate::resolve::attach_resolved_content_pair;
+
     let mut out = Vec::new();
     if let (
         EventKind::SessionStart {
@@ -81,13 +105,16 @@ pub fn compare_session_start(a: &Event, b: &Event) -> Vec<DiffDivergence> {
     ) = (&a.kind, &b.kind)
     {
         if a_cwd != b_cwd {
-            out.push(DiffDivergence {
-                position: Some(a.sequence),
-                kind: DiffDivergenceKind::SessionStartCwdDifference,
-                field: Some("cwd_hash".to_owned()),
-                expected: hash_hex(a_cwd),
-                actual: hash_hex(b_cwd),
-            });
+            out.push(divergence(
+                Some(a.sequence),
+                DiffDivergenceKind::SessionStartCwdDifference,
+                Some("cwd_hash".to_owned()),
+                hash_hex(a_cwd),
+                hash_hex(b_cwd),
+            ));
+            if let Some(ctx) = resolve {
+                attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, a_cwd, b_cwd)?;
+            }
         }
         if a_cfg != b_cfg {
             out.push(content_ref_diff(
@@ -96,32 +123,49 @@ pub fn compare_session_start(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                 hash_hex(a_cfg),
                 hash_hex(b_cfg),
             ));
+            if let Some(ctx) = resolve {
+                attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, a_cfg, b_cfg)?;
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Compares `UserTurn` events at one lockstep position.
-#[must_use]
-pub fn compare_user_turn(a: &Event, b: &Event) -> Vec<DiffDivergence> {
+pub fn compare_user_turn(
+    a: &Event,
+    b: &Event,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<Vec<DiffDivergence>, DiffError> {
+    use crate::resolve::attach_resolved_content_pair;
+
     match (&a.kind, &b.kind) {
         (EventKind::UserTurn { prompt_hash: p1 }, EventKind::UserTurn { prompt_hash: p2 })
             if p1 != p2 =>
         {
-            vec![content_ref_diff(
+            let mut out = vec![content_ref_diff(
                 a.sequence,
                 "prompt_hash",
                 hash_hex(p1),
                 hash_hex(p2),
-            )]
+            )];
+            if let Some(ctx) = resolve {
+                attach_resolved_content_pair(&mut out[0], ctx, p1, p2)?;
+            }
+            Ok(out)
         }
-        _ => Vec::new(),
+        _ => Ok(Vec::new()),
     }
 }
 
 /// Compares `ProviderCall` events at one lockstep position.
-#[must_use]
-pub fn compare_provider_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
+pub fn compare_provider_call(
+    a: &Event,
+    b: &Event,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<Vec<DiffDivergence>, DiffError> {
+    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
+
     let mut out = Vec::new();
     if let (
         EventKind::ProviderCall {
@@ -137,13 +181,16 @@ pub fn compare_provider_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
     ) = (&a.kind, &b.kind)
     {
         if a_id != b_id {
-            out.push(DiffDivergence {
-                position: Some(a.sequence),
-                kind: DiffDivergenceKind::ContentReferenceDifference,
-                field: Some("provider_id".to_owned()),
-                expected: a_id.clone(),
-                actual: b_id.clone(),
-            });
+            out.push(divergence(
+                Some(a.sequence),
+                DiffDivergenceKind::ContentReferenceDifference,
+                Some("provider_id".to_owned()),
+                a_id.clone(),
+                b_id.clone(),
+            ));
+            if resolve.is_some() {
+                mark_not_dereferenceable(out.last_mut().expect("pushed"));
+            }
         }
         let a_final = a_attempts
             .last()
@@ -152,13 +199,21 @@ pub fn compare_provider_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
             .last()
             .and_then(|attempt| attempt.response_hash.as_ref());
         if a_final != b_final {
-            out.push(DiffDivergence {
-                position: Some(a.sequence),
-                kind: DiffDivergenceKind::ProviderCallResponseDifference,
-                field: Some("attempts[-1].response_hash".to_owned()),
-                expected: a_final.map_or_else(|| "none".to_owned(), hash_hex),
-                actual: b_final.map_or_else(|| "none".to_owned(), hash_hex),
-            });
+            out.push(divergence(
+                Some(a.sequence),
+                DiffDivergenceKind::ProviderCallResponseDifference,
+                Some("attempts[-1].response_hash".to_owned()),
+                a_final.map_or_else(|| "none".to_owned(), hash_hex),
+                b_final.map_or_else(|| "none".to_owned(), hash_hex),
+            ));
+            if let Some(ctx) = resolve {
+                match (a_final, b_final) {
+                    (Some(ha), Some(hb)) => {
+                        attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, ha, hb)?;
+                    }
+                    _ => mark_not_dereferenceable(out.last_mut().expect("pushed")),
+                }
+            }
         }
         if a_stream != b_stream {
             out.push(content_ref_diff(
@@ -171,14 +226,27 @@ pub fn compare_provider_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                     .as_ref()
                     .map_or_else(|| "none".to_owned(), hash_hex),
             ));
+            if let Some(ctx) = resolve {
+                match (a_stream.as_ref(), b_stream.as_ref()) {
+                    (Some(ha), Some(hb)) => {
+                        attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, ha, hb)?;
+                    }
+                    _ => mark_not_dereferenceable(out.last_mut().expect("pushed")),
+                }
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Compares `AssistantTurn` events at one lockstep position.
-#[must_use]
-pub fn compare_assistant_turn(a: &Event, b: &Event) -> Vec<DiffDivergence> {
+pub fn compare_assistant_turn(
+    a: &Event,
+    b: &Event,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<Vec<DiffDivergence>, DiffError> {
+    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
+
     let mut out = Vec::new();
     if let (
         EventKind::AssistantTurn {
@@ -192,13 +260,21 @@ pub fn compare_assistant_turn(a: &Event, b: &Event) -> Vec<DiffDivergence> {
     ) = (&a.kind, &b.kind)
     {
         if a_message != b_message {
-            out.push(DiffDivergence {
-                position: Some(a.sequence),
-                kind: DiffDivergenceKind::AssistantContentDifference,
-                field: Some("message_hash".to_owned()),
-                expected: hash_hex(a_message),
-                actual: hash_hex(b_message),
-            });
+            out.push(divergence(
+                Some(a.sequence),
+                DiffDivergenceKind::AssistantContentDifference,
+                Some("message_hash".to_owned()),
+                hash_hex(a_message),
+                hash_hex(b_message),
+            ));
+            if let Some(ctx) = resolve {
+                attach_resolved_content_pair(
+                    out.last_mut().expect("pushed"),
+                    ctx,
+                    a_message,
+                    b_message,
+                )?;
+            }
         }
         if a_tools != b_tools {
             out.push(content_ref_diff(
@@ -207,14 +283,27 @@ pub fn compare_assistant_turn(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                 a_tools.as_ref().map_or_else(|| "none".to_owned(), hash_hex),
                 b_tools.as_ref().map_or_else(|| "none".to_owned(), hash_hex),
             ));
+            if let Some(ctx) = resolve {
+                match (a_tools.as_ref(), b_tools.as_ref()) {
+                    (Some(ha), Some(hb)) => {
+                        attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, ha, hb)?;
+                    }
+                    _ => mark_not_dereferenceable(out.last_mut().expect("pushed")),
+                }
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Compares `ToolCall` events at one lockstep position.
-#[must_use]
-pub fn compare_tool_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
+pub fn compare_tool_call(
+    a: &Event,
+    b: &Event,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<Vec<DiffDivergence>, DiffError> {
+    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
+
     let mut out = Vec::new();
     if let (
         EventKind::ToolCall {
@@ -238,24 +327,43 @@ pub fn compare_tool_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                 a_id.clone(),
                 b_id.clone(),
             ));
+            if resolve.is_some() {
+                mark_not_dereferenceable(out.last_mut().expect("pushed"));
+            }
         }
         if a_input != b_input {
-            out.push(DiffDivergence {
-                position: Some(a.sequence),
-                kind: DiffDivergenceKind::ToolCallInputDifference,
-                field: Some("input_hash".to_owned()),
-                expected: hash_hex(a_input),
-                actual: hash_hex(b_input),
-            });
+            out.push(divergence(
+                Some(a.sequence),
+                DiffDivergenceKind::ToolCallInputDifference,
+                Some("input_hash".to_owned()),
+                hash_hex(a_input),
+                hash_hex(b_input),
+            ));
+            if let Some(ctx) = resolve {
+                attach_resolved_content_pair(
+                    out.last_mut().expect("pushed"),
+                    ctx,
+                    a_input,
+                    b_input,
+                )?;
+            }
         }
         if a_output != b_output {
-            out.push(DiffDivergence {
-                position: Some(a.sequence),
-                kind: DiffDivergenceKind::ToolCallOutputDifference,
-                field: Some("output_hash".to_owned()),
-                expected: hash_hex(a_output),
-                actual: hash_hex(b_output),
-            });
+            out.push(divergence(
+                Some(a.sequence),
+                DiffDivergenceKind::ToolCallOutputDifference,
+                Some("output_hash".to_owned()),
+                hash_hex(a_output),
+                hash_hex(b_output),
+            ));
+            if let Some(ctx) = resolve {
+                attach_resolved_content_pair(
+                    out.last_mut().expect("pushed"),
+                    ctx,
+                    a_output,
+                    b_output,
+                )?;
+            }
         }
         if a_side_effects != b_side_effects {
             out.push(content_ref_diff(
@@ -268,14 +376,27 @@ pub fn compare_tool_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                     .as_ref()
                     .map_or_else(|| "none".to_owned(), hash_hex),
             ));
+            if let Some(ctx) = resolve {
+                match (a_side_effects.as_ref(), b_side_effects.as_ref()) {
+                    (Some(ha), Some(hb)) => {
+                        attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, ha, hb)?;
+                    }
+                    _ => mark_not_dereferenceable(out.last_mut().expect("pushed")),
+                }
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Compares `RetrievalCall` events at one lockstep position.
-#[must_use]
-pub fn compare_retrieval_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
+pub fn compare_retrieval_call(
+    a: &Event,
+    b: &Event,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<Vec<DiffDivergence>, DiffError> {
+    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
+
     let mut out = Vec::new();
     if let (
         EventKind::RetrievalCall {
@@ -297,6 +418,9 @@ pub fn compare_retrieval_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                 a_index.clone(),
                 b_index.clone(),
             ));
+            if resolve.is_some() {
+                mark_not_dereferenceable(out.last_mut().expect("pushed"));
+            }
         }
         if a_query != b_query {
             out.push(content_ref_diff(
@@ -305,6 +429,14 @@ pub fn compare_retrieval_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                 hash_hex(a_query),
                 hash_hex(b_query),
             ));
+            if let Some(ctx) = resolve {
+                attach_resolved_content_pair(
+                    out.last_mut().expect("pushed"),
+                    ctx,
+                    a_query,
+                    b_query,
+                )?;
+            }
         }
         if a_results != b_results {
             out.push(content_ref_diff(
@@ -313,14 +445,27 @@ pub fn compare_retrieval_call(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                 hash_hex(a_results),
                 hash_hex(b_results),
             ));
+            if let Some(ctx) = resolve {
+                attach_resolved_content_pair(
+                    out.last_mut().expect("pushed"),
+                    ctx,
+                    a_results,
+                    b_results,
+                )?;
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Compares `PermissionGate` events at one lockstep position.
-#[must_use]
-pub fn compare_permission_gate(a: &Event, b: &Event) -> Vec<DiffDivergence> {
+pub fn compare_permission_gate(
+    a: &Event,
+    b: &Event,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<Vec<DiffDivergence>, DiffError> {
+    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
+
     let mut out = Vec::new();
     if let (
         EventKind::PermissionGate {
@@ -342,15 +487,21 @@ pub fn compare_permission_gate(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                 a_policy.clone(),
                 b_policy.clone(),
             ));
+            if resolve.is_some() {
+                mark_not_dereferenceable(out.last_mut().expect("pushed"));
+            }
         }
         if a_decision != b_decision {
-            out.push(DiffDivergence {
-                position: Some(a.sequence),
-                kind: DiffDivergenceKind::PermissionGateDecisionDifference,
-                field: Some("decision".to_owned()),
-                expected: a_decision.clone(),
-                actual: b_decision.clone(),
-            });
+            out.push(divergence(
+                Some(a.sequence),
+                DiffDivergenceKind::PermissionGateDecisionDifference,
+                Some("decision".to_owned()),
+                a_decision.clone(),
+                b_decision.clone(),
+            ));
+            if resolve.is_some() {
+                mark_not_dereferenceable(out.last_mut().expect("pushed"));
+            }
         }
         if a_context != b_context {
             out.push(content_ref_diff(
@@ -359,14 +510,27 @@ pub fn compare_permission_gate(a: &Event, b: &Event) -> Vec<DiffDivergence> {
                 hash_hex(a_context),
                 hash_hex(b_context),
             ));
+            if let Some(ctx) = resolve {
+                attach_resolved_content_pair(
+                    out.last_mut().expect("pushed"),
+                    ctx,
+                    a_context,
+                    b_context,
+                )?;
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Compares `SessionEnd` events at one lockstep position.
-#[must_use]
-pub fn compare_session_end(a: &Event, b: &Event) -> Vec<DiffDivergence> {
+pub fn compare_session_end(
+    a: &Event,
+    b: &Event,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<Vec<DiffDivergence>, DiffError> {
+    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
+
     if let (
         EventKind::SessionEnd {
             summary_hash: a_summary,
@@ -377,25 +541,43 @@ pub fn compare_session_end(a: &Event, b: &Event) -> Vec<DiffDivergence> {
     ) = (&a.kind, &b.kind)
         && a_summary != b_summary
     {
-        return vec![DiffDivergence {
-            position: Some(a.sequence),
-            kind: DiffDivergenceKind::SessionEndDifference,
-            field: Some("summary_hash".to_owned()),
-            expected: a_summary
+        let mut out = vec![divergence(
+            Some(a.sequence),
+            DiffDivergenceKind::SessionEndDifference,
+            Some("summary_hash".to_owned()),
+            a_summary
                 .as_ref()
                 .map_or_else(|| "none".to_owned(), hash_hex),
-            actual: b_summary
+            b_summary
                 .as_ref()
                 .map_or_else(|| "none".to_owned(), hash_hex),
-        }];
+        )];
+        if let Some(ctx) = resolve {
+            match (a_summary.as_ref(), b_summary.as_ref()) {
+                (Some(ha), Some(hb)) => {
+                    attach_resolved_content_pair(&mut out[0], ctx, ha, hb)?;
+                }
+                _ => mark_not_dereferenceable(&mut out[0]),
+            }
+        }
+        return Ok(out);
     }
-    Vec::new()
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
 mod tests {
-    use akmon_journal::{AttemptRecord, AttemptStatus, HashAlgorithm};
+    use std::sync::Arc;
+
+    use akmon_journal::{
+        AttemptRecord, AttemptStatus, HashAlgorithm, MemoryObjectStore, ObjectStore,
+    };
     use time::OffsetDateTime;
+
+    use crate::resolve::{
+        RESOLVE_READ_CAP_BYTES, RESOLVE_SKIP_EXCEEDS_CAP, RESOLVE_SKIP_NOT_DEREFERENCABLE,
+        RESOLVE_SKIP_OBJECT_MISSING, ResolveContext,
+    };
 
     use super::*;
 
@@ -435,7 +617,11 @@ mod tests {
             },
         );
         let b = a.clone();
-        assert!(compare_session_start(&a, &b).is_empty());
+        assert!(
+            compare_session_start(&a, &b, None)
+                .expect("compare")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -454,7 +640,7 @@ mod tests {
                 config_hash: hash(4),
             },
         );
-        let diffs = compare_session_start(&a, &b);
+        let diffs = compare_session_start(&a, &b, None).expect("compare");
         assert_eq!(diffs.len(), 2);
         assert_eq!(diffs[0].kind, DiffDivergenceKind::SessionStartCwdDifference);
         assert_eq!(
@@ -472,7 +658,7 @@ mod tests {
             },
         );
         let b = a.clone();
-        assert!(compare_user_turn(&a, &b).is_empty());
+        assert!(compare_user_turn(&a, &b, None).expect("compare").is_empty());
     }
 
     #[test]
@@ -489,7 +675,7 @@ mod tests {
                 prompt_hash: hash(6),
             },
         );
-        let diffs = compare_user_turn(&a, &b);
+        let diffs = compare_user_turn(&a, &b, None).expect("compare");
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].field.as_deref(), Some("prompt_hash"));
     }
@@ -505,7 +691,11 @@ mod tests {
             },
         );
         let b = a.clone();
-        assert!(compare_provider_call(&a, &b).is_empty());
+        assert!(
+            compare_provider_call(&a, &b, None)
+                .expect("compare")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -526,7 +716,7 @@ mod tests {
                 stream_hash: None,
             },
         );
-        let diffs = compare_provider_call(&a, &b);
+        let diffs = compare_provider_call(&a, &b, None).expect("compare");
         assert_eq!(diffs.len(), 3);
         assert_eq!(
             diffs[1].kind,
@@ -544,7 +734,11 @@ mod tests {
             },
         );
         let b = a.clone();
-        assert!(compare_assistant_turn(&a, &b).is_empty());
+        assert!(
+            compare_assistant_turn(&a, &b, None)
+                .expect("compare")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -563,7 +757,7 @@ mod tests {
                 tool_calls_hash: None,
             },
         );
-        let diffs = compare_assistant_turn(&a, &b);
+        let diffs = compare_assistant_turn(&a, &b, None).expect("compare");
         assert_eq!(diffs.len(), 2);
         assert_eq!(
             diffs[0].kind,
@@ -583,7 +777,7 @@ mod tests {
             },
         );
         let b = a.clone();
-        assert!(compare_tool_call(&a, &b).is_empty());
+        assert!(compare_tool_call(&a, &b, None).expect("compare").is_empty());
     }
 
     #[test]
@@ -606,7 +800,7 @@ mod tests {
                 side_effects_hash: None,
             },
         );
-        let diffs = compare_tool_call(&a, &b);
+        let diffs = compare_tool_call(&a, &b, None).expect("compare");
         assert_eq!(diffs.len(), 4);
         assert_eq!(diffs[1].kind, DiffDivergenceKind::ToolCallInputDifference);
         assert_eq!(diffs[2].kind, DiffDivergenceKind::ToolCallOutputDifference);
@@ -623,7 +817,11 @@ mod tests {
             },
         );
         let b = a.clone();
-        assert!(compare_retrieval_call(&a, &b).is_empty());
+        assert!(
+            compare_retrieval_call(&a, &b, None)
+                .expect("compare")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -644,7 +842,7 @@ mod tests {
                 results_hash: hash(33),
             },
         );
-        let diffs = compare_retrieval_call(&a, &b);
+        let diffs = compare_retrieval_call(&a, &b, None).expect("compare");
         assert_eq!(diffs.len(), 3);
         assert_eq!(diffs[0].field.as_deref(), Some("index_id"));
         assert_eq!(diffs[1].field.as_deref(), Some("query_hash"));
@@ -666,7 +864,11 @@ mod tests {
             },
         );
         let b = a.clone();
-        assert!(compare_permission_gate(&a, &b).is_empty());
+        assert!(
+            compare_permission_gate(&a, &b, None)
+                .expect("compare")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -687,7 +889,7 @@ mod tests {
                 context_hash: hash(19),
             },
         );
-        let diffs = compare_permission_gate(&a, &b);
+        let diffs = compare_permission_gate(&a, &b, None).expect("compare");
         assert_eq!(diffs.len(), 3);
         assert_eq!(
             diffs[1].kind,
@@ -704,7 +906,11 @@ mod tests {
             },
         );
         let b = a.clone();
-        assert!(compare_session_end(&a, &b).is_empty());
+        assert!(
+            compare_session_end(&a, &b, None)
+                .expect("compare")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -716,7 +922,7 @@ mod tests {
             },
         );
         let b = event(6, EventKind::SessionEnd { summary_hash: None });
-        let diffs = compare_session_end(&a, &b);
+        let diffs = compare_session_end(&a, &b, None).expect("compare");
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].kind, DiffDivergenceKind::SessionEndDifference);
     }
@@ -727,5 +933,274 @@ mod tests {
         assert_eq!(comparison.events_compared, 0);
         assert!(comparison.divergences.is_empty());
         assert!(comparison.structural_break.is_none());
+    }
+
+    #[test]
+    fn t_resolve_user_turn_loads_prompt_bytes() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let pa = sa.put(b"hello-a").expect("put");
+        let pb = sb.put(b"hello-b").expect("put");
+        let a = event(1, EventKind::UserTurn { prompt_hash: pa });
+        let b = event(1, EventKind::UserTurn { prompt_hash: pb });
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_user_turn(&a, &b, Some(ctx)).expect("compare");
+        let r = diffs[0].resolved.as_ref().expect("resolved");
+        assert!(!r.bytes_match);
+        assert_eq!(r.a_size_bytes, 7);
+        assert_eq!(r.b_size_bytes, 7);
+        assert!(diffs[0].resolved_skip_reason.is_none());
+    }
+
+    #[test]
+    fn t_resolve_user_turn_skips_when_object_missing() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let pa = sa.put(b"a").expect("put");
+        let pb = sb.put(b"b").expect("put");
+        sb.remove_object_for_testing(&pb).expect("remove");
+        let a = event(1, EventKind::UserTurn { prompt_hash: pa });
+        let b = event(1, EventKind::UserTurn { prompt_hash: pb });
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_user_turn(&a, &b, Some(ctx)).expect("compare");
+        assert!(diffs[0].resolved.is_none());
+        assert_eq!(
+            diffs[0].resolved_skip_reason.as_deref(),
+            Some(RESOLVE_SKIP_OBJECT_MISSING)
+        );
+    }
+
+    #[test]
+    fn t_resolve_user_turn_skips_when_over_cap() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let big = vec![0u8; RESOLVE_READ_CAP_BYTES + 1];
+        let pa = sa.put(&big).expect("put");
+        let pb = sb.put(b"small").expect("put");
+        let a = event(1, EventKind::UserTurn { prompt_hash: pa });
+        let b = event(1, EventKind::UserTurn { prompt_hash: pb });
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_user_turn(&a, &b, Some(ctx)).expect("compare");
+        assert!(diffs[0].resolved.is_none());
+        assert_eq!(
+            diffs[0].resolved_skip_reason.as_deref(),
+            Some(RESOLVE_SKIP_EXCEEDS_CAP)
+        );
+    }
+
+    #[test]
+    fn t_resolve_session_start_cwd_attaches_bytes() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let ca = sa.put(b"/a").expect("cwd");
+        let cb = sb.put(b"/b").expect("cwd");
+        let cfg = sa.put(b"cfg").expect("cfg");
+        let cfg_b = sb.put(b"cfg").expect("cfg");
+        let a = event(
+            0,
+            EventKind::SessionStart {
+                cwd_hash: ca,
+                config_hash: cfg,
+            },
+        );
+        let b = event(
+            0,
+            EventKind::SessionStart {
+                cwd_hash: cb,
+                config_hash: cfg_b,
+            },
+        );
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_session_start(&a, &b, Some(ctx)).expect("compare");
+        assert!(diffs[0].resolved.as_ref().is_some_and(|r| !r.bytes_match));
+    }
+
+    #[test]
+    fn t_resolve_provider_id_not_dereferenceable() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let a = event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p1".to_owned(),
+                attempts: vec![attempt(1, Some(hash(1)))],
+                stream_hash: None,
+            },
+        );
+        let b = event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "p2".to_owned(),
+                attempts: vec![attempt(1, Some(hash(1)))],
+                stream_hash: None,
+            },
+        );
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_provider_call(&a, &b, Some(ctx)).expect("compare");
+        assert_eq!(
+            diffs[0].resolved_skip_reason.as_deref(),
+            Some(RESOLVE_SKIP_NOT_DEREFERENCABLE)
+        );
+    }
+
+    #[test]
+    fn t_resolve_tool_id_not_dereferenceable() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let a = event(
+            4,
+            EventKind::ToolCall {
+                tool_id: "a".to_owned(),
+                input_hash: hash(1),
+                output_hash: hash(2),
+                side_effects_hash: None,
+            },
+        );
+        let b = event(
+            4,
+            EventKind::ToolCall {
+                tool_id: "b".to_owned(),
+                input_hash: hash(1),
+                output_hash: hash(2),
+                side_effects_hash: None,
+            },
+        );
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_tool_call(&a, &b, Some(ctx)).expect("compare");
+        assert_eq!(
+            diffs[0].resolved_skip_reason.as_deref(),
+            Some(RESOLVE_SKIP_NOT_DEREFERENCABLE)
+        );
+    }
+
+    #[test]
+    fn t_resolve_retrieval_index_not_dereferenceable() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let a = event(
+            3,
+            EventKind::RetrievalCall {
+                index_id: "i1".to_owned(),
+                query_hash: hash(1),
+                results_hash: hash(2),
+            },
+        );
+        let b = event(
+            3,
+            EventKind::RetrievalCall {
+                index_id: "i2".to_owned(),
+                query_hash: hash(1),
+                results_hash: hash(2),
+            },
+        );
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_retrieval_call(&a, &b, Some(ctx)).expect("compare");
+        assert_eq!(
+            diffs[0].resolved_skip_reason.as_deref(),
+            Some(RESOLVE_SKIP_NOT_DEREFERENCABLE)
+        );
+    }
+
+    #[test]
+    fn t_resolve_permission_policy_not_dereferenceable() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let a = event(
+            5,
+            EventKind::PermissionGate {
+                policy_id: "p1".to_owned(),
+                decision: "allow".to_owned(),
+                context_hash: hash(1),
+            },
+        );
+        let b = event(
+            5,
+            EventKind::PermissionGate {
+                policy_id: "p2".to_owned(),
+                decision: "allow".to_owned(),
+                context_hash: hash(1),
+            },
+        );
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_permission_gate(&a, &b, Some(ctx)).expect("compare");
+        assert_eq!(
+            diffs[0].resolved_skip_reason.as_deref(),
+            Some(RESOLVE_SKIP_NOT_DEREFERENCABLE)
+        );
+    }
+
+    #[test]
+    fn t_resolve_session_end_skips_when_one_summary_none() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let a = event(
+            6,
+            EventKind::SessionEnd {
+                summary_hash: Some(hash(1)),
+            },
+        );
+        let b = event(6, EventKind::SessionEnd { summary_hash: None });
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_session_end(&a, &b, Some(ctx)).expect("compare");
+        assert_eq!(
+            diffs[0].resolved_skip_reason.as_deref(),
+            Some(RESOLVE_SKIP_NOT_DEREFERENCABLE)
+        );
+    }
+
+    #[test]
+    fn t_resolve_assistant_tool_calls_optional_pair_resolves() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let ha = sa.put(b"t1").expect("put");
+        let hb = sb.put(b"t2").expect("put");
+        let a = event(
+            3,
+            EventKind::AssistantTurn {
+                message_hash: hash(10),
+                tool_calls_hash: Some(ha),
+            },
+        );
+        let b = event(
+            3,
+            EventKind::AssistantTurn {
+                message_hash: hash(10),
+                tool_calls_hash: Some(hb),
+            },
+        );
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_assistant_turn(&a, &b, Some(ctx)).expect("compare");
+        assert_eq!(diffs.len(), 1);
+        assert!(diffs[0].resolved.as_ref().is_some_and(|r| !r.bytes_match));
     }
 }
