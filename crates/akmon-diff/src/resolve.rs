@@ -267,6 +267,11 @@ mod tests {
             line.push_str("你好");
         }
         assert!(
+            !line.is_char_boundary(RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES),
+            "byte {} must fall inside a multi-byte character (你好 is 6 bytes; 1020 + 4 = 1024)",
+            RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES
+        );
+        assert!(
             line.len() > RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES,
             "need a line longer than preview cap"
         );
