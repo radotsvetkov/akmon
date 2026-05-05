@@ -2,10 +2,20 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
+use akmon_core::{AgentConfig, Permission, PolicyEngine, PolicyEngineMode, Sandbox};
 use akmon_journal::{EventKind, ObjectStore, RedbObjectStore, RedbSessionGraph, SessionGraph};
+use akmon_models::{
+    CompletionStream, LlmProvider, ModelError, ModelToolCall, StopReason, StreamEvent,
+};
+use akmon_query::AgentSession;
 use akmon_query::journal_contains_session;
+use akmon_tools::{Tool, ToolContext, ToolOutput};
+use async_trait::async_trait;
+use futures_util::stream;
 use serde::Deserialize;
+use serde_json::Value;
 use tempfile::tempdir;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[allow(dead_code)]
@@ -79,6 +89,174 @@ fn run_verify_with(journal_dir: &Path, session_id: Uuid, extra: &[&str]) -> std:
     ]);
     cmd.args(extra);
     cmd.output().expect("run verify")
+}
+
+fn run_inspect_with(journal_dir: &Path, session_id: Uuid, extra: &[&str]) -> std::process::Output {
+    let bin = akmon_bin_path();
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "inspect",
+        &session_id.to_string(),
+        "--journal",
+        &journal_dir.display().to_string(),
+    ]);
+    cmd.args(extra);
+    cmd.output().expect("run inspect")
+}
+
+const TOOL_NAME: &str = "search_workspace";
+const TOOL_OUTPUT: &str = "search: 2 results";
+
+struct IntegrationSearchTool;
+
+#[async_trait]
+impl Tool for IntegrationSearchTool {
+    fn name(&self) -> &str {
+        TOOL_NAME
+    }
+    fn description(&self) -> &str {
+        "integration search mock"
+    }
+    fn required_permissions(&self) -> &[Permission] {
+        &[]
+    }
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> ToolOutput {
+        ToolOutput::Success {
+            content: TOOL_OUTPUT.into(),
+        }
+    }
+}
+
+struct OneTurnMockProvider {
+    sequences: Vec<Vec<Result<StreamEvent, ModelError>>>,
+    call: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl LlmProvider for OneTurnMockProvider {
+    fn name(&self) -> &str {
+        "integration-mock"
+    }
+    fn context_window_tokens(&self) -> usize {
+        200_000
+    }
+    fn completion_model_id(&self) -> &str {
+        "integration-mock-model"
+    }
+    async fn complete(
+        &self,
+        _messages: &[akmon_models::Message],
+        _config: &akmon_models::CompletionConfig,
+    ) -> Result<CompletionStream, ModelError> {
+        use std::sync::atomic::Ordering;
+        let i = self.call.fetch_add(1, Ordering::SeqCst);
+        let events = self.sequences.get(i).cloned().unwrap_or_default();
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+fn one_turn_sequences() -> Vec<Vec<Result<StreamEvent, ModelError>>> {
+    vec![
+        vec![Ok(StreamEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            tool_calls: vec![ModelToolCall {
+                id: "call-1".into(),
+                name: TOOL_NAME.into(),
+                arguments: serde_json::json!({"query": "widgets"}),
+            }],
+        })],
+        vec![
+            Ok(StreamEvent::TextDelta {
+                text: "final response".into(),
+            }),
+            Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            }),
+        ],
+    ]
+}
+
+async fn create_real_agent_session_journal(journal_dir: &Path, sid: Uuid) {
+    let journal = open_journal_handle(journal_dir, sid).expect("journal create");
+    let cfg = AgentConfig {
+        max_iterations: 8,
+        confirmation_timeout_secs: 30,
+        session_id: sid,
+        auto_commit: false,
+        max_completion_tokens: None,
+        subagent_style: false,
+        max_budget_usd: None,
+        fallback_model: None,
+        model_estimates: Vec::new(),
+    };
+    let mut session = AgentSession::new(
+        cfg,
+        Arc::new(PolicyEngine::new(PolicyEngineMode::AutoApproveReads {
+            confirm_writes: true,
+        })),
+        Arc::new(OneTurnMockProvider {
+            sequences: one_turn_sequences(),
+            call: std::sync::atomic::AtomicUsize::new(0),
+        }),
+        vec![Box::new(IntegrationSearchTool)],
+        Arc::new(Sandbox::new(journal_dir)),
+        None,
+        false,
+        journal,
+    )
+    .expect("session new");
+    let (tx, _rx) = mpsc::channel(64);
+    let mut no_policy = None;
+    session
+        .run("one turn".into(), tx, &mut no_policy, &mut None, None)
+        .await
+        .expect("run");
+    session.end(None).expect("session end");
+    drop(session);
+}
+
+fn history_hashes(journal_dir: &Path, sid: Uuid) -> Vec<String> {
+    let store = Arc::new(
+        RedbObjectStore::open(journal_dir.join("journal.redb").as_path()).expect("open store"),
+    );
+    let graph = RedbSessionGraph::reopen(store, sid).expect("reopen graph");
+    graph
+        .history()
+        .expect("history")
+        .into_iter()
+        .map(|(h, _)| h.to_hex())
+        .collect()
+}
+
+fn parse_import_human_counts(stderr: &str) -> Option<(u64, u64, u64)> {
+    // NOTE: This parser is coupled to run_bundle_import's human output format. If the wording in
+    // main.rs changes (for example, "existing in store" -> "already present"), this parser must
+    // be updated. Consider this when polishing CLI output in Phase 7.
+    let mut events = None;
+    let mut objects_new = None;
+    let mut objects_existing = None;
+    for line in stderr.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("events: ") {
+            events = rest.parse::<u64>().ok();
+        }
+        if let Some(rest) = t.strip_prefix("objects: ") {
+            // "31 (28 new, 3 existing in store)"
+            let total_sep = rest.find(' ')?;
+            let _total = rest[..total_sep].parse::<u64>().ok()?;
+            let inner = rest.split('(').nth(1)?.trim_end_matches(')');
+            let mut parts = inner.split(',');
+            let new_part = parts.next()?.trim();
+            let existing_part = parts.next()?.trim();
+            objects_new = new_part.strip_suffix(" new")?.parse::<u64>().ok();
+            objects_existing = existing_part
+                .strip_suffix(" existing in store")?
+                .parse::<u64>()
+                .ok();
+        }
+    }
+    Some((events?, objects_new?, objects_existing?))
 }
 
 fn create_second_clean_session(journal_dir: &Path, session_id: Uuid) {
@@ -436,6 +614,173 @@ fn t_bundle_import_json_output() {
         report.objects_total,
         report.objects_new + report.objects_existing
     );
+}
+
+#[tokio::test]
+async fn t_bundle_import_round_trip_full_session_via_real_agent_session() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::create_dir_all(&dst).expect("mkdir dst");
+    create_real_agent_session_journal(&src, sid).await;
+
+    let bundle = tmp.path().join("full.akmon");
+    let exp = run_bundle_export_with(&src, sid, &["--output", &bundle.display().to_string()]);
+    assert_eq!(
+        exp.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&exp.stderr)
+    );
+
+    let imp = run_bundle_import_ingest_attempt(&bundle, &dst, &[]);
+    assert_eq!(
+        imp.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&imp.stderr)
+    );
+
+    let verify = run_verify_with(&dst, sid, &[]);
+    assert_eq!(
+        verify.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+
+    let src_hashes = history_hashes(&src, sid);
+    let dst_hashes = history_hashes(&dst, sid);
+    assert_eq!(
+        src_hashes, dst_hashes,
+        "event hash lists must match exactly"
+    );
+}
+
+#[test]
+fn t_bundle_import_then_inspect_displays_session() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::create_dir_all(&dst).expect("mkdir dst");
+    create_clean_session(&src, sid);
+    let bundle = tmp.path().join("inspect.akmon");
+    assert!(
+        run_bundle_export_with(&src, sid, &["--output", &bundle.display().to_string()])
+            .status
+            .success()
+    );
+    assert!(
+        run_bundle_import_ingest_attempt(&bundle, &dst, &[])
+            .status
+            .success()
+    );
+
+    let out = run_inspect_with(&dst, sid, &[]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for kind in ["SessionStart", "UserTurn", "SessionEnd"] {
+        assert!(stdout.contains(kind), "missing {kind} in inspect output");
+    }
+}
+
+#[test]
+fn t_bundle_import_idempotency_via_rename_to() {
+    let tmp = tempdir().expect("tempdir");
+    let sid_src = Uuid::new_v4();
+    let sid_a = Uuid::new_v4();
+    let sid_b = Uuid::new_v4();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::create_dir_all(&dst).expect("mkdir dst");
+    create_clean_session(&src, sid_src);
+    let bundle = tmp.path().join("idem.akmon");
+    assert!(
+        run_bundle_export_with(&src, sid_src, &["--output", &bundle.display().to_string()])
+            .status
+            .success()
+    );
+
+    let imp_a =
+        run_bundle_import_ingest_attempt(&bundle, &dst, &["--rename-to", &sid_a.to_string()]);
+    assert_eq!(
+        imp_a.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&imp_a.stderr)
+    );
+    let imp_b =
+        run_bundle_import_ingest_attempt(&bundle, &dst, &["--rename-to", &sid_b.to_string()]);
+    assert_eq!(
+        imp_b.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&imp_b.stderr)
+    );
+
+    assert!(journal_contains_session(&dst, sid_a).expect("contains A"));
+    assert!(journal_contains_session(&dst, sid_b).expect("contains B"));
+
+    let verify_a = run_verify_with(&dst, sid_a, &[]);
+    let verify_b = run_verify_with(&dst, sid_b, &[]);
+    assert_eq!(
+        verify_a.status.code(),
+        Some(0),
+        "A stderr={}",
+        String::from_utf8_lossy(&verify_a.stderr)
+    );
+    assert_eq!(
+        verify_b.status.code(),
+        Some(0),
+        "B stderr={}",
+        String::from_utf8_lossy(&verify_b.stderr)
+    );
+
+    assert_eq!(history_hashes(&dst, sid_a), history_hashes(&dst, sid_b));
+}
+
+#[test]
+fn t_bundle_import_human_and_json_describe_same_outcome() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let src = tmp.path().join("src");
+    let dst_h = tmp.path().join("dst_h");
+    let dst_j = tmp.path().join("dst_j");
+    std::fs::create_dir_all(&src).expect("mkdir src");
+    std::fs::create_dir_all(&dst_h).expect("mkdir dst_h");
+    std::fs::create_dir_all(&dst_j).expect("mkdir dst_j");
+    create_clean_session(&src, sid);
+    let bundle = tmp.path().join("human_json.akmon");
+    assert!(
+        run_bundle_export_with(&src, sid, &["--output", &bundle.display().to_string()])
+            .status
+            .success()
+    );
+
+    let human = run_bundle_import_ingest_attempt(&bundle, &dst_h, &[]);
+    assert_eq!(human.status.code(), Some(0));
+    let human_stderr = String::from_utf8_lossy(&human.stderr);
+    let (events_h, new_h, existing_h) =
+        parse_import_human_counts(&human_stderr).expect("parse human counts");
+
+    let json = run_bundle_import_ingest_attempt(&bundle, &dst_j, &["--format", "json"]);
+    assert_eq!(json.status.code(), Some(0));
+    let report: BundleImportReportV1 =
+        serde_json::from_slice(&json.stdout).expect("parse json report");
+
+    assert_eq!(report.events_imported, events_h);
+    assert_eq!(report.objects_new, new_h);
+    assert_eq!(report.objects_existing, existing_h);
 }
 
 #[test]

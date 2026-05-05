@@ -423,7 +423,7 @@ struct BundleViolation {
     message: String,
 }
 
-/// JSON shape emitted when `akmon bundle import` cannot complete (I/O, manifest, collision, or placeholder).
+/// JSON shape emitted when `akmon bundle import` cannot complete (I/O, manifest, collision, or verification failure).
 #[derive(Debug, Serialize)]
 struct BundleImportInfraError {
     /// CLI crate version that produced this error object.
