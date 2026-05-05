@@ -15,6 +15,7 @@ Beginning with v2.0, each command has its own reference page in this directory. 
 - [akmon bundle export](./bundle-export.md)
 - [akmon bundle import](./bundle-import.md)
 - [akmon redact](./redact.md)
+- [akmon replay](./replay.md)
 
 All v2.0 commands are now documented.
 
