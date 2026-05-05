@@ -102,6 +102,8 @@
 - [CLI Reference](./reference/cli.md)
 - [akmon verify](./reference/verify.md)
 - [akmon inspect](./reference/inspect.md)
+- [akmon bundle export](./reference/bundle-export.md)
+- [akmon bundle import](./reference/bundle-import.md)
 - [Slash Commands](./reference/slash-commands.md)
 - [Configuration Reference](./reference/config.md)
 - [Release notes: v1.8.2](./releases/v1.8.2.md)

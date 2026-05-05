@@ -12,8 +12,10 @@ Beginning with v2.0, each command has its own reference page in this directory. 
 
 - [akmon verify](./verify.md)
 - [akmon inspect](./inspect.md)
+- [akmon bundle export](./bundle-export.md)
+- [akmon bundle import](./bundle-import.md)
 
-Future v2.0 commands (`export`, `import`, `redact`) will be documented in their own pages as they ship.
+Future v2.0 commands (`redact`) will be documented in their own pages as they ship.
 
 The sections below document v1.x commands that may be retained, retired, or migrated as part of v2.0's akmon-core retirement work (Item 6.10). Refer to those sections for current behavior until the migration completes.
 
