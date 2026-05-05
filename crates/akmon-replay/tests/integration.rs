@@ -11,7 +11,7 @@ use akmon_models::{
 };
 use akmon_query::{AgentSession, JournalHandle, journal_db_path, open_journal_read_only};
 use akmon_replay::{
-    ReplayDivergenceKind, ReplayEngine, ReplayEngineConfig, ReplayMode, assemble_report, compare,
+    ReplayEngine, ReplayEngineConfig, ReplayMode, assemble_report, compare,
     load_source_session_from_journal,
 };
 use akmon_tools::{Tool, ToolContext, ToolOutput};
@@ -202,14 +202,9 @@ async fn t_replay_full_session_via_real_agent_session() {
     )
     .expect("engine");
     let report = engine.run_to_report().await.expect("report");
+    assert!(report.passed, "{report:?}");
     assert_eq!(report.source_event_count, report.replay_event_count);
-    assert!(
-        report
-            .divergences
-            .iter()
-            .any(|d| matches!(d.kind, ReplayDivergenceKind::ProviderRequestMismatch)),
-        "{report:?}"
-    );
+    assert!(report.divergences.is_empty(), "{report:?}");
 }
 
 #[tokio::test]
@@ -234,20 +229,16 @@ async fn t_replay_strict_mode_full_session() {
     )
     .expect("engine");
     let report = engine.run_to_report().await.expect("report");
-    assert!(
-        report.divergences.iter().any(|d| matches!(
-            d.kind,
-            ReplayDivergenceKind::ProviderRequestMismatch
-                | ReplayDivergenceKind::ContentReferenceMismatch
-        )),
-        "{report:?}"
-    );
+    assert!(report.passed, "{report:?}");
+    assert_eq!(report.source_event_count, report.replay_event_count);
+    assert!(report.divergences.is_empty(), "{report:?}");
 }
 
 #[tokio::test]
 async fn t_replay_persist_creates_inspectable_session() {
     let tmp = tempdir().expect("source tempdir");
     let persist_tmp = tempdir().expect("persist tempdir");
+    let persist_tmp_report = tempdir().expect("persist report tempdir");
     let sid = Uuid::new_v4();
     write_source_session(
         tmp.path(),
@@ -267,6 +258,7 @@ async fn t_replay_persist_creates_inspectable_session() {
     )
     .expect("engine");
     let output = engine.drive_replay().await.expect("drive");
+    assert_ne!(output.replay_session_id, output.source_session_id);
     let replay =
         open_journal_read_only(persist_tmp.path(), output.replay_session_id).expect("reopen");
     let history = replay
@@ -282,6 +274,19 @@ async fn t_replay_persist_creates_inspectable_session() {
         .map(|(h, _)| h.clone())
         .collect();
     assert_eq!(persisted_hashes, output_hashes);
+
+    let source_again = load_source_session_from_journal(tmp.path(), sid).expect("source again");
+    let report_engine = ReplayEngine::new(
+        source_again,
+        ReplayEngineConfig {
+            mode: ReplayMode::Default,
+            persist: true,
+            persist_journal_dir: Some(persist_tmp_report.path().to_path_buf()),
+        },
+    )
+    .expect("report engine");
+    let report = report_engine.run_to_report().await.expect("report");
+    assert!(report.replay_session_id.is_some(), "{report:?}");
 }
 
 #[tokio::test]
@@ -342,6 +347,9 @@ async fn t_replay_handles_source_with_no_user_turns() {
     assert!(report.passed, "{report:?}");
     assert_eq!(report.source_event_count, 2);
     assert_eq!(report.replay_event_count, 2);
+    // events_compared == 2 because SessionStart and SessionEnd are events; they
+    // get compared even when there are no UserTurns.
+    assert_eq!(report.events_compared, 2);
     assert!(report.divergences.is_empty());
 }
 
@@ -368,14 +376,7 @@ async fn t_replay_handles_multi_turn_session() {
     )
     .expect("engine");
     let report = engine.run_to_report().await.expect("report");
+    assert!(report.passed, "{report:?}");
     assert_eq!(report.source_event_count, report.replay_event_count);
-    assert!(
-        report
-            .divergences
-            .iter()
-            .filter(|d| matches!(d.kind, ReplayDivergenceKind::ProviderRequestMismatch))
-            .count()
-            >= prompts.len(),
-        "{report:?}"
-    );
+    assert!(report.divergences.is_empty(), "{report:?}");
 }
