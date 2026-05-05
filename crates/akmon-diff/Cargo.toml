@@ -1,0 +1,17 @@
+[package]
+name = "akmon-diff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Diff primitives for session-vs-session comparison in Akmon."
+
+[dependencies]
+akmon-journal = { path = "../akmon-journal" }
+akmon-models = { path = "../akmon-models" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true

@@ -112,6 +112,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "akmon-diff"
+version = "1.8.2"
+dependencies = [
+ "akmon-journal",
+ "akmon-models",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
 name = "akmon-index"
 version = "1.8.2"
 dependencies = [
