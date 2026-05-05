@@ -268,11 +268,11 @@ fn compare_event_pair(source: &Event, replay: &Event, divergences: &mut Vec<Repl
         (
             EventKind::SessionStart {
                 cwd_hash: source_cwd,
-                config_hash: source_cfg,
+                config_hash: _source_cfg,
             },
             EventKind::SessionStart {
                 cwd_hash: replay_cwd,
-                config_hash: replay_cfg,
+                config_hash: _replay_cfg,
             },
         ) => {
             compare_hash_field(
@@ -282,13 +282,10 @@ fn compare_event_pair(source: &Event, replay: &Event, divergences: &mut Vec<Repl
                 replay_cwd,
                 divergences,
             );
-            compare_hash_field(
-                source.sequence,
-                "SessionStart.config_hash",
-                source_cfg,
-                replay_cfg,
-                divergences,
-            );
+            // Per extended P11 (replay comparison scope), SessionStart.config_hash
+            // is not compared directly. AgentConfig includes session_id and replay
+            // persistence uses replay-derived session IDs, so config-hash identity
+            // is not stable across record/replay boundaries.
         }
         (
             EventKind::UserTurn {
@@ -643,7 +640,6 @@ struct EventProjection<'a> {
 enum EventKindProjection<'a> {
     SessionStart {
         cwd_hash: &'a Hash,
-        config_hash: &'a Hash,
     },
     UserTurn {
         prompt_hash: &'a Hash,
@@ -692,6 +688,9 @@ struct AttemptProjection<'a> {
 
 fn projection_hash(event: &Event, algorithm: HashAlgorithm) -> Hash {
     let normalized = normalize_event_timestamps(event);
+    // Extended P11 excludes SessionStart.config_hash from strict comparison.
+    // The hash is derived from serialized AgentConfig bytes that include
+    // runtime-variable session identifiers.
     let projection = EventProjection {
         kind: project_kind(&normalized.kind),
     };
@@ -704,11 +703,8 @@ fn project_kind(kind: &EventKind) -> EventKindProjection<'_> {
     match kind {
         EventKind::SessionStart {
             cwd_hash,
-            config_hash,
-        } => EventKindProjection::SessionStart {
-            cwd_hash,
-            config_hash,
-        },
+            config_hash: _config_hash,
+        } => EventKindProjection::SessionStart { cwd_hash },
         EventKind::UserTurn { prompt_hash } => EventKindProjection::UserTurn { prompt_hash },
         EventKind::ProviderCall {
             provider_id,
@@ -2234,6 +2230,27 @@ mod tests {
     }
 
     #[test]
+    fn t_compare_default_session_start_ignores_config_hash() {
+        let source = vec![sample_event(
+            1,
+            EventKind::SessionStart {
+                cwd_hash: hash_of(10),
+                config_hash: hash_of(11),
+            },
+        )];
+        let replay = vec![sample_event(
+            1,
+            EventKind::SessionStart {
+                cwd_hash: hash_of(10),
+                config_hash: hash_of(99),
+            },
+        )];
+        let out = output_for_compare_mode(ReplayMode::Default, source, replay);
+        let diffs = compare_default_mode(&out);
+        assert!(diffs.is_empty(), "{diffs:?}");
+    }
+
+    #[test]
     fn t_compare_default_provider_call_detects_response_mismatch() {
         let source = vec![sample_event(
             2,
@@ -2541,6 +2558,51 @@ mod tests {
         let out = output_for_compare_mode(ReplayMode::Strict, source, replay);
         let diffs = compare_strict_mode(&out);
         assert!(diffs.is_empty(), "{diffs:?}");
+    }
+
+    #[test]
+    fn t_compare_strict_session_start_ignores_config_hash() {
+        let source = vec![sample_event(
+            0,
+            EventKind::SessionStart {
+                cwd_hash: hash_of(1),
+                config_hash: hash_of(2),
+            },
+        )];
+        let replay = vec![sample_event(
+            0,
+            EventKind::SessionStart {
+                cwd_hash: hash_of(1),
+                config_hash: hash_of(222),
+            },
+        )];
+        let out = output_for_compare_mode(ReplayMode::Strict, source, replay);
+        let diffs = compare_strict_mode(&out);
+        assert!(diffs.is_empty(), "{diffs:?}");
+    }
+
+    #[test]
+    fn t_compare_strict_session_start_detects_other_fields() {
+        let source = vec![sample_event(
+            0,
+            EventKind::SessionStart {
+                cwd_hash: hash_of(1),
+                config_hash: hash_of(2),
+            },
+        )];
+        let replay = vec![sample_event(
+            0,
+            EventKind::SessionStart {
+                cwd_hash: hash_of(9),
+                config_hash: hash_of(2),
+            },
+        )];
+        let out = output_for_compare_mode(ReplayMode::Strict, source, replay);
+        let diffs = compare_strict_mode(&out);
+        assert!(diffs.iter().any(|d| {
+            matches!(d.kind, ReplayDivergenceKind::ContentReferenceMismatch)
+                && d.expected.contains("SessionStart.cwd_hash")
+        }));
     }
 
     #[test]
