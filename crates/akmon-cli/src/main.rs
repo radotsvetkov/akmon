@@ -4,6 +4,7 @@ mod audit_cmd;
 mod cli_forward;
 mod cli_project;
 mod config_cmd;
+mod diff_cmd;
 mod doctor_cmd;
 mod evidence_cmd;
 mod export_cmd;
@@ -1946,6 +1947,8 @@ Exit codes:\n\
   3 — I/O or environment error (journal/session not found, write failure)"
     )]
     Redact(RedactArgs),
+    /// Compare two recorded sessions (structural and field-level differences).
+    Diff(diff_cmd::DiffArgs),
     /// Replay a recorded session with deterministic playback substitutions.
     Replay(ReplayArgs),
 }
@@ -5925,6 +5928,9 @@ async fn main() -> ExitCode {
                 args.journal.clone(),
                 args.format,
             );
+        }
+        Some(Commands::Diff(args)) => {
+            return diff_cmd::run_diff(args.clone());
         }
         Some(Commands::Replay(args)) => {
             return run_replay(args.clone()).await;
