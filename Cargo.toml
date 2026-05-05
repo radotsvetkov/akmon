@@ -11,6 +11,7 @@ members = [
     "crates/akmon-tui",
     "crates/akmon-journal",
     "crates/akmon-bundle",
+    "crates/akmon-replay",
 ]
 
 [workspace.dependencies]

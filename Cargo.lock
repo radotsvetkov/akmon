@@ -197,6 +197,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "akmon-replay"
+version = "1.8.2"
+dependencies = [
+ "akmon-core",
+ "akmon-journal",
+ "akmon-models",
+ "akmon-tools",
+ "async-trait",
+ "ciborium",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "akmon-tools"
 version = "1.8.2"
 dependencies = [
