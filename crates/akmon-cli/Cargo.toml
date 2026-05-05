@@ -26,6 +26,7 @@ semantic-index = [
 akmon-bundle = { path = "../akmon-bundle" }
 akmon-config = { path = "../akmon-config" }
 akmon-core = { path = "../akmon-core" }
+akmon-diff = { path = "../akmon-diff" }
 akmon-index = { path = "../akmon-index", optional = true }
 akmon-journal = { path = "../akmon-journal" }
 akmon-models = { path = "../akmon-models" }

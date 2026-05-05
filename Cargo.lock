@@ -55,6 +55,7 @@ dependencies = [
  "akmon-bundle",
  "akmon-config",
  "akmon-core",
+ "akmon-diff",
  "akmon-index",
  "akmon-journal",
  "akmon-models",

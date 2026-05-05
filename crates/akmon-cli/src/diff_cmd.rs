@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use akmon_diff::{DiffEngine, DiffReportV1, load_source_session_from_journal};
+use akmon_query::default_journal_dir;
 use clap::{Args, ValueEnum};
 use uuid::Uuid;
 
@@ -35,10 +37,87 @@ pub struct DiffArgs {
     pub format: DiffFormat,
 }
 
-/// Layer 1 placeholder until engine wiring (Item 6.3 layer 2).
+/// Same journal resolution as `run_replay` (`--journal` or `default_journal_dir()`).
+fn resolve_diff_journal_dir(args: &DiffArgs) -> Result<PathBuf, String> {
+    match &args.journal {
+        Some(path) => Ok(path.clone()),
+        None => default_journal_dir().map_err(|e| e.to_string()),
+    }
+}
+
+/// Layer 2: placeholder output (Layer 3 adds real human/JSON formatters).
+fn print_diff_placeholder_report(report: &DiffReportV1, format: DiffFormat) -> std::io::Result<()> {
+    match format {
+        DiffFormat::Human => {
+            println!("{report:#?}");
+            Ok(())
+        }
+        DiffFormat::Json => {
+            let s = serde_json::to_string_pretty(report)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            println!("{s}");
+            Ok(())
+        }
+    }
+}
+
+/// Load sessions, run comparison, print placeholder report. Exit `1` on mismatch or any error (Layer 3 refines codes).
 #[must_use]
-pub fn run_diff(_args: DiffArgs) -> ExitCode {
-    ExitCode::SUCCESS
+pub fn run_diff(args: DiffArgs) -> ExitCode {
+    let format = args.format;
+    let journal_dir = match resolve_diff_journal_dir(&args) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("akmon: diff: cannot resolve journal directory: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let source_a = match load_source_session_from_journal(&journal_dir, args.session_a) {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("akmon: diff: {err:?}");
+            return ExitCode::from(1);
+        }
+    };
+    let source_b = match load_source_session_from_journal(&journal_dir, args.session_b) {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("akmon: diff: {err:?}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let engine = match DiffEngine::new(source_a, source_b) {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!("akmon: diff: {err:?}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let report = match if args.resolve {
+        engine.run_with_resolve_to_report()
+    } else {
+        engine.run_to_report()
+    } {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("akmon: diff: {err:?}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Err(err) = print_diff_placeholder_report(&report, format) {
+        eprintln!("akmon: diff: failed to print report: {err}");
+        return ExitCode::from(1);
+    }
+
+    if report.matches {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 #[cfg(test)]
@@ -47,8 +126,6 @@ mod tests {
     use crate::{Cli, Commands};
     use clap::Parser;
     use std::path::PathBuf;
-    use std::process::ExitCode;
-    use uuid::Uuid;
 
     const SID_A: &str = "550e8400-e29b-41d4-a716-446655440000";
     const SID_B: &str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
@@ -155,14 +232,17 @@ mod tests {
     }
 
     #[test]
-    fn run_diff_stub_succeeds() {
+    fn resolve_diff_journal_dir_uses_explicit_path() {
         let args = DiffArgs {
-            session_a: Uuid::parse_str(SID_A).expect("uuid"),
-            session_b: Uuid::parse_str(SID_B).expect("uuid"),
-            journal: None,
+            session_a: uuid::Uuid::nil(),
+            session_b: uuid::Uuid::nil(),
+            journal: Some(PathBuf::from("/explicit/journal")),
             resolve: false,
             format: DiffFormat::Human,
         };
-        assert_eq!(super::run_diff(args), ExitCode::SUCCESS);
+        assert_eq!(
+            super::resolve_diff_journal_dir(&args).expect("ok"),
+            PathBuf::from("/explicit/journal")
+        );
     }
 }
