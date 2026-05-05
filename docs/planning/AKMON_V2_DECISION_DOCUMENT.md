@@ -820,6 +820,8 @@ These questions are expected to surface during Item 6.2 implementation and are i
 
 **Item 6.2 — Diff engine implementation.** Implement two-session source loading, lockstep walking with structural-break detection, event-kind-specific field comparators, and optional content dereferencing for `--resolve`. Keep layering explicit (source intake, walk/comparison core, dereference path, report assembly) to preserve testability and avoid CLI-coupled business logic.
 
+**Status: Complete.** Delivered in `akmon-diff` across seven layers (`16c2887`–`ac734eb`). Locked **P12** resolve architecture is recorded in §6.7.1 (`c754271`, `be6bcfe`). Post-v2.0.0 backlog: **6.V** (pre-load memory protection for resolve), **6.W** (structured field decoding in resolve). Phase 7 **7.6** tracks shared resolve preview helpers and inspect UTF-8-safe truncation.
+
 **Item 6.3 — `akmon diff` CLI command.** Add the command surface, argument parsing tests, engine wiring, human and JSON output formatting, integration tests, and reference docs. Keep command composition aligned with Phase 5 replay command layering so report semantics remain stable between terminal use and CI automation.
 
 Backlog (deferred to post-v2.0.0):
@@ -856,7 +858,7 @@ The 10 MiB cap is diff-specific (replay and inspect perform uncapped `get` today
 
 ## Lessons from Phase 5
 
-Phase-level D-decisions are starting constraints, not exhaustive implementation contracts. As with Phase 5, real code paths will force additional scoped decisions that should be recorded explicitly when they appear, not guessed upfront. Expect targeted P-style decision additions during Item 6.2 and additional backlog entries when non-blocking complexity is discovered. The planning document remains a living artifact for the phase, with revisions made deliberately as implementation reality surfaces.
+Phase-level D-decisions are starting constraints, not exhaustive implementation contracts. As with Phase 5, real code paths will force additional scoped decisions that should be recorded explicitly when they appear, not guessed upfront. P-style decision additions emerged during Item 6.2 (P12 for `--resolve` mode architecture) and additional backlog entries (Items 6.V, 6.W, 7.6) were recorded as non-blocking complexity surfaced. The planning document remains a living artifact for the phase, with revisions made deliberately as implementation reality surfaces.
  
 ---
  
