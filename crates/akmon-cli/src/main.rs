@@ -2856,26 +2856,15 @@ fn resolve_replay_persist_journal_dir(
     Some(persist_to.unwrap_or_else(|| source_journal_dir.to_path_buf()))
 }
 
+const REPLAY_HUMAN_DIVERGENCE_CAP: usize = 10;
+
 async fn run_replay_result(
     args: ReplayArgs,
+    source_journal_dir: PathBuf,
+    persist_journal_dir: Option<PathBuf>,
 ) -> Result<akmon_replay::ReplayReportV1, akmon_replay::ReplayInfraError> {
-    let source_journal_dir = match args.journal {
-        Some(path) => path,
-        None => default_journal_dir().map_err(|err| akmon_replay::ReplayInfraError {
-            akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-            error: format!("cannot resolve default journal directory: {err}"),
-            category: "journal_not_found".to_owned(),
-            source_session_id: Some(args.session_id.to_string()),
-            missing_provider_id: None,
-            missing_tool_id: None,
-            missing_object_hash: None,
-        })?,
-    };
-    let persist_journal_dir = resolve_replay_persist_journal_dir(
-        args.persist,
-        args.persist_to,
-        source_journal_dir.as_path(),
-    );
+    // Journal directories are resolved by the caller so formatting/exit handling
+    // can report infra failures before invoking engine wiring.
     let source = akmon_replay::load_source_session_from_journal(
         source_journal_dir.as_path(),
         args.session_id,
@@ -2896,10 +2885,180 @@ async fn run_replay_result(
     })
 }
 
+fn render_replay_human_report(
+    report: &akmon_replay::ReplayReportV1,
+    persisted_journal_dir: Option<&Path>,
+) -> String {
+    let mut lines = vec![
+        format!("replay: source session {}", report.source_session_id),
+        format!("  mode: {}", report.mode),
+        format!("  events compared: {}", report.events_compared),
+        format!("  source events: {}", report.source_event_count),
+        format!("  replay events: {}", report.replay_event_count),
+        format!(
+            "  primitive divergences: {}",
+            report.primitive_divergence_count
+        ),
+        format!("  engine divergences: {}", report.engine_divergence_count),
+        format!("  passed: {}", if report.passed { "yes" } else { "no" }),
+    ];
+    if let (Some(replay_session_id), Some(path)) =
+        (report.replay_session_id.as_deref(), persisted_journal_dir)
+    {
+        lines.push(format!(
+            "  persisted as: {replay_session_id} in {}",
+            path.display()
+        ));
+    }
+    if !report.passed {
+        lines.push("  divergences:".to_owned());
+        let shown = report.divergences.len().min(REPLAY_HUMAN_DIVERGENCE_CAP);
+        for (idx, divergence) in report.divergences.iter().take(shown).enumerate() {
+            let event = divergence
+                .event_seq
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "unknown".to_owned());
+            lines.push(format!(
+                "    [{}] event {event}: {:?}",
+                idx + 1,
+                divergence.kind
+            ));
+            lines.push(format!("          expected: {}", divergence.expected));
+            lines.push(format!("          actual:   {}", divergence.actual));
+        }
+        if report.divergences.len() > REPLAY_HUMAN_DIVERGENCE_CAP {
+            let remaining = report.divergences.len() - REPLAY_HUMAN_DIVERGENCE_CAP;
+            lines.push(format!(
+                "    ... (and {remaining} more; use --format json for full list)"
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn render_replay_human_error(error: &akmon_replay::ReplayInfraError) -> String {
+    let sid = error
+        .source_session_id
+        .as_deref()
+        .unwrap_or("unknown source session");
+    match error.category.as_str() {
+        "journal_not_found" => format!("akmon replay: source journal not found for session {sid}"),
+        "empty_source" => "akmon replay: source session has no events to replay".to_owned(),
+        "no_matching_calls" => {
+            "akmon replay: source session has no matching provider/tool calls to replay".to_owned()
+        }
+        "missing_tool_for_replay" => format!(
+            "akmon replay: source session uses tool '{}' which cannot be replayed",
+            error.missing_tool_id.as_deref().unwrap_or("<unknown>")
+        ),
+        "missing_provider_for_replay" => format!(
+            "akmon replay: source session uses provider '{}' which cannot be replayed",
+            error.missing_provider_id.as_deref().unwrap_or("<unknown>")
+        ),
+        "missing_source_object" => format!(
+            "akmon replay: source session references missing object '{}'",
+            error.missing_object_hash.as_deref().unwrap_or("<unknown>")
+        ),
+        "unsupported_provider_multiplicity" => {
+            "akmon replay: multi-provider source sessions are not supported in v2.0.0".to_owned()
+        }
+        _ => format!("akmon replay: {}", error.error),
+    }
+}
+
+fn print_replay_json_report(report: &akmon_replay::ReplayReportV1) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(report).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
+fn print_replay_json_error(error: &akmon_replay::ReplayInfraError) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(error).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
 async fn run_replay(args: ReplayArgs) -> ExitCode {
-    let _format = args.format;
-    let _result = run_replay_result(args).await;
-    unimplemented!("output formatting — implemented in Item 5.3 layer 3")
+    let format = args.format;
+    let source_journal_dir = match args.journal.clone() {
+        Some(path) => path,
+        None => match default_journal_dir() {
+            Ok(path) => path,
+            Err(err) => {
+                let infra = akmon_replay::ReplayInfraError {
+                    akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    error: format!("cannot resolve default journal directory: {err}"),
+                    category: "journal_not_found".to_owned(),
+                    source_session_id: Some(args.session_id.to_string()),
+                    missing_provider_id: None,
+                    missing_tool_id: None,
+                    missing_object_hash: None,
+                };
+                return match format {
+                    ReplayFormat::Json => match print_replay_json_error(&infra) {
+                        Ok(()) => ExitCode::from(3),
+                        Err(render_err) => {
+                            eprintln!("akmon replay: failed to render JSON output: {render_err}");
+                            ExitCode::from(3)
+                        }
+                    },
+                    ReplayFormat::Human => {
+                        eprintln!("{}", render_replay_human_error(&infra));
+                        ExitCode::from(3)
+                    }
+                };
+            }
+        },
+    };
+    let persist_journal_dir = resolve_replay_persist_journal_dir(
+        args.persist,
+        args.persist_to.clone(),
+        source_journal_dir.as_path(),
+    );
+    let result = run_replay_result(args, source_journal_dir, persist_journal_dir.clone()).await;
+    match result {
+        Ok(report) => match format {
+            ReplayFormat::Json => match print_replay_json_report(&report) {
+                Ok(()) => {
+                    if report.passed {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(1)
+                    }
+                }
+                Err(err) => {
+                    eprintln!("akmon replay: failed to render JSON output: {err}");
+                    ExitCode::from(3)
+                }
+            },
+            ReplayFormat::Human => {
+                println!(
+                    "{}",
+                    render_replay_human_report(&report, persist_journal_dir.as_deref())
+                );
+                if report.passed {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                }
+            }
+        },
+        Err(err) => match format {
+            ReplayFormat::Json => match print_replay_json_error(&err) {
+                Ok(()) => ExitCode::from(3),
+                Err(render_err) => {
+                    eprintln!("akmon replay: failed to render JSON output: {render_err}");
+                    ExitCode::from(3)
+                }
+            },
+            ReplayFormat::Human => {
+                eprintln!("{}", render_replay_human_error(&err));
+                ExitCode::from(3)
+            }
+        },
+    }
 }
 
 fn parse_requested_redact_hashes(
@@ -7119,6 +7278,168 @@ mod tests {
             source,
         );
         assert_eq!(not_persisted, None);
+    }
+
+    fn sample_replay_divergence(
+        seq: Option<u64>,
+        expected: &str,
+        actual: &str,
+    ) -> akmon_replay::ReplayDivergence {
+        akmon_replay::ReplayDivergence {
+            event_seq: seq,
+            kind: akmon_replay::ReplayDivergenceKind::AssistantContentMismatch,
+            expected: expected.to_owned(),
+            actual: actual.to_owned(),
+        }
+    }
+
+    fn sample_replay_report(
+        passed: bool,
+        replay_session_id: Option<&str>,
+        divergences: Vec<akmon_replay::ReplayDivergence>,
+    ) -> akmon_replay::ReplayReportV1 {
+        akmon_replay::ReplayReportV1 {
+            akmon_version: "0.0.0-test".to_owned(),
+            agef_version: "0.1".to_owned(),
+            source_session_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            source_head: "deadbeef".to_owned(),
+            replay_session_id: replay_session_id.map(str::to_owned),
+            mode: "default".to_owned(),
+            events_compared: 14,
+            source_event_count: 14,
+            replay_event_count: 14,
+            primitive_divergence_count: 0,
+            engine_divergence_count: divergences.len() as u64,
+            divergences,
+            passed,
+        }
+    }
+
+    #[test]
+    fn t_format_human_passing_report() {
+        let report = sample_replay_report(true, None, Vec::new());
+        let out = render_replay_human_report(&report, None);
+        assert!(out.contains("mode: default"));
+        assert!(out.contains("events compared: 14"));
+        assert!(out.contains("passed: yes"));
+        assert!(!out.contains("\n  divergences:"));
+    }
+
+    #[test]
+    fn t_format_human_failing_report_with_divergences() {
+        let report = sample_replay_report(
+            false,
+            None,
+            vec![
+                sample_replay_divergence(Some(5), "exp-1", "act-1"),
+                sample_replay_divergence(Some(7), "exp-2", "act-2"),
+                sample_replay_divergence(Some(9), "exp-3", "act-3"),
+            ],
+        );
+        let out = render_replay_human_report(&report, None);
+        assert!(out.contains("passed: no"));
+        assert!(out.contains("divergences:"));
+        assert!(out.contains("[1] event 5:"));
+        assert!(out.contains("[3] event 9:"));
+        assert!(out.contains("expected: exp-1"));
+        assert!(out.contains("actual:   act-3"));
+    }
+
+    #[test]
+    fn t_format_human_truncates_divergences_at_cap() {
+        let divergences = (0..15)
+            .map(|i| sample_replay_divergence(Some(i), "e", "a"))
+            .collect();
+        let report = sample_replay_report(false, None, divergences);
+        let out = render_replay_human_report(&report, None);
+        assert!(out.contains("[10] event 9:"));
+        assert!(!out.contains("[11] event 10:"));
+        assert!(out.contains("(and 5 more; use --format json for full list)"));
+    }
+
+    #[test]
+    fn t_format_human_persisted_session_id() {
+        let report = sample_replay_report(
+            true,
+            Some("7c9a3f8b-1111-2222-3333-444455556666"),
+            Vec::new(),
+        );
+        let out = render_replay_human_report(&report, Some(Path::new("/tmp/journal")));
+        assert!(out.contains("persisted as: 7c9a3f8b-1111-2222-3333-444455556666 in /tmp/journal"));
+    }
+
+    #[test]
+    fn t_format_human_no_persisted_session_id() {
+        let report = sample_replay_report(true, None, Vec::new());
+        let out = render_replay_human_report(&report, Some(Path::new("/tmp/journal")));
+        assert!(!out.contains("persisted as:"));
+    }
+
+    #[test]
+    fn t_format_json_success_serializes_report() {
+        let report = sample_replay_report(true, None, Vec::new());
+        let json = serde_json::to_string_pretty(&report).expect("serialize report");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        assert_eq!(
+            parsed["source_session_id"],
+            serde_json::Value::String("550e8400-e29b-41d4-a716-446655440000".to_owned())
+        );
+        assert_eq!(
+            parsed["mode"],
+            serde_json::Value::String("default".to_owned())
+        );
+        assert_eq!(parsed["passed"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn t_format_json_error_serializes_infra_error() {
+        let error = akmon_replay::ReplayInfraError {
+            akmon_version: "0.0.0-test".to_owned(),
+            error: "boom".to_owned(),
+            category: "session_run_failed".to_owned(),
+            source_session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_owned()),
+            missing_provider_id: None,
+            missing_tool_id: None,
+            missing_object_hash: None,
+        };
+        let json = serde_json::to_string_pretty(&error).expect("serialize infra error");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse json");
+        assert_eq!(
+            parsed["category"],
+            serde_json::Value::String("session_run_failed".to_owned())
+        );
+        assert_eq!(
+            parsed["error"],
+            serde_json::Value::String("boom".to_owned())
+        );
+    }
+
+    #[test]
+    fn t_format_human_error_for_each_category() {
+        let categories = [
+            "journal_not_found",
+            "empty_source",
+            "no_matching_calls",
+            "missing_tool_for_replay",
+            "missing_provider_for_replay",
+            "missing_source_object",
+            "unsupported_provider_multiplicity",
+            "session_run_failed",
+        ];
+        for category in categories {
+            let error = akmon_replay::ReplayInfraError {
+                akmon_version: "0.0.0-test".to_owned(),
+                error: "details".to_owned(),
+                category: category.to_owned(),
+                source_session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_owned()),
+                missing_provider_id: Some("provider-x".to_owned()),
+                missing_tool_id: Some("tool-y".to_owned()),
+                missing_object_hash: Some("hash-z".to_owned()),
+            };
+            let rendered = render_replay_human_error(&error);
+            assert!(!rendered.trim().is_empty(), "category={category}");
+            assert!(rendered.starts_with("akmon replay:"), "category={category}");
+        }
     }
 
     #[test]
