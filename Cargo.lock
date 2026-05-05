@@ -59,6 +59,7 @@ dependencies = [
  "akmon-journal",
  "akmon-models",
  "akmon-query",
+ "akmon-replay",
  "akmon-tools",
  "akmon-tui",
  "anyhow",

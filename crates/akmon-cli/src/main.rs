@@ -346,6 +346,35 @@ enum RedactFormat {
     Json,
 }
 
+/// Output format for `akmon replay` status messages.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum ReplayFormat {
+    /// Human-readable status messages.
+    #[default]
+    Human,
+    /// Machine-readable JSON status messages.
+    Json,
+}
+
+/// Replay comparison mode for `akmon replay`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum ReplayModeArg {
+    /// Semantic comparison mode.
+    #[default]
+    Default,
+    /// Strict comparison mode.
+    Strict,
+}
+
+impl From<ReplayModeArg> for akmon_replay::ReplayMode {
+    fn from(value: ReplayModeArg) -> Self {
+        match value {
+            ReplayModeArg::Default => Self::Default,
+            ReplayModeArg::Strict => Self::Strict,
+        }
+    }
+}
+
 /// Stable JSON shape for `akmon bundle export --format json`.
 #[derive(Debug, Serialize, Deserialize)]
 struct BundleExportReportV1 {
@@ -1917,6 +1946,8 @@ Exit codes:\n\
   3 — I/O or environment error (journal/session not found, write failure)"
     )]
     Redact(RedactArgs),
+    /// Replay a recorded session with deterministic playback substitutions.
+    Replay(ReplayArgs),
 }
 
 /// Arguments for `akmon bundle`.
@@ -2043,6 +2074,32 @@ struct RedactArgs {
     /// Output format for status messages: human (default) or json.
     #[arg(long, default_value = "human")]
     format: RedactFormat,
+}
+
+/// Arguments for `akmon replay`.
+#[derive(Args, Debug, Clone)]
+struct ReplayArgs {
+    /// Source session id (UUID).
+    session_id: uuid::Uuid,
+    /// Source journal directory.
+    ///
+    /// Defaults to per-user journal location (`$XDG_STATE_HOME/akmon/journal`).
+    #[arg(long)]
+    journal: Option<PathBuf>,
+    /// Replay comparison mode.
+    #[arg(long, value_enum, default_value_t = ReplayModeArg::Default)]
+    mode: ReplayModeArg,
+    /// Persist replay session to journal (default: report-only).
+    #[arg(long)]
+    persist: bool,
+    /// Target journal directory for persisted replay session.
+    ///
+    /// Defaults to source `--journal` directory when `--persist` is set.
+    #[arg(long, requires = "persist")]
+    persist_to: Option<PathBuf>,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ReplayFormat::Human)]
+    format: ReplayFormat,
 }
 
 fn format_bundle_byte_size(bytes: u64) -> String {
@@ -2785,6 +2842,18 @@ fn run_redact(
         }
     }
     ExitCode::SUCCESS
+}
+
+fn run_replay(args: ReplayArgs) -> ExitCode {
+    let _mode: akmon_replay::ReplayMode = args.mode.into();
+    let _ = (
+        args.session_id,
+        args.journal,
+        args.persist,
+        args.persist_to,
+        args.format,
+    );
+    unimplemented!("akmon replay handler — implemented in Item 5.3 layer 2")
 }
 
 fn parse_requested_redact_hashes(
@@ -5648,6 +5717,9 @@ async fn main() -> ExitCode {
                 args.format,
             );
         }
+        Some(Commands::Replay(args)) => {
+            return run_replay(args.clone());
+        }
         Some(Commands::Chat) | None => {}
     }
 
@@ -6894,6 +6966,89 @@ mod tests {
             }
             other => panic!("expected verify command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn t_replay_subcommand_parses_session_id() {
+        let cli = Cli::try_parse_from(["akmon", "replay", "550e8400-e29b-41d4-a716-446655440000"])
+            .expect("parse replay");
+        match cli.command {
+            Some(Commands::Replay(args)) => {
+                assert_eq!(
+                    args.session_id.to_string(),
+                    "550e8400-e29b-41d4-a716-446655440000"
+                );
+                assert!(args.journal.is_none());
+                assert_eq!(args.mode, ReplayModeArg::Default);
+                assert!(!args.persist);
+                assert!(args.persist_to.is_none());
+                assert_eq!(args.format, ReplayFormat::Human);
+            }
+            other => panic!("expected replay command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_replay_subcommand_parses_all_flags() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "replay",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--journal",
+            "/tmp/source-journal",
+            "--mode",
+            "strict",
+            "--persist",
+            "--persist-to",
+            "/tmp/replay-journal",
+            "--format",
+            "json",
+        ])
+        .expect("parse replay flags");
+        match cli.command {
+            Some(Commands::Replay(args)) => {
+                assert_eq!(args.journal, Some(PathBuf::from("/tmp/source-journal")));
+                assert_eq!(args.mode, ReplayModeArg::Strict);
+                assert!(args.persist);
+                assert_eq!(args.persist_to, Some(PathBuf::from("/tmp/replay-journal")));
+                assert_eq!(args.format, ReplayFormat::Json);
+            }
+            other => panic!("expected replay command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_replay_subcommand_rejects_persist_to_without_persist() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "replay",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--persist-to",
+            "/tmp/replay-journal",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--persist") && rendered.contains("--persist-to"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_replay_subcommand_rejects_invalid_mode() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "replay",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--mode",
+            "aggressive",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value") || rendered.contains("possible values"),
+            "unexpected clap error: {rendered}"
+        );
     }
 
     #[test]
