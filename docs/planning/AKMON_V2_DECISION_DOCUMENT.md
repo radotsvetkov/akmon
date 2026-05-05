@@ -642,6 +642,7 @@ Each item: design first, implement, document under `docs/src/commands/` or `docs
 - Replay supports **two modes** in v2.0.0:
   - `default`: semantic comparison, final-success-only provider playback, divergence-and-continue tool mismatch handling.
   - `strict`: hash-identical-after-normalization comparison, full provider attempt-sequence playback, hard-fail on tool input mismatch.
+- Phase 5 replay supports **single-provider sessions only** for v2.0.0. Multi-provider replay is deferred to Item 5.6.
 - Replay refuses incomplete/corrupted/unresolvable source sessions (error path; see P8/D-09).
 
 **Item 5.1 — PlaybackProvider and PlaybackTool** (inert, no real side effects)
@@ -717,6 +718,18 @@ When to start: After v2.0.0 Phase 5 replay scope ships, and only with explicit d
 Notes:
 - v2.0.0 composition path remains: `akmon bundle import` -> `akmon replay <session-id>`.
 - Avoid dual-path complexity in initial replay implementation.
+
+**Item 5.6 — Multi-provider replay via router PlaybackProvider** (deferred follow-up, out of v2.0.0)
+
+Goal: Support replay of sessions that used multiple provider identities (for example model switches mid-session or fallback providers on retry exhaustion).
+
+Background: Item 5.2 Layer 2 surfaced that `AgentSession` accepts a single provider instance, while Item 5.1's playback design indexed providers by `provider_id`. v2.0.0 replay therefore enforces single-provider sessions and rejects multi-provider sessions with `ReplayError::UnsupportedProviderMultiplicity`.
+
+Approach: Build a router `PlaybackProvider` that wraps multiple per-id playback substitutes. `AgentSession` sees one provider; routing happens internally based on the active provider in the recorded call sequence.
+
+When to start: When real-world replay usage demonstrates demand for multi-provider session support. Not blocking v2.0.0 release.
+
+Estimated scope: 4-6 commits across `akmon-replay` (router primitive, engine integration, tests, docs update).
  
 ---
  
