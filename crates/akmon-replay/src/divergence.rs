@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 /// Divergence categories recorded during replay runtime.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReplayDivergenceKind {
     /// Provider was called where source history did not expect a provider call.
     ProviderCallUnexpected,
@@ -38,7 +39,7 @@ pub enum ReplayDivergenceKind {
 }
 
 /// One replay divergence record with human-readable expected/actual summaries.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayDivergence {
     /// Source event sequence where divergence occurred (when known).
     pub event_seq: Option<u64>,

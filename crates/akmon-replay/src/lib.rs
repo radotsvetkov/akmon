@@ -7,6 +7,7 @@ mod engine;
 mod error;
 mod mode;
 mod provider;
+mod report;
 mod tool;
 
 pub use divergence::{ReplayDivergence, ReplayDivergenceCollector, ReplayDivergenceKind};
@@ -17,4 +18,5 @@ pub use engine::{
 pub use error::ReplayError;
 pub use mode::ReplayMode;
 pub use provider::{PlaybackProvider, PlaybackProviderConfig};
+pub use report::{ReplayInfraError, ReplayReportV1, assemble_report};
 pub use tool::{PlaybackTool, PlaybackToolConfig};

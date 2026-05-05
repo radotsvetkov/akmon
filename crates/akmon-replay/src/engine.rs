@@ -21,7 +21,8 @@ use uuid::Uuid;
 
 use crate::{
     PlaybackProvider, PlaybackProviderConfig, PlaybackTool, PlaybackToolConfig, ReplayDivergence,
-    ReplayDivergenceCollector, ReplayDivergenceKind, ReplayError, ReplayMode,
+    ReplayDivergenceCollector, ReplayDivergenceKind, ReplayError, ReplayMode, ReplayReportV1,
+    assemble_report,
 };
 
 /// Replay engine setup and orchestration state (Layer 1: loading and setup only).
@@ -126,6 +127,8 @@ pub struct ReplayRunOutput {
     pub replay_history: Vec<(Hash, Event)>,
     /// Runtime divergences recorded by replay primitives.
     pub divergences: Vec<crate::ReplayDivergence>,
+    /// Whether replay session output was persisted to on-disk journal.
+    pub replay_persisted: bool,
 }
 
 /// Compares source and replay histories in default mode using index lockstep.
@@ -929,6 +932,13 @@ where
         &self.replay_agent_config
     }
 
+    /// Convenience entrypoint: replay run, mode comparison, and report assembly.
+    pub async fn run_to_report(self) -> Result<ReplayReportV1, ReplayError> {
+        let output = self.drive_replay().await?;
+        let engine_divergences = compare(&output);
+        Ok(assemble_report(output, engine_divergences))
+    }
+
     /// Runs source user turns against playback primitives and captures replay history.
     pub async fn drive_replay(self) -> Result<ReplayRunOutput, ReplayError> {
         let provider = self.select_single_provider()?;
@@ -990,6 +1000,7 @@ where
             source_history: self.source.history().to_vec(),
             replay_history,
             divergences,
+            replay_persisted: self.config.persist,
         })
     }
 
@@ -1272,6 +1283,7 @@ mod tests {
                 .map(|e| (hash_of(e.sequence as u8), e))
                 .collect(),
             divergences: Vec::new(),
+            replay_persisted: false,
         }
     }
 
@@ -1742,6 +1754,23 @@ mod tests {
             err,
             ReplayError::UnsupportedProviderMultiplicity { count: 0 }
         ));
+    }
+
+    #[tokio::test]
+    async fn t_run_to_report_clean_session() {
+        let source = source_session();
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+            },
+        )
+        .expect("engine");
+        let report = engine.run_to_report().await.expect("report");
+        assert_eq!(report.mode, "default");
+        assert!(report.source_event_count > 0);
+        assert!(report.replay_event_count > 0);
     }
 
     #[test]
