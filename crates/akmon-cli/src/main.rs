@@ -334,6 +334,16 @@ enum BundleImportFormat {
     Json,
 }
 
+/// Output format for `akmon redact` status messages.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum RedactFormat {
+    /// Human-readable status messages.
+    #[default]
+    Human,
+    /// Machine-readable JSON status messages.
+    Json,
+}
+
 /// Stable JSON shape for `akmon bundle export --format json`.
 #[derive(Debug, Serialize, Deserialize)]
 struct BundleExportReportV1 {
@@ -1544,6 +1554,32 @@ Exit codes:\n\
         #[arg(long, default_value = "meta")]
         binary: BinaryMode,
     },
+    /// Produce a sanitized derivative bundle with specified objects redacted.
+    #[command(
+        long_about = "Produce a sanitized derivative bundle with specified objects redacted.\n\n\
+Reads a session from the on-disk journal and writes a new .akmon bundle in which \
+the named objects are replaced by Akmon sentinel markers. The source journal is \
+not modified. The derivative bundle is a valid AGEF bundle that can be inspected, \
+verified, and imported like any other bundle.\n\n\
+Redaction is one-way: the sentinel objects do not contain the original content. \
+Original content remains in the source journal (treat as sensitive). If the source \
+journal is destroyed, the redacted content is unrecoverable.\n\n\
+All three of --output, --object, and --reason are required. --object can be \
+specified multiple times to redact multiple objects in one invocation.\n\n\
+Examples:\n\
+  akmon redact 550e8400-... --output sanitized.akmon \\\n\
+    --object 8b2a3f7c... --reason \"PII removal\"\n\
+  akmon redact 550e8400-... --output out.akmon \\\n\
+    --object hash1 --object hash2 --reason \"GDPR request\"\n\
+  akmon redact 550e8400-... --output out.akmon \\\n\
+    --object hash1 --reason \"Trade secret\" --format json\n\n\
+Exit codes:\n\
+  0 — Derivative bundle written successfully\n\
+  1 — (reserved; not currently emitted by redact)\n\
+  2 — Usage error (e.g., output path exists, --object hash does not exist in source session)\n\
+  3 — I/O or environment error (journal/session not found, write failure)"
+    )]
+    Redact(RedactArgs),
 }
 
 /// Arguments for `akmon bundle`.
@@ -1644,6 +1680,32 @@ struct BundleImportArgs {
     /// Required when the local journal already contains the bundle's `session_id`.
     #[arg(long, value_name = "NEW_UUID")]
     rename_to: Option<uuid::Uuid>,
+}
+
+/// Arguments for `akmon redact`.
+#[derive(Args, Debug, Clone)]
+struct RedactArgs {
+    /// Session UUID assigned at AgentSession construction.
+    session_id: uuid::Uuid,
+    /// Path where the sanitized derivative bundle file will be written.
+    ///
+    /// Required — no default to prevent accidental overwrite of source artifacts.
+    #[arg(long)]
+    output: PathBuf,
+    /// Object hash to redact (hex, lowercase). Repeat for multiple objects.
+    #[arg(long, required = true)]
+    object: Vec<String>,
+    /// Audit rationale recorded in each sentinel.
+    #[arg(long)]
+    reason: String,
+    /// Path to the source journal directory.
+    ///
+    /// Defaults to per-user journal location (`$XDG_STATE_HOME/akmon/journal`).
+    #[arg(long)]
+    journal: Option<PathBuf>,
+    /// Output format for status messages: human (default) or json.
+    #[arg(long, default_value = "human")]
+    format: RedactFormat,
 }
 
 fn format_bundle_byte_size(bytes: u64) -> String {
@@ -1969,6 +2031,22 @@ fn run_bundle_export(
         }
     }
 
+    ExitCode::SUCCESS
+}
+
+fn run_redact(
+    session_id: uuid::Uuid,
+    output: PathBuf,
+    object: Vec<String>,
+    reason: String,
+    journal: Option<PathBuf>,
+    format: RedactFormat,
+) -> ExitCode {
+    eprintln!(
+        "redact: session_id={session_id} output={:?} objects={:?} reason={reason:?} journal={:?} format={:?}",
+        output, object, journal, format
+    );
+    eprintln!("(layer 1 stub — redaction logic in layer 2)");
     ExitCode::SUCCESS
 }
 
@@ -4601,6 +4679,16 @@ async fn main() -> ExitCode {
                 *binary,
             );
         }
+        Some(Commands::Redact(args)) => {
+            return run_redact(
+                args.session_id,
+                args.output.clone(),
+                args.object.clone(),
+                args.reason.clone(),
+                args.journal.clone(),
+                args.format,
+            );
+        }
         Some(Commands::Chat) | None => {}
     }
 
@@ -6003,6 +6091,235 @@ mod tests {
             rendered.contains("invalid value") || rendered.contains("possible values"),
             "unexpected clap error: {rendered}"
         );
+    }
+
+    #[test]
+    fn t_redact_subcommand_parses_required_flags() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--output",
+            "out.akmon",
+            "--object",
+            "abc",
+            "--reason",
+            "test",
+        ])
+        .expect("parse redact");
+        match cli.command {
+            Some(Commands::Redact(args)) => {
+                assert_eq!(
+                    args.session_id.to_string(),
+                    "550e8400-e29b-41d4-a716-446655440000"
+                );
+                assert_eq!(args.output, PathBuf::from("out.akmon"));
+                assert_eq!(args.object, vec!["abc".to_owned()]);
+                assert_eq!(args.reason, "test");
+                assert!(args.journal.is_none());
+                assert_eq!(args.format, RedactFormat::Human);
+            }
+            other => panic!("expected redact command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_redact_subcommand_parses_repeatable_objects() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--output",
+            "out.akmon",
+            "--object",
+            "abc",
+            "--object",
+            "def",
+            "--reason",
+            "test",
+        ])
+        .expect("parse redact");
+        match cli.command {
+            Some(Commands::Redact(args)) => {
+                assert_eq!(args.object, vec!["abc".to_owned(), "def".to_owned()]);
+            }
+            other => panic!("expected redact command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_redact_subcommand_parses_optional_journal() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--output",
+            "out.akmon",
+            "--object",
+            "abc",
+            "--reason",
+            "test",
+            "--journal",
+            "/tmp/journal.redb",
+        ])
+        .expect("parse redact");
+        match cli.command {
+            Some(Commands::Redact(args)) => {
+                assert_eq!(args.journal, Some(PathBuf::from("/tmp/journal.redb")));
+            }
+            other => panic!("expected redact command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn t_redact_subcommand_rejects_missing_session_id() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "--output",
+            "out.akmon",
+            "--object",
+            "abc",
+            "--reason",
+            "test",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("required arguments were not provided")
+                || rendered.contains("<SESSION_ID>")
+                || rendered.contains("Usage:"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_redact_subcommand_rejects_missing_output() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--object",
+            "abc",
+            "--reason",
+            "test",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("required arguments were not provided")
+                || rendered.contains("--output")
+                || rendered.contains("Usage:"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_redact_subcommand_rejects_missing_object() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--output",
+            "out.akmon",
+            "--reason",
+            "test",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("required arguments were not provided")
+                || rendered.contains("--object")
+                || rendered.contains("Usage:"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_redact_subcommand_rejects_missing_reason() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--output",
+            "out.akmon",
+            "--object",
+            "abc",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("required arguments were not provided")
+                || rendered.contains("--reason")
+                || rendered.contains("Usage:"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_redact_subcommand_rejects_invalid_uuid() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "not-a-uuid",
+            "--output",
+            "out.akmon",
+            "--object",
+            "abc",
+            "--reason",
+            "test",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value")
+                || rendered.contains("invalid character")
+                || rendered.contains("UUID"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_redact_subcommand_rejects_invalid_format() {
+        let err = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--output",
+            "out.akmon",
+            "--object",
+            "abc",
+            "--reason",
+            "test",
+            "--format",
+            "yaml",
+        ])
+        .expect_err("must fail");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value") || rendered.contains("possible values"),
+            "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_redact_subcommand_accepts_default_format() {
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "redact",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--output",
+            "out.akmon",
+            "--object",
+            "abc",
+            "--reason",
+            "test",
+        ])
+        .expect("parse redact");
+        match cli.command {
+            Some(Commands::Redact(args)) => assert_eq!(args.format, RedactFormat::Human),
+            other => panic!("expected redact command, got {other:?}"),
+        }
     }
 
     #[test]
