@@ -106,6 +106,7 @@
 - [akmon bundle import](./reference/bundle-import.md)
 - [akmon redact](./reference/redact.md)
 - [akmon replay](./reference/replay.md)
+- [akmon diff](./reference/diff.md)
 - [Slash Commands](./reference/slash-commands.md)
 - [Configuration Reference](./reference/config.md)
 - [Release notes: v1.8.2](./releases/v1.8.2.md)
