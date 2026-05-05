@@ -19,6 +19,22 @@ pub enum ReplayDivergenceKind {
     UnexpectedSessionEnd,
     /// Source history has expected events replay did not reach.
     MissingExpectedEvent,
+    /// Source and replay event kinds differ at the same index.
+    EventKindMismatch,
+    /// Source history contains events replay history is missing.
+    MissingReplayEvent,
+    /// Replay history contains extra events not present in source.
+    UnexpectedReplayEvent,
+    /// Source and replay event counts differ.
+    EventCountMismatch,
+    /// Assistant content differs for matching `AssistantTurn` events.
+    AssistantContentMismatch,
+    /// Tool output differs for matching `ToolCall` events.
+    ToolOutputMismatch,
+    /// Permission decision differs for matching `PermissionGate` events.
+    PermissionGateDecisionMismatch,
+    /// Generic hash/reference mismatch for a specific field within matching event kinds.
+    ContentReferenceMismatch,
 }
 
 /// One replay divergence record with human-readable expected/actual summaries.

@@ -18,8 +18,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::{
-    PlaybackProvider, PlaybackProviderConfig, PlaybackTool, PlaybackToolConfig,
-    ReplayDivergenceCollector, ReplayError, ReplayMode,
+    PlaybackProvider, PlaybackProviderConfig, PlaybackTool, PlaybackToolConfig, ReplayDivergence,
+    ReplayDivergenceCollector, ReplayDivergenceKind, ReplayError, ReplayMode,
 };
 
 /// Replay engine setup and orchestration state (Layer 1: loading and setup only).
@@ -124,6 +124,337 @@ pub struct ReplayRunOutput {
     pub replay_history: Vec<(Hash, Event)>,
     /// Runtime divergences recorded by replay primitives.
     pub divergences: Vec<crate::ReplayDivergence>,
+}
+
+/// Compares source and replay histories in default mode using index lockstep.
+///
+/// This comparator excludes envelope-coupled fields (`parents`, `sequence`, `emitted_at`) and
+/// focuses on event-kind and kind-specific semantic content references per Decision D-09 (P1/O1).
+pub fn compare_default_mode(output: &ReplayRunOutput) -> Vec<ReplayDivergence> {
+    let mut divergences = Vec::new();
+    let shared_len = output.source_history.len().min(output.replay_history.len());
+    for idx in 0..shared_len {
+        let (_, source_event) = &output.source_history[idx];
+        let (_, replay_event) = &output.replay_history[idx];
+        compare_event_pair(source_event, replay_event, &mut divergences);
+    }
+    if output.source_history.len() > shared_len {
+        for (_, source_event) in &output.source_history[shared_len..] {
+            divergences.push(ReplayDivergence {
+                event_seq: Some(source_event.sequence),
+                kind: ReplayDivergenceKind::MissingReplayEvent,
+                expected: format!("event at source seq {}", source_event.sequence),
+                actual: "replay history ended before this event".to_owned(),
+            });
+        }
+    }
+    if output.replay_history.len() > shared_len {
+        for (_, replay_event) in &output.replay_history[shared_len..] {
+            divergences.push(ReplayDivergence {
+                event_seq: Some(replay_event.sequence),
+                kind: ReplayDivergenceKind::UnexpectedReplayEvent,
+                expected: "no additional replay events".to_owned(),
+                actual: format!("unexpected replay event at seq {}", replay_event.sequence),
+            });
+        }
+    }
+    if output.source_history.len() != output.replay_history.len() {
+        divergences.push(ReplayDivergence {
+            event_seq: None,
+            kind: ReplayDivergenceKind::EventCountMismatch,
+            expected: format!("source event_count={}", output.source_history.len()),
+            actual: format!("replay event_count={}", output.replay_history.len()),
+        });
+    }
+    divergences
+}
+
+fn compare_event_pair(source: &Event, replay: &Event, divergences: &mut Vec<ReplayDivergence>) {
+    if std::mem::discriminant(&source.kind) != std::mem::discriminant(&replay.kind) {
+        divergences.push(ReplayDivergence {
+            event_seq: Some(source.sequence),
+            kind: ReplayDivergenceKind::EventKindMismatch,
+            expected: kind_name(&source.kind).to_owned(),
+            actual: kind_name(&replay.kind).to_owned(),
+        });
+        return;
+    }
+    match (&source.kind, &replay.kind) {
+        (
+            EventKind::SessionStart {
+                cwd_hash: source_cwd,
+                config_hash: source_cfg,
+            },
+            EventKind::SessionStart {
+                cwd_hash: replay_cwd,
+                config_hash: replay_cfg,
+            },
+        ) => {
+            compare_hash_field(
+                source.sequence,
+                "SessionStart.cwd_hash",
+                source_cwd,
+                replay_cwd,
+                divergences,
+            );
+            compare_hash_field(
+                source.sequence,
+                "SessionStart.config_hash",
+                source_cfg,
+                replay_cfg,
+                divergences,
+            );
+        }
+        (
+            EventKind::UserTurn {
+                prompt_hash: source_prompt,
+            },
+            EventKind::UserTurn {
+                prompt_hash: replay_prompt,
+            },
+        ) => {
+            compare_hash_field(
+                source.sequence,
+                "UserTurn.prompt_hash",
+                source_prompt,
+                replay_prompt,
+                divergences,
+            );
+        }
+        (
+            EventKind::ProviderCall {
+                provider_id: source_provider_id,
+                attempts: source_attempts,
+                stream_hash: source_stream_hash,
+            },
+            EventKind::ProviderCall {
+                provider_id: replay_provider_id,
+                attempts: replay_attempts,
+                stream_hash: replay_stream_hash,
+            },
+        ) => {
+            if source_provider_id != replay_provider_id {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::ContentReferenceMismatch,
+                    expected: format!("ProviderCall.provider_id={source_provider_id}"),
+                    actual: format!("ProviderCall.provider_id={replay_provider_id}"),
+                });
+            }
+            let source_final_response =
+                source_attempts.last().and_then(|a| a.response_hash.clone());
+            let replay_final_response =
+                replay_attempts.last().and_then(|a| a.response_hash.clone());
+            if source_final_response != replay_final_response {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::AssistantContentMismatch,
+                    expected: format!("ProviderCall.final_response_hash={source_final_response:?}"),
+                    actual: format!("ProviderCall.final_response_hash={replay_final_response:?}"),
+                });
+            }
+            if source_stream_hash != replay_stream_hash {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::AssistantContentMismatch,
+                    expected: format!("ProviderCall.stream_hash={source_stream_hash:?}"),
+                    actual: format!("ProviderCall.stream_hash={replay_stream_hash:?}"),
+                });
+            }
+        }
+        (
+            EventKind::ToolCall {
+                tool_id: source_tool_id,
+                input_hash: source_input_hash,
+                output_hash: source_output_hash,
+                side_effects_hash: source_side_effects_hash,
+            },
+            EventKind::ToolCall {
+                tool_id: replay_tool_id,
+                input_hash: replay_input_hash,
+                output_hash: replay_output_hash,
+                side_effects_hash: replay_side_effects_hash,
+            },
+        ) => {
+            if source_tool_id != replay_tool_id {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::ContentReferenceMismatch,
+                    expected: format!("ToolCall.tool_id={source_tool_id}"),
+                    actual: format!("ToolCall.tool_id={replay_tool_id}"),
+                });
+            }
+            compare_hash_field(
+                source.sequence,
+                "ToolCall.input_hash",
+                source_input_hash,
+                replay_input_hash,
+                divergences,
+            );
+            if source_output_hash != replay_output_hash {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::ToolOutputMismatch,
+                    expected: format!("ToolCall.output_hash={source_output_hash}"),
+                    actual: format!("ToolCall.output_hash={replay_output_hash}"),
+                });
+            }
+            if source_side_effects_hash != replay_side_effects_hash {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::ContentReferenceMismatch,
+                    expected: format!("ToolCall.side_effects_hash={source_side_effects_hash:?}"),
+                    actual: format!("ToolCall.side_effects_hash={replay_side_effects_hash:?}"),
+                });
+            }
+        }
+        (
+            EventKind::RetrievalCall {
+                index_id: source_index,
+                query_hash: source_query_hash,
+                results_hash: source_results_hash,
+            },
+            EventKind::RetrievalCall {
+                index_id: replay_index,
+                query_hash: replay_query_hash,
+                results_hash: replay_results_hash,
+            },
+        ) => {
+            if source_index != replay_index {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::ContentReferenceMismatch,
+                    expected: format!("RetrievalCall.index_id={source_index}"),
+                    actual: format!("RetrievalCall.index_id={replay_index}"),
+                });
+            }
+            compare_hash_field(
+                source.sequence,
+                "RetrievalCall.query_hash",
+                source_query_hash,
+                replay_query_hash,
+                divergences,
+            );
+            compare_hash_field(
+                source.sequence,
+                "RetrievalCall.results_hash",
+                source_results_hash,
+                replay_results_hash,
+                divergences,
+            );
+        }
+        (
+            EventKind::PermissionGate {
+                policy_id: source_policy_id,
+                decision: source_decision,
+                context_hash: source_context_hash,
+            },
+            EventKind::PermissionGate {
+                policy_id: replay_policy_id,
+                decision: replay_decision,
+                context_hash: replay_context_hash,
+            },
+        ) => {
+            if source_decision != replay_decision {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::PermissionGateDecisionMismatch,
+                    expected: format!("PermissionGate.decision={source_decision}"),
+                    actual: format!("PermissionGate.decision={replay_decision}"),
+                });
+            }
+            if source_policy_id != replay_policy_id {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::ContentReferenceMismatch,
+                    expected: format!("PermissionGate.policy_id={source_policy_id}"),
+                    actual: format!("PermissionGate.policy_id={replay_policy_id}"),
+                });
+            }
+            compare_hash_field(
+                source.sequence,
+                "PermissionGate.context_hash",
+                source_context_hash,
+                replay_context_hash,
+                divergences,
+            );
+        }
+        (
+            EventKind::AssistantTurn {
+                message_hash: source_message_hash,
+                tool_calls_hash: source_tool_calls_hash,
+            },
+            EventKind::AssistantTurn {
+                message_hash: replay_message_hash,
+                tool_calls_hash: replay_tool_calls_hash,
+            },
+        ) => {
+            if source_message_hash != replay_message_hash {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::AssistantContentMismatch,
+                    expected: format!("AssistantTurn.message_hash={source_message_hash}"),
+                    actual: format!("AssistantTurn.message_hash={replay_message_hash}"),
+                });
+            }
+            if source_tool_calls_hash != replay_tool_calls_hash {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::ContentReferenceMismatch,
+                    expected: format!("AssistantTurn.tool_calls_hash={source_tool_calls_hash:?}"),
+                    actual: format!("AssistantTurn.tool_calls_hash={replay_tool_calls_hash:?}"),
+                });
+            }
+        }
+        (
+            EventKind::SessionEnd {
+                summary_hash: source_summary,
+            },
+            EventKind::SessionEnd {
+                summary_hash: replay_summary,
+            },
+        ) => {
+            if source_summary != replay_summary {
+                divergences.push(ReplayDivergence {
+                    event_seq: Some(source.sequence),
+                    kind: ReplayDivergenceKind::ContentReferenceMismatch,
+                    expected: format!("SessionEnd.summary_hash={source_summary:?}"),
+                    actual: format!("SessionEnd.summary_hash={replay_summary:?}"),
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn compare_hash_field(
+    event_seq: u64,
+    field_name: &str,
+    source_hash: &Hash,
+    replay_hash: &Hash,
+    divergences: &mut Vec<ReplayDivergence>,
+) {
+    if source_hash != replay_hash {
+        divergences.push(ReplayDivergence {
+            event_seq: Some(event_seq),
+            kind: ReplayDivergenceKind::ContentReferenceMismatch,
+            expected: format!("{field_name}={source_hash}"),
+            actual: format!("{field_name}={replay_hash}"),
+        });
+    }
+}
+
+fn kind_name(kind: &EventKind) -> &'static str {
+    match kind {
+        EventKind::SessionStart { .. } => "SessionStart",
+        EventKind::UserTurn { .. } => "UserTurn",
+        EventKind::ProviderCall { .. } => "ProviderCall",
+        EventKind::ToolCall { .. } => "ToolCall",
+        EventKind::RetrievalCall { .. } => "RetrievalCall",
+        EventKind::PermissionGate { .. } => "PermissionGate",
+        EventKind::AssistantTurn { .. } => "AssistantTurn",
+        EventKind::SessionEnd { .. } => "SessionEnd",
+    }
 }
 
 /// Load a source session from an on-disk journal directory.
@@ -584,6 +915,36 @@ mod tests {
             response_hash,
             stream_hash: None,
             error_message: None,
+        }
+    }
+
+    fn hash_of(byte: u8) -> Hash {
+        Hash::from_bytes(HashAlgorithm::Sha256, [byte; 32])
+    }
+
+    fn sample_event(sequence: u64, kind: EventKind) -> Event {
+        Event {
+            parents: Vec::new(),
+            kind,
+            emitted_at: OffsetDateTime::UNIX_EPOCH,
+            sequence,
+        }
+    }
+
+    fn output_for_compare(source_events: Vec<Event>, replay_events: Vec<Event>) -> ReplayRunOutput {
+        ReplayRunOutput {
+            source_session_id: Uuid::new_v4(),
+            replay_session_id: Uuid::new_v4(),
+            mode: ReplayMode::Default,
+            source_history: source_events
+                .into_iter()
+                .map(|e| (hash_of(e.sequence as u8), e))
+                .collect(),
+            replay_history: replay_events
+                .into_iter()
+                .map(|e| (hash_of(e.sequence as u8), e))
+                .collect(),
+            divergences: Vec::new(),
         }
     }
 
@@ -1050,5 +1411,312 @@ mod tests {
             err,
             ReplayError::UnsupportedProviderMultiplicity { count: 0 }
         ));
+    }
+
+    #[test]
+    fn t_compare_identical_histories_no_divergences() {
+        let source = vec![
+            sample_event(
+                0,
+                EventKind::SessionStart {
+                    cwd_hash: hash_of(1),
+                    config_hash: hash_of(2),
+                },
+            ),
+            sample_event(
+                1,
+                EventKind::UserTurn {
+                    prompt_hash: hash_of(3),
+                },
+            ),
+            sample_event(2, EventKind::SessionEnd { summary_hash: None }),
+        ];
+        let out = output_for_compare(source.clone(), source);
+        let diffs = compare_default_mode(&out);
+        assert!(diffs.is_empty());
+    }
+
+    #[test]
+    fn t_compare_detects_event_kind_mismatch() {
+        let out = output_for_compare(
+            vec![sample_event(
+                3,
+                EventKind::UserTurn {
+                    prompt_hash: hash_of(7),
+                },
+            )],
+            vec![sample_event(
+                3,
+                EventKind::ToolCall {
+                    tool_id: "t".to_owned(),
+                    input_hash: hash_of(7),
+                    output_hash: hash_of(8),
+                    side_effects_hash: None,
+                },
+            )],
+        );
+        let diffs = compare_default_mode(&out);
+        assert!(
+            diffs
+                .iter()
+                .any(|d| matches!(d.kind, ReplayDivergenceKind::EventKindMismatch))
+        );
+    }
+
+    #[test]
+    fn t_compare_detects_missing_replay_event() {
+        let out = output_for_compare(
+            vec![
+                sample_event(
+                    0,
+                    EventKind::UserTurn {
+                        prompt_hash: hash_of(1),
+                    },
+                ),
+                sample_event(
+                    1,
+                    EventKind::UserTurn {
+                        prompt_hash: hash_of(2),
+                    },
+                ),
+            ],
+            vec![sample_event(
+                0,
+                EventKind::UserTurn {
+                    prompt_hash: hash_of(1),
+                },
+            )],
+        );
+        let diffs = compare_default_mode(&out);
+        assert!(
+            diffs
+                .iter()
+                .any(|d| matches!(d.kind, ReplayDivergenceKind::MissingReplayEvent))
+        );
+    }
+
+    #[test]
+    fn t_compare_detects_unexpected_replay_event() {
+        let out = output_for_compare(
+            vec![sample_event(
+                0,
+                EventKind::UserTurn {
+                    prompt_hash: hash_of(1),
+                },
+            )],
+            vec![
+                sample_event(
+                    0,
+                    EventKind::UserTurn {
+                        prompt_hash: hash_of(1),
+                    },
+                ),
+                sample_event(1, EventKind::SessionEnd { summary_hash: None }),
+            ],
+        );
+        let diffs = compare_default_mode(&out);
+        assert!(
+            diffs
+                .iter()
+                .any(|d| matches!(d.kind, ReplayDivergenceKind::UnexpectedReplayEvent))
+        );
+    }
+
+    #[test]
+    fn t_compare_detects_event_count_mismatch() {
+        let out = output_for_compare(
+            vec![],
+            vec![sample_event(
+                0,
+                EventKind::SessionEnd { summary_hash: None },
+            )],
+        );
+        let diffs = compare_default_mode(&out);
+        assert!(
+            diffs
+                .iter()
+                .any(|d| matches!(d.kind, ReplayDivergenceKind::EventCountMismatch))
+        );
+    }
+
+    #[test]
+    fn t_compare_detects_assistant_content_mismatch() {
+        let out = output_for_compare(
+            vec![sample_event(
+                1,
+                EventKind::AssistantTurn {
+                    message_hash: hash_of(1),
+                    tool_calls_hash: None,
+                },
+            )],
+            vec![sample_event(
+                1,
+                EventKind::AssistantTurn {
+                    message_hash: hash_of(2),
+                    tool_calls_hash: None,
+                },
+            )],
+        );
+        let diffs = compare_default_mode(&out);
+        assert!(
+            diffs
+                .iter()
+                .any(|d| matches!(d.kind, ReplayDivergenceKind::AssistantContentMismatch))
+        );
+    }
+
+    #[test]
+    fn t_compare_detects_tool_output_mismatch() {
+        let out = output_for_compare(
+            vec![sample_event(
+                2,
+                EventKind::ToolCall {
+                    tool_id: "t1".to_owned(),
+                    input_hash: hash_of(1),
+                    output_hash: hash_of(2),
+                    side_effects_hash: None,
+                },
+            )],
+            vec![sample_event(
+                2,
+                EventKind::ToolCall {
+                    tool_id: "t1".to_owned(),
+                    input_hash: hash_of(1),
+                    output_hash: hash_of(3),
+                    side_effects_hash: None,
+                },
+            )],
+        );
+        let diffs = compare_default_mode(&out);
+        assert!(
+            diffs
+                .iter()
+                .any(|d| matches!(d.kind, ReplayDivergenceKind::ToolOutputMismatch))
+        );
+    }
+
+    #[test]
+    fn t_compare_detects_permission_gate_decision_mismatch() {
+        let out = output_for_compare(
+            vec![sample_event(
+                2,
+                EventKind::PermissionGate {
+                    policy_id: "p".to_owned(),
+                    decision: "allowed".to_owned(),
+                    context_hash: hash_of(7),
+                },
+            )],
+            vec![sample_event(
+                2,
+                EventKind::PermissionGate {
+                    policy_id: "p".to_owned(),
+                    decision: "denied".to_owned(),
+                    context_hash: hash_of(7),
+                },
+            )],
+        );
+        let diffs = compare_default_mode(&out);
+        assert!(
+            diffs.iter().any(|d| {
+                matches!(d.kind, ReplayDivergenceKind::PermissionGateDecisionMismatch)
+            })
+        );
+    }
+
+    #[test]
+    fn t_compare_no_realignment_after_divergence() {
+        let source = vec![
+            sample_event(
+                0,
+                EventKind::UserTurn {
+                    prompt_hash: hash_of(1),
+                },
+            ),
+            sample_event(
+                1,
+                EventKind::AssistantTurn {
+                    message_hash: hash_of(2),
+                    tool_calls_hash: None,
+                },
+            ),
+            sample_event(
+                2,
+                EventKind::ToolCall {
+                    tool_id: "t".to_owned(),
+                    input_hash: hash_of(3),
+                    output_hash: hash_of(4),
+                    side_effects_hash: None,
+                },
+            ),
+            sample_event(3, EventKind::SessionEnd { summary_hash: None }),
+            sample_event(
+                4,
+                EventKind::UserTurn {
+                    prompt_hash: hash_of(5),
+                },
+            ),
+        ];
+        let replay = vec![
+            sample_event(
+                0,
+                EventKind::UserTurn {
+                    prompt_hash: hash_of(1),
+                },
+            ),
+            sample_event(
+                1,
+                EventKind::AssistantTurn {
+                    message_hash: hash_of(2),
+                    tool_calls_hash: None,
+                },
+            ),
+            sample_event(
+                2,
+                EventKind::ToolCall {
+                    tool_id: "t".to_owned(),
+                    input_hash: hash_of(3),
+                    output_hash: hash_of(4),
+                    side_effects_hash: None,
+                },
+            ),
+            sample_event(
+                3,
+                EventKind::PermissionGate {
+                    policy_id: "p".to_owned(),
+                    decision: "allowed".to_owned(),
+                    context_hash: hash_of(8),
+                },
+            ),
+            sample_event(
+                4,
+                EventKind::UserTurn {
+                    prompt_hash: hash_of(5),
+                },
+            ),
+        ];
+        let out = output_for_compare(source, replay);
+        let diffs = compare_default_mode(&out);
+        let kind_mismatches = diffs
+            .iter()
+            .filter(|d| matches!(d.kind, ReplayDivergenceKind::EventKindMismatch))
+            .count();
+        assert_eq!(kind_mismatches, 1);
+    }
+
+    #[test]
+    fn t_compare_excludes_timestamps_from_default_comparison() {
+        let mut source_event = sample_event(
+            1,
+            EventKind::AssistantTurn {
+                message_hash: hash_of(9),
+                tool_calls_hash: None,
+            },
+        );
+        let mut replay_event = source_event.clone();
+        source_event.emitted_at = OffsetDateTime::UNIX_EPOCH;
+        replay_event.emitted_at = OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(90);
+        let out = output_for_compare(vec![source_event], vec![replay_event]);
+        let diffs = compare_default_mode(&out);
+        assert!(diffs.is_empty());
     }
 }
