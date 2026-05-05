@@ -184,11 +184,11 @@ These decisions were settled in product-owner conversation and are now LOCKED. E
  
 **Decision.** **Benevolent dictator for v0.1, documented intent to transition to core maintainers by v1.0.** The spec repo's `GOVERNANCE.md` explicitly says "governance currently informal, see roadmap to formalize by v1.0." Honest, doesn't overclaim, leaves room to grow.
  
-### §5.9 Decision D-09: Replay determinism contract — **LOCKED: best-effort with divergence report (P1-P11)**
+### §5.9 Decision D-09: Replay determinism contract — **LOCKED: best-effort with divergence report (P1-P11, extended)**
 
 **Context.** Strict replay requires model determinism support. Many local backends don't have it. The initial wording left key implementation details open (equivalence level, timestamp handling, retry handling, mismatch policy, persistence, and mode semantics), which blocked Phase 5 implementation sequencing.
 
-**Decision.** **Best-effort with explicit divergence report**, concretized by Phase 5 decisions P1-P11:
+**Decision.** **Best-effort with explicit divergence report**, concretized by Phase 5 decisions P1-P11 (extended):
 
 - **P1 — Equivalence levels:**
   - **Default mode** compares semantic equivalence: same event kinds in the same order with matching content references (for example `prompt_hash`, `tool_id`, `input_hash`, `output_hash`).
@@ -210,12 +210,17 @@ These decisions were settled in product-owner conversation and are now LOCKED. E
 - **P9 — Surface location:** playback primitives implement existing provider/tool traits; orchestration lives in ReplayEngine as a distinct primitive.
 - **P10 — Report coupling:** ReplayReportV1 is independent; Phase 6 diff defines its own schema.
 - **P11 — Replay comparison scope:**
-  - Replay does **not** compare provider request bytes directly.
-  - Request payloads contain runtime-variable content (session identifiers, environment paths, potentially timestamps and request IDs) that cannot be faithfully reconstructed during replay without retrofitting the agent loop to be replay-aware.
+  - Replay does **not** compare hash fields whose underlying payload contains runtime-variable identifiers.
+  - v2.0.0 exclusion list:
+    - `ProviderCall.request_hash` (request payloads contain runtime-variable content such as session identifiers, environment paths, and request IDs).
+    - `SessionStart.config_hash` (serialized `AgentConfig` includes `session_id`, which is replay-derived for persisted replay sessions).
   - Replay comparison focuses on:
     - What playback returns: `response_hash`, `stream_hash`, `output_hash`;
     - What the agent loop decides: event kind sequence, call ordering, tool invocations;
     - Decisions that should be deterministic given equivalent inputs.
+  - Mode treatment for excluded fields:
+    - Default mode: skip direct comparison.
+    - Strict mode: compare normalized projections where runtime-variable identifiers (including config/session identifiers) are normalized to placeholder values before projection hashing.
   - Sessions where the agent loop's decision-making is faithful to recorded responses produce zero divergences. Sessions where the agent loop diverges (different tool calls, different message sequences, etc.) produce specific divergences locating the decision point.
   - This is the v2.0.0 fidelity contract. Stronger fidelity (request-byte-identical replay) is potentially achievable via agent loop retrofit but is out of scope for v2.0.0. See Item 5.7.
 
@@ -649,6 +654,7 @@ Each item: design first, implement, document under `docs/src/commands/` or `docs
 - Replay re-executes one recorded journal session using playback substitutes (`PlaybackProvider`, `PlaybackTool`) and emits a **ReplayReportV1** with divergence categories.
 - Replay input is **session-id only** in v2.0.0 (`akmon replay <session-id>`). Direct bundle input is deferred.
 - Replay default behavior is **report-only** (no journal mutation). `--persist` opt-in writes a replay-derived session with a new UUID.
+- For v2.0.0 CLI, `--persist` requires explicit `--persist-to <path>`; replay refuses implicit writes into the source journal directory due to Redb handle/lock constraints during read-while-replay.
 - Replay supports **two modes** in v2.0.0:
   - `default`: semantic comparison, final-success-only provider playback, divergence-and-continue tool mismatch handling.
   - `strict`: hash-identical-after-normalization comparison, full provider attempt-sequence playback, hard-fail on tool input mismatch.
@@ -697,7 +703,7 @@ Goal: Add replay command surface for v2.0.0 with explicit mode and report behavi
 When to start: After Item 5.2 engine and schema stabilize.
 
 When done:
-- Command shape: `akmon replay <session-id> [--journal <path>] [--mode <default|strict>] [--persist] [--format <human|json>]`.
+- Command shape: `akmon replay <session-id> [--journal <path>] [--mode <default|strict>] [--persist --persist-to <path>] [--format <human|json>]`.
 - Exit-code contract follows v2 pattern:
   - `0` replay completed with no divergences (or acceptable mode-defined clean result),
   - `1` divergences found / strict-mode replay mismatch failure,
@@ -708,6 +714,7 @@ When done:
 Notes for Cursor:
 - Keep `--format json` explicit per D-12.
 - Report-first UX by default; persistence is opt-in only (`--persist`).
+- Q1 (revised): `--persist` requires `--persist-to <path>`. Replay CLI refuses implicit "persist into source journal directory" because source replay keeps a read handle open and Redb cannot satisfy same-file write-open in that state.
 
 **Item 5.4 — Live regeneration command (`akmon regenerate`)** (deferred follow-up, out of v2.0.0)
 
