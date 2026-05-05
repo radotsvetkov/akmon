@@ -1,16 +1,17 @@
 use std::sync::{Arc, Mutex};
 
-use akmon_journal::{
-    AttemptRecord, AttemptStatus, Event, EventKind, Hash, ObjectStore, digest_bytes,
-};
+use akmon_journal::{AttemptRecord, AttemptStatus, Event, EventKind, Hash, ObjectStore};
 use akmon_models::{
     AttemptObserver, CompletionConfig, CompletionStream, LlmProvider, Message, ModelError,
     ModelToolCall, StopReason, StreamEvent,
 };
 use async_trait::async_trait;
 use futures::stream;
+#[cfg(test)]
+use serde::Serializer;
+#[cfg(test)]
 use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     ReplayDivergence, ReplayDivergenceCollector, ReplayDivergenceKind, ReplayError, ReplayMode,
@@ -64,6 +65,7 @@ pub struct PlaybackProvider<S: ObjectStore> {
 }
 
 /// Canonical request payload used by journaling provider hashing.
+#[cfg(test)]
 #[derive(Debug)]
 struct RequestPayload<'a> {
     provider_id: &'a str,
@@ -71,6 +73,7 @@ struct RequestPayload<'a> {
     config: &'a CompletionConfig,
 }
 
+#[cfg(test)]
 impl Serialize for RequestPayload<'_> {
     fn serialize<T: Serializer>(&self, serializer: T) -> Result<T::Ok, T::Error> {
         let mut s = serializer.serialize_struct("RequestPayload", 3)?;
@@ -81,8 +84,10 @@ impl Serialize for RequestPayload<'_> {
     }
 }
 
+#[cfg(test)]
 struct ConfigPayload<'a>(&'a CompletionConfig);
 
+#[cfg(test)]
 impl Serialize for ConfigPayload<'_> {
     fn serialize<T: Serializer>(&self, serializer: T) -> Result<T::Ok, T::Error> {
         let config = self.0;
@@ -190,8 +195,8 @@ impl<S: ObjectStore + 'static> LlmProvider for PlaybackProvider<S> {
 
     async fn complete(
         &self,
-        messages: &[Message],
-        config: &CompletionConfig,
+        _messages: &[Message],
+        _config: &CompletionConfig,
     ) -> Result<CompletionStream, ModelError> {
         let call = {
             let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -213,23 +218,11 @@ impl<S: ObjectStore + 'static> LlmProvider for PlaybackProvider<S> {
             guard.cursor = guard.cursor.saturating_add(1);
             call
         };
-        let request_hash = request_hash(
-            self.store.as_ref(),
-            self.config.provider_id.as_str(),
-            messages,
-            config,
-        )?;
-        if request_hash != call.attempts[0].request_hash {
-            record_divergence(
-                &self.divergences,
-                ReplayDivergence {
-                    event_seq: Some(call.event_seq),
-                    kind: ReplayDivergenceKind::ProviderRequestMismatch,
-                    expected: call.attempts[0].request_hash.to_hex(),
-                    actual: request_hash.to_hex(),
-                },
-            );
-        }
+        // Per P11 (replay comparison scope), request_hash is not compared at any layer.
+        // Request payloads contain runtime-variable content (session_id, environment paths)
+        // that cannot be faithfully reconstructed during replay. PlaybackProvider returns
+        // recorded responses without verifying request hash equivalence. Engine-level
+        // comparison also excludes request_hash per the same contract.
         if matches!(self.config.mode, ReplayMode::Strict) {
             let expected_len = call.attempts.len();
             let actual_len = call.attempts.len();
@@ -309,6 +302,7 @@ fn ensure_present<S: ObjectStore>(store: &S, hash: &Hash) -> Result<(), ReplayEr
     }
 }
 
+#[cfg(test)]
 fn request_hash<S: ObjectStore>(
     store: &S,
     provider_id: &str,
@@ -326,7 +320,7 @@ fn request_hash<S: ObjectStore>(
             message: format!("replay request hash encode failed: {err}"),
         }
     })?;
-    Ok(digest_bytes(store.algorithm(), &bytes))
+    Ok(akmon_journal::digest_bytes(store.algorithm(), &bytes))
 }
 
 fn read_response<S: ObjectStore>(
@@ -626,5 +620,54 @@ mod tests {
             .await
             .expect("second");
         assert_eq!(playback.cursor(), 2);
+    }
+
+    #[tokio::test]
+    async fn t_playback_provider_does_not_emit_request_mismatch_per_p11() {
+        let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let messages = sample_messages();
+        let completion = CompletionConfig::default();
+        let req = request_hash_for(store.as_ref(), &messages, &completion);
+        let rsp = response_hash(store.as_ref(), "ok");
+        let attempts = vec![AttemptRecord {
+            attempt_number: 1,
+            started_at: OffsetDateTime::UNIX_EPOCH,
+            ended_at: OffsetDateTime::UNIX_EPOCH,
+            status: AttemptStatus::Success,
+            request_hash: req,
+            response_hash: Some(rsp),
+            stream_hash: None,
+            error_message: None,
+        }];
+        let event = sample_event(attempts);
+        let divergences = collector();
+        let playback = PlaybackProvider::from_history(
+            &[(Hash::from_bytes(HashAlgorithm::Sha256, [6_u8; 32]), event)],
+            Arc::clone(&store),
+            provider_config(ReplayMode::Default),
+            Arc::clone(&divergences),
+        )
+        .expect("construct");
+        let mismatch_completion = CompletionConfig {
+            session_id: Some(uuid::Uuid::new_v4().to_string()),
+            ..CompletionConfig::default()
+        };
+        let mut stream = playback
+            .complete(&messages, &mismatch_completion)
+            .await
+            .expect("complete");
+        let mut saw_done = false;
+        while let Some(item) = stream.next().await {
+            if matches!(item, Ok(StreamEvent::Done { .. })) {
+                saw_done = true;
+            }
+        }
+        assert!(saw_done);
+        let guard = divergences.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(
+            !guard
+                .iter()
+                .any(|d| matches!(d.kind, ReplayDivergenceKind::ProviderRequestMismatch))
+        );
     }
 }
