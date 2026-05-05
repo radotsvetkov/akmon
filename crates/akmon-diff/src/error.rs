@@ -31,6 +31,14 @@ pub enum DiffError {
         /// Parsing or validation failure reason.
         reason: String,
     },
+    /// Source session violates diff preconditions.
+    #[error("source {session_label} precondition violated: {violation}")]
+    SourcePreconditionViolated {
+        /// Source label in pairwise comparison ("A" or "B").
+        session_label: String,
+        /// Human-readable precondition failure detail.
+        violation: String,
+    },
     /// Internal invariant violation in diff orchestration.
     #[error("internal diff error: {context}: {source}")]
     InternalError {
@@ -61,6 +69,10 @@ mod tests {
             DiffError::InvalidSessionId {
                 session_id: "bad".to_owned(),
                 reason: "not uuid".to_owned(),
+            },
+            DiffError::SourcePreconditionViolated {
+                session_label: "A".to_owned(),
+                violation: "history is empty".to_owned(),
             },
             DiffError::InternalError {
                 context: "walker".to_owned(),
