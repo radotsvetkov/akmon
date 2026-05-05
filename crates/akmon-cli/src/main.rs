@@ -2429,7 +2429,7 @@ fn run_redact(
             emit_redact_error(
                 format,
                 "invalid_object_hash",
-                format!("invalid --object hash '{}'", bad),
+                format!("invalid --object hash '{bad}'"),
                 Some(bad),
                 None,
             );
@@ -3590,7 +3590,7 @@ fn run_bundle_import(
         let mut graph = match RedbSessionGraph::open_new(Arc::clone(&store), target_session_id) {
             Ok(g) => g,
             Err(err) => {
-                let msg = format!("cannot open target session {}: {err}", target_session_id);
+                let msg = format!("cannot open target session {target_session_id}: {err}");
                 if matches!(format, BundleImportFormat::Json) {
                     let _ = print_bundle_import_infra_json_error(
                         "session_open_failed",
@@ -3604,10 +3604,7 @@ fn run_bundle_import(
             }
         };
         if let Err(err) = graph.import_verified_linear_history(&history) {
-            let msg = format!(
-                "cannot import event history for session {}: {err}",
-                target_session_id
-            );
+            let msg = format!("cannot import event history for session {target_session_id}: {err}");
             if matches!(format, BundleImportFormat::Json) {
                 let _ = print_bundle_import_infra_json_error("import_failed", msg.clone(), None);
             } else {
@@ -3620,8 +3617,7 @@ fn run_bundle_import(
             Ok(r) => r,
             Err(err) => {
                 let msg = format!(
-                    "post-import verification errored for session {}: {err}; manual cleanup may be required",
-                    target_session_id
+                    "post-import verification errored for session {target_session_id}: {err}; manual cleanup may be required"
                 );
                 if matches!(format, BundleImportFormat::Json) {
                     let _ = print_bundle_import_infra_json_error(
@@ -3637,8 +3633,7 @@ fn run_bundle_import(
         };
         if !post.is_clean() {
             let msg = format!(
-                "post-import verification failed for session {}; journal may contain a broken imported session and may require manual cleanup",
-                target_session_id
+                "post-import verification failed for session {target_session_id}; journal may contain a broken imported session and may require manual cleanup"
             );
             if matches!(format, BundleImportFormat::Json) {
                 let _ = print_bundle_import_infra_json_error(
