@@ -1089,8 +1089,9 @@ where
         .map_err(|err| ReplayError::SessionRunFailed {
             reason: format!("create replay session: {err}"),
         })?;
-        let (event_tx, _event_rx): (mpsc::Sender<AgentEvent>, mpsc::Receiver<AgentEvent>) =
+        let (event_tx, mut event_rx): (mpsc::Sender<AgentEvent>, mpsc::Receiver<AgentEvent>) =
             mpsc::channel(32);
+        let event_drain = tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
         let mut interactive_policy_rx: Option<mpsc::Receiver<InteractivePolicyReply>> = None;
         let mut question_answer_rx: Option<mpsc::Receiver<String>> = None;
         for prompt in &self.source_index.user_prompts {
@@ -1107,6 +1108,12 @@ where
                     reason: format!("run replay user turn: {err}"),
                 })?;
         }
+        drop(event_tx);
+        event_drain
+            .await
+            .map_err(|err| ReplayError::SessionRunFailed {
+                reason: format!("drain replay event stream: {err}"),
+            })?;
         session
             .end(None)
             .map_err(|err| ReplayError::SessionRunFailed {

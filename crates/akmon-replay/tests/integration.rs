@@ -20,6 +20,7 @@ use futures::stream;
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 const TOOL_NAME: &str = "integration_search";
@@ -376,6 +377,39 @@ async fn t_replay_handles_multi_turn_session() {
     )
     .expect("engine");
     let report = engine.run_to_report().await.expect("report");
+    assert!(report.passed, "{report:?}");
+    assert_eq!(report.source_event_count, report.replay_event_count);
+    assert!(report.divergences.is_empty(), "{report:?}");
+}
+
+#[tokio::test]
+async fn t_replay_completes_with_more_than_32_events() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    let turn_count = 16usize;
+    let prompts: Vec<String> = (1..=turn_count).map(|n| format!("turn {n}")).collect();
+    let prompt_refs: Vec<&str> = prompts.iter().map(String::as_str).collect();
+    write_source_session(
+        tmp.path(),
+        sid,
+        &prompt_refs,
+        multi_turn_sequences(prompt_refs.len()),
+    )
+    .await;
+    let source = load_source_session_from_journal(tmp.path(), sid).expect("source");
+    let engine = ReplayEngine::new(
+        source,
+        ReplayEngineConfig {
+            mode: ReplayMode::Default,
+            persist: false,
+            persist_journal_dir: None,
+        },
+    )
+    .expect("engine");
+    let report = timeout(Duration::from_secs(10), engine.run_to_report())
+        .await
+        .expect("replay should complete without hanging")
+        .expect("report");
     assert!(report.passed, "{report:?}");
     assert_eq!(report.source_event_count, report.replay_event_count);
     assert!(report.divergences.is_empty(), "{report:?}");
