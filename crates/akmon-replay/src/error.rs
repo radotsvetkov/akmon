@@ -1,4 +1,5 @@
 use akmon_journal::Hash;
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Setup-time replay construction errors.
@@ -68,6 +69,20 @@ pub enum ReplayError {
     #[error("replay session malformed: {reason}")]
     ReplaySessionMalformed {
         /// Validation detail.
+        reason: String,
+    },
+    /// Persist config is invalid for requested replay mode.
+    #[error("invalid replay persist configuration: {reason}")]
+    PersistConfigInvalid {
+        /// Validation detail.
+        reason: String,
+    },
+    /// Persist target journal cannot be prepared for writing replay output.
+    #[error("persist journal not writable at {path}: {reason}")]
+    PersistJournalNotWritable {
+        /// Target journal directory.
+        path: PathBuf,
+        /// Error detail.
         reason: String,
     },
 }

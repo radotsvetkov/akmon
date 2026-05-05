@@ -11,9 +11,7 @@ use akmon_journal::{
     referenced_object_hashes_for_kind,
 };
 use akmon_models::LlmProvider;
-use akmon_query::{
-    AgentSession, JournalHandle, open_default_journal_handle, open_journal_read_only,
-};
+use akmon_query::{AgentSession, JournalHandle, journal_db_path, open_journal_read_only};
 use akmon_tools::Tool;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
@@ -47,6 +45,10 @@ pub struct ReplayEngineConfig {
     pub mode: ReplayMode,
     /// Whether replay output should be persisted as a new session.
     pub persist: bool,
+    /// Target journal directory when `persist` is enabled.
+    ///
+    /// Required when `persist=true`. Ignored when `persist=false`.
+    pub persist_journal_dir: Option<std::path::PathBuf>,
 }
 
 /// Loaded source-session material used by replay setup and execution.
@@ -948,11 +950,12 @@ where
         replay_config.session_id = replay_session_id;
 
         let replay_history = if self.config.persist {
-            let journal = open_default_journal_handle(replay_session_id).map_err(|err| {
-                ReplayError::SessionRunFailed {
-                    reason: format!("open persist journal: {err}"),
-                }
-            })?;
+            let journal_dir = self.config.persist_journal_dir.as_ref().ok_or(
+                ReplayError::PersistConfigInvalid {
+                    reason: "persist=true requires persist_journal_dir".to_owned(),
+                },
+            )?;
+            let journal = open_persist_journal_handle(journal_dir, replay_session_id)?;
             self.drive_with_journal(
                 replay_config,
                 provider,
@@ -1104,6 +1107,40 @@ where
     }
 }
 
+fn open_persist_journal_handle(
+    journal_dir: &Path,
+    session_id: Uuid,
+) -> Result<JournalHandle<RedbObjectStore, RedbSessionGraph>, ReplayError> {
+    std::fs::create_dir_all(journal_dir).map_err(|err| ReplayError::PersistJournalNotWritable {
+        path: journal_dir.to_path_buf(),
+        reason: err.to_string(),
+    })?;
+    let db_path = journal_db_path(journal_dir);
+    let store = if db_path.is_file() {
+        RedbObjectStore::open(db_path.as_path()).map_err(|err| {
+            ReplayError::PersistJournalNotWritable {
+                path: journal_dir.to_path_buf(),
+                reason: err.to_string(),
+            }
+        })?
+    } else {
+        RedbObjectStore::create(db_path.as_path(), HashAlgorithm::Sha256).map_err(|err| {
+            ReplayError::PersistJournalNotWritable {
+                path: journal_dir.to_path_buf(),
+                reason: err.to_string(),
+            }
+        })?
+    };
+    let store = Arc::new(store);
+    let graph = RedbSessionGraph::open_new(Arc::clone(&store), session_id).map_err(|err| {
+        ReplayError::PersistJournalNotWritable {
+            path: journal_dir.to_path_buf(),
+            reason: err.to_string(),
+        }
+    })?;
+    Ok(JournalHandle::new(store, Arc::new(Mutex::new(graph))))
+}
+
 fn build_playback_maps<S: ObjectStore + Send + Sync + 'static>(
     history: &[(Hash, Event)],
     store: Arc<S>,
@@ -1227,6 +1264,7 @@ fn reconstruct_agent_config_from_source<S: ObjectStore>(
 mod tests {
     use super::*;
     use akmon_journal::{AttemptRecord, AttemptStatus, HashAlgorithm, MemoryObjectStore};
+    use akmon_query::journal_contains_session;
     use time::OffsetDateTime;
 
     fn put_bytes(store: &MemoryObjectStore, bytes: &[u8]) -> Hash {
@@ -1489,6 +1527,12 @@ mod tests {
         SourceSession::new(Uuid::new_v4(), store, graph, history)
     }
 
+    fn temp_journal_dir(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("akmon-replay-{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("mkdir");
+        path
+    }
+
     #[test]
     fn preconditions_reject_empty_source() {
         let store = MemoryObjectStore::new(HashAlgorithm::Sha256);
@@ -1533,6 +1577,7 @@ mod tests {
             ReplayEngineConfig {
                 mode: ReplayMode::Default,
                 persist: false,
+                persist_journal_dir: None,
             },
         )
         .expect("new");
@@ -1556,6 +1601,7 @@ mod tests {
             ReplayEngineConfig {
                 mode: ReplayMode::Default,
                 persist: false,
+                persist_journal_dir: None,
             },
         )
         .expect("engine");
@@ -1576,6 +1622,7 @@ mod tests {
             ReplayEngineConfig {
                 mode: ReplayMode::Default,
                 persist: false,
+                persist_journal_dir: None,
             },
         )
         .expect("engine");
@@ -1606,6 +1653,7 @@ mod tests {
             ReplayEngineConfig {
                 mode: ReplayMode::Default,
                 persist: false,
+                persist_journal_dir: None,
             },
         )
         .expect("engine");
@@ -1690,6 +1738,7 @@ mod tests {
             ReplayEngineConfig {
                 mode: ReplayMode::Default,
                 persist: false,
+                persist_journal_dir: None,
             },
         )
         .expect("engine");
@@ -1746,6 +1795,7 @@ mod tests {
             ReplayEngineConfig {
                 mode: ReplayMode::Default,
                 persist: false,
+                persist_journal_dir: None,
             },
         )
         .expect("engine");
@@ -1764,6 +1814,7 @@ mod tests {
             ReplayEngineConfig {
                 mode: ReplayMode::Default,
                 persist: false,
+                persist_journal_dir: None,
             },
         )
         .expect("engine");
@@ -1771,6 +1822,131 @@ mod tests {
         assert_eq!(report.mode, "default");
         assert!(report.source_event_count > 0);
         assert!(report.replay_event_count > 0);
+    }
+
+    #[tokio::test]
+    async fn t_persist_writes_replay_session_to_journal() {
+        let source = source_session();
+        let journal_dir = temp_journal_dir("persist-write");
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: true,
+                persist_journal_dir: Some(journal_dir.clone()),
+            },
+        )
+        .expect("engine");
+        let out = engine.drive_replay().await.expect("drive");
+        assert!(journal_contains_session(&journal_dir, out.replay_session_id).expect("contains"));
+    }
+
+    #[tokio::test]
+    async fn t_persist_replay_session_has_distinct_uuid() {
+        let source = source_session();
+        let journal_dir = temp_journal_dir("persist-uuid");
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: true,
+                persist_journal_dir: Some(journal_dir),
+            },
+        )
+        .expect("engine");
+        let out = engine.drive_replay().await.expect("drive");
+        assert_ne!(out.source_session_id, out.replay_session_id);
+    }
+
+    #[tokio::test]
+    async fn t_persist_replay_session_passes_verify() {
+        let source = source_session();
+        let journal_dir = temp_journal_dir("persist-verify");
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: true,
+                persist_journal_dir: Some(journal_dir.clone()),
+            },
+        )
+        .expect("engine");
+        let out = engine.drive_replay().await.expect("drive");
+        let handle =
+            open_journal_read_only(&journal_dir, out.replay_session_id).expect("open replay");
+        let guard = handle.graph.lock().unwrap_or_else(|p| p.into_inner());
+        let verification = guard.verify().expect("verify");
+        assert!(verification.is_clean());
+    }
+
+    #[tokio::test]
+    async fn t_no_persist_does_not_write_to_journal() {
+        let source = source_session();
+        let journal_dir = temp_journal_dir("no-persist");
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+                persist_journal_dir: Some(journal_dir.clone()),
+            },
+        )
+        .expect("engine");
+        let out = engine.drive_replay().await.expect("drive");
+        assert!(!journal_contains_session(&journal_dir, out.replay_session_id).expect("contains"));
+    }
+
+    #[tokio::test]
+    async fn t_persist_report_includes_replay_session_id() {
+        let source = source_session();
+        let journal_dir = temp_journal_dir("persist-report-id");
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: true,
+                persist_journal_dir: Some(journal_dir),
+            },
+        )
+        .expect("engine");
+        let report = engine.run_to_report().await.expect("report");
+        assert!(report.replay_session_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn t_no_persist_report_replay_session_id_is_none() {
+        let source = source_session();
+        let journal_dir = temp_journal_dir("no-persist-report-id");
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+                persist_journal_dir: Some(journal_dir),
+            },
+        )
+        .expect("engine");
+        let report = engine.run_to_report().await.expect("report");
+        assert!(report.replay_session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn t_persist_with_invalid_journal_path_fails_cleanly() {
+        let source = source_session();
+        let journal_dir = temp_journal_dir("persist-invalid");
+        let invalid_path = journal_dir.join("not-a-directory");
+        std::fs::write(&invalid_path, b"x").expect("create file");
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: true,
+                persist_journal_dir: Some(invalid_path),
+            },
+        )
+        .expect("engine");
+        let err = engine.drive_replay().await.expect_err("must fail");
+        assert!(matches!(err, ReplayError::PersistJournalNotWritable { .. }));
     }
 
     #[test]

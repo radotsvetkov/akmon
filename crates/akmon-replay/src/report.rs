@@ -126,6 +126,12 @@ impl ReplayInfraError {
             ReplayError::ReplaySessionMalformed { .. } => {
                 ("replay_session_malformed", None, None, None)
             }
+            ReplayError::PersistConfigInvalid { .. } => {
+                ("persist_config_invalid", None, None, None)
+            }
+            ReplayError::PersistJournalNotWritable { .. } => {
+                ("persist_journal_not_writable", None, None, None)
+            }
         };
         Self {
             akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
