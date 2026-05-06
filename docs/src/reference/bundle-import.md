@@ -104,7 +104,7 @@ Exit code is `2`.
 
 ```json
 {
-  "akmon_version": "1.8.2",
+  "akmon_version": "2.0.0",
   "agef_version": "0.1.1",
   "bundle_path": "/path/to/audit.akmon",
   "original_session_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -121,7 +121,7 @@ Exit code is `2`.
 
 ```json
 {
-  "akmon_version": "1.8.2",
+  "akmon_version": "2.0.0",
   "agef_version": "0.1.1",
   "bundle_path": "/path/to/audit.akmon",
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -154,7 +154,7 @@ Fields:
 
 ```json
 {
-  "akmon_version": "1.8.2",
+  "akmon_version": "2.0.0",
   "error": "target journal already contains session 550e8400-e29b-41d4-a716-446655440000",
   "category": "session_id_collision",
   "colliding_session_id": "550e8400-e29b-41d4-a716-446655440000"

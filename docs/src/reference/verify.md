@@ -113,7 +113,7 @@ JSON is always emitted to stdout (including failure cases), so pipelines can par
 
 ```json
 {
-  "akmon_version": "1.8.2",
+  "akmon_version": "2.0.0",
   "agef_version": "0.1.1",
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
   "journal_path": "/home/alice/.local/state/akmon/journal",
@@ -175,7 +175,7 @@ Known violation categories:
 
 ```json
 {
-  "akmon_version": "1.8.2",
+  "akmon_version": "2.0.0",
   "category": "session_not_found",
   "error": "cannot open journal /tmp/my-journal for session 550e8400-e29b-41d4-a716-446655440000: session not found: 550e8400-e29b-41d4-a716-446655440000"
 }

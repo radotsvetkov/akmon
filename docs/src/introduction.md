@@ -1,135 +1,260 @@
 # Introduction
 
-Akmon is a terminal-native AI coding agent designed for developers who need control, portability, and accountability. It is intentionally built as a small Rust binary with a typed permission model, explicit provider selection, and an auditable execution trail.
+Akmon is the review-aware AI coding agent for regulated engineering.
+It is built for teams where "the model suggested it" is not enough evidence to merge, release, or certify software changes.
+Every session is captured as a tamper-evident, content-addressed artifact that can be replayed, compared, and verified later.
 
-As of v1.8.1, Akmon ships a complete trust pipeline:
+Akmon is intentionally not a "best autocomplete UX" product.
+It is a terminal-first control plane for AI-assisted code change work where traceability, deterministic evidence, and explicit operator control are non-negotiable.
+The core question is simple: when an auditor, reviewer, or incident responder asks what happened, can you prove it?
 
-- policy-as-code controls,
-- tamper-evident audit chains,
-- replay metadata and evidence artifacts,
-- reliability metrics with enforceable SLO/trend gates,
-- enterprise policy profiles/packs for environment rollout.
-
-This page explains why it exists, the design choices behind it, who it is for, and where it is intentionally not trying to compete.
+This page explains the problem Akmon is designed to solve, the design choices behind it, what ships in v2.0.0, and where Akmon is intentionally not trying to compete.
 
 ## The problem Akmon was built to solve
 
-AI coding tools are now capable of shipping real features, but most teams still have the same fear: _what exactly did it do, and why did it do that?_ In many products, you get polished UX and fast output, but limited transparency into model context, permission boundaries, or reproducibility across environments. That tradeoff works for many workflows, but it breaks down for infrastructure, backend, and compliance-heavy engineering.
+AI coding agents can now produce meaningful code changes, but many environments still cannot rely on them for critical work.
+The blocker is usually not raw model capability.
+The blocker is evidence quality.
 
-A second tension is provider lock-in. In practice, model quality, cost, latency, legal terms, and data handling requirements all change over time. If your coding agent is hard-wired to a single vendor, your team inherits that vendor's pricing and roadmap decisions whether or not they fit your constraints. Teams with NDAs, private source, or regulated systems often need the ability to switch providers or run local inference without changing their workflow.
+Teams repeatedly run into the same questions:
 
-A third tension is operational reality. Many developers do not work in a single desktop IDE context all day. They work over SSH in remote Linux hosts, inside ephemeral CI runners, in locked-down enterprise laptops, or in Dockerized build systems. Tools that require a specific IDE plugin stack or runtime ecosystem are often awkward or impossible in those environments. Akmon was built for those constraints first, not as an afterthought.
+- What exactly did the agent read?
+- What tools did it call?
+- What side effects happened on disk or in shell?
+- Which policy decision allowed each side effect?
+- Can we replay the run and validate that the artifact is still intact?
+
+In many tools, those answers are partial or ephemeral.
+You get a useful session in the moment, but weak forensic value later.
+That gap is acceptable for low-risk prototyping.
+It is a hard stop for regulated release workflows.
+
+Provider lock-in is the second recurring failure mode.
+Model quality, latency, legal terms, and cost change over time.
+If your coding workflow depends on one provider's roadmap, your engineering process inherits that business risk.
+Regulated teams and enterprise teams often need optionality: local models for sensitive code paths, hosted models for throughput, and explicit controls over where prompts go.
+
+Operational portability is the third issue.
+Real engineering happens in mixed environments:
+
+- local laptops,
+- remote SSH sessions,
+- CI runners,
+- hardened enterprise hosts,
+- restricted network segments.
+
+If the agent requires a specific IDE plugin stack or heavyweight runtime chain, adoption collapses outside a narrow desktop workflow.
+Akmon is built for those constraints first.
 
 ## The design decisions (and why)
 
 ### Single binary
 
-Akmon is compiled Rust, shipped as a standalone executable. This is not just "nice for install." It means predictable behavior across machines because there is no dependency on a host Node/Python runtime, global package manager state, or plugin version drift. If two machines run the same Akmon version, the agent behavior is far easier to reason about.
+Akmon ships as a standalone Rust binary.
+That has practical effects beyond install convenience.
 
-That portability matters in practical environments:
+- Runtime state is explicit and portable.
+- Environment drift is reduced relative to dynamic plugin/runtime stacks.
+- CI and remote-host deployment stay simple.
 
-- local development on macOS,
-- remote debugging over SSH on Debian/Ubuntu,
-- containerized CI jobs with minimal base images,
-- controlled or air-gapped environments where runtime bootstrap is tightly restricted.
-
-When a tool's runtime stack is small and explicit, troubleshooting is also faster. A failed run is usually a model/provider issue, permission policy issue, or repository issue, not "works on my machine because npm state differed."
+If two machines run the same Akmon version, behavior is easier to reason about and support.
+Troubleshooting tends to focus on policy, provider config, repository state, or model behavior rather than host runtime mismatch.
 
 ### Bring your own key / bring your own model
 
-Akmon supports Anthropic, OpenAI, OpenRouter, Groq, Azure OpenAI, Bedrock, OpenAI-compatible endpoints, and Ollama for offline local execution. You can select the model per task.
+Akmon supports Anthropic, OpenAI, OpenRouter, Groq, Azure OpenAI, Bedrock, OpenAI-compatible endpoints, and Ollama.
+Model selection remains an operator decision.
 
-Why this matters:
+That matters for:
 
-- **commercial control:** you decide which provider's pricing and terms you accept,
-- **privacy control:** with Ollama, code can remain local,
-- **resilience:** if one provider is degraded or rate-limited, your workflow does not collapse,
-- **task fit:** cheaper models for repetitive edits, stronger models for architecture/design.
+- commercial leverage,
+- legal and data-boundary control,
+- outage resilience,
+- per-task cost/performance tuning.
 
-In other words, model choice becomes an engineering decision, not a platform limitation.
+The objective is not to force one "best model."
+The objective is to keep model strategy decoupled from tooling adoption.
 
-### Typed permission system
+### Typed permission boundaries
 
-Tool execution is not free-form shell by default. Operations pass through permission checks modeled as typed actions (read file, write file, execute command, network fetch, and so on). The user can approve once, approve for a session, or deny based on policy and context.
+Akmon treats tool operations as explicit capabilities, not implicit side effects.
+Reads, writes, shell execution, and network actions are mediated through policy and approval flow.
 
-That creates a concrete safety boundary between model suggestions and actual side effects. The model can _request_ actions; it cannot silently mutate the system without policy passing those requests.
+This creates a clear boundary:
 
-### Audit log
+- the model can request an action,
+- the runtime can enforce policy,
+- the operator can review and approve or deny.
 
-Akmon can emit JSONL audit events with session metadata, policy decisions, tool calls, and execution flow. This is essential for teams that need post-run review and accountability.
+That boundary is critical in environments where side effects must be reviewable and explainable.
 
-Practically, it gives you answers to questions like:
+### Session evidence as a first-class output
 
-- what command executed and when,
-- what file was modified and after which approval,
-- where the session stopped,
-- what model and token usage were involved.
+Most tools treat logs as support artifacts.
+Akmon treats the session artifact as a product output.
 
-The point is not surveillance; the point is operational clarity when AI performs meaningful work on production code.
+A useful AI run is not just "did it produce code."
+A useful AI run is "can we verify what happened and carry that evidence through review, CI, and audit."
 
-### Context as architecture
+### Context discipline
 
-Akmon's workflow emphasizes context discipline: research, plan/spec, then implementation. That structure exists because LLM performance degrades when context fills with stale exploration artifacts.
+Akmon encourages explicit context shaping rather than perpetual thread growth.
+Teams typically get better outcomes when they separate work into:
 
-Instead of trying to keep one giant conversation forever, Akmon encourages:
+1. exploration,
+2. planning/specification,
+3. implementation and verification.
 
-1. focused exploration,
-2. explicit plan/spec on disk (`.akmon/specs`),
-3. implementation from plan with iterative verification.
+This reduces context drift and makes outcomes easier to reproduce.
 
-This makes sessions more predictable, easier to resume, and less likely to drift into repetitive read loops.
+## The session evidence model in v2.0.0
+
+v2.0.0 centers Akmon around a deterministic session evidence workflow.
+The system records each run as a content-addressed event journal with cryptographic chain integrity.
+That gives reviewers a concrete object to inspect instead of reconstructing behavior from partial logs.
+
+At a high level:
+
+- Events are linked in order and integrity-checked.
+- Session contents can be replayed deterministically against recorded providers/tools.
+- Two sessions can be compared structurally and at field level.
+- Evidence can be exported into AGEF bundles for portability.
+
+Akmon v2.0.0 implements AGEF v0.1.1 as a practical reference implementation for portable AI-agent session evidence.
+The goal is operational interoperability and verifiability, not vendor-specific lock-in.
+
+### The 10-command surface in v2.0.0
+
+v2.0.0 ships ten commands organized around the session lifecycle.
+
+#### Run and diagnose
+
+- `run` starts normal agent execution.
+- `doctor` validates environment and configuration preconditions.
+
+#### Inspect and understand sessions
+
+- `inspect` reads session records for targeted examination.
+- `diff` compares sessions structurally and at field level.
+
+#### Replay and verify integrity
+
+- `replay` re-executes against recorded provider/tool context for deterministic validation.
+- `verify` performs integrity checks on session artifacts.
+- `audit` validates cryptographic chain integrity and audit consistency.
+
+#### Create compliance artifacts
+
+- `evidence` generates evidence outputs suitable for review workflows.
+- `bundle` packages portable AGEF archives.
+- `redact` removes sensitive content from artifacts under controlled policy.
+
+These commands are meant to compose.
+A common pattern is:
+
+1. run a task,
+2. inspect/diff output,
+3. verify/audit integrity,
+4. export/redact evidence for downstream review.
 
 ## Who Akmon is for
 
-### Backend developers working across varied environments
+Akmon targets teams that must prove what AI did, not just benefit from what AI suggested.
 
-If you work in terminal-first repositories, remote hosts, and client-controlled systems where installing editor plugins is inconsistent, Akmon's single-binary model is a practical fit.
+### Aerospace and avionics teams
 
-### Platform and DevOps engineers automating changes
+For organizations working under DO-178C-style qualification and evidence pressure, session traceability and deterministic replay reduce ambiguity during review.
 
-Headless mode (`--task`, `--yes`, `--output json`) is designed for automation and CI integration. Budget controls and structured outputs make it easier to gate and observe autonomous runs.
+### Medical device software teams
 
-### Regulated or privacy-constrained teams
+For IEC 62304-oriented development, controlled side effects and audit-ready artifacts support stronger change documentation and risk controls.
 
-Teams that need to constrain data movement can run local models with Ollama and keep a durable audit record for operational/compliance review.
+### Automotive software teams
 
-### Open-source maintainers avoiding vendor coupling
+For ISO 26262-influenced workflows, reproducible agent behavior and explicit evidence chains improve confidence in AI-assisted modifications.
 
-Akmon is Apache-2.0 and provider-agnostic. You can evolve model strategy over time without replacing the tool itself.
+### Finance and enterprise controls teams
 
-## What Akmon does not do
+For SOC 2 or similar control environments, the session artifact model helps demonstrate governance over AI-driven code changes.
 
-Akmon is intentionally opinionated, and that includes explicit limits:
+### Defense and high-assurance environments
 
-- It is not an IDE extension with inline completions and graphical diff UX.
-- It does not try to out-polish provider-native tools in their own primary environment.
-- Local models can be slower and less capable on complex multi-file design tasks.
-- It is terminal-first and expected to remain that way.
+For CMMC-style and restricted-network contexts, single-binary deployment, policy boundaries, and provider flexibility are practical adoption requirements.
 
-Those are deliberate tradeoffs in favor of portability, policy boundaries, and scriptability.
+### Platform and SRE teams
 
-## Common mistakes and troubleshooting
+For teams running large automation surfaces in CI, structured outputs and verifiable artifacts make autonomous tasks easier to gate and monitor.
 
-### Mistake: using one expensive model for every task
+## What Akmon is intentionally not
 
-Use a cheaper model for exploration/refactors and reserve stronger models for architecture-heavy reasoning.
+Akmon is opinionated about scope.
+That includes clear non-goals.
 
-### Mistake: skipping project context
+- It is not trying to replace IDE-native completion workflows.
+- It is not optimized for maximum "chat polish" over evidentiary rigor.
+- It is not tied to a single model provider's product strategy.
+- It is not built around opaque, non-replayable agent behavior.
 
-Create and maintain `AKMON.md`. A short, high-quality project context usually improves outputs more than writing longer prompts each turn.
+Those tradeoffs are deliberate.
+Akmon prioritizes reviewability, operational control, and portability over broad UX coverage.
 
-### Mistake: running headless without budget limits
+## Practical usage guidance
 
-For CI and automation, use `--max-budget-usd` and parse `--output json` for safe exits.
+### Use model tiers intentionally
 
-### Mistake: blaming model quality for policy friction
+Use lower-cost models for exploration and mechanical edits.
+Use stronger models for architecture or multi-file reasoning.
+This keeps cost predictable without forcing one model for every task.
 
-If the agent seems "stuck," inspect permission prompts and policy settings first. In many cases the model is waiting for explicit approval.
+### Keep project context explicit
+
+Maintain `AKMON.md` with constraints, architecture notes, and decision boundaries.
+High-quality local context usually improves output quality more than longer ad-hoc prompts.
+
+### Treat evidence generation as part of done
+
+In regulated workflows, task completion includes evidence readiness.
+A run is not complete until required verification and artifact checks pass.
+
+### Gate automation with policy and verification
+
+For headless workflows, use explicit policy, budget limits, and integrity checks so autonomous runs fail closed when constraints are violated.
+
+## Adoption notes for regulated teams
+
+Teams adopting Akmon in regulated contexts usually move in phases instead of switching everything at once.
+
+### Phase 1: Observe
+
+Start by running scoped tasks with full session capture enabled.
+Focus on understanding evidence quality and policy fit before broad automation.
+
+### Phase 2: Constrain
+
+Introduce tighter policy defaults and approval rules for writes, shell, and network operations.
+Treat denied operations as useful feedback about control boundaries, not as friction to bypass.
+
+### Phase 3: Verify
+
+Standardize post-run verification steps in CI and review checklists.
+Require session integrity checks for categories of changes where auditability is mandatory.
+
+### Phase 4: Operationalize
+
+Package repeatable workflows for common engineering tasks and gate them with policy and evidence requirements.
+The goal is consistent, reviewable operation rather than maximal autonomy.
+
+This phased approach keeps rollout practical:
+
+- engineers get immediate utility,
+- governance teams get deterministic evidence,
+- reliability standards are raised without blocking delivery.
 
 ## Where to go next
 
 - Install and first run: [Getting Started](./getting-started/installation.md)
-- Practical walkthroughs: [Step-by-step tutorials](./tutorials/step-by-step.md)
-- Automation and CI: [Headless mode](./usage/headless.md)
-- Integration with external systems: [MCP guide](./features/mcp.md)
-- Internal architecture for contributors: [Contributing architecture](./contributing/architecture.md)
+- Headless automation: [Headless mode](./usage/headless.md)
+- Interactive usage: [Interactive mode](./usage/interactive.md)
+- Policy controls: [Policy profiles](./features/policy-profiles.md)
+- Session comparison: [Session diff reference](./reference/diff.md)
+- Architecture for contributors: [Contributing architecture](./contributing/architecture.md)

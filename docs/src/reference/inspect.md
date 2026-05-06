@@ -141,7 +141,7 @@ journal: /home/user/.local/state/akmon/journal
 
 ```json
 {
-  "akmon_version": "1.8.2",
+  "akmon_version": "2.0.0",
   "agef_version": "0.1.1",
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
   "journal_path": "/home/user/.local/state/akmon/journal",
@@ -211,7 +211,7 @@ Infrastructure failures use this JSON shape:
 
 ```json
 {
-  "akmon_version": "1.8.2",
+  "akmon_version": "2.0.0",
   "category": "session_not_found",
   "error": "cannot open journal ...: session not found: 550e8400-e29b-41d4-a716-446655440000"
 }

@@ -92,7 +92,7 @@ redacted: source session 550e8400-e29b-41d4-a716-446655440000
 
 ```json
 {
-  "akmon_version": "1.8.2",
+  "akmon_version": "2.0.0",
   "agef_version": "0.1.1",
   "source_session_id": "550e8400-e29b-41d4-a716-446655440000",
   "source_head": "8b2a3f7c1ef0ea7e80f772f8f84f86b16f5527cd51ff8b0a464f157c4cd5c757",
@@ -134,7 +134,7 @@ Field meanings:
 
 ```json
 {
-  "akmon_version": "1.8.2",
+  "akmon_version": "2.0.0",
   "error": "invalid --object hash 'zz-not-hex'",
   "category": "invalid_object_hash",
   "invalid_object_hash": "zz-not-hex"
