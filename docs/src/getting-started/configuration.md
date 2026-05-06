@@ -1,68 +1,95 @@
 # Configuration
 
-Akmon reads settings from `~/.akmon/config.toml` and environment variables. CLI flags override both.
+Documented for Akmon `2.0.0`.
 
-## Config wizard
+## Who this is for
+
+Engineers configuring Akmon for repeatable local use, CI usage, and policy/evidence-aware operation.
+
+## What you will have at the end
+
+- A valid `~/.akmon/config.toml`.
+- A clear precedence model: CLI flags > environment > config file.
+- Verified provider routing and masked config inspection commands.
+
+## Prerequisites
+
+1. `akmon --version` works.
+2. You have either local Ollama or hosted provider credentials.
+3. You can run commands in a terminal where `~/.akmon/` is writable.
+
+## Steps
+
+1. Run the interactive setup wizard (optional, quickest start).
 
 ```bash
 akmon config
 ```
 
-With **no subcommand**, Akmon runs a short interactive questionnaire on stdin: default model, optional Anthropic / OpenRouter keys, and Ollama base URL. It writes `~/.akmon/config.toml` (and may append `.akmon/` to `.gitignore` when you store an Anthropic key).
+Expected result: Akmon writes `~/.akmon/config.toml`.
 
-- For **automation or JSON output**, pass an explicit subcommand. `akmon config --json` **requires** a subcommand (for example `akmon config show --json`) so stdout stays machine-readable.
-- Everything the wizard sets can also be configured with `akmon config <topic> …`, by editing TOML, or via **environment variables** (see [Environment variables](../reference/env-vars.md)).
-
-## Fullscreen TUI and scrollback
-
-The default chat UI uses the terminal’s **alternate screen**, so your emulator’s normal **scrollback may not include the full conversation**. Use the **`/transcript`** slash command to write the current chat to `.akmon/transcript_export.md` in the project, then open it in `less`, an editor, or a pager.
-
-## Show effective config
+2. Inspect the effective stored config safely.
 
 ```bash
 akmon config show
 ```
 
-Sensitive values are masked in output.
+Expected result: keys are masked in output.
 
-## `config.toml` location
+3. Set or update common values with explicit subcommands.
 
-| Scope | Path |
-| --- | --- |
-| User | `~/.akmon/config.toml` |
+```bash
+akmon config model set qwen2.5-coder:7b
+akmon config ollama-url set http://localhost:11434
+```
 
-Project-level overrides may apply depending on your setup; use `akmon config path` to see which file is active.
+4. Verify provider resolution for the current model and environment.
 
-## Common keys
+```bash
+akmon config explain-provider
+```
 
-Typical `[model]` section:
+Expected result: deterministic provider decision trace with candidate reasons.
+
+5. If you manage credentials in file form, use top-level keys from `AkmonGlobalConfig`.
 
 ```toml
-[model]
-default = "claude-haiku-4-5-20251001"
-anthropic_key = "sk-ant-..." # prefer: akmon config key set
+default_model = "qwen2.5-coder:7b"
+ollama_url = "http://localhost:11434"
+# anthropic_api_key = "sk-ant-..."
+# openrouter_api_key = "sk-or-..."
 
 [architect]
 planner_model = "llama3.2"
+
+[policy]
+profile = "dev"
+packs = [".akmon/policy-packs/team.toml"]
 ```
 
-For OpenRouter:
+## Verification
 
-```toml
-[model]
-default = "anthropic/claude-haiku-4-5"
-openrouter_key = "sk-or-..."
+```bash
+akmon config path
+akmon config show --json
+akmon doctor providers
 ```
 
-## Model context window and cost estimate (`[model_estimates]`)
+Expected result:
+- config path resolves to `~/.akmon/config.toml`
+- JSON output parses cleanly
+- doctor reports either healthy provider checks or actionable failures
 
-The TUI’s **context % bar** reflects **model context window** usage from reported token counts. **Rate limits** (requests/minute, tokens/minute, spend caps) are enforced by your provider and are **independent** of that percentage—you can be low on context and still hit a limit.
+## Troubleshooting
 
-Akmon’s **USD session cost** is a **rough estimate** from usage tokens and optional price tables (not a bill from your provider).
+- `akmon config --json` without subcommand is invalid by design; use `akmon config show --json`.
+- If TUI scrollback is missing, export with `/transcript` to `.akmon/transcript_export.md`.
+- If provider selection is unexpected, compare `akmon config explain-provider` with your env vars.
+- Store secrets in environment variables for CI rather than committing config files.
 
-Optional rows match the **current model id** (substring match, first match wins). If you omit `context_window_tokens`, a built-in hint may still apply for common ids.
+## Model context and cost estimates (`model_estimates`)
 
-In the **TUI**, use **`/config`** (or **Ctrl+S**) → **Estimates** to edit these fields for the current model without hand-editing TOML.
+`model_estimates` rows are optional hints for context window and rough USD estimation.
 
 ```toml
 [[model_estimates]]
@@ -75,57 +102,5 @@ cache_read_per_million_usd = 0.1
 # Shown in /context as a reminder (not enforced by Akmon)
 note = "Check Anthropic console for RPM/TPM and tier limits."
 ```
-
-The same table is used by the headless CLI for cost accumulation. Changes saved from the TUI apply immediately; if you edit `config.toml` by hand, restart Akmon to pick them up.
-
-## Editor integration
-
-Set `EDITOR` (or rely on the default) for `/edit-plan` and `/update-context` in the TUI:
-
-```bash
-export EDITOR="nvim"
-```
-
-## Local model reliability (Ollama)
-
-Akmon now uses Ollama model metadata (when available) to tune local reliability behavior:
-
-- adaptive first-token deadline (longer for larger local models),
-- adaptive idle-stream timeout (to reduce false failures during cold starts),
-- context-window hints for no-output diagnostics,
-- tool-support expectation hints when a local model is likely not tool-capable.
-
-Probe data is best-effort only. If probing fails, Akmon falls back to deterministic safe defaults and continues.
-
-### What status hints mean
-
-During a slow local first request, you may see status lines such as:
-
-- `Loading <model>…`
-- `Loading model into RAM… first request is slow`
-- `Still loading…`
-
-These hints are emitted consistently in both streaming and buffered response paths.
-
-### Common local failure patterns and recovery
-
-- **Model missing**  
-  Run `ollama pull <model>` and confirm with `ollama ps`.
-- **First-token timeout**  
-  Warm the model once (`ollama run <model>`), then retry.
-- **Idle stream timeout**  
-  Check `ollama ps`; if the model process crashed/unloaded, restart it and retry.
-- **No output / possible context overflow**  
-  Use `/clear`, retry with smaller context, or switch to a model with larger context.
-- **Tool-heavy tasks on weak local models**  
-  Switch to a tool-capable local model (for example `qwen2.5-coder:7b`) if tool calls stall.
-
-### Recommended cold-start workflow
-
-1. Pull and warm your local model:
-   - `ollama pull qwen2.5-coder:7b`
-   - `ollama run qwen2.5-coder:7b`
-2. Start Akmon with that model and keep early turns focused.
-3. If context gets noisy, use `/clear` before retrying long tasks.
 
 See also [Environment variables](../reference/env-vars.md) and [Configuration reference](../reference/config.md).

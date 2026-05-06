@@ -1,6 +1,18 @@
 # Example: REST API with Rust + Axum
 
+Documented for Akmon `2.0.0`.
+
 End-to-end pattern: **plan → scaffold → implement in layers → test**.
+
+## Scenario
+
+Industry/context (illustrative): defense-adjacent internal API with strict review and evidence expectations.
+
+## Constraints
+
+- Data boundary: local/dev database only for example.
+- Approval requirement: layered implementation and test coverage.
+- CI requirement: reproducible `cargo` checks.
 
 ## Prerequisites
 
@@ -58,3 +70,15 @@ add cursor-based pagination to GET /posts
 ```
 add utoipa OpenAPI spec and Swagger UI
 ```
+
+## Outcome
+
+Artifacts answer: "What changed, why, and can we verify the session chain?"
+- `.akmon/audit/<session-id>.jsonl`
+- `.akmon/evidence/<session-id>.json`
+- Optional headless `run.json` for CI records
+
+## Anti-patterns
+
+- Implementing auth + persistence + routing in a single unreviewed turn.
+- Skipping `--plan` for large multi-module changes.

@@ -123,31 +123,16 @@ At a high level:
 Akmon v2.0.0 implements AGEF v0.1.1 as a practical reference implementation for portable AI-agent session evidence.
 The goal is operational interoperability and verifiability, not vendor-specific lock-in.
 
-### The 10-command surface in v2.0.0
+### Command surface in v2.0.0
 
-v2.0.0 ships ten commands organized around the session lifecycle.
+v2.0.0 command workflow centers around:
 
-#### Run and diagnose
-
-- `run` starts normal agent execution.
-- `doctor` validates environment and configuration preconditions.
-
-#### Inspect and understand sessions
-
-- `inspect` reads session records for targeted examination.
-- `diff` compares sessions structurally and at field level.
-
-#### Replay and verify integrity
-
-- `replay` re-executes against recorded provider/tool context for deterministic validation.
-- `verify` performs integrity checks on session artifacts.
-- `audit` validates cryptographic chain integrity and audit consistency.
-
-#### Create compliance artifacts
-
-- `evidence` generates evidence outputs suitable for review workflows.
-- `bundle` packages portable AGEF archives.
-- `redact` removes sensitive content from artifacts under controlled policy.
+- `chat` / `--task` for execution entry points,
+- `doctor` for provider diagnostics,
+- `inspect` and `diff` for session analysis,
+- `verify`, `audit`, and `evidence` for integrity and evidence validation,
+- `replay` for deterministic comparison,
+- `bundle export` / `bundle import` and `redact` for portable and sanitized handoff.
 
 These commands are meant to compose.
 A common pattern is:
@@ -256,5 +241,7 @@ This phased approach keeps rollout practical:
 - Headless automation: [Headless mode](./usage/headless.md)
 - Interactive usage: [Interactive mode](./usage/interactive.md)
 - Policy controls: [Policy profiles](./features/policy-profiles.md)
+- Core terms: [Glossary](./concepts/glossary.md)
+- Reviewer handoff: [Regulated reviewer flow](./concepts/reviewer-flow.md)
 - Session comparison: [Session diff reference](./reference/diff.md)
 - Architecture for contributors: [Contributing architecture](./contributing/architecture.md)

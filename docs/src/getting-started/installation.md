@@ -1,5 +1,27 @@
 # Installation
 
+Documented for Akmon `2.0.0`.
+
+## Who this is for
+
+Engineers installing Akmon on macOS or Linux for local development, CI, or remote shell usage.
+
+## What you will have at the end
+
+- A runnable `akmon` binary on `PATH`.
+- A verified installation (`akmon --version`).
+- A clear fallback path for source builds.
+
+## Prerequisites
+
+- Shell access on macOS or Linux.
+- `curl` available.
+- `Rust 1.88+` only if building from source.
+
+## Steps
+
+1. Install from a release binary (recommended).
+
 ## Requirements
 
 - **Git** — for project context and git operations
@@ -64,6 +86,8 @@ akmon --version
 # e.g. akmon 2.0.0
 ```
 
+2. If binary install fails, build from source.
+
 ## Option 2 — From source
 
 ```bash
@@ -80,11 +104,29 @@ mkdir -p ~/bin
 cp target/release/akmon ~/bin/
 ```
 
+3. (Optional) Install from crates.io if available in your workflow.
+
 ## Option 3 — cargo install
 
 ```bash
 cargo install akmon
 ```
+
+## Verification
+
+```bash
+command -v akmon
+akmon --version
+akmon --help
+```
+
+Expected result: all commands succeed and print usage/version output.
+
+## Troubleshooting
+
+- If `akmon` is not found, add `~/bin` to `PATH` and restart your shell.
+- If downloaded file is HTML, verify the release asset name and tag availability.
+- For provider failures after install, run `akmon doctor providers`.
 
 ## Using over SSH
 

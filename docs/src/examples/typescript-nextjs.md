@@ -1,5 +1,17 @@
 # Example: Next.js + TypeScript
 
+Documented for Akmon `2.0.0`.
+
+## Scenario
+
+Industry/context (illustrative): fintech internal portal requiring policy-aware change traces.
+
+## Constraints
+
+- Approval requirement: keep server/client boundaries explicit.
+- CI requirement: lint + test + E2E flow readiness.
+- Audit need: headless run record for reviewer replay path.
+
 App Router stack with **Drizzle**, **Server Actions**, and **Shadcn UI**.
 
 ## Setup
@@ -33,3 +45,12 @@ add Playwright E2E for login + task flows
 ```
 add drag-and-drop ordering with optimistic UI
 ```
+
+## Outcome
+
+You get a planned and implemented Next.js slice with evidence artifacts and reproducible command history.
+
+## Anti-patterns
+
+- Defaulting all logic to client components without rationale.
+- Shipping feature flows without test prompts in the same review cycle.

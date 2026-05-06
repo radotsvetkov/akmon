@@ -1,131 +1,100 @@
 # Quick Start
 
-From zero to a working AI coding session in under 5 minutes.
+Documented for Akmon `2.0.0`.
 
-## Step 1 — Choose a model provider
+## Who this is for
 
-### Local (free, private, offline)
+Engineers who want a first successful Akmon run in a local repository using either a local model (Ollama) or hosted provider credentials.
 
-Install [Ollama](https://ollama.com) and pull a model:
+## What you will have at the end
+
+- One completed Akmon session in your project.
+- A recorded audit log and evidence artifact for that session.
+- A baseline understanding of interactive and headless entry points.
+
+## Prerequisites
+
+1. `akmon --version` works.
+2. You are inside a git repository.
+3. One provider path is ready:
+   - Local: `ollama` running with a pulled model.
+   - Hosted: one of `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, or Azure/Bedrock settings.
+
+## Steps
+
+1. Choose a model source.
 
 ```bash
+# Local-first example
 ollama pull qwen2.5-coder:7b
 ```
 
-Akmon detects Ollama automatically. No key needed.
+```bash
+# Hosted example (pick one)
+export ANTHROPIC_API_KEY="YOUR_KEY"
+```
 
-### Cloud API
+Expected result: provider prerequisites are available before Akmon starts.
+
+2. Start Akmon in interactive mode.
 
 ```bash
-# Anthropic — best quality
-export ANTHROPIC_API_KEY=your-key
-
-# OpenRouter — 500+ models with one key
-export OPENROUTER_API_KEY=your-key
-
-# Groq — fastest inference
-export GROQ_API_KEY=your-key
+cd /path/to/your-repo
+akmon
 ```
 
-## Step 2 — Open your project
+Expected result: full-screen TUI opens for a new session.
+
+3. Run a read-only exploration prompt.
+
+```text
+explain where authentication state is created and validated
+```
+
+Expected result: Akmon reads/searches files and returns an explanation with tool traces in-session.
+
+4. Run one bounded implementation prompt.
+
+```text
+add input validation to create_user and explain the tests required
+```
+
+Expected result: Akmon proposes file edits with approval gates before writes.
+
+5. End the session cleanly.
+
+```text
+/exit
+```
+
+Expected result: session summary appears and Akmon saves artifacts.
+
+## Verification
+
+Check that session evidence exists in the project:
 
 ```bash
-cd your-project
-akmon chat
+ls -1 .akmon/audit .akmon/evidence
 ```
 
-The TUI opens. If this is your first session in this project,
-Akmon suggests running `/init` to generate project memory.
+Then verify integrity:
 
-## Step 3 — Try your first task
-
-Type a task in plain language and press Enter:
-
-```
-explain how authentication works in this codebase
+```bash
+# Replace with your session UUID
+akmon verify <session-uuid>
 ```
 
-Akmon will search the codebase semantically, read relevant files,
-and explain what it found.
+Expected result:
+- `akmon verify` exits `0` for a valid session chain.
+- Audit/evidence files are present for reviewer handoff.
 
-## Step 4 — Make a change
+## Troubleshooting
 
-```
-add input validation to the create_user function
-```
+- If startup fails with provider errors, run `akmon doctor providers`.
+- If model routing is unclear, run `akmon config explain-provider`.
+- If Ollama is slow on first turn, warm model once with `ollama run <model>`.
+- If you need machine-readable output for CI, use headless mode:
 
-Before writing any file, Akmon shows a colored diff of exactly
-what will change. You approve or reject each change.
-
-## Step 5 — Generate project memory
-
-```
-/init
-```
-
-Akmon analyzes your project and generates `AKMON.md` — a context
-file describing your tech stack, conventions, and architecture.
-Every session after this will produce better results.
-
-## Common first tasks
-
-| What you want | What to type |
-|---|---|
-| Understand the codebase | `explain the overall architecture` |
-| Find something | `find where database connections are managed` |
-| Add a feature | `add rate limiting to the API endpoints` |
-| Fix a bug | `the login endpoint returns 500, debug it` |
-| Refactor | `refactor the user module to use the repository pattern` |
-| Write tests | `add unit tests for the authentication service` |
-| Review code | `review src/api.rs for security issues` |
-| Analyze performance | `find the slowest database queries` |
-
-## Key slash commands
-
-| Command | What it does |
-|---|---|
-| `/help` | Show all commands |
-| `/plan` | Plan before implementing |
-| `/init` | Generate AKMON.md |
-| `/model` | Switch model mid-session |
-| `/cost` | Show session cost so far |
-| `/audit` | Show audit log |
-| `/clear` | Fresh context, same session |
-| `/exit` | Exit with session summary |
-
-## Exit summary
-
-When you exit, Akmon shows a full session summary:
-
-```
-  Akmon session complete
-
-  Session
-  ──────────────────────────────────
-  ID         a1b2c3d4
-  Duration   12m 34s
-  Directory  ~/my-project
-  Model      claude-haiku-4-5 (Anthropic)
-
-  Activity
-  ──────────────────────────────────
-  Messages      14
-  Tool calls    23
-    ✓ Succeeded  22
-    ✗ Failed      1
-  Files read    8
-  Files written 3
-
-  Tokens
-  ──────────────────────────────────
-  Input      48,291
-  Output      6,847
-  Cache hit  41,203 (85% savings)
-  Est. cost  ~$0.047
-
-  Audit log
-  ──────────────────────────────────
-  .akmon/audit/a1b2c3d4.jsonl
-
-  Agent powering down. Goodbye!
+```bash
+akmon --task "run tests and summarize failures" --output json --yes
 ```

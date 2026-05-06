@@ -1,48 +1,90 @@
-# Tutorial A: Local-first developer flow (Ollama)
+# Tutorial: Local-first developer flow (Ollama)
 
-This walkthrough uses only local inference and produces trust artifacts you can verify.
+Documented for Akmon `2.0.0`.
 
-## 1) Install and configure
+Time estimate: 15-20 minutes  
+Complexity: Beginner
+
+## Who this is for
+
+Developers who want a fully local Akmon workflow with verifiable session evidence.
+
+## What you will have at the end
+
+- One interactive local session.
+- One equivalent headless JSON run.
+- Verified audit/evidence artifacts for review.
+
+## Prerequisites
+
+1. `akmon --version` prints `2.0.0` (or your current build).
+2. `ollama` is installed and running.
+3. You are inside a git repository.
+
+## Steps
+
+1. Pull a local model and verify Akmon.
 
 ```bash
-ollama pull qwen3.5:9b
+ollama pull qwen2.5-coder:7b
 akmon --version
-akmon config
 ```
 
-## 2) Start interactive work
+2. Start interactive mode with a local model and dev policy profile.
 
 ```bash
-cd your-project
-akmon chat --model qwen3.5:9b --policy-profile dev
+cd /path/to/your-repo
+akmon --model qwen2.5-coder:7b --policy-profile dev chat
 ```
 
-Prompt:
+3. Run one controlled implementation request.
 
 ```text
-Add validation to the registration handler and update tests.
+add validation to the registration handler and update tests
 ```
 
-## 3) Run equivalent headless turn for artifact capture
+Expected result: Akmon asks for approvals before write actions.
+
+4. Run an equivalent headless task for machine-readable artifact output.
 
 ```bash
-akmon --model qwen3.5:9b --yes --output json \
-  --task "Add validation to registration handler and update tests" \
+akmon --model qwen2.5-coder:7b --yes --output json \
+  --task "add validation to the registration handler and update tests" \
   | tee run.json
 ```
 
-## 4) Verify audit and evidence
+5. Extract the session ID and verify recorded artifacts.
 
 ```bash
-akmon audit verify .akmon/audit/<session-id>.jsonl
-akmon evidence verify .akmon/evidence/<session-id>.json
+SESSION_ID="$(jq -r '.session_id' run.json)"
+akmon audit verify ".akmon/audit/${SESSION_ID}.jsonl"
+akmon evidence verify ".akmon/evidence/${SESSION_ID}.json"
+akmon verify "${SESSION_ID}"
 ```
 
-## 5) Inspect reliability metrics
+## What gets recorded in evidence
+
+- Session metadata (session/model/provider context).
+- Tool execution and reliability metrics.
+- Replay metadata and policy/tool registry hashes.
+- Paths to audit/evidence artifacts for review handoff.
+
+## How a reviewer validates this
+
+1. Confirm `akmon verify <session-id>` exits `0`.
+2. Confirm `akmon audit verify` and `akmon evidence verify` both succeed.
+3. Inspect `run.json` fields (`session_id`, `status`, `reliability_metrics`, `replay_metadata`) for expected run characteristics.
+
+## Verification
 
 ```bash
-jq '.reliability_metrics' run.json
-jq '.reliability_metrics' .akmon/evidence/<session-id>.json
+jq '{session_id,status,reliability_metrics,replay_metadata}' run.json
 ```
 
-You now have a local run with verifiable chain integrity and reliability counters.
+Expected result: JSON object includes non-empty `session_id` and `status`.
+
+## Troubleshooting
+
+- If Ollama is unavailable, check `ollama ps` and retry.
+- If provider resolution is unexpected, run `akmon config explain-provider`.
+- If first local response is slow, warm with `ollama run qwen2.5-coder:7b` once before rerunning.

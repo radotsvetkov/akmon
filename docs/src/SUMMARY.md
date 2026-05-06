@@ -3,15 +3,17 @@
 [Introduction](./introduction.md)
 
 - [Other tools vs Akmon](./comparison.md)
+- [Glossary](./concepts/glossary.md)
+- [Regulated reviewer flow](./concepts/reviewer-flow.md)
 
 ---
 
 # Tutorials
 
 - [Tutorials overview](./tutorials/overview.md)
-- [Step-by-step (Rust, Go, Python, Elixir)](./tutorials/step-by-step.md)
 - [Local-first developer flow (Ollama)](./tutorials/local-first-ollama.md)
 - [CI headless governance flow](./tutorials/ci-headless-governance.md)
+- [Step-by-step (Rust, Go, Python, Elixir)](./tutorials/step-by-step.md)
 - [Enterprise policy rollout](./tutorials/enterprise-policy-rollout.md)
 - [Example projects](./tutorials/example-projects.md)
 - [Multi-agent & automation](./tutorials/multi-agent-automation.md)
@@ -23,8 +25,8 @@
 
 - [Installation](./getting-started/installation.md)
 - [Quick Start](./getting-started/quickstart.md)
-- [Configuration](./getting-started/configuration.md)
 - [Provider Setup](./getting-started/providers.md)
+- [Configuration](./getting-started/configuration.md)
 
 ---
 
@@ -77,8 +79,8 @@
 - [Audit Log](./features/audit-log.md)
 - [Policy Profiles & Packs](./features/policy-profiles.md)
 - [Evidence Artifact](./features/evidence.md)
-- [Reliability & SLO Metrics](./features/reliability-slos.md)
 - [Security Model](./features/security.md)
+- [Reliability & SLO Metrics](./features/reliability-slos.md)
 - [Cost Transparency](./features/cost.md)
 
 ---

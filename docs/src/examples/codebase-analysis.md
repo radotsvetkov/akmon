@@ -1,14 +1,27 @@
 # Example: Analyzing a codebase
 
-## Bootstrap context
+Documented for Akmon `2.0.0`.
+
+## Scenario
+
+Industry/context (illustrative): regulated fintech service onboarding a new engineer for read-only architecture review.
+
+## Constraints
+
+- Data boundary: no uncontrolled writes during discovery.
+- Approval requirement: keep first pass read-oriented.
+- Audit need: produce artifacts reviewers can verify.
+
+## Akmon workflow
 
 ```bash
 cd unfamiliar-project
 akmon init
-akmon chat
+akmon --plan --task "map architecture, auth path, config flow, and top risk modules"
+akmon --yes --output json --task "summarize architecture and list highest-risk modules with evidence links" | tee analysis-run.json
 ```
 
-## Questions that work well
+## Useful prompt patterns
 
 ```
 high-level architecture and main data flows
@@ -38,4 +51,16 @@ generate a Mermaid diagram of major modules
 which tests should I run locally before contributing?
 ```
 
-Use **`/plan`** for read-only reconnaissance on sensitive trees.
+## Outcome
+
+After the run, you should have:
+- `analysis-run.json`
+- `.akmon/audit/<session-id>.jsonl`
+- `.akmon/evidence/<session-id>.json`
+
+Reviewer question this answers: "What did the analyst inspect, and is the summary traceable to a verifiable session?"
+
+## Anti-patterns
+
+- Using broad write tasks during initial architecture discovery.
+- Reporting "risk areas" without keeping the corresponding session evidence.

@@ -1,5 +1,17 @@
 # Python web services — Flask & FastAPI
 
+Documented for Akmon `2.0.0`.
+
+## Scenario
+
+Industry/context (illustrative): healthcare integration service requiring auditable API modifications.
+
+## Constraints
+
+- Approval requirement: auth and validation behavior must follow existing conventions.
+- CI requirement: `pytest` required for each change slice.
+- Audit need: evidence artifact retained for API behavior review.
+
 This example complements the [Python language guide](../languages/python.md) and the [step-by-step tutorial](../tutorials/step-by-step.md).
 
 ## What you will demonstrate
@@ -35,3 +47,12 @@ pytest
 - For long handlers, prefer **plan mode** first so file boundaries are explicit before writes.
 
 See also: [Headless mode](../usage/headless.md), [Security model](../features/security.md).
+
+## Outcome
+
+This flow provides framework-specific modifications with explicit test and evidence expectations.
+
+## Anti-patterns
+
+- Adding authenticated routes without mirroring existing auth dependency patterns.
+- Accepting framework drift (mixed app-factory and module-level startup styles) in the same refactor.

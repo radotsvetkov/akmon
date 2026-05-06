@@ -1,6 +1,54 @@
 # Configuration reference
 
-Akmon user config is stored at `~/.akmon/config.toml`.
+Documented for Akmon `2.0.0`.
+
+## Who this is for
+
+Operators and maintainers who need the exact supported keys in `~/.akmon/config.toml`.
+
+## What you will have at the end
+
+- A code-accurate list of user config keys and sections.
+- Confirmed policy/SLO sections used by current CLI commands.
+
+## Prerequisites
+
+- Akmon installed and runnable.
+
+## Steps
+
+1. Resolve the active config file path.
+
+```bash
+akmon config path
+```
+
+2. Inspect current config safely.
+
+```bash
+akmon config show
+akmon config show --json
+```
+
+3. Edit only supported keys listed below.
+
+## Top-level keys (`AkmonGlobalConfig`)
+
+```toml
+default_model = "llama3.2"
+ollama_url = "http://localhost:11434"
+
+# Provider credentials (prefer env vars in CI)
+# anthropic_api_key = "sk-ant-..."
+# openrouter_api_key = "sk-or-..."
+# openai_api_key = "sk-..."
+# groq_api_key = "gsk_..."
+# azure_openai_endpoint = "https://.../chat/completions"
+# azure_openai_api_key = "..."
+# azure_api_version = "2024-02-01"
+# openai_compatible_url = "http://127.0.0.1:1234/v1"
+# openai_compatible_api_key = "..."
+```
 
 ## Core model keys
 
@@ -9,7 +57,31 @@ default_model = "llama3.2"
 ollama_url = "http://localhost:11434"
 ```
 
-Provider credentials can be set via env vars or `akmon config key`.
+Provider credentials can be set via env vars or config fields.
+
+## Architect defaults (`[architect]`)
+
+```toml
+[architect]
+planner_model = "llama3.2"
+```
+
+## Display settings (`[display]`)
+
+```toml
+[display]
+theme = "auto" # auto | dark | light
+```
+
+## MCP servers (`[[mcp]]`)
+
+```toml
+[[mcp]]
+name = "github"
+url = "https://mcp.example.com"
+enabled = true
+scope = "user" # user | project
+```
 
 ## Policy governance (`[policy]`)
 
@@ -76,27 +148,12 @@ For MCP actions, fail-closed behavior also applies:
 - ambiguous MCP context denies,
 - parent policy modes without configured MCP rules deny.
 
-## MCP governance example (allow one, deny all others)
-
-```toml
-[mcp.servers]
-allow = ["github-prod"]
-deny = ["*"]
-
-[mcp.tools]
-allow = ["search_issues"]
-deny = ["*"]
-```
-
-This allows only `search_issues` on `github-prod`; every other MCP server/tool is blocked.
-
-## Reliability defaults (`[slo]`)
+## Reliability defaults (`[slo]` and `[slo.trend]`)
 
 ```toml
 [slo]
 min_tool_success_rate = 0.95
 max_timeout_rate = 0.02
-max_policy_denial_rate = 0.20
 max_tool_failure_rate = 0.05
 max_retries_total = 3
 max_timeouts_total = 2
@@ -111,12 +168,32 @@ max_latency_avg_increase_ratio = 0.50
 min_baseline_samples = 5
 ```
 
-CLI overrides take precedence over config.
+`max_policy_denial_rate` is supported by `akmon slo verify` CLI thresholds, but is not part of `[slo]` defaults in `AkmonGlobalConfig`.
 
-## Migration notes for v1.8.1 operators
+## Model estimates (`[[model_estimates]]`)
 
-- Audit records are chain-shaped (`schema_version`, `event_index`, `prev_hash`, `event_hash`).
-- Run report JSON now includes additive `replay_metadata` and `reliability_metrics`.
-- Evidence artifacts are versioned (`evidence_schema_version: "evidence.v1"`).
-- Policy governance can now be managed by profile/packs without changing permission classes.
-- MCP configured-mode rollouts should include explicit `[mcp.servers]` + `[mcp.tools]` allow rules to avoid fail-closed denials.
+```toml
+[[model_estimates]]
+pattern = "haiku-4-5"
+context_window_tokens = 200000
+input_per_million_usd = 1.0
+output_per_million_usd = 5.0
+cache_read_per_million_usd = 0.1
+note = "Pricing/context hint for local estimation."
+```
+
+## Verification
+
+```bash
+akmon config show --json
+akmon policy show-effective --profile dev
+akmon slo verify .akmon/evidence/<session-id>.json --strict
+```
+
+Expected result: config parses, policy can render effective configuration, and SLO settings are consumed.
+
+## Troubleshooting
+
+- If `akmon config show` fails, validate TOML syntax and remove unknown keys.
+- If policy packs fail to load, check file paths and TOML/JSON parse errors from `akmon policy show-effective`.
+- If SLO commands fail on thresholds, check whether you are using CLI overrides vs `[slo]` defaults.

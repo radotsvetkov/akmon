@@ -1,5 +1,17 @@
 # Elixir / Phoenix — context-first agent sessions
 
+Documented for Akmon `2.0.0`.
+
+## Scenario
+
+Industry/context (illustrative): defense supplier internal portal with strict module ownership and review controls.
+
+## Constraints
+
+- Approval requirement: context/module boundaries must remain explicit.
+- CI requirement: `mix test` required after implementation.
+- Audit need: preserve evidence for each feature-slice run.
+
 Beam projects reward **explicit module names** and **Mix task** discipline. Akmon does not run `mix` for you unless you approve shell tool calls—so naming conventions in `AKMON.md` matter.
 
 ## Prepare `AKMON.md`
@@ -29,6 +41,15 @@ Phoenix moves through **router → controller/live → context → schema**. A p
 
 ## Multi-agent note
 
-You can run a **cheap local model** for `--plan` and a **stronger cloud model** for `--yes` on the same repo ([Multi-agent & automation](../tutorials/multi-agent-automation.md)).
+You can run a local model for planning and a hosted model for implementation on the same repository when policy allows.
 
 See [Other languages](../languages/other.md) for Elixir mentions in the generic profile path.
+
+## Outcome
+
+The result is a context-aligned Phoenix feature slice with a reviewable plan-to-implementation trace.
+
+## Anti-patterns
+
+- Editing router, contexts, and schemas without an explicit plan artifact first.
+- Treating Mix checks as optional in regulated delivery workflows.

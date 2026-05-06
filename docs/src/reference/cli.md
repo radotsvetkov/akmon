@@ -1,14 +1,120 @@
 # CLI Reference
 
-## Synopsis
+Documented for Akmon `2.0.0`.
+
+## Who this is for
+
+Engineers and CI maintainers who need an accurate command surface overview before using command-specific reference pages.
+
+## What you will have at the end
+
+- The canonical top-level command layout.
+- Common global flags and where to inspect exhaustive flags.
+- Pointers to per-command reference pages for stable automation.
+
+## Prerequisites
+
+1. Akmon installed and runnable (`akmon --version`).
+2. A project repository for interactive or headless runs.
+
+## Steps
+
+1. Inspect top-level help.
 
 ```bash
-akmon [FLAGS] [SUBCOMMAND]
+akmon --help
 ```
 
-Use `akmon --help` for the authoritative flag list for your installed binary.
+Expected result: all current global options and subcommands from clap output.
 
-Beginning with v2.0, each command has its own reference page in this directory. See:
+2. Use interactive mode (default) or headless mode (`--task`) as needed.
+
+```bash
+# Interactive TUI
+akmon
+
+# Headless run
+akmon --task "run tests and summarize failures" --output json --yes
+```
+
+3. Use command-specific help for exact flags before scripting.
+
+```bash
+akmon verify --help
+akmon inspect --help
+akmon bundle export --help
+akmon bundle import --help
+akmon replay --help
+```
+
+## Verification
+
+Run a no-side-effect check on command availability:
+
+```bash
+akmon --help
+akmon config --help
+akmon policy --help
+akmon slo --help
+```
+
+Expected result: commands parse and help exits `0`.
+
+## Troubleshooting
+
+- If a command in this page differs from your binary, treat `akmon --help` as source of truth.
+- For provider or auth routing confusion, run `akmon config explain-provider`.
+- For failed provider setup, run `akmon doctor providers`.
+
+## Top-level subcommands (v2.0.0)
+
+- `chat`
+- `init`
+- `new`
+- `config`
+- `doctor`
+- `audit`
+- `evidence`
+- `slo`
+- `policy`
+- `scout`
+- `spec`
+- `import`
+- `export`
+- `bundle`
+- `verify`
+- `inspect`
+- `redact`
+- `diff`
+- `replay`
+
+## Common global flags
+
+- `--task <TEXT>`: headless task run.
+- `--model <MODEL>`: active model id.
+- `--yes`: auto-approve read-only tools.
+- `--output <text|json>`: output format.
+- `--audit-log <PATH>`: override audit JSONL output path.
+- `--evidence-path <PATH>`: override evidence JSON path.
+- `--policy-profile <dev|staging|prod>`: select built-in policy profile.
+- `--policy-pack <PATH>`: add policy pack (repeatable).
+- `--policy-override <PATH>`: highest-precedence override file.
+- `--web-fetch`: enable `web_fetch` tool.
+- `--yes-web`: auto-approve `web_fetch` to allowed public URLs.
+- `--mcp-server <URL>`: register MCP tools from remote server (repeatable).
+- `--index`: load/build semantic index.
+- `--plan`: read-only planning mode.
+- `--architect`: two-phase planner+implementation mode.
+- `--planner-model <MODEL>`: planner model override.
+- `--continue`: resume last project session.
+- `--session <ID_OR_PREFIX>`: resume specific session.
+- `--name <TEXT>`: session display name.
+- `--max-budget-usd <USD>`: headless spend cap.
+- `--add-dir <DIR>`: add sandbox directory (repeatable).
+- `--dossier <PATH>`: inject scout dossier context.
+- `--fallback-model <MODEL>`: fallback on repeated 429/529 (headless).
+
+## Command-specific references
 
 - [akmon verify](./verify.md)
 - [akmon inspect](./inspect.md)
@@ -17,27 +123,6 @@ Beginning with v2.0, each command has its own reference page in this directory. 
 - [akmon redact](./redact.md)
 - [akmon replay](./replay.md)
 - [akmon diff](./diff.md)
-
-All v2.0 commands are now documented.
-
-The sections below document v1.x commands that may be retained, retired, or migrated as part of v2.0's akmon-core retirement work (Item 6.10). Refer to those sections for current behavior until the migration completes.
-
-## Common global flags
-
-| Flag | Purpose |
-| --- | --- |
-| `--task` | Headless task run (no TUI) |
-| `--model` | Model id for run/session |
-| `--yes` | Auto-approve read operations |
-| `--web-fetch` | Enable `web_fetch` tool |
-| `--yes-web` | Auto-approve web fetch where policy allows |
-| `--output` | `text` or `json` |
-| `--audit-log` | Override audit JSONL path |
-| `--evidence-path` | Override evidence JSON path |
-| `--policy-profile` | Policy profile: `dev`, `staging`, `prod` |
-| `--policy-pack` | Additional policy pack file (repeatable) |
-| `--policy-override` | Highest-precedence policy override file |
-| `--dossier` | Inject scout dossier context into prompt |
 
 ## Trust and governance commands
 

@@ -1,5 +1,30 @@
 # Evidence Artifact
 
+Documented for Akmon `2.0.0`.
+
+## Who this is for
+
+Developers and reviewers who need portable run evidence for CI and audit workflows.
+
+## What you will have at the end
+
+- A clear model of what Akmon records in evidence artifacts.
+- Commands to validate artifact integrity and enforce reliability gates.
+
+## Prerequisites
+
+- A completed headless run (`akmon --task ...`) that emitted artifacts.
+
+## Steps
+
+1. Run a headless session to produce evidence.
+
+```bash
+akmon --task "run tests and summarize failures" --output json --yes | tee run.json
+```
+
+2. Locate the evidence artifact path.
+
 Akmon writes a deterministic evidence artifact per successful/budget-stopped headless run:
 
 ```text
@@ -7,6 +32,12 @@ Akmon writes a deterministic evidence artifact per successful/budget-stopped hea
 ```
 
 You can override the location with `--evidence-path <path>`.
+
+3. Verify evidence and linked audit chain:
+
+```bash
+akmon evidence verify .akmon/evidence/<session-id>.json
+```
 
 ## Why it exists
 
@@ -83,19 +114,21 @@ Consumers should validate schema version before strict parsing.
 
 ## Validation
 
-Use:
-
-```bash
-akmon evidence verify .akmon/evidence/<session-id>.json
-```
-
-Validation checks schema support, replay metadata shape, linked audit-chain
-integrity, and session hash consistency.
+`akmon evidence verify` checks schema support, replay metadata shape, linked audit-chain integrity, and session hash consistency.
 
 Exit codes:
 
 - `0`: evidence valid
 - `1`: evidence invalid/missing/tampered
+
+## Verification
+
+```bash
+SESSION_ID="$(jq -r '.session_id' run.json)"
+akmon evidence verify ".akmon/evidence/${SESSION_ID}.json"
+```
+
+Expected result: command exits `0` and reports valid schema/session linkage.
 
 ## Enforcing SLOs in CI
 
@@ -125,6 +158,12 @@ Trend/regression check against prior evidence history:
       --window 20 \
       --strict
 ```
+
+## Troubleshooting
+
+- If evidence verify fails, confirm artifact path and JSON validity.
+- If session linkage errors appear, ensure audit/evidence files are from the same session.
+- If SLO gates fail, inspect thresholds and `reliability_metrics` fields before relaxing policy.
 
 ## Policy provenance and hash impact
 

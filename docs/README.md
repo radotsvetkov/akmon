@@ -21,6 +21,12 @@ Run the same docs checks CI runs:
 bash scripts/docs/run_all.sh
 ```
 
+This includes mdBook build, link checks, CLI smoke checks, JSON snippet checks, and required version-marker checks on maintained pages.
+
+## Maintainers workflow
+
+See `docs/MAINTAINERS.md` for the docs update protocol, quarterly audit checklist, and tutorial definition of done.
+
 ## Adding a page
 
 1. Create a `.md` file in the appropriate `docs/src/` subdirectory

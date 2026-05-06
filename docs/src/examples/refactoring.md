@@ -1,5 +1,17 @@
 # Example: Refactoring an existing project
 
+Documented for Akmon `2.0.0`.
+
+## Scenario
+
+Industry/context (illustrative): medical software backend needs controlled refactoring with explicit reviewer traceability.
+
+## Constraints
+
+- Approval requirement: no silent architecture rewrites.
+- CI requirement: tests must pass after each scoped change.
+- Audit need: maintain session evidence for each refactor batch.
+
 ## Prepare
 
 ```bash
@@ -9,7 +21,7 @@ akmon init
 
 Edit **`AKMON.md`** so conventions match your team before large refactors.
 
-## Patterns
+## Akmon workflow patterns
 
 **Extract service layer**
 
@@ -43,3 +55,15 @@ review API handlers: validation, authz gaps, sensitive data in logs
 ```
 
 Akmon shows diffs before writes — review each change.
+
+## Outcome
+
+You should produce:
+- Small, reviewable refactor batches.
+- Evidence artifacts per batch run.
+- A reviewer-auditable path from prompt to file changes.
+
+## Anti-patterns
+
+- Asking for "full project refactor" in one turn.
+- Skipping verification/tests between structural changes.

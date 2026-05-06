@@ -16,4 +16,7 @@ bash scripts/docs/check_cli_smoke.sh
 echo "==> JSON snippet sanity checks"
 python3 scripts/docs/check_json_snippets.py
 
+echo "==> Version marker checks"
+python3 scripts/docs/check_version_markers.py
+
 echo "All docs checks passed."

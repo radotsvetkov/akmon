@@ -1,6 +1,23 @@
 # Environment Variables
 
-Secrets are often better as **env vars** or **`akmon config key`** than literals in `config.toml`.
+Documented for Akmon `2.0.0`.
+
+## Who this is for
+
+Users configuring Akmon via environment (shell, CI, secret managers) instead of storing credentials in `~/.akmon/config.toml`.
+
+## What you will have at the end
+
+- A verified list of environment variables recognized by the current CLI/provider resolver.
+- A clear provider-resolution order for debugging.
+
+## Prerequisites
+
+- Akmon installed and runnable (`akmon --help`).
+
+## Steps
+
+1. Export provider variables needed for your route.
 
 ## Provider keys
 
@@ -9,7 +26,7 @@ ANTHROPIC_API_KEY
 OPENROUTER_API_KEY
 OPENAI_API_KEY
 GROQ_API_KEY
-AZURE_OPENAI_ENDPOINT      # naming may vary; check CLI help
+AZURE_OPENAI_ENDPOINT
 AZURE_OPENAI_API_KEY
 AWS_ACCESS_KEY_ID          # Bedrock
 AWS_SECRET_ACCESS_KEY
@@ -17,12 +34,18 @@ AWS_SESSION_TOKEN          # optional
 AWS_DEFAULT_REGION
 ```
 
-## Runtime behavior
+2. Use CLI help to verify current env-backed flags.
 
 ```bash
-AKMON_OLLAMA_URL           # default http://localhost:11434
-EDITOR                     # external edits (/edit-plan, /update-context)
-NO_COLOR                   # disable ANSI styling
+akmon --help
+akmon config --help
+akmon doctor providers --help
+```
+
+3. Inspect effective routing decision:
+
+```bash
+akmon config explain-provider
 ```
 
 ## Detection order (matches `LlmConnectConfig::resolve`)
@@ -40,8 +63,30 @@ Akmon evaluates providers in a **fixed priority order** (first successful branch
 
 Use `akmon config explain-provider` to print the same order with per-branch reasons for your current model and env. Use `akmon config show` (masked) to inspect stored config.
 
+## Additional runtime variables used by Akmon
+
+```bash
+EDITOR            # used by `akmon config edit` and TUI edit flows
+AKMON_DEBUG_GIT   # enables git root discovery debug logging
+```
+
 ## Wizard vs env vs `config.toml`
 
 - **`akmon config`** (no subcommand) interactively writes `~/.akmon/config.toml`.
 - The same settings usually have **environment variable** equivalents listed in the sections above (handy for CI, containers, or secret managers).
 - Advanced fields (Architect defaults, `[display]`, MCP entries) are often easiest to edit in TOML or via `akmon config mcp …`; see [Configuration](../getting-started/configuration.md) and `akmon config --help`.
+
+## Verification
+
+```bash
+akmon config show --json
+akmon config explain-provider
+```
+
+Expected result: provider prerequisites are reported without printing raw secrets.
+
+## Troubleshooting
+
+- If Bedrock is unexpectedly selected, check whether `AWS_ACCESS_KEY_ID` is set.
+- If slash model IDs fail, ensure `OPENROUTER_API_KEY` is available.
+- If Azure is partially configured, set both `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_API_KEY`.
