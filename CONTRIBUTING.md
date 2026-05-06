@@ -6,6 +6,28 @@ This guide explains how to contribute code, docs, and bug reports in a way that 
 
 All participants must follow the **[Code of Conduct](CODE_OF_CONDUCT.md)**. Report **security** issues per **[SECURITY.md](SECURITY.md)** (do not file public issues for undisclosed vulnerabilities).
 
+## Developer Certificate of Origin (DCO)
+
+Akmon uses the Developer Certificate of Origin (DCO) to certify that contributors have the right to submit their contributions. By signing off on each commit, you certify that you wrote the code or otherwise have the right to submit it under the project's open source license.
+
+### How to sign off
+
+Add a `Signed-off-by` line to every commit message:
+
+```text
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+Git can do this automatically with the `-s` flag:
+
+```bash
+git commit -s -m "your commit message"
+```
+
+The full DCO text is available at [developercertificate.org](https://developercertificate.org).
+
+Pull requests with unsigned commits will be asked to amend their history before review.
+
 ## Ways to contribute
 
 - Report bugs and UX issues.
