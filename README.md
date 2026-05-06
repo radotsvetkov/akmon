@@ -23,7 +23,7 @@
 
 # Akmon
 
-Akmon is a terminal-native AI coding agent built as a single Rust binary for teams that need real control over AI side effects. It runs with local or hosted models, enforces typed permission checks for writes/shell/network actions, and produces machine-verifiable artifacts for audit and CI.
+Akmon is the review-aware AI coding agent for regulated engineering. Every session is recorded as a tamper-evident, content-addressed, replayable artifact — a deterministic event journal with cryptographic chain integrity, byte-level replay validation, and exportable evidence bundles. Built as a single Rust binary for teams that need real control over AI side effects: typed permission checks for writes, shell, and network; local or hosted model support; machine-verifiable artifacts for audit and CI.
 
 **Website:** [radotsvetkov.github.io/akmon](https://radotsvetkov.github.io/akmon/) · **Docs:** [radotsvetkov.github.io/akmon/docs](https://radotsvetkov.github.io/akmon/docs/)
 
@@ -32,36 +32,38 @@ Akmon is a terminal-native AI coding agent built as a single Rust binary for tea
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
-## Why v1.8.2 matters
+## Why this exists
 
-Akmon v1.8.2 is an operability and trust release: **provider routing is fully explainable** without changing how backends are selected:
+Most AI coding agents make decisions you cannot audit. Prompt context, model responses, tool calls, and file edits live in process memory and disappear when a session ends. When a regulator, security reviewer, or incident response team asks why an agent made a change, the answer is often somewhere between "we do not know" and "we can try to reproduce it."
 
-- deterministic `ProviderResolutionTrace` (mirrors `LlmConnectConfig::resolve()`),
-- `akmon config explain-provider` (text or JSON),
-- `akmon doctor providers` includes the same `provider_resolution` block (text + JSON),
-- headless `--output json` run summaries include additive `provider_resolution`.
+Akmon records every prompt, model response, tool call, and file change as a content-addressed event journal with a cryptographic chain. Sessions replay deterministically against recorded providers and tools. Sessions can be compared structurally and at field level. Sessions export as portable evidence bundles in the AGEF format.
 
-Earlier v1.8.x highlights still apply: `akmon doctor providers`, MCP governance hardening, docs quality gates in CI, and local-model reliability improvements—see [CHANGELOG.md](CHANGELOG.md) and [release notes v1.8.2](docs/src/releases/v1.8.2.md).
+Akmon is built for aerospace (DO-178C tool qualification), medical devices (IEC 62304), automotive (ISO 26262), finance (SOC 2 evidence), defense (CMMC), and any environment where code review is a regulatory requirement rather than a cultural preference. If "the AI did it" is not an acceptable explanation, Akmon is for you.
 
-## 5-minute quickstart
+## What's in v2.0.0
+
+v2.0.0 ships ten commands organized around the session lifecycle: `run` for normal agent sessions, `replay` for deterministic re-execution against recorded providers and tools, `diff` for structural and field-level session comparison, `inspect` for examining session contents, `bundle` for portable AGEF archives, `redact` for compliance-driven content removal, `audit` for cryptographic chain verification, `evidence` for compliance artifact generation, `verify` for integrity checks, and `doctor` for environment diagnostics. Plus policy profiles, MCP governance, and local model support carried forward from the 1.x line.
+
+## Quickstart
 
 ```bash
 # Install one binary (example: Linux x86_64)
 curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 -o ~/bin/akmon
 chmod +x ~/bin/akmon
 
-# Verify
+# Verify install
 akmon --version
 
-# Optional one-time setup wizard
-akmon config
-
-# Run a headless task with structured output
+# Run a minimal headless task
 cd your-project
-akmon --yes --output json --task "run tests and summarize failures" | tee run.json
+akmon --yes --task "summarize failing tests and propose minimal fixes"
 ```
 
-## Trust & verification pipeline
+For verification and audit workflows, use the trust pipeline below.
+
+## Trust pipeline
+
+Akmon's verification pipeline lets you prove a session ran as recorded, with cryptographic chain integrity and SLO compliance, without trusting the agent itself.
 
 ```bash
 # 1) Run a task (writes audit + evidence by default)
@@ -80,9 +82,9 @@ akmon slo verify .akmon/evidence/<session-id>.json --strict
 akmon slo trend .akmon/evidence/<session-id>.json --baseline-dir .akmon/evidence/history --window 20 --strict
 ```
 
-## Session evidence format
+## Session evidence format (AGEF)
 
-Akmon's session records conform to the [AGEF specification](https://github.com/radotsvetkov/agef) — a portable, content-addressed, tamper-evident format for AI agent session evidence. The Akmon implementation is the AGEF v0.1 reference implementation.
+Akmon's session records conform to the [AGEF specification](https://github.com/radotsvetkov/agef), a portable, content-addressed, tamper-evident format for AI agent session evidence. Akmon v2.0.0 implements AGEF v0.1.1 and produces bundles intended to be verifiable and portable across environments.
 
 ## Enterprise policy profiles
 
@@ -101,18 +103,7 @@ Merge precedence is deterministic:
 
 `profile < packs < project-local policy < CLI override`
 
-## What changed in 1.8.2
-
-- Provider resolution explainability: [CLI reference](docs/src/reference/cli.md) (`config explain-provider`, `doctor providers`), [Provider setup](docs/src/getting-started/providers.md), [Environment variables](docs/src/reference/env-vars.md)
-- Release notes: [docs/src/releases/v1.8.2.md](docs/src/releases/v1.8.2.md)
-
-### What changed in 1.8.1
-
-- Provider diagnostics command: [CLI reference](docs/src/reference/cli.md), [Provider setup](docs/src/getting-started/providers.md)
-- MCP governance hardening: [Security model](docs/src/features/security.md), [MCP guide](docs/src/features/mcp.md), [Configuration reference](docs/src/reference/config.md)
-- Docs quality gates: [Contributing guide](CONTRIBUTING.md), [docs/README](docs/README.md)
-- TUI internal refactor (no UX change): [Contributing architecture](docs/src/contributing/architecture.md)
-- Local model reliability: [Configuration](docs/src/getting-started/configuration.md), [Cost guide](docs/src/features/cost.md)
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Documentation
 
@@ -122,6 +113,7 @@ Merge precedence is deterministic:
 - Headless mode: [docs/src/usage/headless.md](docs/src/usage/headless.md)
 - Interactive mode: [docs/src/usage/interactive.md](docs/src/usage/interactive.md)
 - Tutorials: [docs/src/tutorials/overview.md](docs/src/tutorials/overview.md)
+- Session diff reference: [docs/src/reference/diff.md](docs/src/reference/diff.md)
 
 ## Contributing
 
