@@ -36,7 +36,7 @@ tar = "0.4"
 zstd = "0.13"
 
 [workspace.package]
-version = "1.8.2"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"

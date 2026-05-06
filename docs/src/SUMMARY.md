@@ -109,6 +109,7 @@
 - [akmon diff](./reference/diff.md)
 - [Slash Commands](./reference/slash-commands.md)
 - [Configuration Reference](./reference/config.md)
+- [Release notes: v2.0.0](./releases/v2.0.0.md)
 - [Release notes: v1.8.2](./releases/v1.8.2.md)
 - [Release notes: v1.8.1](./releases/v1.8.1.md)
 - [Release notes: v1.8.0](./releases/v1.8.0.md)

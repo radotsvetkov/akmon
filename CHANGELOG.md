@@ -30,6 +30,43 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Compatibility path:** `files[]` remains as a backward-compatible alias for existing parsers while `changes[]` is now canonical.
 - **Dossier ingestion:** `--dossier <path>` injects validated scout context into subsequent implementation runs without adding a new orchestration subsystem.
 
+## [2.0.0] - 2026-05-06
+
+Akmon v2.0.0 is the production-ready release. Earlier 1.x releases were exploratory. The major version bump reflects formalization of the session evidence model, the AGEF v0.1.1 specification, and a substantially expanded command surface (`verify`, `inspect`, `bundle`, `redact`, `replay`, `diff`). Existing 1.8.x sessions remain readable but consumers integrating against session formats should pin to AGEF v0.1.1.
+
+### Added
+
+- **Content-addressed substrate foundation:** session graph and object store with merkle-linked integrity (`Item 1.2`), plus stronger provider-call invariants and head consistency checks.
+- **AGEF v0.1.1 specification implementation:** Akmon v2.0.0 is the AGEF v0.1.1 reference implementation. Bundle format, content addressing, and session graph semantics conform to the published specification.
+- **Provider and tool journaling primitives:** `JournalingProvider`/`AttemptObserver` instrumentation across backends and `JournalingTool` with input/output hashing.
+- **Session-first event recording:** agent loop now records `SessionStart`, `UserTurn`, `PermissionGate`, and `AssistantTurn` events in the session journal.
+- **`akmon verify`:** CLI verification command with human/JSON output and verbose diagnostics.
+- **`akmon inspect`:** session inspection command with summary/verbose modes, JSON output, object resolution, and binary rendering modes.
+- **`akmon bundle`:** export/import command family for portable session bundles, including `--verify-only` import path and ingestion flow.
+- **`akmon redact`:** derivative-bundle redaction workflow with sentinel object support and inspect visibility for redaction sentinels.
+- **Replay engine and `akmon replay`:** deterministic replay pipeline, strict/default comparison modes, persistence support, structured report output, and CLI command surface.
+- **Diff engine and `akmon diff`:** structural and field-level session comparison engine and CLI command with output formatting and exit codes.
+- **Resolve-mode content comparison for diff:** dereferenced object-content comparison support in diff workflows.
+- **Documentation and references for new command surfaces:** release/runtime docs for verify, inspect, bundle, redact, replay, and diff commands.
+
+### Changed
+
+- **Release positioning:** README rewritten around regulated-engineering use cases and review-aware session evidence workflows.
+- **Planning and release architecture docs:** v2 decision-document and phase planning records expanded to cover implemented release scope.
+- **Workspace versioning:** workspace package version bumped from `1.8.2` to `2.0.0`.
+
+### Fixed
+
+- **Inspect UTF-8 truncation safety:** resolve preview now truncates lines at UTF-8 character boundaries, preventing panics when byte caps cut through multi-byte characters.
+- **Replay engine robustness:** orchestration/channel-drain and comparison normalization fixes for deterministic replay behavior.
+- **Diff integration reliability:** multi-session journal loading path improved in CLI integration coverage and behavior.
+
+### Documentation
+
+- **New command references:** replay/diff and other v2 command docs added or expanded under `docs/src/reference/`.
+- **Release documentation updates:** release notes and planning artifacts aligned with v2 rollout.
+- **Landing documentation refresh:** README and related docs now reflect regulated-engineering positioning and trust pipeline workflows.
+
 ## [1.8.1] - 2026-04-20
 
 ### Added
