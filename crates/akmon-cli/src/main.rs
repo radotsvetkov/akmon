@@ -4446,6 +4446,24 @@ fn format_base64_preview(bytes: &[u8], max_chars: usize) -> String {
     }
 }
 
+// Duplicated from akmon-diff::resolve; promote to shared module when a third caller appears (Item 7.6 follow-up).
+fn truncate_line_to_max_bytes(line: &str, max_bytes: usize) -> (&str, usize) {
+    if line.len() <= max_bytes {
+        return (line, 0);
+    }
+    let mut end = 0;
+    for (idx, ch) in line.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next <= max_bytes {
+            end = next;
+        } else {
+            break;
+        }
+    }
+    let omitted = line.len() - end;
+    (&line[..end], omitted)
+}
+
 fn format_resolved_human(
     value_label: &str,
     hash: &akmon_journal::Hash,
@@ -4492,9 +4510,13 @@ fn format_resolved_human(
                     .take(RESOLVE_TEXT_PREVIEW_MAX_LINES)
                     .map(|line| {
                         if line.len() > RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES {
+                            let (prefix, _) = truncate_line_to_max_bytes(
+                                line,
+                                RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES,
+                            );
                             format!(
                                 "  | {}... (truncated, full hash: {})",
-                                &line[..RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES],
+                                prefix,
                                 hash.to_hex()
                             )
                         } else {
@@ -4513,9 +4535,13 @@ fn format_resolved_human(
                     .iter()
                     .map(|line| {
                         if line.len() > RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES {
+                            let (prefix, _) = truncate_line_to_max_bytes(
+                                line,
+                                RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES,
+                            );
                             format!(
                                 "  | {}... (truncated, full hash: {})",
-                                &line[..RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES],
+                                prefix,
                                 hash.to_hex()
                             )
                         } else {
@@ -7614,6 +7640,33 @@ mod tests {
         assert!(
             rendered.contains("invalid value") || rendered.contains("possible values"),
             "unexpected clap error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn t_format_resolved_human_long_line_with_multibyte_chars() {
+        let mut line = String::new();
+        while line.len() < 1100 {
+            line.push_str("你好");
+        }
+        assert!(
+            !line.is_char_boundary(RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES),
+            "byte {} must fall inside a multi-byte character (你好 is 6 bytes; 1020 + 4 = 1024)",
+            RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES
+        );
+        assert!(
+            line.len() > RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES,
+            "need a line longer than preview cap"
+        );
+        let text = format!("{line}\nrest");
+        let hash = akmon_journal::Hash::from_bytes(HashAlgorithm::Sha256, [0u8; 32]);
+        let rendered =
+            format_resolved_human("value", &hash, Some(text.into_bytes()), BinaryMode::Meta);
+        assert!(!rendered.is_empty());
+        assert!(
+            rendered
+                .iter()
+                .any(|entry| entry.contains("truncated, full hash"))
         );
     }
 
