@@ -32,6 +32,7 @@ fn run_bundle_export_with(
 ) -> std::process::Output {
     let bin = akmon_bin_path();
     let mut cmd = Command::new(bin);
+    cmd.current_dir(journal_dir);
     cmd.args([
         "bundle",
         "export",
@@ -209,7 +210,17 @@ fn t_bundle_export_default_output_path() {
     let work = tempfile::tempdir_in(tmp.path()).expect("workdir");
     let old_cwd = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(work.path()).expect("chdir");
-    let out = run_bundle_export_with(tmp.path(), sid, &[]);
+    let bin = akmon_bin_path();
+    let out = Command::new(bin)
+        .args([
+            "bundle",
+            "export",
+            &sid.to_string(),
+            "--journal",
+            &tmp.path().display().to_string(),
+        ])
+        .output()
+        .expect("run bundle export");
     std::env::set_current_dir(&old_cwd).expect("restore cwd");
     assert_eq!(
         out.status.code(),
