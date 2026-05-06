@@ -80,6 +80,24 @@
       box-shadow: 0 1px 0 rgba(125,211,252,0.06);
     }
 
+    .nav-menu-btn {
+      display: none;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+
+    .nav-menu-btn:hover {
+      color: var(--accent);
+      border-color: var(--accent-dim);
+    }
+
     .nav-logo {
       display: flex;
       align-items: baseline;
@@ -145,7 +163,7 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 80px 24px 60px;
+      padding: 96px 24px 64px;
       position: relative;
       overflow: hidden;
     }
@@ -213,7 +231,7 @@
       font-style: italic;
       color: var(--text-dim);
       text-align: center;
-      margin-bottom: 20px;
+      margin-bottom: 16px;
       letter-spacing: 0.02em;
       opacity: 0;
       animation: fadeUp 0.8s ease 0.5s forwards;
@@ -224,7 +242,7 @@
       flex-wrap: wrap;
       gap: 8px;
       justify-content: center;
-      margin-bottom: 40px;
+      margin-bottom: 28px;
       opacity: 0;
       animation: fadeUp 0.8s ease 0.6s forwards;
     }
@@ -248,7 +266,7 @@
       gap: 16px;
       flex-wrap: wrap;
       justify-content: center;
-      margin-bottom: 60px;
+      margin-bottom: 44px;
       opacity: 0;
       animation: fadeUp 0.8s ease 0.7s forwards;
     }
@@ -357,7 +375,7 @@
 
     /* ─── SECTION BASE ─── */
     section {
-      padding: 100px 24px;
+      padding: 92px 24px;
     }
 
     .container {
@@ -379,7 +397,7 @@
       letter-spacing: 0.04em;
       color: var(--text);
       line-height: 1;
-      margin-bottom: 20px;
+      margin-bottom: 14px;
     }
 
     .section-body {
@@ -388,7 +406,7 @@
       font-weight: 300;
       color: var(--text-dim);
       max-width: 560px;
-      line-height: 1.7;
+      line-height: 1.62;
     }
 
     /* ─── WHY SECTION ─── */
@@ -403,12 +421,12 @@
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
       gap: 1px;
       background: var(--border);
-      margin-top: 60px;
+      margin-top: 44px;
     }
 
     .why-card {
       background: var(--bg2);
-      padding: 32px;
+      padding: 28px;
       position: relative;
       overflow: hidden;
       transition: background 0.2s;
@@ -561,12 +579,12 @@
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: 1px;
       background: var(--border);
-      margin-top: 60px;
+      margin-top: 44px;
     }
 
     .provider-card {
       background: var(--bg);
-      padding: 24px;
+      padding: 20px;
       transition: background 0.2s;
     }
 
@@ -612,7 +630,7 @@
       grid-template-columns: 1fr 1fr;
       gap: 80px;
       align-items: center;
-      margin-top: 60px;
+      margin-top: 44px;
     }
 
     @media (max-width: 768px) {
@@ -806,7 +824,7 @@
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
       gap: 24px;
-      margin-top: 48px;
+      margin-top: 36px;
     }
 
     .contrib-card {
@@ -848,8 +866,32 @@
     /* ─── RESPONSIVE ─── */
     @media (max-width: 640px) {
       nav { padding: 0 16px; }
-      .nav-links { display: none; }
+      .nav-menu-btn { display: inline-flex; align-items: center; justify-content: center; }
+      .nav-links {
+        display: none;
+        position: absolute;
+        top: 56px;
+        left: 0;
+        right: 0;
+        background: rgba(12,12,14,0.98);
+        border-bottom: 1px solid var(--border);
+        padding: 12px 16px 14px;
+        gap: 12px;
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .nav-links.open { display: flex; }
+      .nav-links li { width: 100%; }
+      .nav-links a { display: block; width: 100%; padding: 4px 0; }
+      .nav-links .nav-cta {
+        margin-top: 6px;
+        display: inline-flex;
+        width: auto;
+      }
       .hero { padding: 80px 16px 40px; }
+      .hero-tagline { margin-bottom: 12px; }
+      .hero-actions { margin-bottom: 28px; }
+      section { padding: 72px 16px; }
       .footer-inner { flex-direction: column; align-items: flex-start; }
     }
   </style>
@@ -862,19 +904,16 @@
     <span class="nav-name">Akmon</span>
     <span class="nav-version">v2.0.0</span>
   </a>
-  <ul class="nav-links">
-    <li><a href="#why">Why Akmon</a></li>
-    <li><a href="#showcase">Showcase</a></li>
-    <li><a href="#install">Install</a></li>
-    <li><a href="#providers">Providers</a></li>
-    <li><a href="#contribute">Community</a></li>
-    <li><a href="#trust-pipeline">Trust pipeline</a></li>
+  <ul class="nav-links" id="nav-links">
+    <li><a href="#why">Product</a></li>
+    <li><a href="#trust-pipeline">Trust</a></li>
+    <li><a href="#install">Get started</a></li>
+    <li><a href="./docs/">Docs</a></li>
     <li><a href="./docs/tutorials/overview.html">Tutorials</a></li>
-    <li><a href="./docs/features/policy-profiles.html">Policy profiles</a></li>
-    <li><a href="./docs/comparison.html">Vs others</a></li>
-    <li><a href="./docs/">Documentation</a></li>
+    <li><a href="#contribute">Community</a></li>
     <li><a href="https://github.com/radotsvetkov/akmon" class="nav-cta">GitHub →</a></li>
   </ul>
+  <button class="nav-menu-btn" id="nav-menu-btn" type="button" aria-expanded="false" aria-controls="nav-links">Menu</button>
 </nav>
 
 <!-- HERO -->
@@ -901,15 +940,19 @@
 
   <h1 class="hero-title"><span class="hero-ak">AK</span><span class="hero-mon">MON</span></h1>
 
-  <p class="hero-tagline">Review-aware AI coding agent for regulated engineering.</p>
+  <p class="hero-tagline">AI coding sessions you can verify, replay, and defend in review.</p>
+  <p class="section-body" style="max-width:760px;text-align:center;margin-bottom:20px">
+    Akmon is a terminal-first AI coding agent for regulated engineering teams that need explicit policy boundaries,
+    auditable tool activity, and portable session evidence across local development and CI.
+  </p>
 
   <div class="hero-pills">
-    <span class="pill pill-amber">review-aware</span>
-    <span class="pill pill-amber">tamper-evident sessions</span>
-    <span class="pill pill-amber">rust-native</span>
-    <span class="pill">single binary</span>
+    <span class="pill pill-amber">regulated engineering focus</span>
+    <span class="pill pill-amber">tamper-evident evidence</span>
+    <span class="pill">single rust binary</span>
+    <span class="pill">policy boundaries</span>
     <span class="pill">replay + diff + verify</span>
-    <span class="pill">no subscription</span>
+    <span class="pill">provider optionality</span>
   </div>
 
   <div class="hero-actions">
@@ -936,19 +979,20 @@
         <span class="terminal-title">akmon — ~/my-project — claude-haiku — Anthropic</span>
       </div>
       <div class="terminal-body">
-        <div><span class="t-prompt">~/my-project</span> <span class="t-dim">$</span> <span class="t-cmd">akmon run</span></div>
+        <div><span class="t-prompt">~/payments-service</span> <span class="t-dim">$</span> <span class="t-cmd">akmon</span></div>
         <div class="t-dim">  ▓▓▓▓ akmon v2.0.0 · ~/my-project · claude-haiku · Anthropic</div>
         <br>
-        <div><span class="t-amber">You:</span> <span class="t-cmd">find all places where authentication tokens are validated</span></div>
+        <div><span class="t-amber">You:</span> <span class="t-cmd">trace token validation flow and list policy-relevant risks</span></div>
         <br>
-        <div><span class="t-blue">  → semantic_search</span><span class="t-dim">  "token validation"</span></div>
-        <div><span class="t-green">  ✓ semantic_search</span>  <span class="t-dim">3 results                    [Tab to expand]</span></div>
+        <div><span class="t-blue">  → semantic_search</span><span class="t-dim">  "token validation flow"</span></div>
+        <div><span class="t-green">  ✓ semantic_search</span>  <span class="t-dim">4 results                    [Tab to expand]</span></div>
         <div><span class="t-blue">  → read_file</span><span class="t-dim">  src/auth/middleware.rs</span></div>
         <div><span class="t-green">  ✓ read_file</span>  <span class="t-dim">287 lines</span></div>
+        <div><span class="t-blue">  → read_file</span><span class="t-dim">  src/api/token_guard.rs</span></div>
+        <div><span class="t-green">  ✓ read_file</span>  <span class="t-dim">164 lines</span></div>
         <br>
-        <div><span class="t-amber">Akmon:</span> <span class="t-cmd">Token validation happens in <span class="t-blue">src/auth/middleware.rs</span>.</span></div>
-        <div><span class="t-cmd">The <span class="t-amber">validate_jwt</span> function at line 47 decodes Bearer</span></div>
-        <div><span class="t-cmd">tokens using HS256 and checks expiry against Redis...</span> <span class="t-bar"></span></div>
+        <div><span class="t-amber">Akmon:</span> <span class="t-cmd">Validation happens in <span class="t-blue">src/auth/middleware.rs</span> and <span class="t-blue">src/api/token_guard.rs</span>.</span></div>
+        <div><span class="t-cmd">I found expiry + issuer checks, and one endpoint missing audience validation.</span> <span class="t-bar"></span></div>
         <br>
         <div class="t-dim">  a1b2c3d4 · tokens:4,821 · <span style="color:var(--green)">cache:8,779</span> · ~$0.004 · step 3</div>
       </div>
@@ -964,8 +1008,8 @@
       <div class="section-label">// unique to akmon</div>
       <h2 class="section-title" style="margin-bottom:16px">See the agent loop</h2>
       <p class="section-body" style="max-width:560px;margin:0 auto;text-align:center">
-        Tool calls with permission boundaries, diffs before writes, JSONL audit, and real cost visibility—
-        not a hosted black box. The preview below cycles through a typical turn (read → act → summarize).
+        Realistic workflow preview for regulated teams: scoped discovery, policy-gated changes, then verifiable evidence checks.
+        The sequence below cycles through a representative run.
       </p>
     </div>
     <div class="terminal-wrap terminal-live" style="max-width:780px;margin:0 auto">
@@ -989,52 +1033,52 @@
 <section class="why" id="why">
   <div class="container">
     <div class="section-label">// why akmon</div>
-    <h2 class="section-title">Built different<br>by design</h2>
+    <h2 class="section-title">Built for review,<br>not just generation</h2>
     <p class="section-body">
-      Hosted agents can change access, pricing, or terms on their timeline.
-      Akmon is a binary you run, with your keys and your rules.
+      Akmon is designed for teams that need defensible software change history:
+      explicit permissions, portable session evidence, deterministic checks, and provider control.
     </p>
 
     <div class="why-grid">
       <div class="why-card">
         <span class="why-icon">📋</span>
-        <h3>Full audit trail</h3>
-        <p>Every tool call, permission decision, and model response can be logged to a JSONL file—useful when you need a record of what the agent did.</p>
+        <h3>Session evidence first</h3>
+        <p>Every run can produce structured audit and evidence artifacts that survive beyond chat history and support review workflows.</p>
       </div>
       <div class="why-card">
         <span class="why-icon">🔒</span>
-        <h3>Sandbox + SSRF protection</h3>
-        <p>Files are constrained to your git root. Web requests block RFC1918 ranges and cloud metadata endpoints. API keys are zeroized in memory on drop.</p>
+        <h3>Policy boundaries</h3>
+        <p>Filesystem, shell, network, and tool actions are policy-evaluated, so sensitive operations are governed instead of implied.</p>
       </div>
       <div class="why-card">
         <span class="why-icon">⚙️</span>
         <h3>Single Rust binary</h3>
-        <p>3.4MB with no runtime dependencies. Drop it in /usr/local/bin. Works over SSH. Works in Docker. Works in CI. No Node.js, no Python, no VS Code required.</p>
+        <p>Terminal-first operation in local shells, SSH, and CI without dependency on editor plugin runtime stacks.</p>
       </div>
       <div class="why-card">
         <span class="why-icon">🔑</span>
-        <h3>BYOK — any provider</h3>
-        <p>Ollama for free local inference. Anthropic, OpenRouter (500+ models), Groq, OpenAI, Azure, or Amazon Bedrock. You own the keys and the tool.</p>
+        <h3>Provider optionality</h3>
+        <p>Use local or hosted models with your own credentials and routing choices, instead of binding engineering workflows to one vendor.</p>
       </div>
       <div class="why-card">
         <span class="why-icon">💰</span>
-        <h3>Real cost transparency</h3>
-        <p>Cache hits shown in green. Session cost in USD always visible. Exit summary shows exactly what was spent. No surprise bills, no opaque credit systems.</p>
+        <h3>Cost transparency</h3>
+        <p>Token usage, cache effects, and run cost estimates stay visible so teams can reason about budget and drift over time.</p>
       </div>
       <div class="why-card">
         <span class="why-icon">🔍</span>
-        <h3>Diff before writes + session diffs</h3>
-        <p>Review write hunks in-session, then compare full runs with <code>akmon diff</code> for structural and field-level session analysis.</p>
+        <h3>Change control + replayability</h3>
+        <p>Review write hunks before approval, compare sessions with <code>akmon diff</code>, and validate deterministic behavior with replay workflows.</p>
       </div>
       <div class="why-card">
         <span class="why-icon">📈</span>
-        <h3>SLO and trend gates</h3>
-        <p>Run reliability guardrails with <code>akmon slo verify</code> and detect regressions over historical baselines with <code>akmon slo trend</code>.</p>
+        <h3>Reliability gates</h3>
+        <p>Use <code>akmon slo verify</code> and <code>akmon slo trend</code> to enforce reliability thresholds in CI instead of relying on ad hoc confidence.</p>
       </div>
       <div class="why-card">
         <span class="why-icon">🛡️</span>
-        <h3>Enterprise policy profiles</h3>
-        <p>Roll deterministic policy governance from <code>dev</code> to <code>staging</code> to <code>prod</code> with composable policy packs and effective-policy inspection.</p>
+        <h3>Governed rollout profiles</h3>
+        <p>Move from <code>dev</code> to <code>staging</code> to <code>prod</code> using deterministic profile + policy-pack layering and effective-policy inspection.</p>
       </div>
     </div>
   </div>
@@ -1338,11 +1382,10 @@
     </p>
     <div class="cta-actions">
       <a href="#install" class="btn btn-primary">↓ Install Akmon</a>
-      <a href="./docs/" class="btn btn-secondary">Read the docs →</a>
+      <a href="./docs/" class="btn btn-secondary">Read docs →</a>
       <a href="./docs/tutorials/overview.html" class="btn btn-secondary">Tutorials →</a>
-      <a href="./docs/features/policy-profiles.html" class="btn btn-secondary">Policy profiles →</a>
-      <a href="./docs/releases/v2.0.0.html" class="btn btn-secondary">v2.0.0 notes →</a>
-      <a href="https://github.com/radotsvetkov/akmon" class="btn btn-secondary">View on GitHub</a>
+      <a href="./docs/concepts/reviewer-flow.html" class="btn btn-secondary">Reviewer flow →</a>
+      <a href="https://github.com/radotsvetkov/akmon" class="btn btn-secondary">GitHub →</a>
     </div>
   </div>
 </section>
@@ -1368,25 +1411,41 @@
 
 <script>
   (function () {
+    var btn = document.getElementById('nav-menu-btn');
+    var links = document.getElementById('nav-links');
+    if (!btn || !links) return;
+    btn.addEventListener('click', function () {
+      var open = links.classList.toggle('open');
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    links.querySelectorAll('a').forEach(function (a) {
+      a.addEventListener('click', function () {
+        links.classList.remove('open');
+        btn.setAttribute('aria-expanded', 'false');
+      });
+    });
+  })();
+
+  (function () {
     var cap = document.getElementById('live-demo-caption');
     var body = document.getElementById('live-demo-body');
     if (!body || !cap) return;
     var frames = [
       {
-        cap: 'Step 1 — Natural-language goal in your repo',
-        html: '<div><span class="t-prompt">~/payments</span> <span class="t-dim">$</span> <span class="t-cmd">akmon run</span></div><div class="t-dim" style="margin-top:8px">▓▓ akmon v2.0.0 · claude-haiku · Anthropic</div><br><div><span class="t-amber">You:</span> <span class="t-cmd">Add idempotency keys to the capture endpoint</span></div><br><div class="t-dim">  Model loads project profile + AKMON.md context…</div>'
+        cap: 'Step 1 — Headless task for governed automation',
+        html: '<div><span class="t-prompt">~/payments</span> <span class="t-dim">$</span> <span class="t-cmd">akmon --yes --output json --task "harden idempotency checks"</span></div><br><div class="t-dim">  session_id: 9f2e...  status: completed</div>'
       },
       {
-        cap: 'Step 2 — Read-only exploration (search + read)',
-        html: '<div><span class="t-blue">  → semantic_search</span><span class="t-dim">  "idempotency capture"</span></div><div><span class="t-green">  ✓ semantic_search</span>  <span class="t-dim">4 hits</span></div><div><span class="t-blue">  → read_file</span><span class="t-dim">  src/api/capture.rs</span></div><div><span class="t-green">  ✓ read_file</span>  <span class="t-dim">412 lines</span></div><br><div class="t-dim">  Policy: reads auto-approved under <span class="t-cmd">--yes</span></div>'
+        cap: 'Step 2 — Tool calls are explicit and auditable',
+        html: '<div><span class="t-blue">  → semantic_search</span><span class="t-dim">  "idempotency capture"</span></div><div><span class="t-green">  ✓ semantic_search</span>  <span class="t-dim">4 hits</span></div><div><span class="t-blue">  → read_file</span><span class="t-dim">  src/api/capture.rs</span></div><div><span class="t-green">  ✓ read_file</span>  <span class="t-dim">412 lines</span></div><div><span class="t-blue">  → apply_patch</span><span class="t-dim">  src/api/capture.rs</span></div><div><span class="t-green">  ✓ apply_patch</span>  <span class="t-dim">mode=applied</span></div>'
       },
       {
-        cap: 'Step 3 — Writes show a diff before commit',
-        html: '<div class="t-amber">  Pending write</div><div class="t-dim">  capture.rs — add header parse + store key</div><br><div class="t-output" style="color:var(--green)">+ use crate::ids::IdempotencyKey;</div><div class="t-output" style="color:var(--red)">- // TODO: reject replays</div><div class="t-output" style="color:var(--green)">+ if store.seen(&amp;key)? { return Err(...); }</div><br><div><span class="t-amber">Allow this write?</span> <span class="t-cmd">[y] yes  [n] no</span></div>'
+        cap: 'Step 3 — Verify integrity and evidence linkage',
+        html: '<div><span class="t-prompt">~/payments</span> <span class="t-dim">$</span> <span class="t-cmd">akmon audit verify .akmon/audit/9f2e....jsonl</span></div><div><span class="t-green">  ✓</span> <span class="t-dim">valid chain</span></div><div><span class="t-prompt">~/payments</span> <span class="t-dim">$</span> <span class="t-cmd">akmon evidence verify .akmon/evidence/9f2e....json</span></div><div><span class="t-green">  ✓</span> <span class="t-dim">schema + linkage valid</span></div><div><span class="t-prompt">~/payments</span> <span class="t-dim">$</span> <span class="t-cmd">akmon verify 9f2e....</span></div><div><span class="t-green">  ✓</span> <span class="t-dim">session integrity passed</span></div>'
       },
       {
-        cap: 'Step 4 — Session cost + audit trail',
-        html: '<div class="t-amber">  Session</div><div class="t-dim">  ───────────────────────────</div><div class="t-output">  Tool calls <span class="t-cmd">11</span> · Files written <span class="t-cmd">2</span></div><div class="t-output">  Tokens <span class="t-cmd">38,102</span> · <span class="t-green">Cache 29,440</span></div><div class="t-output">  Est. cost <span class="t-amber">~$0.031</span></div><br><div class="t-dim">  .akmon/audit/e7f3…jsonl  <span style="color:var(--accent)">JSONL audit</span></div>'
+        cap: 'Step 4 — Reliability and cost are first-class signals',
+        html: '<div class="t-amber">  Summary</div><div class="t-dim">  tool_calls=11 success=11 failures=0</div><div class="t-dim">  tokens=38,102 cache=29,440 est_cost_usd=0.031</div><div class="t-dim">  reliability_metrics + replay_metadata captured</div><div class="t-dim">  artifacts: .akmon/audit/...  .akmon/evidence/...</div>'
       }
     ];
     var i = 0;
