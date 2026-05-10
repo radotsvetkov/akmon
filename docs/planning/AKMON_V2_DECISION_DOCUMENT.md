@@ -962,7 +962,7 @@ objects/<hex>             — one file per content-addressed blob
  
 ```json
 {
-  "agef_version": "0.1",
+  "agef_version": "0.1.1",
   "producer": {
     "name": "akmon",
     "version": "2.0.0"
