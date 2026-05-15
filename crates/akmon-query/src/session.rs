@@ -1656,7 +1656,11 @@ Complete and verify the current file(s), then continue in the next turn.";
                     AgentEvent::ToolCallCompleted {
                         id: id.clone(),
                         name: name.clone(),
-                        success: true,
+                        // false: the tool was never dispatched (still in Thinking state).
+                        // Thinking + ToolCallCompleted { success: true } is an illegal FSM
+                        // transition; success: false is the correct shape for inline rejections
+                        // that short-circuit before ToolExecution.
+                        success: false,
                         message: msg.clone(),
                     },
                     task,
