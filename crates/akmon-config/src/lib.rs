@@ -118,6 +118,18 @@ pub struct AkmonGlobalConfig {
     pub openai_compatible_url: Option<String>,
     #[serde(default)]
     pub openai_compatible_api_key: Option<String>,
+    /// Override for the first-token deadline (ms) applied to all LLM completions.
+    ///
+    /// Useful for local models (lemonade, mlx-lm, Ollama) that must prefill large
+    /// contexts before emitting a single token.  When unset, [`CompletionConfig`]
+    /// default (currently 300 000 ms / 5 min) is used.
+    ///
+    /// Example (`~/.akmon/config.toml`):
+    /// ```toml
+    /// first_token_deadline_ms = 600_000  # 10 min for very large contexts
+    /// ```
+    #[serde(default)]
+    pub first_token_deadline_ms: Option<u64>,
     /// Registered MCP HTTP servers.
     #[serde(default)]
     pub mcp: Vec<McpServerEntry>,

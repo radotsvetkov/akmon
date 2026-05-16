@@ -196,6 +196,7 @@ dependencies = [
 name = "akmon-query"
 version = "2.0.0"
 dependencies = [
+ "akmon-config",
  "akmon-core",
  "akmon-journal",
  "akmon-models",

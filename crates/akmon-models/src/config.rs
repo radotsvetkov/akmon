@@ -26,13 +26,17 @@ pub struct CompletionConfig {
 
 impl Default for CompletionConfig {
     /// Defaults: `max_tokens` 8192 (see [`crate::max_tokens_for_model`] for model-specific values),
-    /// `temperature` 0.7, `first_token_deadline_ms` 5000, `stream` true.
+    /// `temperature` 0.7, `first_token_deadline_ms` 300000 (5 min), `stream` true.
+    ///
+    /// 5 minutes is a safe floor for any real-world provider: local models (Ollama, lemonade,
+    /// mlx-lm) may take 30–120 s to prefill a large codebase context before emitting the first
+    /// token.  Provider-specific or config-file overrides can raise this further.
     fn default() -> Self {
         Self {
             max_tokens: max_tokens_for_model(""),
             session_id: None,
             temperature: 0.7,
-            first_token_deadline_ms: 5000,
+            first_token_deadline_ms: 300_000,
             stream: true,
             tools: Vec::new(),
             fallback_model: None,
@@ -49,7 +53,7 @@ mod tests {
         let c = CompletionConfig::default();
         assert_eq!(c.max_tokens, 8192);
         assert_eq!(c.temperature, 0.7);
-        assert_eq!(c.first_token_deadline_ms, 5000);
+        assert_eq!(c.first_token_deadline_ms, 300_000);
         assert!(c.stream);
         assert!(c.tools.is_empty());
     }
