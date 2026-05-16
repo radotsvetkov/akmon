@@ -499,7 +499,15 @@ impl SessionGraph for RedbSessionGraph {
             let (key, value) = item.map_err(|err| {
                 JournalError::Verification(format!("iterate session_events item failed: {err}"))
             })?;
-            let (sid, seq) = parse_event_key(key.value())?;
+            // Skip keys that don't match the current 24-byte format (UUID 16 + seq u64 8).
+            // This makes the journal forward-compatible with databases written by older akmon
+            // versions that used a different key layout (e.g. 32-byte keys). Rather than
+            // crashing the entire session on a schema mismatch, we silently skip foreign-format
+            // keys — they belong to sessions from the old binary and are not readable anyway.
+            let (sid, seq) = match parse_event_key(key.value()) {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            };
             if sid != self.session_id {
                 continue;
             }
@@ -554,7 +562,10 @@ impl SessionGraph for RedbSessionGraph {
                 let (k, _) = item.map_err(|err| {
                     JournalError::Verification(format!("iterate session_events item failed: {err}"))
                 })?;
-                let (sid, _) = parse_event_key(k.value())?;
+                let (sid, _) = match parse_event_key(k.value()) {
+                    Ok(pair) => pair,
+                    Err(_) => continue, // skip keys from older akmon schema versions
+                };
                 if sid == self.session_id {
                     return Err(JournalError::Verification(
                         "import target session is not empty".into(),
@@ -1571,6 +1582,82 @@ mod tests {
         assert!(
             err.to_string().contains("not empty"),
             "unexpected err: {err}"
+        );
+    }
+
+    /// Regression test: history() and import_verified_linear_history() must survive a journal
+    /// database that contains rows with non-24-byte keys (written by an older akmon version).
+    ///
+    /// Root cause observed in production: /tmp/agentpack-stage is volume-mounted into every
+    /// smolvm task VM and persists across runs. An older akmon binary wrote 32-byte event keys;
+    /// when akmon 2.0.0 opened the same journal.redb it crashed immediately on the first
+    /// history() call because parse_event_key() hard-failed on the unexpected length.
+    #[test]
+    fn history_skips_foreign_key_lengths() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|_| unreachable!());
+        let path = tmp.path().join("foreign_keys.redb");
+        let store = Arc::new(
+            RedbObjectStore::create(path.as_path(), HashAlgorithm::Sha256)
+                .unwrap_or_else(|_| unreachable!()),
+        );
+
+        // Create a normal session and append two events.
+        let sid = uuid::Uuid::new_v4();
+        let mut graph =
+            RedbSessionGraph::open_new(Arc::clone(&store), sid).unwrap_or_else(|_| unreachable!());
+        graph
+            .append(session_start(store.as_ref()))
+            .unwrap_or_else(|_| unreachable!());
+        graph
+            .append(EventKind::UserTurn {
+                prompt_hash: make_hash(store.as_ref(), 0x55),
+            })
+            .unwrap_or_else(|_| unreachable!());
+
+        // Inject a row with a 32-byte key directly into SESSION_EVENTS_TABLE, simulating a
+        // stale entry written by an older akmon binary with a different key layout.
+        {
+            let write_txn = store
+                .database()
+                .begin_write()
+                .unwrap_or_else(|_| unreachable!());
+            {
+                let mut events_table = write_txn
+                    .open_table(SESSION_EVENTS_TABLE)
+                    .unwrap_or_else(|_| unreachable!());
+                let foreign_key = [0xFFu8; 32]; // 32-byte key — unrecognized format
+                let dummy_value = [0u8; 4];
+                events_table
+                    .insert(foreign_key.as_slice(), dummy_value.as_slice())
+                    .unwrap_or_else(|_| unreachable!());
+            }
+            write_txn.commit().unwrap_or_else(|_| unreachable!());
+        }
+
+        // Reopen the session. history() must succeed and return only the two valid events,
+        // skipping the foreign-key row entirely.
+        let reopened =
+            RedbSessionGraph::reopen(Arc::clone(&store), sid).unwrap_or_else(|_| unreachable!());
+        let history = reopened
+            .history()
+            .expect("history() must not fail on foreign key lengths");
+        assert_eq!(
+            history.len(),
+            2,
+            "expected 2 valid events, got {}",
+            history.len()
+        );
+
+        // Also verify that session_head_row_exists works correctly with foreign-key rows
+        // present — the foreign rows must not be mistaken for a real session's events.
+        assert!(
+            session_head_row_exists(&store, sid).unwrap_or_else(|_| unreachable!()),
+            "real session must still be found"
+        );
+        let unknown_sid = uuid::Uuid::new_v4();
+        assert!(
+            !session_head_row_exists(&store, unknown_sid).unwrap_or_else(|_| unreachable!()),
+            "unknown session must not be found"
         );
     }
 }
