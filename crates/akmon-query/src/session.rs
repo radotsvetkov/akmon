@@ -154,6 +154,15 @@ fn completion_config_for_tools(
         cfg.first_token_deadline_ms =
             ollama_first_token_deadline_ms(provider.completion_model_id());
     }
+    // Apply first_token_deadline_ms from ~/.akmon/config.toml if set.
+    // This overrides both the 300 s default and the Ollama model-derived value,
+    // letting operators tune the deadline for slow local inference servers
+    // (e.g. lemonade on AMD Strix Halo prefilling large codebases).
+    if let Ok((_, global_cfg)) = akmon_config::load_user_config() {
+        if let Some(deadline_ms) = global_cfg.first_token_deadline_ms {
+            cfg.first_token_deadline_ms = deadline_ms;
+        }
+    }
     cfg
 }
 
@@ -1656,7 +1665,11 @@ Complete and verify the current file(s), then continue in the next turn.";
                     AgentEvent::ToolCallCompleted {
                         id: id.clone(),
                         name: name.clone(),
-                        success: true,
+                        // false: the tool was never dispatched (still in Thinking state).
+                        // Thinking + ToolCallCompleted { success: true } is an illegal FSM
+                        // transition; success: false is the correct shape for inline rejections
+                        // that short-circuit before ToolExecution.
+                        success: false,
                         message: msg.clone(),
                     },
                     task,

@@ -553,4 +553,34 @@ mod tests {
             .is_err()
         );
     }
+
+    /// `Thinking + ToolCallCompleted { success: true }` is illegal.
+    ///
+    /// A successful completion requires the tool to have been dispatched first
+    /// (`Thinking → ToolExecution`), so `ToolCallCompleted { success: true }`
+    /// may only arrive from `ToolExecution`, not directly from `Thinking`.
+    ///
+    /// Inline short-circuit paths (unknown tool, policy denial, repeat-limit
+    /// nudges) must use `success: false` when emitting `ToolCallCompleted`
+    /// from `Thinking` state.  Using `success: true` from `Thinking` was the
+    /// root cause of the crash observed when the tool-repeat-limit policy
+    /// fired: the FSM raised `InvalidTransition` and the session exited with
+    /// code 1.
+    #[test]
+    fn illegal_thinking_tool_completed_success_true_without_dispatch() {
+        let r = validate_transition(
+            &thinking(0),
+            &AgentEvent::ToolCallCompleted {
+                id: "1".into(),
+                name: "read_file".into(),
+                success: true,
+                message: "You have called read_file 5 times already.".into(),
+            },
+        );
+        assert!(
+            r.is_err(),
+            "ToolCallCompleted {{ success: true }} from Thinking must be illegal \
+             — tool was never dispatched through ToolExecution"
+        );
+    }
 }
