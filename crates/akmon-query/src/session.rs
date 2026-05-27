@@ -154,6 +154,11 @@ fn completion_config_for_tools(
         cfg.first_token_deadline_ms =
             ollama_first_token_deadline_ms(provider.completion_model_id());
     }
+    if let Ok((_, global_cfg)) = akmon_config::load_user_config() {
+        if let Some(deadline_ms) = global_cfg.first_token_deadline_ms {
+            cfg.first_token_deadline_ms = deadline_ms;
+        }
+    }
     cfg
 }
 

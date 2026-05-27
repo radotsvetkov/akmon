@@ -118,6 +118,17 @@ pub struct AkmonGlobalConfig {
     pub openai_compatible_url: Option<String>,
     #[serde(default)]
     pub openai_compatible_api_key: Option<String>,
+    /// Override first-token deadline (ms) for all LLM completions.
+    ///
+    /// Applies after provider-specific defaults (e.g. Ollama model heuristics).
+    /// Useful for slow local OpenAI-compatible servers prefilling large contexts.
+    ///
+    /// Example (`~/.akmon/config.toml`):
+    /// ```toml
+    /// first_token_deadline_ms = 600_000
+    /// ```
+    #[serde(default)]
+    pub first_token_deadline_ms: Option<u64>,
     /// Registered MCP HTTP servers.
     #[serde(default)]
     pub mcp: Vec<McpServerEntry>,
@@ -302,6 +313,19 @@ pub fn append_akmon_gitignore_line(cwd: &Path) -> std::io::Result<bool> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn first_token_deadline_ms_roundtrip_in_toml() {
+        let dir = tempdir().expect("tmp");
+        let path = dir.path().join("config.toml");
+        let c = AkmonGlobalConfig {
+            first_token_deadline_ms: Some(600_000),
+            ..Default::default()
+        };
+        save_config_to(&path, &c).expect("save");
+        let l = load_config_from(&path).expect("load");
+        assert_eq!(l.first_token_deadline_ms, Some(600_000));
+    }
 
     #[test]
     fn model_roundtrip_save() {

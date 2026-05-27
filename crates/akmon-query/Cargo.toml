@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Akmon agent session: FSM, policy, model provider, and tools orchestration."
 
 [dependencies]
+akmon-config = { path = "../akmon-config" }
 akmon-core = { path = "../akmon-core" }
 akmon-journal = { path = "../akmon-journal" }
 akmon-models = { path = "../akmon-models" }

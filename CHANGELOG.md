@@ -23,6 +23,7 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Diff trust dry-run:** `patch`, `apply_patch`, `edit`, and `write_file` now support `dry_run` validation mode that computes full diffs without mutating files.
 - **Context Scout Dossier:** new bounded `akmon scout` read-only workflow produces deterministic `context_scout.v1` JSON dossiers for planning/CI usage.
+- **`first_token_deadline_ms` in `~/.akmon/config.toml`:** optional operator override for LLM first-token timeouts; applies after provider-specific defaults (including Ollama model heuristics).
 
 ### Fixed
 
