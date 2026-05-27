@@ -194,6 +194,12 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, args: JsonValue, _ctx: &ToolContext) -> ToolOutput {
+        if let Err(msg) = crate::validate_tool_arguments(&self.input_schema, &args) {
+            return ToolOutput::Error {
+                code: ToolErrorCode::InvalidArgs,
+                message: msg,
+            };
+        }
         let payload = json!({
             "jsonrpc": "2.0",
             "id": 1,

@@ -7,10 +7,10 @@ use akmon_core::{
     AgentConfig, AgentEvent, InteractivePolicyReply, McpServerConfig, PolicyEngine,
     PolicyEngineMode, PolicyVerdict, Sandbox, save_plan_markdown, write_audit_jsonl,
 };
-use akmon_models::{LlmProvider, OllamaProbe};
+use akmon_models::{LlmProvider, Message, MessageRole, OllamaProbe};
 use akmon_query::{
     AgentSession, DefaultAgentSession, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
-    open_default_journal_handle, write_handoff_file,
+    open_or_resume_default_journal_handle, write_handoff_file,
 };
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
@@ -24,6 +24,27 @@ use tokio::sync::mpsc;
 
 use crate::command::UiCommand;
 use crate::config::TuiLaunchConfig;
+use crate::message::TuiMessage;
+
+fn tui_messages_to_model_messages(msgs: &[TuiMessage]) -> Vec<Message> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            TuiMessage::User { content } => Some(Message {
+                role: MessageRole::User,
+                content: content.clone(),
+            }),
+            TuiMessage::Assistant {
+                content,
+                complete: true,
+                ..
+            } => Some(Message {
+                role: MessageRole::Assistant,
+                content: content.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
 
 /// One user-submitted agent invocation from the TUI input loop.
 #[derive(Debug, Clone)]
@@ -244,9 +265,9 @@ async fn build_agent_session(
         model_estimates: config.model_estimates.clone(),
     };
 
-    let journal = open_default_journal_handle(agent_config.session_id)
+    let journal = open_or_resume_default_journal_handle(agent_config.session_id, config.journal_resume)
         .map_err(|e| format!("journal: {e}"))?;
-    let session = AgentSession::new(
+    let mut session = AgentSession::new(
         agent_config,
         Arc::clone(&policy),
         provider,
@@ -257,6 +278,14 @@ async fn build_agent_session(
         journal,
     )
     .map_err(|e| format!("session: {e}"))?;
+    if config.journal_resume {
+        if let Some(msgs) = &config.resume_messages {
+            let model_msgs = tui_messages_to_model_messages(msgs);
+            if !model_msgs.is_empty() {
+                session.restore_context_from_messages(model_msgs);
+            }
+        }
+    }
 
     Ok((session, policy_rx))
 }

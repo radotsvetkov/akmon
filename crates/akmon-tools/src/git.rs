@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use akmon_core::AuditEvent;
+use akmon_core::{AuditEvent, Sandbox};
 use async_trait::async_trait;
 use chrono::Utc;
 use regex::Regex;
@@ -134,11 +134,26 @@ fn validate_paths_in_sandbox(ctx: &ToolContext, paths: &[String]) -> Result<(), 
     Ok(())
 }
 
+fn validate_git_argv(ctx: &ToolContext, argv: &[String]) -> Result<(), ToolOutput> {
+    const DISALLOWED_FLAGS: [&str; 5] = ["--git-dir", "--work-tree", "-C", "--no-index", "--bare"];
+    for arg in argv {
+        for flag in DISALLOWED_FLAGS {
+            if arg == flag || arg.starts_with(&format!("{flag}=")) {
+                return Err(ToolOutput::Error {
+                    code: ToolErrorCode::InvalidArgs,
+                    message: format!("git flag `{flag}` is not allowed"),
+                });
+            }
+        }
+    }
+    validate_paths_in_sandbox(ctx, argv)
+}
+
 /// After a successful `edit` or `write_file`, stage and commit the touched file (best-effort).
 ///
 /// Returns an [`AuditEvent::AgentStep`] when a commit was created or when a failure should be recorded.
 pub fn try_auto_commit_after_file_tool(
-    root: &Path,
+    sandbox: &Sandbox,
     session_id: &str,
     tool_name: &str,
     args: &JsonValue,
@@ -161,13 +176,16 @@ pub fn try_auto_commit_after_file_tool(
     } else {
         args.get("path")?.as_str()?.to_string()
     };
-    let path = path_storage.as_str();
+    let resolved = sandbox.resolve(&path_storage).ok()?;
+    let path_cow = resolved.to_string_lossy();
+    let path = path_cow.as_ref();
+    let root = sandbox.primary_root();
     let old_str = args.get("old_str").and_then(|v| v.as_str());
     let snippet = old_str.map(collapse_for_message).unwrap_or_default();
     let file_part = Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
-        .unwrap_or(path);
+        .unwrap_or(path_storage.as_str());
     let msg_tail = if snippet.is_empty() {
         file_part.to_string()
     } else {
@@ -370,6 +388,9 @@ impl Tool for GitTool {
                 },
             },
             "diff" => {
+                if let Err(e) = validate_git_argv(ctx, &argv) {
+                    return e;
+                }
                 let mut gargs = vec!["diff".to_string()];
                 gargs.extend(argv.clone());
                 let stat = parse_diff_stat(&root, &argv);
@@ -410,6 +431,9 @@ impl Tool for GitTool {
                 }
             }
             "log" => {
+                if let Err(e) = validate_git_argv(ctx, &argv) {
+                    return e;
+                }
                 let mut gargs = vec!["log".to_string()];
                 if argv.is_empty() {
                     gargs.push("--oneline".into());
@@ -669,6 +693,9 @@ impl Tool for GitTool {
                 }
             }
             "show" => {
+                if let Err(e) = validate_git_argv(ctx, &argv) {
+                    return e;
+                }
                 let mut gargs = vec!["show".to_string(), "--stat".to_string()];
                 if argv.is_empty() {
                     gargs.push("HEAD".into());
@@ -904,8 +931,13 @@ mod tests {
         let _ = run_git_output(root, &["config", "user.email", "t@t"]).expect("cfg");
         let _ = run_git_output(root, &["config", "user.name", "t"]).expect("cfg");
         std::fs::write(root.join("a.rs"), "//x\n").expect("w");
-        let ev =
-            try_auto_commit_after_file_tool(root, "sid", "write_file", &json!({"path": "a.rs"}));
+        let sandbox = akmon_core::Sandbox::with_git_root(root.to_path_buf(), true);
+        let ev = try_auto_commit_after_file_tool(
+            &sandbox,
+            "sid",
+            "write_file",
+            &json!({"path": "a.rs"}),
+        );
         assert!(ev.is_some());
         let log = run_git_output(root, &["log", "--oneline", "-1"]).expect("log");
         let s = String::from_utf8_lossy(&log.stdout);

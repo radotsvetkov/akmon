@@ -35,6 +35,7 @@ tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
+jsonschema = "0.46.5"
 
 [dev-dependencies]
 akmon-journal = { path = "../akmon-journal", features = ["test-utils"] }

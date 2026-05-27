@@ -6,6 +6,7 @@ mod anthropic;
 mod bedrock;
 mod config;
 mod error;
+pub mod http_client;
 pub mod journaling;
 mod llm_connect;
 mod max_tokens;

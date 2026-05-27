@@ -305,7 +305,9 @@ where
             keep_recent: ContextManager::default().keep_recent,
             fixed_system_messages,
         };
-        emit_session_start(&journal, &config)?;
+        if !journal.resumed {
+            emit_session_start(&journal, &config)?;
+        }
         let provider_id = canonical_provider_id(provider.as_ref());
         let inner: Arc<dyn LlmProvider + Send + Sync> = provider;
         let wrapped: Arc<dyn LlmProvider> = Arc::new(JournalingProvider::new(
@@ -1508,6 +1510,41 @@ Resume from the mid-sentence or mid-block point where the response was cut."
         }
     }
 
+    /// Resets parallel-tool state and transitions to [`AgentState::Failed`] before returning `Err`.
+    async fn fail_tool_batch(
+        &mut self,
+        event_tx: &mpsc::Sender<AgentEvent>,
+        message: impl Into<String>,
+        task: &str,
+    ) -> Result<(), AgentError> {
+        let error = AgentError::SessionFailed {
+            message: message.into(),
+        };
+        self.parallel_tool_batch_remaining = 0;
+        if matches!(
+            self.state,
+            AgentState::Thinking { .. }
+                | AgentState::ToolExecution { .. }
+                | AgentState::AwaitingConfirmation { .. }
+        ) {
+            self.apply_event(
+                event_tx,
+                AgentEvent::Error {
+                    error: error.clone(),
+                    recoverable: false,
+                },
+                task,
+            )
+            .await?;
+        } else {
+            self.state = AgentState::Failed {
+                error: error.clone(),
+                recoverable: false,
+            };
+        }
+        Err(error)
+    }
+
     /// Policy + optional parallel execution for one model turn's tool calls.
     async fn dispatch_tool_calls_batch(
         &mut self,
@@ -1517,6 +1554,7 @@ Resume from the mid-sentence or mid-block point where the response was cut."
         interactive_policy_rx: &mut Option<mpsc::Receiver<InteractivePolicyReply>>,
         question_answer_rx: &mut Option<mpsc::Receiver<String>>,
     ) -> Result<(), AgentError> {
+        self.parallel_tool_batch_remaining = 0;
         let n = tool_calls.len();
         let mut slots: Vec<Option<ToolCallResult>> = vec![None; n];
 
@@ -1604,6 +1642,35 @@ Resume from the mid-sentence or mid-block point where the response was cut."
                 }
             }
 
+            if let Err(msg) = akmon_tools::validate_tool_arguments(
+                &self.tools[tool_idx].parameters_schema(),
+                &args,
+            ) {
+                self.apply_event(
+                    event_tx,
+                    AgentEvent::ToolCallCompleted {
+                        id: id.clone(),
+                        name: name.clone(),
+                        success: false,
+                        message: msg.clone(),
+                    },
+                    task,
+                )
+                .await?;
+                slots[idx] = Some(ToolCallResult {
+                    call_id: id.clone(),
+                    tool_name: name.clone(),
+                    output: ToolOutput::Error {
+                        code: akmon_tools::ToolErrorCode::InvalidArgs,
+                        message: msg,
+                    },
+                    success: false,
+                    arguments: args.clone(),
+                    latency_ms: 0,
+                });
+                continue;
+            }
+
             const MAX_WRITE_FILE_CALLS_PER_ASSISTANT_MESSAGE: u32 = 2;
             if name == "write_file" {
                 write_file_calls_this_message += 1;
@@ -1681,8 +1748,11 @@ Complete and verify the current file(s), then continue in the next turn.";
                 slots[idx] = Some(ToolCallResult {
                     call_id: id.clone(),
                     tool_name: name.clone(),
-                    output: ToolOutput::Success { content: msg },
-                    success: true,
+                    output: ToolOutput::Error {
+                        code: akmon_tools::ToolErrorCode::InvalidArgs,
+                        message: msg.clone(),
+                    },
+                    success: false,
                     arguments: args.clone(),
                     latency_ms: 0,
                 });
@@ -1801,9 +1871,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                     let decision = match decision {
                         Ok(d) => d,
                         Err(e) => {
-                            return Err(AgentError::SessionFailed {
-                                message: e.to_string(),
-                            });
+                            return self.fail_tool_batch(event_tx, e.to_string(), task).await;
                         }
                     };
                     self.audit_log.push(decision.audit.clone());
@@ -1842,9 +1910,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                     let decision = match decision {
                         Ok(d) => d,
                         Err(e) => {
-                            return Err(AgentError::SessionFailed {
-                                message: e.to_string(),
-                            });
+                            return self.fail_tool_batch(event_tx, e.to_string(), task).await;
                         }
                     };
                     self.audit_log.push(decision.audit.clone());
@@ -1878,9 +1944,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                     let decision = match decision {
                         Ok(d) => d,
                         Err(e) => {
-                            return Err(AgentError::SessionFailed {
-                                message: e.to_string(),
-                            });
+                            return self.fail_tool_batch(event_tx, e.to_string(), task).await;
                         }
                     };
                     self.audit_log.push(decision.audit.clone());
@@ -1960,17 +2024,24 @@ Complete and verify the current file(s), then continue in the next turn.";
                                 )
                                 .await?;
                                 let Some(rx) = interactive_policy_rx.as_mut() else {
-                                    return Err(AgentError::SessionFailed {
-                                        message: "interactive policy requires a verdict channel"
-                                            .into(),
-                                    });
+                                    return self
+                                        .fail_tool_batch(
+                                            event_tx,
+                                            "interactive policy requires a verdict channel",
+                                            task,
+                                        )
+                                        .await;
                                 };
                                 let reply = match rx.recv().await {
                                     Some(v) => v,
                                     None => {
-                                        return Err(AgentError::SessionFailed {
-                                            message: "policy verdict channel closed".into(),
-                                        });
+                                        return self
+                                            .fail_tool_batch(
+                                                event_tx,
+                                                "policy verdict channel closed",
+                                                task,
+                                            )
+                                            .await;
                                     }
                                 };
                                 let reason: String = match reply.verdict {
@@ -1992,9 +2063,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                                 let decision = match decision {
                                     Ok(d) => d,
                                     Err(e) => {
-                                        return Err(AgentError::SessionFailed {
-                                            message: e.to_string(),
-                                        });
+                                        return self.fail_tool_batch(event_tx, e.to_string(), task).await;
                                     }
                                 };
                                 self.audit_log.push(decision.audit.clone());
@@ -2035,9 +2104,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                                 decision
                             }
                             Err(e) => {
-                                return Err(AgentError::SessionFailed {
-                                    message: e.to_string(),
-                                });
+                                return self.fail_tool_batch(event_tx, e.to_string(), task).await;
                             }
                         }
                     }
@@ -2049,9 +2116,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                         ) {
                             Ok(d) => d,
                             Err(e) => {
-                                return Err(AgentError::SessionFailed {
-                                    message: e.to_string(),
-                                });
+                                return self.fail_tool_batch(event_tx, e.to_string(), task).await;
                             }
                         };
                         self.audit_log.push(decision.audit.clone());
@@ -2195,9 +2260,13 @@ Complete and verify the current file(s), then continue in the next turn.";
                         let answer = match rx.recv().await {
                             Some(a) => a,
                             None => {
-                                return Err(AgentError::SessionFailed {
-                                    message: "question answer channel closed".into(),
-                                });
+                                return self
+                                    .fail_tool_batch(
+                                        event_tx,
+                                        "question answer channel closed",
+                                        task,
+                                    )
+                                    .await;
                             }
                         };
                         tool_result.output = ToolOutput::Success { content: answer };
@@ -2217,9 +2286,13 @@ Complete and verify the current file(s), then continue in the next turn.";
                     ToolOutput::Success { content } => content.clone(),
                     ToolOutput::Error { message, .. } => message.clone(),
                     ToolOutput::Question { .. } => {
-                        return Err(AgentError::SessionFailed {
-                            message: "internal: unresolved Question tool output".into(),
-                        });
+                        return self
+                            .fail_tool_batch(
+                                event_tx,
+                                "internal: unresolved Question tool output",
+                                task,
+                            )
+                            .await;
                     }
                 };
                 self.apply_event(
@@ -2237,7 +2310,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                     && self.sandbox.has_git_root
                     && tool_result.success
                     && let Some(ev) = akmon_tools::try_auto_commit_after_file_tool(
-                        self.sandbox.primary_root(),
+                        self.sandbox.as_ref(),
                         &self.config.session_id.to_string(),
                         &tool_result.tool_name,
                         &tool_result.arguments,
@@ -2253,9 +2326,9 @@ Complete and verify the current file(s), then continue in the next turn.";
             let r = match slot {
                 Some(v) => v,
                 None => {
-                    return Err(AgentError::SessionFailed {
-                        message: "internal: missing tool result slot".into(),
-                    });
+                    return self
+                        .fail_tool_batch(event_tx, "internal: missing tool result slot", task)
+                        .await;
                 }
             };
             self.record_tool_completion_metrics(r);
@@ -2650,6 +2723,16 @@ Complete and verify the current file(s), then continue in the next turn.";
                     iteration: *iteration,
                 })
             }
+            (
+                AgentState::AwaitingConfirmation { .. },
+                AgentEvent::Error {
+                    error: err @ AgentError::SessionFailed { .. },
+                    recoverable,
+                },
+            ) => Ok(AgentState::Failed {
+                error: err.clone(),
+                recoverable: *recoverable,
+            }),
             (AgentState::Thinking { .. }, AgentEvent::Error { error, recoverable }) => {
                 Ok(AgentState::Failed {
                     error: error.clone(),
@@ -2684,6 +2767,17 @@ Complete and verify the current file(s), then continue in the next turn.";
                 .ok_or_else(|| AgentError::SessionFailed {
                     message: "missing post_summary_resume for ContextSummarized".into(),
                 }),
+            (
+                AgentState::Summarizing { .. },
+                AgentEvent::Error {
+                    error:
+                        err @ (AgentError::SessionFailed { .. } | AgentError::ModelError { .. }),
+                    recoverable,
+                },
+            ) => Ok(AgentState::Failed {
+                error: err.clone(),
+                recoverable: *recoverable,
+            }),
             _ => Err(AgentError::InvalidTransition {
                 from: self.state.to_string(),
                 to: event.to_string(),

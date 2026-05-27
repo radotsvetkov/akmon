@@ -48,7 +48,8 @@ use akmon_models::{
 };
 use akmon_query::{
     AgentSession, SessionRunExit, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
-    ToolCallSummary, default_journal_dir, journal_contains_session, open_default_journal_handle,
+    ToolCallSummary, default_journal_dir, journal_contains_session,
+    open_or_resume_default_journal_handle,
     open_journal_read_only, write_handoff_file,
 };
 #[cfg(feature = "semantic-index")]
@@ -2849,18 +2850,15 @@ fn resolve_replay_persist_journal_dir(
     persist: bool,
     persist_to: Option<PathBuf>,
     source_journal_dir: &Path,
-) -> Option<PathBuf> {
+) -> Result<Option<PathBuf>, String> {
     if !persist {
-        return None;
+        return Ok(None);
     }
-    // Q1 revised: clap enforces --persist <=> --persist-to. If this invariant is
-    // violated, fail fast with a usage-contract panic rather than silently
-    // defaulting to source journal, which is disallowed.
     let _ = source_journal_dir;
-    Some(
-        persist_to
-            .expect("Q1 revised: --persist requires --persist-to <path>; enforced at parse time"),
-    )
+    persist_to.ok_or_else(|| {
+        "--persist requires --persist-to <path> (enforced at parse time)".into()
+    })
+    .map(Some)
 }
 
 const REPLAY_HUMAN_DIVERGENCE_CAP: usize = 10;
@@ -3019,11 +3017,37 @@ async fn run_replay(args: ReplayArgs) -> ExitCode {
             }
         },
     };
-    let persist_journal_dir = resolve_replay_persist_journal_dir(
+    let persist_journal_dir = match resolve_replay_persist_journal_dir(
         args.persist,
         args.persist_to.clone(),
         source_journal_dir.as_path(),
-    );
+    ) {
+        Ok(dir) => dir,
+        Err(msg) => {
+            let infra = akmon_replay::ReplayInfraError {
+                akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+                error: msg,
+                category: "usage".to_owned(),
+                source_session_id: Some(args.session_id.to_string()),
+                missing_provider_id: None,
+                missing_tool_id: None,
+                missing_object_hash: None,
+            };
+            return match format {
+                ReplayFormat::Json => match print_replay_json_error(&infra) {
+                    Ok(()) => ExitCode::from(2),
+                    Err(render_err) => {
+                        eprintln!("akmon replay: failed to render JSON output: {render_err}");
+                        ExitCode::from(2)
+                    }
+                },
+                ReplayFormat::Human => {
+                    eprintln!("{}", render_replay_human_error(&infra));
+                    ExitCode::from(2)
+                }
+            };
+        }
+    };
     let result = run_replay_result(args, source_journal_dir, persist_journal_dir.clone()).await;
     match result {
         Ok(report) => match format {
@@ -5375,15 +5399,95 @@ fn cli_attach_specs_subagent(
 }
 
 fn load_user_global_config() -> AkmonGlobalConfig {
-    akmon_config::akmon_config_path()
-        .as_ref()
-        .and_then(|p| akmon_config::load_config_from(p).ok())
-        .unwrap_or_default()
+    let Some(path) = akmon_config::akmon_config_path() else {
+        return AkmonGlobalConfig::default();
+    };
+    match akmon_config::load_config_from(&path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!(
+                "akmon: warning: ignoring invalid config {}: {e}",
+                path.display()
+            );
+            AkmonGlobalConfig::default()
+        }
+    }
+}
+
+const DEFAULT_CLI_MODEL: &str = "llama3.2";
+const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+
+fn merged_cli_model(cli: &Cli, global: &AkmonGlobalConfig) -> String {
+    if cli.model != DEFAULT_CLI_MODEL {
+        return cli.model.clone();
+    }
+    global
+        .default_model
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| cli.model.clone())
+}
+
+fn effective_ollama_url(cli: &Cli, global: &AkmonGlobalConfig) -> String {
+    if cli.ollama_url != DEFAULT_OLLAMA_URL {
+        return cli.ollama_url.clone();
+    }
+    global
+        .ollama_url
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| cli.ollama_url.clone())
+}
+
+fn merged_mcp_server_configs(cli: &Cli, global: &AkmonGlobalConfig) -> Vec<McpServerConfig> {
+    let mut servers = Vec::new();
+    for entry in &global.mcp {
+        if entry.enabled {
+            servers.push(McpServerConfig {
+                name: entry.name.clone(),
+                url: entry.url.clone(),
+                description: String::new(),
+            });
+        }
+    }
+    for url in &cli.mcp_server {
+        if !servers.iter().any(|s| s.url == *url) {
+            servers.push(McpServerConfig {
+                name: url.clone(),
+                url: url.clone(),
+                description: String::new(),
+            });
+        }
+    }
+    servers
+}
+
+async fn register_mcp_tools(
+    tools: &mut Vec<Box<dyn akmon_tools::Tool>>,
+    servers: &[McpServerConfig],
+) {
+    for server in servers {
+        match discover_mcp_tools(server).await {
+            Ok(mcp_tools) => {
+                eprintln!(
+                    "akmon: MCP server {} — {} tools registered",
+                    server.url,
+                    mcp_tools.len()
+                );
+                for t in mcp_tools {
+                    tools.push(Box::new(t));
+                }
+            }
+            Err(e) => {
+                eprintln!("akmon: MCP server {} unavailable: {e}", server.url);
+            }
+        }
+    }
 }
 
 fn provider_resolution_for_cli(cli: &Cli) -> ProviderResolutionTrace {
     let global = load_user_global_config();
-    llm_connect_from_cli(cli, &global, cli.model.clone()).explain_provider_resolution()
+    llm_connect_from_cli(cli, &global, merged_cli_model(cli, &global)).explain_provider_resolution()
 }
 
 fn coalesce_opt(a: Option<String>, b: Option<String>) -> Option<String> {
@@ -5407,7 +5511,7 @@ pub(crate) fn llm_connect_from_cli(
     };
     LlmConnectConfig {
         model,
-        ollama_url: cli.ollama_url.clone(),
+        ollama_url: effective_ollama_url(cli, global),
         anthropic_api_key: coalesce_opt(
             cli.anthropic_key.clone(),
             global.anthropic_api_key.clone(),
@@ -6095,7 +6199,7 @@ async fn main() -> ExitCode {
         let tui_config = TuiLaunchConfig {
             version: env!("CARGO_PKG_VERSION").to_string(),
             project_root: project_root.clone(),
-            model_name: cli.model.clone(),
+            model_name: merged_cli_model(&cli, &global),
             mode_label: mode_label.to_string(),
             session_id,
             max_iterations: AgentConfig::default().max_iterations,
@@ -6126,12 +6230,15 @@ async fn main() -> ExitCode {
                 cli.openai_compatible_key.clone(),
                 global.openai_compatible_api_key.clone(),
             ),
-            ollama_url: cli.ollama_url.clone(),
+            ollama_url: effective_ollama_url(&cli, &global),
             shell_allow: cli.shell_allow.clone(),
             web_fetch: cli.web_fetch,
             yes_web: cli.yes_web,
             auto_yes: cli.yes,
-            mcp_servers: cli.mcp_server.clone(),
+            mcp_servers: merged_mcp_server_configs(&cli, &global)
+                .into_iter()
+                .map(|s| s.url)
+                .collect(),
             audit_log_path,
             akmon_md: akmon_content,
             has_akmon_md,
@@ -6142,6 +6249,7 @@ async fn main() -> ExitCode {
             display_theme: global.display.theme,
             session_display_name: cli.session_name.clone(),
             resume_messages,
+            journal_resume: resolved_resume.is_some(),
             model_estimates: global.model_estimates.clone(),
         };
         let tui_outcome = akmon_tui::run_interactive(tui_config).await;
@@ -6219,6 +6327,9 @@ async fn main() -> ExitCode {
     let audit_log_path = resolve_audit_log_path(&project_root, session_id, cli.audit_log.clone());
     let evidence_path = resolve_evidence_path(&project_root, session_id, cli.evidence_path.clone());
     let global = load_user_global_config();
+    let run_model = merged_cli_model(&cli, &global);
+    let mcp_servers = merged_mcp_server_configs(&cli, &global);
+    let journal_resume = resolved_resume.is_some();
     let agent_config = AgentConfig {
         session_id,
         auto_commit: cli.auto_commit,
@@ -6337,7 +6448,7 @@ async fn main() -> ExitCode {
     }
 
     if cli.plan {
-        let provider = match resolve_llm(&cli, &global, cli.model.clone()) {
+        let provider = match resolve_llm(&cli, &global, run_model.clone()) {
             Ok(p) => p,
             Err(e) => {
                 exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
@@ -6376,7 +6487,10 @@ async fn main() -> ExitCode {
             auto_commit: false,
             ..agent_config.clone()
         };
-        let journal = match open_default_journal_handle(plan_agent_config.session_id) {
+        let journal = match open_or_resume_default_journal_handle(
+            plan_agent_config.session_id,
+            journal_resume,
+        ) {
             Ok(j) => j,
             Err(e) => {
                 exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
@@ -6549,7 +6663,10 @@ async fn main() -> ExitCode {
             auto_commit: false,
             ..agent_config.clone()
         };
-        let journal = match open_default_journal_handle(planner_agent_config.session_id) {
+        let journal = match open_or_resume_default_journal_handle(
+            planner_agent_config.session_id,
+            journal_resume,
+        ) {
             Ok(j) => j,
             Err(e) => {
                 exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
@@ -6605,7 +6722,7 @@ async fn main() -> ExitCode {
         if let Err(e) = akmon_core::save_plan_markdown(&project_root, &task, &plan_text) {
             eprintln!("akmon: warning: failed to save plan file: {e}");
         }
-        let provider_main = match resolve_llm(&cli, &global, cli.model.clone()) {
+        let provider_main = match resolve_llm(&cli, &global, run_model.clone()) {
             Ok(p) => p,
             Err(e) => {
                 exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
@@ -6619,28 +6736,7 @@ async fn main() -> ExitCode {
             #[cfg(feature = "semantic-index")]
             semantic_parts.clone(),
         );
-        for url in &cli.mcp_server {
-            let server = McpServerConfig {
-                name: url.clone(),
-                url: url.clone(),
-                description: String::new(),
-            };
-            match discover_mcp_tools(&server).await {
-                Ok(mcp_tools) => {
-                    eprintln!(
-                        "akmon: MCP server {} — {} tools registered",
-                        url,
-                        mcp_tools.len()
-                    );
-                    for t in mcp_tools {
-                        tools.push(Box::new(t));
-                    }
-                }
-                Err(e) => {
-                    eprintln!("akmon: MCP server {url} unavailable: {e}");
-                }
-            }
-        }
+        register_mcp_tools(&mut tools, &mcp_servers).await;
         #[cfg(feature = "semantic-index")]
         cli_attach_specs_subagent(
             &mut tools,
@@ -6662,7 +6758,7 @@ async fn main() -> ExitCode {
             &sandbox,
             &akmon_content,
         );
-        let journal = match open_default_journal_handle(agent_config.session_id) {
+        let journal = match open_or_resume_default_journal_handle(agent_config.session_id, true) {
             Ok(j) => j,
             Err(e) => {
                 exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
@@ -6773,7 +6869,7 @@ async fn main() -> ExitCode {
         };
     }
 
-    let provider = match resolve_llm(&cli, &global, cli.model.clone()) {
+    let provider = match resolve_llm(&cli, &global, run_model.clone()) {
         Ok(p) => p,
         Err(e) => {
             exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
@@ -6788,28 +6884,7 @@ async fn main() -> ExitCode {
         #[cfg(feature = "semantic-index")]
         semantic_parts.clone(),
     );
-    for url in &cli.mcp_server {
-        let server = McpServerConfig {
-            name: url.clone(),
-            url: url.clone(),
-            description: String::new(),
-        };
-        match discover_mcp_tools(&server).await {
-            Ok(mcp_tools) => {
-                eprintln!(
-                    "akmon: MCP server {} — {} tools registered",
-                    url,
-                    mcp_tools.len()
-                );
-                for t in mcp_tools {
-                    tools.push(Box::new(t));
-                }
-            }
-            Err(e) => {
-                eprintln!("akmon: MCP server {url} unavailable: {e}");
-            }
-        }
-    }
+    register_mcp_tools(&mut tools, &mcp_servers).await;
     #[cfg(feature = "semantic-index")]
     cli_attach_specs_subagent(
         &mut tools,
@@ -6832,7 +6907,7 @@ async fn main() -> ExitCode {
         &akmon_content,
     );
 
-    let journal = match open_default_journal_handle(agent_config.session_id) {
+    let journal = match open_or_resume_default_journal_handle(agent_config.session_id, journal_resume) {
         Ok(j) => j,
         Err(e) => {
             exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
@@ -7315,13 +7390,15 @@ mod tests {
             true,
             Some(PathBuf::from("/tmp/replay-journal")),
             source,
-        );
+        )
+        .expect("persist dir");
         assert_eq!(resolved, Some(PathBuf::from("/tmp/replay-journal")));
         let not_persisted = resolve_replay_persist_journal_dir(
             false,
             Some(PathBuf::from("/tmp/replay-journal")),
             source,
-        );
+        )
+        .expect("no persist");
         assert_eq!(not_persisted, None);
     }
 

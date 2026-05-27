@@ -94,6 +94,8 @@ pub struct TuiLaunchConfig {
     pub session_display_name: Option<String>,
     /// When resuming, prefill transcript from a saved `~/.akmon/sessions/*.json` snapshot.
     pub resume_messages: Option<Vec<crate::message::TuiMessage>>,
+    /// When true, reopen the existing journal graph for [`Self::session_id`].
+    pub journal_resume: bool,
     /// Per-model context/cost hints from `~/.akmon/config.toml` (`[model_estimates]`).
     pub model_estimates: Vec<ModelCostEstimateRow>,
 }

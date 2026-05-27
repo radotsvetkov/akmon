@@ -86,7 +86,7 @@ pub fn provider_display_name(model: &str) -> &'static str {
 }
 
 /// CLI / config inputs that determine which [`LlmProvider`] implementation to use.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LlmConnectConfig {
     /// Model id (Ollama tag, Claude id, OpenRouter `org/model`, Bedrock model id, …).
     pub model: String,
@@ -114,6 +114,35 @@ pub struct LlmConnectConfig {
     pub openai_compatible_url: Option<String>,
     /// API key for [`Self::openai_compatible_url`] when the server requires auth.
     pub openai_compatible_api_key: Option<String>,
+}
+
+fn mask_secret(opt: &Option<String>) -> Option<&'static str> {
+    opt.as_ref()
+        .filter(|s| !s.is_empty())
+        .map(|_| "<redacted>")
+}
+
+impl std::fmt::Debug for LlmConnectConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmConnectConfig")
+            .field("model", &self.model)
+            .field("ollama_url", &self.ollama_url)
+            .field("anthropic_api_key", &mask_secret(&self.anthropic_api_key))
+            .field("openrouter_api_key", &mask_secret(&self.openrouter_api_key))
+            .field("openai_api_key", &mask_secret(&self.openai_api_key))
+            .field("groq_api_key", &mask_secret(&self.groq_api_key))
+            .field("azure_openai_endpoint", &self.azure_openai_endpoint)
+            .field("azure_openai_api_key", &mask_secret(&self.azure_openai_api_key))
+            .field("azure_api_version", &self.azure_api_version)
+            .field("bedrock_explicit", &self.bedrock_explicit)
+            .field("aws_region", &self.aws_region)
+            .field("openai_compatible_url", &self.openai_compatible_url)
+            .field(
+                "openai_compatible_api_key",
+                &mask_secret(&self.openai_compatible_api_key),
+            )
+            .finish()
+    }
 }
 
 impl Default for LlmConnectConfig {

@@ -896,6 +896,8 @@ fn apply_loaded_session(
         g.audit_log_path = audit.clone();
         g.akmon_md = akmon_md;
         g.has_akmon_md = has_akmon_md;
+        g.resume_messages = Some(messages.clone());
+        g.journal_resume = true;
     }
     app.session_id = session_id;
     app.project_root = project_root;

@@ -1,7 +1,5 @@
 //! Discover models from a running Ollama server (`GET /api/tags`).
 
-use std::time::Duration;
-
 use serde::Deserialize;
 
 /// One entry returned by Ollama's `/api/tags`.
@@ -100,12 +98,15 @@ pub struct OllamaCapabilityHint {
 
 /// Probes Ollama with a 2-second timeout.
 pub async fn probe_ollama(base_url: &str) -> OllamaProbe {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-    {
+    let client = match crate::http_client::build_http_client(2, 2) {
         Ok(c) => c,
-        Err(_) => reqwest::Client::new(),
+        Err(e) => {
+            tracing::warn!("ollama probe HTTP client: {e}");
+            return OllamaProbe {
+                reachable: false,
+                models: vec![],
+            };
+        }
     };
 
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));

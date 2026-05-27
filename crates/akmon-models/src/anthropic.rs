@@ -101,14 +101,9 @@ impl AnthropicBackend {
 }
 
 fn build_anthropic_http_client() -> reqwest::Client {
-    match reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(300))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => reqwest::Client::new(),
-    }
+    crate::http_client::build_http_client(10, 300).unwrap_or_else(|e| {
+        panic!("anthropic HTTP client: {e}");
+    })
 }
 
 /// Joins all [`MessageRole::System`] bodies in order with `\n\n`.

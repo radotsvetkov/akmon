@@ -429,11 +429,9 @@ impl OpenAiCompatBackend {
 }
 
 fn build_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(300))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+    crate::http_client::build_http_client(10, 300).unwrap_or_else(|e| {
+        panic!("openai-compatible HTTP client: {e}");
+    })
 }
 
 fn map_http_status(status: StatusCode, body: &str) -> ModelError {

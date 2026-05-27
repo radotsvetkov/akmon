@@ -1930,6 +1930,7 @@ mod input_mouse_tests {
             display_theme: akmon_config::TerminalTheme::default(),
             session_display_name: None,
             resume_messages: None,
+            journal_resume: false,
             model_estimates: Vec::new(),
         }
     }

@@ -23,6 +23,8 @@ where
     pub store: Arc<S>,
     /// Merkle session graph; mutex matches [`akmon_models::journaling::JournalingProvider`] patterns.
     pub graph: Arc<Mutex<G>>,
+    /// When true, the graph was reopened for resume and [`emit_session_start`] must be skipped.
+    pub resumed: bool,
 }
 
 impl<S, G> JournalHandle<S, G>
@@ -32,7 +34,20 @@ where
 {
     /// Creates a handle from an existing store and graph mutex.
     pub fn new(store: Arc<S>, graph: Arc<Mutex<G>>) -> Self {
-        Self { store, graph }
+        Self {
+            store,
+            graph,
+            resumed: false,
+        }
+    }
+
+    /// Like [`Self::new`] but marks the handle as a resumed session (skip [`emit_session_start`]).
+    pub fn resumed(store: Arc<S>, graph: Arc<Mutex<G>>) -> Self {
+        Self {
+            store,
+            graph,
+            resumed: true,
+        }
     }
 }
 
@@ -80,6 +95,18 @@ pub fn journal_db_path(journal_dir: &std::path::Path) -> PathBuf {
 pub fn open_default_journal_handle(
     session_id: Uuid,
 ) -> Result<JournalHandle<RedbObjectStore, RedbSessionGraph>, AgentError> {
+    open_or_resume_default_journal_handle(session_id, false)
+}
+
+/// Opens the default journal, creating a new session graph or reopening an existing one when `resume`.
+///
+/// When `resume` is true and `session_id` already exists in `session_heads`, the graph is reopened
+/// and the returned handle has [`JournalHandle::resumed`] set. When `resume` is false, [`RedbSessionGraph::open_new`]
+/// is used (fails if the session already exists).
+pub fn open_or_resume_default_journal_handle(
+    session_id: Uuid,
+    resume: bool,
+) -> Result<JournalHandle<RedbObjectStore, RedbSessionGraph>, AgentError> {
     let dir = default_journal_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| AgentError::SessionFailed {
         message: format!("journal mkdir {}: {e}", dir.display()),
@@ -91,8 +118,14 @@ pub fn open_default_journal_handle(
         RedbObjectStore::create(db_path.as_path(), HashAlgorithm::Sha256).map_err(journal_err)?
     };
     let store = Arc::new(store);
-    let graph = RedbSessionGraph::open_new(Arc::clone(&store), session_id).map_err(journal_err)?;
-    Ok(JournalHandle::new(store, Arc::new(Mutex::new(graph))))
+    let exists = session_head_row_exists(store.as_ref(), session_id).map_err(journal_err)?;
+    if resume && exists {
+        let graph = RedbSessionGraph::reopen(Arc::clone(&store), session_id).map_err(journal_err)?;
+        Ok(JournalHandle::resumed(store, Arc::new(Mutex::new(graph))))
+    } else {
+        let graph = RedbSessionGraph::open_new(Arc::clone(&store), session_id).map_err(journal_err)?;
+        Ok(JournalHandle::new(store, Arc::new(Mutex::new(graph))))
+    }
 }
 
 /// Opens an existing journal + session graph for read-only operations by `session_id`.

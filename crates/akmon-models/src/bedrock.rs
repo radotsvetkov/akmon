@@ -217,11 +217,9 @@ impl BedrockBackend {
         secret_access_key: String,
         session_token: Option<String>,
     ) -> Self {
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = crate::http_client::build_http_client(10, 300).unwrap_or_else(|e| {
+            panic!("bedrock HTTP client: {e}");
+        });
         let name_buf = format!("bedrock/{model_id}");
         let context_window = infer_context_window_tokens(&model_id);
         Self {

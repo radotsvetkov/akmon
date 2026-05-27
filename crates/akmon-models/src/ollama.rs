@@ -257,14 +257,9 @@ impl OllamaBackend {
 }
 
 fn build_http_client() -> reqwest::Client {
-    match reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(120))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => reqwest::Client::new(),
-    }
+    crate::http_client::build_http_client(5, 120).unwrap_or_else(|e| {
+        panic!("ollama HTTP client: {e}");
+    })
 }
 
 fn map_reqwest_send_error(e: reqwest::Error) -> ModelError {

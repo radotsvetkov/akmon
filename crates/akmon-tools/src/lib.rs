@@ -18,6 +18,7 @@ mod output;
 mod patch;
 mod read_file;
 mod read_spec;
+mod schema_validate;
 mod search;
 #[cfg(feature = "semantic-index")]
 mod semantic_search;
@@ -41,6 +42,7 @@ pub use output::{ToolErrorCode, ToolOutput};
 pub use patch::{PatchTool, patch_write_relative_paths};
 pub use read_file::{DEFAULT_MAX_READ_BYTES, ReadFileTool};
 pub use read_spec::ReadSpecTool;
+pub use schema_validate::validate_tool_arguments;
 pub use search::{DEFAULT_MAX_SEARCH_FILE_BYTES, DEFAULT_MAX_SEARCH_RESULTS, SearchTool};
 #[cfg(feature = "semantic-index")]
 pub use semantic_search::SemanticSearchTool;

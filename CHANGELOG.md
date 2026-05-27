@@ -28,6 +28,16 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **Tool repeat-limit FSM:** emit `ToolCallCompleted { success: false }` from `Thinking` when the `read_file` / `list_directory` repeat guard fires, avoiding an `InvalidTransition` crash that exited the session with code 1 (reported in [#1](https://github.com/radotsvetkov/akmon/issues/1)).
+- **Session resume:** reopen existing journal graphs on `-c` / `--continue-last` instead of failing with `session already exists`; skip duplicate `SessionStart` on resume; restore agent model context in the TUI.
+- **Repeat-limit evidence:** align tool-result payload with FSM event (`success: false`) so metrics and model transcript match journal/UI.
+- **Tool dispatch:** validate LLM tool arguments against each tool's JSON Schema before execution (including MCP proxies).
+- **Mid-batch tool failures:** reset parallel-tool state and transition to `Failed` instead of leaving the session stuck in `ToolExecution`.
+- **FSM drift:** handle `AwaitingConfirmation + Error(SessionFailed)` and `Summarizing + Error` in `next_state_after`.
+- **Git tool:** sandbox-validate paths for `diff` / `log` / `show`; block repo-escape flags; resolve auto-commit paths through the sandbox.
+- **HTTP clients:** remove timeout-less `reqwest::Client::new()` fallbacks in model backends.
+- **Config load:** warn when `~/.akmon/config.toml` is invalid instead of silently using defaults.
+- **Config wiring:** apply `default_model`, `ollama_url`, and enabled `[[mcp]]` entries from `~/.akmon/config.toml` (CLI flags still override non-default values).
+- **Secrets in Debug:** redact API keys in `LlmConnectConfig` debug output.
 
 ### Changed
 
