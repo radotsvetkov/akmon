@@ -1,6 +1,6 @@
 # Tutorial: Local-first developer flow (Ollama)
 
-Documented for Akmon `2.0.0`.
+Documented for Akmon `2.1.0`.
 
 Time estimate: 15-20 minutes  
 Complexity: Beginner
@@ -17,7 +17,7 @@ Developers who want a fully local Akmon workflow with verifiable session evidenc
 
 ## Prerequisites
 
-1. `akmon --version` prints `2.0.0` (or your current build).
+1. `akmon --version` prints `2.1.0` (or your current build).
 2. `ollama` is installed and running.
 3. You are inside a git repository.
 

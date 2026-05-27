@@ -8,7 +8,11 @@ Akmon is intentionally not a "best autocomplete UX" product.
 It is a terminal-first control plane for AI-assisted code change work where traceability, deterministic evidence, and explicit operator control are non-negotiable.
 The core question is simple: when an auditor, reviewer, or incident responder asks what happened, can you prove it?
 
-This page explains the problem Akmon is designed to solve, the design choices behind it, what ships in v2.0.0, and where Akmon is intentionally not trying to compete.
+This page explains the problem Akmon is designed to solve, the design choices behind it, what ships in v2.x (latest **v2.1.0**), and where Akmon is intentionally not trying to compete.
+
+## v2.1.0 highlights
+
+On top of the v2.0.0 evidence substrate (unchanged AGEF v0.1.1), v2.1.0 closes several production gaps: journal-backed session resume, repeat-limit FSM crash fix, JSON Schema validation before tool dispatch, config.toml wiring for model/Ollama/MCP/deadlines, and git/config hardening. See [release notes](./releases/v2.1.0.md).
 
 ## The problem Akmon was built to solve
 

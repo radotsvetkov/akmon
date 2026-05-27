@@ -1,6 +1,6 @@
 # Tutorial: Example projects for regulated teams
 
-Documented for Akmon `2.0.0`.
+Documented for Akmon `2.1.0`.
 
 Time estimate: 25-35 minutes  
 Complexity: Intermediate

@@ -1,6 +1,6 @@
 # Evidence Artifact
 
-Documented for Akmon `2.0.0`.
+Documented for Akmon `2.1.0`.
 
 ## Who this is for
 

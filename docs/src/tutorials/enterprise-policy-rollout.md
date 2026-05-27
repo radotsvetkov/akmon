@@ -1,6 +1,6 @@
 # Tutorial: Enterprise policy profile rollout
 
-Documented for Akmon `2.0.0`.
+Documented for Akmon `2.1.0`.
 
 Time estimate: 30-40 minutes  
 Complexity: Advanced

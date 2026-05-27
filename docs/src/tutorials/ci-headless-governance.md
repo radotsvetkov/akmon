@@ -1,6 +1,6 @@
 # Tutorial: CI headless governance flow
 
-Documented for Akmon `2.0.0`.
+Documented for Akmon `2.1.0`.
 
 Time estimate: 20-30 minutes  
 Complexity: Intermediate

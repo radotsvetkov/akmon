@@ -1,6 +1,6 @@
 # Example: REST API with Rust + Axum
 
-Documented for Akmon `2.0.0`.
+Documented for Akmon `2.1.0`.
 
 End-to-end pattern: **plan → scaffold → implement in layers → test**.
 

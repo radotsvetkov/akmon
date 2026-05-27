@@ -40,9 +40,11 @@ Akmon records every prompt, model response, tool call, and file change as a cont
 
 Akmon is built for aerospace (DO-178C tool qualification), medical devices (IEC 62304), automotive (ISO 26262), finance (SOC 2 evidence), defense (CMMC), and any environment where code review is a regulatory requirement rather than a cultural preference. If "the AI did it" is not an acceptable explanation, Akmon is for you.
 
-## What's in v2.0.0
+## What's in v2.x
 
-v2.0.0 ships ten commands organized around the session lifecycle: `run` for normal agent sessions, `replay` for deterministic re-execution against recorded providers and tools, `diff` for structural and field-level session comparison, `inspect` for examining session contents, `bundle` for portable AGEF archives, `redact` for compliance-driven content removal, `audit` for cryptographic chain verification, `evidence` for compliance artifact generation, `verify` for integrity checks, and `doctor` for environment diagnostics. Plus policy profiles, MCP governance, and local model support carried forward from the 1.x line.
+**Latest: [v2.1.0](https://github.com/radotsvetkov/akmon/releases/tag/v2.1.0)** — stability release: session resume, repeat-limit crash fix, tool schema validation, config.toml wiring, git sandbox hardening, and scout/diff dry-run workflows. See [release notes](https://radotsvetkov.github.io/akmon/docs/releases/v2.1.0.html).
+
+**v2.0.0** shipped ten commands organized around the session lifecycle: `run` for normal agent sessions, `replay` for deterministic re-execution against recorded providers and tools, `diff` for structural and field-level session comparison, `inspect` for examining session contents, `bundle` for portable AGEF archives, `redact` for compliance-driven content removal, `audit` for cryptographic chain verification, `evidence` for compliance artifact generation, `verify` for integrity checks, and `doctor` for environment diagnostics. Plus policy profiles, MCP governance, and local model support carried forward from the 1.x line.
 
 ## Quickstart
 
@@ -84,7 +86,7 @@ akmon slo trend .akmon/evidence/<session-id>.json --baseline-dir .akmon/evidence
 
 ## Session evidence format (AGEF)
 
-Akmon's session records conform to the [AGEF specification](https://github.com/radotsvetkov/agef), a portable, content-addressed, tamper-evident format for AI agent session evidence. Akmon v2.0.0 implements AGEF v0.1.1 and produces bundles intended to be verifiable and portable across environments.
+Akmon's session records conform to the [AGEF specification](https://github.com/radotsvetkov/agef), a portable, content-addressed, tamper-evident format for AI agent session evidence. Akmon v2.1.0 implements AGEF v0.1.1 and produces bundles intended to be verifiable and portable across environments.
 
 ## Enterprise policy profiles
 

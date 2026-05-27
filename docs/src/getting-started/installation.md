@@ -1,6 +1,6 @@
 # Installation
 
-Documented for Akmon `2.0.0`.
+Documented for Akmon `2.1.0`.
 
 ## Who this is for
 
@@ -83,7 +83,7 @@ sudo curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/downloa
 **Verify**
 ```bash
 akmon --version
-# e.g. akmon 2.0.0
+# e.g. akmon 2.1.0
 ```
 
 2. If binary install fails, build from source.

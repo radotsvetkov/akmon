@@ -19,6 +19,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-05-28
+
+Stability and operator-experience release on top of the v2.0.0 evidence substrate. No AGEF, bundle-format, or `EventKind` changes.
+
 ### Added
 
 - **Diff trust dry-run:** `patch`, `apply_patch`, `edit`, and `write_file` now support `dry_run` validation mode that computes full diffs without mutating files.
