@@ -265,8 +265,9 @@ async fn build_agent_session(
         model_estimates: config.model_estimates.clone(),
     };
 
-    let journal = open_or_resume_default_journal_handle(agent_config.session_id, config.journal_resume)
-        .map_err(|e| format!("journal: {e}"))?;
+    let journal =
+        open_or_resume_default_journal_handle(agent_config.session_id, config.journal_resume)
+            .map_err(|e| format!("journal: {e}"))?;
     let mut session = AgentSession::new(
         agent_config,
         Arc::clone(&policy),

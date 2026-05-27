@@ -120,10 +120,12 @@ pub fn open_or_resume_default_journal_handle(
     let store = Arc::new(store);
     let exists = session_head_row_exists(store.as_ref(), session_id).map_err(journal_err)?;
     if resume && exists {
-        let graph = RedbSessionGraph::reopen(Arc::clone(&store), session_id).map_err(journal_err)?;
+        let graph =
+            RedbSessionGraph::reopen(Arc::clone(&store), session_id).map_err(journal_err)?;
         Ok(JournalHandle::resumed(store, Arc::new(Mutex::new(graph))))
     } else {
-        let graph = RedbSessionGraph::open_new(Arc::clone(&store), session_id).map_err(journal_err)?;
+        let graph =
+            RedbSessionGraph::open_new(Arc::clone(&store), session_id).map_err(journal_err)?;
         Ok(JournalHandle::new(store, Arc::new(Mutex::new(graph))))
     }
 }

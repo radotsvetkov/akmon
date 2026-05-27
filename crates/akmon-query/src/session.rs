@@ -2063,7 +2063,9 @@ Complete and verify the current file(s), then continue in the next turn.";
                                 let decision = match decision {
                                     Ok(d) => d,
                                     Err(e) => {
-                                        return self.fail_tool_batch(event_tx, e.to_string(), task).await;
+                                        return self
+                                            .fail_tool_batch(event_tx, e.to_string(), task)
+                                            .await;
                                     }
                                 };
                                 self.audit_log.push(decision.audit.clone());
@@ -2770,8 +2772,7 @@ Complete and verify the current file(s), then continue in the next turn.";
             (
                 AgentState::Summarizing { .. },
                 AgentEvent::Error {
-                    error:
-                        err @ (AgentError::SessionFailed { .. } | AgentError::ModelError { .. }),
+                    error: err @ (AgentError::SessionFailed { .. } | AgentError::ModelError { .. }),
                     recoverable,
                 },
             ) => Ok(AgentState::Failed {

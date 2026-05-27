@@ -11,10 +11,7 @@ pub fn validate_tool_arguments(schema: &JsonValue, args: &JsonValue) -> Result<(
         return Ok(());
     }
     let validator = Validator::new(schema).map_err(|e| format!("invalid tool schema: {e}"))?;
-    let errors: Vec<String> = validator
-        .iter_errors(args)
-        .map(|e| e.to_string())
-        .collect();
+    let errors: Vec<String> = validator.iter_errors(args).map(|e| e.to_string()).collect();
     if errors.is_empty() {
         Ok(())
     } else {

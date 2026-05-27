@@ -48,9 +48,8 @@ use akmon_models::{
 };
 use akmon_query::{
     AgentSession, SessionRunExit, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
-    ToolCallSummary, default_journal_dir, journal_contains_session,
-    open_or_resume_default_journal_handle,
-    open_journal_read_only, write_handoff_file,
+    ToolCallSummary, default_journal_dir, journal_contains_session, open_journal_read_only,
+    open_or_resume_default_journal_handle, write_handoff_file,
 };
 #[cfg(feature = "semantic-index")]
 use akmon_tools::SemanticSearchTool;
@@ -2855,10 +2854,9 @@ fn resolve_replay_persist_journal_dir(
         return Ok(None);
     }
     let _ = source_journal_dir;
-    persist_to.ok_or_else(|| {
-        "--persist requires --persist-to <path> (enforced at parse time)".into()
-    })
-    .map(Some)
+    persist_to
+        .ok_or_else(|| "--persist requires --persist-to <path> (enforced at parse time)".into())
+        .map(Some)
 }
 
 const REPLAY_HUMAN_DIVERGENCE_CAP: usize = 10;
@@ -6907,12 +6905,13 @@ async fn main() -> ExitCode {
         &akmon_content,
     );
 
-    let journal = match open_or_resume_default_journal_handle(agent_config.session_id, journal_resume) {
-        Ok(j) => j,
-        Err(e) => {
-            exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
-        }
-    };
+    let journal =
+        match open_or_resume_default_journal_handle(agent_config.session_id, journal_resume) {
+            Ok(j) => j,
+            Err(e) => {
+                exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
+            }
+        };
     let mut session = match AgentSession::new(
         agent_config,
         Arc::clone(&policy),

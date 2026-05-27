@@ -117,9 +117,7 @@ pub struct LlmConnectConfig {
 }
 
 fn mask_secret(opt: &Option<String>) -> Option<&'static str> {
-    opt.as_ref()
-        .filter(|s| !s.is_empty())
-        .map(|_| "<redacted>")
+    opt.as_ref().filter(|s| !s.is_empty()).map(|_| "<redacted>")
 }
 
 impl std::fmt::Debug for LlmConnectConfig {
@@ -132,7 +130,10 @@ impl std::fmt::Debug for LlmConnectConfig {
             .field("openai_api_key", &mask_secret(&self.openai_api_key))
             .field("groq_api_key", &mask_secret(&self.groq_api_key))
             .field("azure_openai_endpoint", &self.azure_openai_endpoint)
-            .field("azure_openai_api_key", &mask_secret(&self.azure_openai_api_key))
+            .field(
+                "azure_openai_api_key",
+                &mask_secret(&self.azure_openai_api_key),
+            )
             .field("azure_api_version", &self.azure_api_version)
             .field("bedrock_explicit", &self.bedrock_explicit)
             .field("aws_region", &self.aws_region)
