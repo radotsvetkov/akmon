@@ -87,7 +87,8 @@ pub fn validate_transition(from: &AgentState, event: &AgentEvent) -> Result<(), 
         // Thinking + tool path
         (AgentState::Thinking { .. }, AgentEvent::ToolCallDispatched { .. }) => Ok(()), // → ToolExecution
 
-        // Thinking + tool outcome without dispatch (unknown tool, policy block, etc.)
+        // Thinking + tool outcome without dispatch (unknown tool, policy block, repeat-limit nudge).
+        // success: true is illegal here — a successful completion requires ToolExecution first.
         (AgentState::Thinking { .. }, AgentEvent::ToolCallCompleted { success: false, .. }) => {
             Ok(())
         }
@@ -551,6 +552,24 @@ mod tests {
                 &AgentEvent::IterationStarted { n: 2, max: 25 }
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn illegal_thinking_tool_completed_success_true_without_dispatch() {
+        let r = validate_transition(
+            &thinking(0),
+            &AgentEvent::ToolCallCompleted {
+                id: "1".into(),
+                name: "read_file".into(),
+                success: true,
+                message: "You have called read_file 5 times already.".into(),
+            },
+        );
+        assert!(
+            r.is_err(),
+            "ToolCallCompleted {{ success: true }} from Thinking must be illegal \
+             — tool was never dispatched through ToolExecution"
         );
     }
 }

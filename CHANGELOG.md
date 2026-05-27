@@ -24,6 +24,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Diff trust dry-run:** `patch`, `apply_patch`, `edit`, and `write_file` now support `dry_run` validation mode that computes full diffs without mutating files.
 - **Context Scout Dossier:** new bounded `akmon scout` read-only workflow produces deterministic `context_scout.v1` JSON dossiers for planning/CI usage.
 
+### Fixed
+
+- **Tool repeat-limit FSM:** emit `ToolCallCompleted { success: false }` from `Thinking` when the `read_file` / `list_directory` repeat guard fires, avoiding an `InvalidTransition` crash that exited the session with code 1 (reported in [#1](https://github.com/radotsvetkov/akmon/issues/1)).
+
 ### Changed
 
 - **File diff payload contract:** file-modifying tools now return a stabilized `file_change_set` payload with explicit `type`, `mode` (`applied` or `dry_run`), canonical `changes[]`, aggregate `summary`, and `risk` classification.

@@ -1656,7 +1656,8 @@ Complete and verify the current file(s), then continue in the next turn.";
                     AgentEvent::ToolCallCompleted {
                         id: id.clone(),
                         name: name.clone(),
-                        success: true,
+                        // false: tool never dispatched; Thinking + success:true is illegal FSM.
+                        success: false,
                         message: msg.clone(),
                     },
                     task,
