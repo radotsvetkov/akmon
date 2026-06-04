@@ -11,12 +11,13 @@
 - Not a prompt to paste into Cursor. It's a planning document. Cursor reads it as context; your existing Cursor system prompt drives the interaction style.
 - Not a timeline. Estimates are rough (8–10 focused weeks, but you set pace).
 - Not a marketing plan. Positioning only. Marketing is downstream of shipped code.
-**Document version:** 1.3 — June 2026
+**Document version:** 1.4 — June 2026
 **Revision history:**
 - v1.0 (April 2026) — Initial document.
 - v1.1 (April 2026) — Adds D-16, D-17, Item 6.10 in response to repositioning audit findings A and B (`docs/repositioning-audit.md`). No prior decisions altered.
 - v1.2 (May 2026) — Adds Item 4.3 design decisions (F1-F12), renames bundle commands to `akmon bundle ...`, and corrects D-02 manifest serialization wording to align with AGEF v0.1.1 §6.
 - v1.3 (June 2026) — Reconciles §4 and §6.8 with shipped reality: Item 6.10 (akmon-core legacy retirement) is reclassified from a v2.0.0 release gate to tracked post-v2.x debt, because v2.0.0 and v2.1.0 shipped with the legacy audit/evidence surface coexisting with the journal substrate. Coexistence is now explicitly accepted and documented (product-owner ruling) rather than a silent gate bypass. No LOCKED positioning (§1–§3) altered; no substrate invariant altered.
+- v1.4 (June 2026) — Completes D-05 with **D-18: native session signing** (offline-first OpenPGP/x509), and specifies the corresponding **AGEF v0.1.2** additive substrate change (optional `manifest.signatures[]`). Product-owner ruling: "offline GPG/x509 first" (no keyless/Sigstore; transparency-log anchoring deferred). This is a substrate-level change (bundle/manifest format) authorized by this revision per `02-substrate-invariants.mdc`; the canonical AGEF spec in `radotsvetkov/agef` must be updated in lockstep (S10). One sub-decision (S9, crypto backend / dependency) is left OPEN pending explicit approval before implementation, per the no-silent-dependency rule. No LOCKED positioning (§1–§3) altered.
 ---
  
 # Layer 1 — Locked positioning
@@ -335,6 +336,45 @@ AttemptRecord {
 This sub-decision is deferred to Phase 2 design (Item 2.1's design step). The choice between 2a/2b/2c happens during the design conversation in Prompt 2.1, where the actual code shapes are visible.
  
 **Continuation retries (`StopReason::MaxTokens`).** Session-level continuations are a *different* mechanism from rate-limit retries. They are user-relevant but do not belong in the `attempts` array — they are logically distinct provider calls that produce additional content. Each continuation produces its own ProviderCall event in the session graph. This is the existing model; no change required.
+
+### §5.18 Decision D-18: Native session signing — **LOCKED direction: offline-first OpenPGP/x509; one OPEN sub-decision (S9)**
+
+*Added in v1.4. Completes D-05 ("native signing v2.1"). Product-owner ruling: offline GPG/x509 first — no keyless/Sigstore, no transparency-log anchoring in this step.*
+
+**Context.** D-05 shipped tamper-evidence (the merkle hash chain) plus a configurable post-session signing **hook** (`SigningConfig`: an external command receiving `{head}`/`{session_id}`), and `akmon sign` invokes it. That makes signing *possible* but not *native*: there is no built-in signature production, and a bundle carries no signature, so the artifact that leaves the machine is tamper-evident but not independently *attributable*. The improvement plan's highest-leverage gap (§C.1.1, "logs vs. evidence") is closing exactly this: a detached signature over the session head turns a self-produced log into a third-party-verifiable attestation. D-18 specifies native signing as an **additive** layer (a sidecar for the journal, an optional manifest field for bundles) that does not touch the merkle core.
+
+**Design decisions (S1–S10).**
+
+1. **S1 — Signing target.** Sign a domain-separated *signing statement* over the **session head hash** (the canonical session identifier; it commits to the entire event/object DAG). Signing a statement rather than the bare head hex provides domain separation (a signature cannot be replayed as if it covered a different session, algorithm, or protocol).
+2. **S2 — Statement format (`AGEF-SIG-v1`).** A canonical UTF-8 byte string, fixed field order, LF-terminated:
+   ```
+   AGEF-SIG-v1
+   agef_version:0.1.2
+   hash_algorithm:<sha256|blake3>
+   session_id:<uuid>
+   head:<lowercase-hex>
+   ```
+   The `AGEF-SIG-v1` tag versions the statement independently of the bundle.
+3. **S3 — Schemes (offline-first).** `openpgp-detached` (OpenPGP detached signature) ships first; `x509-cms` (detached CMS/PKCS#7) is reserved as the enterprise option and MAY land in the same minor. Explicitly **excluded** here (per the ruling): keyless/Sigstore and any network/transparency-log dependency — those conflict with the air-gap story and are a later additive layer (improvement plan Track 1 P1).
+4. **S4 — Manifest schema (AGEF v0.1.2, additive).** `manifest.json` gains an OPTIONAL `signatures` array; absence ⇒ unsigned (fully backward compatible — existing readers already tolerate unknown manifest fields via the flattened `extra` map). Each entry:
+   ```json
+   { "scheme": "openpgp-detached", "key_id": "<fingerprint>",
+     "statement_version": "AGEF-SIG-v1", "signature": "<base64>",
+     "created_at": "<rfc3339>" }
+   ```
+5. **S5 — Signatures are outside the event hash chain.** Like all manifest metadata (D-02), signatures are *not* part of any event hash. They sign the head — the chain root — so they authenticate the whole chain without being inside it. Adding or counter-signing never mutates the head or any event/object hash; multiple signatures (counter-signing) are allowed.
+6. **S6 — Verification semantics.** Integrity verification (object re-hash, chain re-walk, head/closure — the existing path) runs first and is **independent** of signatures. Then, if `signatures` is present and the verifier was given a trusted public key (`--verify-key`), each signature is checked against the reconstructed `AGEF-SIG-v1` statement and reported per-signature. Rules: present key + valid sig ⇒ verified; present key + invalid sig ⇒ **hard failure (exit 1)**; signatures present but no key ⇒ "signed, not verified (no key provided)" (not a failure); `--require-signature` makes absent-or-unverified a failure.
+7. **S7 — Key trust model (v0.1.2).** Out-of-band public-key distribution: the verifier supplies the trusted key(s). No PKI chain building, no web-of-trust, no transparency log in this step — documented explicitly as the v0.1.2 trust boundary. Existence-at-time anchoring (Rekor / RFC-3161 TSA) is a separate additive layer.
+8. **S8 — CLI surface.** `akmon sign <session-id> --scheme openpgp --key <key-id>` produces a native detached signature over the statement and records it (journal: a `signatures` sidecar; bundle: embedded in `manifest.signatures[]` at export, plus `akmon bundle sign <bundle> --key …` to sign an existing bundle). The existing hook-based `akmon sign` (`SigningConfig`, e.g. cosign) is retained unchanged as the generic escape hatch. `akmon bundle verify <bundle> [--verify-key <pub>] [--require-signature]` and `agef-verify <bundle> [--verify-key <pub>] [--require-signature]` gain signature verification.
+9. **S9 — Crypto backend / dependency — *OPEN, requires explicit approval before implementation* (no-silent-dependency rule).** Options:
+   - **(a) Shell out to system `gpg` / `openssl`** — zero new Rust dependencies; runtime dependency on those binaries; consistent with the existing hook philosophy and the local-first/offline thesis. *Recommended for v0.1.2.*
+   - **(b) Pure-Rust OpenPGP (`sequoia-openpgp`)** — no external binary; large dependency/build surface; strongest in-process correctness.
+   - **(c) Minimal pure-Rust (`pgp` / `rsa` / `ed25519-dalek`)** — lighter than sequoia; more glue code.
+   The recommendation is **(a)** (smallest substrate footprint, no dependency-review burden, matches the air-gap story). The choice is deferred to an explicit ruling before code lands, per `99-non-negotiable` / `04-v2-scope-discipline`.
+10. **S10 — AGEF spec coordination.** AGEF v0.1.2 is a minor/additive bump (no breaking change; v0.1.1 readers still read v0.1.2 bundles, ignoring `signatures`). The canonical spec in `radotsvetkov/agef` MUST be updated in lockstep with implementation: revise the §A.3 non-goal, add `signatures` to the §A.5 manifest, add a signing + verification section, and bump §A.11. Appendix A of this document carries the seed (see A.5/A.14/A.11 below).
+
+**Implementation sequencing (after S9 is ruled).** Suggested order, each behind the standard fmt+clippy+test gate: (1) `AGEF-SIG-v1` statement builder + `ManifestSignature` type in `akmon-bundle` (additive, `Option`), bump `AGEF_SPEC_VERSION` to `0.1.2`; (2) signature *verification* in `akmon-bundle` + wire into `akmon bundle verify` and `agef-verify` (verify before produce — lets us test against fixtures); (3) native signature *production* via the chosen backend + `akmon sign --scheme`/`akmon bundle sign`; (4) docs + AGEF spec repo update (S10); (5) a `produce → sign → verify-with-non-Akmon-tool` integration test (improvement-plan success metric F.1).
+
  
 ---
  
@@ -964,7 +1004,7 @@ AGEF exists because AI agent sessions are increasingly consequential and existin
 ## A.3 Non-goals
  
 - Not an agent runtime specification.
-- Not a signature/cryptographic identity standard. Signing is out-of-scope for v0.1; expected in v0.2 via plugin standards like cosign.
+- Not a full signature/cryptographic-identity *standard*. AGEF v0.1.2 adds an OPTIONAL detached-signature envelope over the session head (`manifest.signatures[]`; see §A.14). It does not mandate a PKI, a key-distribution mechanism, or a transparency log. Keyless/Sigstore signing and existence-at-time anchoring remain out of scope for the v0.1.x line (offline-first, per decision D-18).
 - Not a model behavior certification.
 ## A.4 Format structure
  
@@ -995,6 +1035,22 @@ objects/<hex>             — one file per content-addressed blob
   "object_count": <integer>,
   "event_count": <integer>
 }
+```
+
+**AGEF v0.1.2 (additive):** `manifest.json` MAY carry an optional `signatures` array. Absence means
+unsigned; presence does not change any event or object hash (signatures cover the session head, not
+the chain interior — see §A.14). Older v0.1.x readers ignore the field.
+
+```json
+"signatures": [
+  {
+    "scheme": "openpgp-detached",
+    "key_id": "<signer fingerprint / key id>",
+    "statement_version": "AGEF-SIG-v1",
+    "signature": "<base64 detached signature bytes>",
+    "created_at": "<rfc3339>"
+  }
+]
 ```
  
 ## A.6 Event structure
@@ -1049,7 +1105,7 @@ A bundle passes verification when all events' computed hashes match their claime
  
 ## A.11 Versioning
  
-- v0.x — pre-stable; breaking changes allowed.
+- v0.x — pre-stable; breaking changes allowed. Within v0.1: v0.1.1 fixed the event wire framing; v0.1.2 adds the OPTIONAL `manifest.signatures[]` envelope (§A.14) — additive only, so v0.1.1 readers still read v0.1.2 bundles (ignoring the field).
 - v1.0 — first stable major. Bundles produced against v1.0 readable by all v1.x readers.
 - v2.0 — next breaking major. v1.x bundles MAY be readable by v2.x tools with explicit opt-in.
 ## A.12 Governance
@@ -1059,6 +1115,46 @@ Currently held by Rado Tsvetkov as benevolent dictator (per D-08). Intent to tra
 ## A.13 License
  
 SPEC.md and all normative AGEF documentation are licensed CC BY 4.0. Reference implementations licensed per producing project.
+
+## A.14 Signing & verification (v0.1.2, OPTIONAL)
+
+AGEF v0.1.2 defines an OPTIONAL detached-signature envelope so a session's *attributability* can be
+checked by a third party, independently of the producer. Signing is additive: it never alters the
+event hash chain, the object store, or any content hash.
+
+**Signed statement (`AGEF-SIG-v1`).** Signers do not sign the bare head hash; they sign a canonical,
+domain-separated UTF-8 statement (fixed field order, LF line endings, no trailing whitespace):
+
+```
+AGEF-SIG-v1
+agef_version:0.1.2
+hash_algorithm:<sha256|blake3>
+session_id:<uuid>
+head:<lowercase-hex-of-session-head>
+```
+
+The statement binds the signature to a specific session, hash algorithm, and head, preventing reuse
+of a signature outside its intended context.
+
+**Schemes.** v0.1.2 defines `openpgp-detached` (an OpenPGP detached signature over the statement
+bytes). `x509-cms` (detached CMS/PKCS#7) is reserved. Keyless/transparency-log schemes are out of
+scope for v0.1.x.
+
+**Placement.** Signatures live in `manifest.signatures[]` (§A.5). Because the head already commits
+to the entire DAG, a single signature authenticates the whole session; multiple entries allow
+counter-signing. Signatures are manifest metadata and are excluded from event hashing.
+
+**Verification procedure (extends §A.10).** After the §A.10 integrity checks pass, a verifier given
+one or more trusted public keys: for each `signatures[]` entry, reconstructs the `AGEF-SIG-v1`
+statement from the manifest's `agef_version`, `hash_algorithm`, `session.id`, and `session.head`,
+then verifies the signature under the named scheme. A present-and-valid signature is "verified"; a
+present key with an invalid signature is a hard failure; signatures present with no key available
+are reported as "unverified" (integrity is still established). Verifiers MAY offer a
+`require-signature` mode that treats absent/unverified signatures as failure.
+
+**Trust model (v0.1.2).** Public keys are distributed out of band; AGEF does not specify a PKI,
+web-of-trust, or transparency log. Existence-at-time anchoring (e.g., RFC-3161 / Rekor) is a future
+additive layer.
  
 ---
  
