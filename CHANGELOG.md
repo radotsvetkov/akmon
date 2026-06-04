@@ -19,6 +19,10 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`spawn_subagent` is gated off by default.** Multi-agent orchestration is an explicit non-goal of Akmon's thesis (decision document §1.2 / §3.4: "one agent, one session, one artifact"). The `spawn_subagent` tool is no longer registered in default sessions, and the agent prompt no longer references it. Set the `AKMON_EXPERIMENTAL_SUBAGENTS` environment variable to a truthy value (`1`, `true`, `yes`, or `on`) to opt the current process into the unsupported, experimental capability. This aligns the shipped tool surface with the locked thesis; the experimental flag is intentionally not part of `config.toml`.
+
 ## [2.1.0] - 2026-05-28
 
 Stability and operator-experience release on top of the v2.0.0 evidence substrate. No AGEF, bundle-format, or `EventKind` changes.

@@ -150,37 +150,42 @@ fn attach_specs_subagent_tools(
     if !plan_mode {
         tools.push(Box::new(WriteSpecTool::new()));
     }
-    let shell_allow = cfg.shell_allow.clone();
-    let web_fetch = cfg.web_fetch;
-    let has_git = cfg.sandbox_has_git_root;
-    #[cfg(feature = "semantic-index")]
-    let semantic = cfg.semantic_index.clone();
-    let plan_for_sub = plan_mode;
-    let factory: SubagentToolFactory = Arc::new(move || {
+    // Multi-agent orchestration is an explicit non-goal (decision doc §1.2/§3.4: "one agent,
+    // one session, one artifact"). spawn_subagent is registered only behind the experimental
+    // opt-in; default sessions never expose it.
+    if akmon_config::experimental_subagents_enabled() {
+        let shell_allow = cfg.shell_allow.clone();
+        let web_fetch = cfg.web_fetch;
+        let has_git = cfg.sandbox_has_git_root;
         #[cfg(feature = "semantic-index")]
-        {
-            build_tool_registry(
-                &shell_allow,
-                web_fetch,
-                semantic.clone(),
-                has_git,
-                plan_for_sub,
-            )
-        }
-        #[cfg(not(feature = "semantic-index"))]
-        {
-            build_tool_registry(&shell_allow, web_fetch, has_git, plan_for_sub)
-        }
-    });
-    let rt = Arc::new(SubagentRuntime {
-        provider: Arc::clone(provider),
-        sandbox: Arc::clone(sandbox),
-        akmon_md: akmon_md.clone(),
-        plan_mode,
-        confirmation_timeout_secs: 30,
-        tool_factory: factory,
-    });
-    tools.push(Box::new(SpawnSubagentTool::new(rt)));
+        let semantic = cfg.semantic_index.clone();
+        let plan_for_sub = plan_mode;
+        let factory: SubagentToolFactory = Arc::new(move || {
+            #[cfg(feature = "semantic-index")]
+            {
+                build_tool_registry(
+                    &shell_allow,
+                    web_fetch,
+                    semantic.clone(),
+                    has_git,
+                    plan_for_sub,
+                )
+            }
+            #[cfg(not(feature = "semantic-index"))]
+            {
+                build_tool_registry(&shell_allow, web_fetch, has_git, plan_for_sub)
+            }
+        });
+        let rt = Arc::new(SubagentRuntime {
+            provider: Arc::clone(provider),
+            sandbox: Arc::clone(sandbox),
+            akmon_md: akmon_md.clone(),
+            plan_mode,
+            confirmation_timeout_secs: 30,
+            tool_factory: factory,
+        });
+        tools.push(Box::new(SpawnSubagentTool::new(rt)));
+    }
 }
 
 async fn build_agent_session(

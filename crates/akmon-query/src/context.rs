@@ -123,7 +123,6 @@ AUTONOMOUS TASK COMPLETION:\n\
 /// Three-phase workflow for large or cross-cutting work (injected with implementation-mode project context).
 pub const RESEARCH_PLAN_IMPLEMENT_WORKFLOW: &str = "\
 LARGE-TASK WORKFLOW:\n\
-Use `spawn_subagent` when understanding existing logic needs 3+ files.\n\
 Research key files, produce a short plan, then implement incrementally.\n\
 Persist durable decisions in `.akmon/specs/` with write_spec/read_spec.\n";
 
@@ -231,6 +230,13 @@ Examples of bad semantic_search queries (use search instead):\n\
         String::new()
     };
 
+    // spawn_subagent is experimental and off by default; reference it only when registered.
+    let subagent_rule = if tool_names.contains(&"spawn_subagent") {
+        "  - read_spec / spawn_subagent are read-oriented: use them to inspect `.akmon/specs/` or run a nested exploration pass.\n"
+    } else {
+        "  - read_spec is read-oriented: use it to inspect `.akmon/specs/`.\n"
+    };
+
     format!(
         "{PROJECT_CONTEXT_START}\n\
 You are an AI coding assistant running inside the Akmon agent.\n\
@@ -252,7 +258,7 @@ To work on this project in PLAN MODE:\n\
 {step_web}\
 RULES:\n\
   - Produce a written plan only; do not propose tool calls that modify the repository.\n\
-  - read_spec / spawn_subagent are read-oriented: use them to inspect `.akmon/specs/` or run a nested exploration pass.\n\
+{subagent_rule}\
   - read_file only after locating paths via semantic_search or search.\n\
   - NEVER guess file paths.\n\
 {semantic_block}\
@@ -286,6 +292,7 @@ fn format_project_context(
     let tools_line = tool_names.join(", ");
     let has_git = tool_names.contains(&"git");
     let has_shell = tool_names.contains(&"shell");
+    let has_subagent = tool_names.contains(&"spawn_subagent");
 
     let step1 = if has_semantic {
         "  STEP 1 — Understand the codebase:\n\
@@ -395,6 +402,14 @@ Examples of bad semantic_search queries\n\
         String::new()
     };
 
+    // spawn_subagent is experimental and off by default (decision doc §1.2/§3.4); only hint at
+    // it when the tool is actually registered for this session.
+    let subagent_hint = if has_subagent {
+        "For multi-file exploration, spawn_subagent runs a nested read-only research pass.\n"
+    } else {
+        ""
+    };
+
     format!(
         "{PROJECT_CONTEXT_START}\n\
 You are an AI coding assistant \n\
@@ -407,7 +422,8 @@ Available tools: {tools_line}\n\
 \n\
 {AUTONOMOUS_TASK_COMPLETION}\n\
 \n\
-{RESEARCH_PLAN_IMPLEMENT_WORKFLOW}\n\
+{RESEARCH_PLAN_IMPLEMENT_WORKFLOW}\
+{subagent_hint}\
 \n\
 To work on this project:\n\
 {step1}\

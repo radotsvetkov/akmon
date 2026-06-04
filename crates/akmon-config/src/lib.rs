@@ -362,10 +362,48 @@ pub fn append_akmon_gitignore_line(cwd: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Name of the environment variable that opts a session into the experimental
+/// `spawn_subagent` capability.
+pub const EXPERIMENTAL_SUBAGENTS_ENV: &str = "AKMON_EXPERIMENTAL_SUBAGENTS";
+
+/// Returns whether the experimental, off-by-default `spawn_subagent` capability is enabled.
+///
+/// Multi-agent orchestration is an explicit non-goal of Akmon's thesis (decision document
+/// §1.2 / §3.4: "one agent, one session, one artifact"). The `spawn_subagent` tool is therefore
+/// not registered in default builds. Setting [`EXPERIMENTAL_SUBAGENTS_ENV`] to a truthy value
+/// (`1`, `true`, `yes`, or `on`, case-insensitive) opts the current process into the unsupported,
+/// out-of-thesis capability for experimentation. The flag is intentionally an environment
+/// variable rather than a `config.toml` field to keep it out of the supported configuration
+/// surface.
+pub fn experimental_subagents_enabled() -> bool {
+    std::env::var(EXPERIMENTAL_SUBAGENTS_ENV)
+        .ok()
+        .is_some_and(|v| is_truthy_flag(&v))
+}
+
+/// Parses a boolean opt-in flag: truthy for `1` / `true` / `yes` / `on` (case-insensitive,
+/// surrounding whitespace ignored); everything else is false.
+fn is_truthy_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn experimental_subagents_flag_parsing() {
+        for v in ["1", "true", "TRUE", " Yes ", "on", "On"] {
+            assert!(is_truthy_flag(v), "{v:?} should be truthy");
+        }
+        for v in ["", "0", "false", "no", "off", "maybe", "2"] {
+            assert!(!is_truthy_flag(v), "{v:?} should be falsy");
+        }
+    }
 
     #[test]
     fn first_token_deadline_ms_roundtrip_in_toml() {

@@ -4111,28 +4111,33 @@ fn cli_attach_specs_subagent(
     if !plan_mode {
         tools.push(Box::new(WriteSpecTool::new()));
     }
-    let shell_allow = cli.shell_allow.clone();
-    let web_fetch = cli.web_fetch;
-    let semantic = semantic_parts.clone();
-    let plan_for_sub = plan_mode;
-    let factory: SubagentToolFactory = Arc::new(move || {
-        build_tool_registry(
-            &shell_allow,
-            web_fetch,
-            has_git_root,
-            plan_for_sub,
-            semantic.clone(),
-        )
-    });
-    let rt = Arc::new(SubagentRuntime {
-        provider: Arc::clone(provider),
-        sandbox: Arc::clone(sandbox),
-        akmon_md: akmon_md.clone(),
-        plan_mode,
-        confirmation_timeout_secs: 30,
-        tool_factory: factory,
-    });
-    tools.push(Box::new(SpawnSubagentTool::new(rt)));
+    // Multi-agent orchestration is an explicit non-goal (decision doc §1.2/§3.4: "one agent,
+    // one session, one artifact"). spawn_subagent is registered only behind the experimental
+    // opt-in; default sessions never expose it.
+    if akmon_config::experimental_subagents_enabled() {
+        let shell_allow = cli.shell_allow.clone();
+        let web_fetch = cli.web_fetch;
+        let semantic = semantic_parts.clone();
+        let plan_for_sub = plan_mode;
+        let factory: SubagentToolFactory = Arc::new(move || {
+            build_tool_registry(
+                &shell_allow,
+                web_fetch,
+                has_git_root,
+                plan_for_sub,
+                semantic.clone(),
+            )
+        });
+        let rt = Arc::new(SubagentRuntime {
+            provider: Arc::clone(provider),
+            sandbox: Arc::clone(sandbox),
+            akmon_md: akmon_md.clone(),
+            plan_mode,
+            confirmation_timeout_secs: 30,
+            tool_factory: factory,
+        });
+        tools.push(Box::new(SpawnSubagentTool::new(rt)));
+    }
 }
 
 #[cfg(not(feature = "semantic-index"))]
@@ -4149,20 +4154,25 @@ fn cli_attach_specs_subagent(
     if !plan_mode {
         tools.push(Box::new(WriteSpecTool::new()));
     }
-    let shell_allow = cli.shell_allow.clone();
-    let web_fetch = cli.web_fetch;
-    let plan_for_sub = plan_mode;
-    let factory: SubagentToolFactory =
-        Arc::new(move || build_tool_registry(&shell_allow, web_fetch, has_git_root, plan_for_sub));
-    let rt = Arc::new(SubagentRuntime {
-        provider: Arc::clone(provider),
-        sandbox: Arc::clone(sandbox),
-        akmon_md: akmon_md.clone(),
-        plan_mode,
-        confirmation_timeout_secs: 30,
-        tool_factory: factory,
-    });
-    tools.push(Box::new(SpawnSubagentTool::new(rt)));
+    // See the semantic-index variant above: spawn_subagent is an explicit non-goal, gated
+    // behind the experimental opt-in and absent from default sessions.
+    if akmon_config::experimental_subagents_enabled() {
+        let shell_allow = cli.shell_allow.clone();
+        let web_fetch = cli.web_fetch;
+        let plan_for_sub = plan_mode;
+        let factory: SubagentToolFactory = Arc::new(move || {
+            build_tool_registry(&shell_allow, web_fetch, has_git_root, plan_for_sub)
+        });
+        let rt = Arc::new(SubagentRuntime {
+            provider: Arc::clone(provider),
+            sandbox: Arc::clone(sandbox),
+            akmon_md: akmon_md.clone(),
+            plan_mode,
+            confirmation_timeout_secs: 30,
+            tool_factory: factory,
+        });
+        tools.push(Box::new(SpawnSubagentTool::new(rt)));
+    }
 }
 
 fn load_user_global_config() -> AkmonGlobalConfig {
