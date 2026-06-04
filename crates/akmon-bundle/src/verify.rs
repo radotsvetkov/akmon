@@ -116,8 +116,8 @@ impl BundleViolation {
     pub fn category(&self) -> &'static str {
         match self {
             Self::UnsupportedHashAlgorithm(_) => "unsupported_hash_algorithm",
-            Self::ObjectCountMismatch { .. } => "object_count_mismatch",
-            Self::EventCountMismatch { .. } => "event_count_mismatch",
+            Self::ObjectCountMismatch { .. } => "manifest_object_count_mismatch",
+            Self::EventCountMismatch { .. } => "manifest_event_count_mismatch",
             Self::ObjectKeyHashMismatch { .. } => "object_key_hash_mismatch",
             Self::NoEvents => "no_events",
             Self::SequenceMismatch { .. } => "sequence",
@@ -129,6 +129,28 @@ impl BundleViolation {
             Self::SessionEndNotTerminal => "session_end_not_terminal",
             Self::InvalidManifestHead { .. } => "invalid_manifest_head",
             Self::HeadMismatch { .. } => "head_mismatch",
+        }
+    }
+
+    /// Event content hash in hex when this violation refers to a specific event.
+    #[must_use]
+    pub fn event_hash_hex(&self) -> Option<String> {
+        match self {
+            Self::BrokenParentChain { .. }
+            | Self::EventContentHash { .. }
+            | Self::SequenceMismatch { .. } => None,
+            Self::MissingObject { referenced_by, .. } => Some(referenced_by.to_hex()),
+            _ => None,
+        }
+    }
+
+    /// Object hash in hex when this violation refers to a specific object.
+    #[must_use]
+    pub fn object_hash_hex(&self) -> Option<String> {
+        match self {
+            Self::ObjectKeyHashMismatch { object_hash }
+            | Self::MissingObject { object_hash, .. } => Some(object_hash.to_hex()),
+            _ => None,
         }
     }
 
@@ -545,7 +567,7 @@ mod tests {
         let mut contents = valid_bundle();
         contents.manifest.object_count = 99;
         let report = verify_bundle(&contents);
-        assert!(categories(&report).contains(&"object_count_mismatch"));
+        assert!(categories(&report).contains(&"manifest_object_count_mismatch"));
     }
 
     #[test]
@@ -553,7 +575,7 @@ mod tests {
         let mut contents = valid_bundle();
         contents.manifest.event_count = 1;
         let report = verify_bundle(&contents);
-        assert!(categories(&report).contains(&"event_count_mismatch"));
+        assert!(categories(&report).contains(&"manifest_event_count_mismatch"));
     }
 
     #[test]
