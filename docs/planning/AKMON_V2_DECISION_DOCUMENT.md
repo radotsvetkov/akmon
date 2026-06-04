@@ -11,11 +11,12 @@
 - Not a prompt to paste into Cursor. It's a planning document. Cursor reads it as context; your existing Cursor system prompt drives the interaction style.
 - Not a timeline. Estimates are rough (8–10 focused weeks, but you set pace).
 - Not a marketing plan. Positioning only. Marketing is downstream of shipped code.
-**Document version:** 1.2 — May 2026
+**Document version:** 1.3 — June 2026
 **Revision history:**
 - v1.0 (April 2026) — Initial document.
 - v1.1 (April 2026) — Adds D-16, D-17, Item 6.10 in response to repositioning audit findings A and B (`docs/repositioning-audit.md`). No prior decisions altered.
 - v1.2 (May 2026) — Adds Item 4.3 design decisions (F1-F12), renames bundle commands to `akmon bundle ...`, and corrects D-02 manifest serialization wording to align with AGEF v0.1.1 §6.
+- v1.3 (June 2026) — Reconciles §4 and §6.8 with shipped reality: Item 6.10 (akmon-core legacy retirement) is reclassified from a v2.0.0 release gate to tracked post-v2.x debt, because v2.0.0 and v2.1.0 shipped with the legacy audit/evidence surface coexisting with the journal substrate. Coexistence is now explicitly accepted and documented (product-owner ruling) rather than a silent gate bypass. No LOCKED positioning (§1–§3) altered; no substrate invariant altered.
 ---
  
 # Layer 1 — Locked positioning
@@ -119,7 +120,18 @@ Akmon is **not** for:
  
 **LOCKED.**
  
-Akmon v2.0 is shippable when all P0 items are complete, both P1 items are complete, the akmon-core cleanup pass (Item 6.10) is complete, and the following are true:
+Akmon v2.0 is shippable when all P0 items are complete, both P1 items are complete, and the following are true:
+
+> **Amendment (v1.3, June 2026) — Item 6.10 reclassified from release gate to tracked debt.**
+> As originally written, this gate also required the akmon-core cleanup pass (Item 6.10) before
+> tagging v2.0.0. In shipped reality, v2.0.0 (2026-05-06) and v2.1.0 (2026-05-28) released with
+> Item 6.10 deferred: the legacy `akmon-core` hash-chained audit/evidence/SLO surface coexists
+> with the `akmon-journal` substrate, and the user-facing `akmon audit|evidence|slo verify`
+> commands still read the legacy JSONL. This coexistence is now explicitly accepted and documented
+> (product-owner ruling, this revision) rather than treated as a silent gate bypass. The renderer
+> migration — legacy JSONL rendered from `akmon-journal` — is reclassified as tracked post-v2.x
+> debt; see §6.8. No LOCKED positioning (§1–§3) and no substrate invariant is altered by this
+> reclassification.
  
 1. A new user can run `akmon chat` against their own regulated repo, produce a session, verify its integrity, inspect it, export it to a bundle, ship the bundle to a colleague, and have the colleague import it and replay it — all without network access for anything except the model API calls the session itself made.
 2. The AGEF spec v0.1 is published in a separate repository under `radotsvetkov/agef`, referenced from Akmon's README.
@@ -871,10 +883,16 @@ Phase-level D-decisions are starting constraints, not exhaustive implementation 
 **Item 6.10 — Retire legacy audit/replay/evidence code in akmon-core**
  
 *Added in v1.1 per Decision D-16.*
+
+**Status (v1.3, June 2026): DEFERRED — tracked post-v2.x debt, not a release gate.** v2.0.0 and
+v2.1.0 shipped with the legacy `akmon-core` audit/evidence/SLO surface coexisting with the
+`akmon-journal` substrate (see the §4 v1.3 amendment). The renderer migration below remains the
+intended end state — to be scheduled deliberately — but it no longer blocks any tag, and the
+coexistence is accepted and documented rather than a silent gate bypass.
  
 Goal: Remove the legacy hash-chained audit, replay metadata, and evidence validation code from `akmon-core`. Replace with thin renderers that produce the existing JSONL format from `akmon-journal` data, preserving compatibility for any external tools that consume the legacy format.
  
-When to start: After Phase 6 (diff) is complete and before Phase 7 (release preparation) begins.
+When to start: Reclassified (v1.3) to post-v2.x; schedule deliberately, ideally alongside migrating the user-facing `akmon audit|evidence|slo` command surface to render from the journal. (Originally: after Phase 6, before Phase 7.)
  
 When done:
 - The legacy `AuditChainRecord` JSONL output is produced by a renderer over `akmon-journal`, not by direct emission from the agent loop.
@@ -885,7 +903,7 @@ Notes for Cursor:
 - This is the deletion pass promised by D-16. Treat it as serious cleanup, not a refactor sprint. Surface findings before deletion. Identify each piece of legacy code, its consumer (if any), and confirm the new renderer covers the consumer's needs before removing.
 - The renderer is a thin function: take a `SessionGraph`, walk events, produce JSONL records. It does not reproduce the *internal* hash chain; it produces the *output format* that external tools expected.
 - If any external tooling (CI scripts, dashboards) consumes the legacy JSONL, identify it before deletion and verify the renderer satisfies its contract.
-Constraint: this item is required before tagging v2.0.0. It is not optional cleanup; it closes the architectural debt D-16 deferred from Phase 1.
+Constraint (amended v1.3): originally required before tagging v2.0.0; reclassified to tracked post-v2.x debt (see Status above and the §4 amendment). It remains real architectural debt (D-16) to close deliberately, but it does not block a tag.
  
 Commit: `refactor(core): retire legacy audit/replay/evidence; render from journal (Item 6.10)`.
  
