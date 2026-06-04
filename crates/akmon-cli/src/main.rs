@@ -6755,7 +6755,7 @@ mod tests {
                     assert!(args.journal.is_none());
                     assert_eq!(args.format, bundle_cmd::BundleExportFormat::Human);
                 }
-                bundle_cmd::BundleCommands::Import(_) => panic!("expected bundle export command"),
+                _ => panic!("expected bundle export command"),
             },
             other => panic!("expected bundle export command, got {other:?}"),
         }
@@ -6787,7 +6787,7 @@ mod tests {
                     assert_eq!(args.journal, Some(PathBuf::from("/tmp/journal.redb")));
                     assert_eq!(args.format, bundle_cmd::BundleExportFormat::Json);
                 }
-                bundle_cmd::BundleCommands::Import(_) => panic!("expected bundle export command"),
+                _ => panic!("expected bundle export command"),
             },
             other => panic!("expected bundle export command, got {other:?}"),
         }
@@ -6875,7 +6875,7 @@ mod tests {
                     assert!(!args.allow_extra_files);
                     assert!(args.rename_to.is_none());
                 }
-                bundle_cmd::BundleCommands::Export(_) => panic!("expected bundle import command"),
+                _ => panic!("expected bundle import command"),
             },
             other => panic!("expected bundle import command, got {other:?}"),
         }
@@ -6913,7 +6913,7 @@ mod tests {
                         )
                     );
                 }
-                bundle_cmd::BundleCommands::Export(_) => panic!("expected bundle import command"),
+                _ => panic!("expected bundle import command"),
             },
             other => panic!("expected bundle import command, got {other:?}"),
         }
@@ -6968,7 +6968,7 @@ mod tests {
         match cli.command {
             Some(Commands::Bundle(bundle)) => match bundle.command {
                 bundle_cmd::BundleCommands::Import(args) => assert!(!args.verify_only),
-                bundle_cmd::BundleCommands::Export(_) => panic!("expected import"),
+                _ => panic!("expected import"),
             },
             _ => panic!("expected bundle import"),
         }
@@ -6980,7 +6980,7 @@ mod tests {
         match cli.command {
             Some(Commands::Bundle(bundle)) => match bundle.command {
                 bundle_cmd::BundleCommands::Import(args) => assert!(!args.allow_extra_files),
-                bundle_cmd::BundleCommands::Export(_) => panic!("expected import"),
+                _ => panic!("expected import"),
             },
             _ => panic!("expected bundle import"),
         }

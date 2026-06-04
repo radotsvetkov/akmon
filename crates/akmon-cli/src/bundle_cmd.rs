@@ -145,7 +145,7 @@ pub(crate) struct BundleImportInfraError {
 pub struct BundleArgs {
     /// Bundle command to execute.
     #[command(subcommand)]
-    command: BundleCommands,
+    pub(crate) command: BundleCommands,
 }
 
 /// Nested bundle subcommands.
@@ -206,53 +206,53 @@ Exit codes:\n\
 #[derive(Args, Debug, Clone)]
 pub struct BundleExportArgs {
     /// Session UUID assigned at AgentSession construction.
-    session_id: uuid::Uuid,
+    pub(crate) session_id: uuid::Uuid,
     /// Path where the bundle file will be written.
     ///
     /// If omitted, defaults to `<session-id>.akmon` in the current directory.
     #[arg(long)]
-    output: Option<PathBuf>,
+    pub(crate) output: Option<PathBuf>,
     /// Path to the journal directory.
     ///
     /// Defaults to per-user journal location (`$XDG_STATE_HOME/akmon/journal`).
     #[arg(long)]
-    journal: Option<PathBuf>,
+    pub(crate) journal: Option<PathBuf>,
     /// Output format for status messages: human (default) or json.
     #[arg(long, default_value = "human")]
-    format: BundleExportFormat,
+    pub(crate) format: BundleExportFormat,
 }
 
 /// Arguments for `akmon bundle import`.
 #[derive(Args, Debug, Clone)]
 pub struct BundleImportArgs {
     /// Path to the `.akmon` bundle file to import.
-    bundle: PathBuf,
+    pub(crate) bundle: PathBuf,
     /// Path to the journal directory.
     ///
     /// Defaults to per-user journal location (`$XDG_STATE_HOME/akmon/journal`).
     #[arg(long)]
-    journal: Option<PathBuf>,
+    pub(crate) journal: Option<PathBuf>,
     /// Output format for status messages: human (default) or json.
     #[arg(long, default_value = "human")]
-    format: BundleImportFormat,
+    pub(crate) format: BundleImportFormat,
     /// Verify the bundle without modifying the local journal.
     ///
     /// When set, the bundle is fully validated per AGEF Sections 13 and 14 but no objects or
     /// events are written.
     #[arg(long)]
-    verify_only: bool,
+    pub(crate) verify_only: bool,
     /// Allow the import to succeed when the tar archive contains files outside the AGEF normative
     /// set (`manifest.json`, `events.bin`, `objects/<hex>`).
     ///
     /// Default is strict: unknown files cause hard reject.
     #[arg(long)]
-    allow_extra_files: bool,
+    pub(crate) allow_extra_files: bool,
     /// Re-map the bundle's `session_id` to a different UUID during import.
     ///
     /// Useful when importing a bundle whose `session_id` already exists in the local journal.
     /// Required when the local journal already contains the bundle's `session_id`.
     #[arg(long, value_name = "NEW_UUID")]
-    rename_to: Option<uuid::Uuid>,
+    pub(crate) rename_to: Option<uuid::Uuid>,
 }
 
 /// Arguments for `akmon bundle verify`.
