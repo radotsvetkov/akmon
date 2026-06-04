@@ -86,7 +86,7 @@ akmon slo trend .akmon/evidence/<session-id>.json --baseline-dir .akmon/evidence
 
 ## Session evidence format (AGEF)
 
-Akmon's session records conform to the [AGEF specification](https://github.com/radotsvetkov/agef), a portable, content-addressed, tamper-evident format for AI agent session evidence. Akmon v2.1.0 implements AGEF v0.1.1 and produces bundles intended to be verifiable and portable across environments.
+Akmon's session records conform to the [AGEF specification](https://github.com/radotsvetkov/agef), a portable, content-addressed, tamper-evident format for AI agent session evidence. Akmon implements AGEF v0.1.2 and produces bundles intended to be verifiable and portable across environments. Bundles can be optionally signed with an offline Ed25519 key (`akmon bundle sign`); the signature is verifiable by `akmon bundle verify --verify-key` or the standalone `agef-verify --verify-key`, turning a tamper-evident record into a third-party-attributable one.
 
 ## Enterprise policy profiles
 
