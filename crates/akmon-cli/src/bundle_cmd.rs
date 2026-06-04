@@ -8,8 +8,9 @@ use std::sync::Arc;
 use akmon_bundle::{
     BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest, ManifestSignature,
     Producer, ReadBundleOptions, SCHEME_ED25519, SIG_STATEMENT_VERSION, SessionMetadata,
-    WriteBundleOptions, key_id, public_key_from_pkcs8, read_bundle, sign_statement,
-    signing_statement, verify_bundle, write_bundle,
+    SignatureOutcome, SignatureVerificationReport, WriteBundleOptions, key_id,
+    parse_public_key_hex, public_key_from_pkcs8, read_bundle, sign_statement, signing_statement,
+    verify_bundle, verify_manifest_signatures, write_bundle,
 };
 use akmon_journal::{
     AGEF_SPEC_VERSION, Event, EventKind, Hash, HashAlgorithm, ObjectStore, RedbObjectStore,
@@ -84,10 +85,49 @@ pub struct BundleVerifyReportV1 {
     events_in_bundle: u64,
     /// Number of objects decoded from `objects/`.
     objects_in_bundle: u64,
-    /// Whether all structural and integrity checks passed.
+    /// Holistic verdict: integrity clean, no invalid signatures, and (with `--require-signature`)
+    /// at least one signature verified.
     passed: bool,
-    /// Collected violations (empty when `passed` is true).
+    /// Collected integrity violations (empty when structurally clean).
     violations: Vec<BundleViolation>,
+    /// Per-signature verification results (empty when the bundle is unsigned).
+    #[serde(default)]
+    signatures: Vec<CliSignatureReport>,
+}
+
+/// One signature-verification result for `akmon bundle verify --format json`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CliSignatureReport {
+    /// `key_id` from the manifest entry (hex SHA-256 of the signer public key).
+    key_id: String,
+    /// Signature scheme (`ed25519`).
+    scheme: String,
+    /// Outcome: `verified`, `invalid`, `unverified_no_key`, `unsupported_scheme`, or `malformed`.
+    outcome: String,
+}
+
+/// Stable lowercase outcome string for [`CliSignatureReport::outcome`].
+fn signature_outcome_str(outcome: &SignatureOutcome) -> &'static str {
+    match outcome {
+        SignatureOutcome::Verified => "verified",
+        SignatureOutcome::Invalid => "invalid",
+        SignatureOutcome::UnverifiedNoKey => "unverified_no_key",
+        SignatureOutcome::UnsupportedScheme => "unsupported_scheme",
+        SignatureOutcome::Malformed => "malformed",
+    }
+}
+
+/// Maps the library signature report into CLI-compatible JSON entries.
+fn cli_signature_reports(report: &SignatureVerificationReport) -> Vec<CliSignatureReport> {
+    report
+        .checks
+        .iter()
+        .map(|c| CliSignatureReport {
+            key_id: c.key_id.clone(),
+            scheme: c.scheme.clone(),
+            outcome: signature_outcome_str(&c.outcome).to_owned(),
+        })
+        .collect()
 }
 
 /// Machine-readable bundle import result (`akmon bundle import --format json`).
@@ -287,6 +327,13 @@ pub struct BundleVerifyArgs {
     /// Default is strict: unknown files cause hard reject.
     #[arg(long)]
     allow_extra_files: bool,
+    /// Trusted Ed25519 public key as hex (64 chars), read from a file. Repeatable. When provided,
+    /// each `manifest.signatures[]` entry is verified against these keys (AGEF v0.1.2).
+    #[arg(long = "verify-key", value_name = "HEX_FILE")]
+    verify_keys: Vec<PathBuf>,
+    /// Fail (exit 1) unless at least one signature verifies against a `--verify-key`.
+    #[arg(long)]
+    require_signature: bool,
 }
 
 /// Arguments for `akmon bundle sign`.
@@ -733,7 +780,7 @@ fn exit_bundle_verify_failed(
     format: BundleImportFormat,
     violations: Vec<BundleViolation>,
 ) -> ExitCode {
-    let report = build_bundle_verify_report_v1(bundle, contents, false, violations);
+    let report = build_bundle_verify_report_v1(bundle, contents, false, violations, Vec::new());
     match format {
         BundleImportFormat::Json => {
             if let Err(err) = print_bundle_verify_json_report(&report) {
@@ -762,6 +809,7 @@ fn build_bundle_verify_report_v1(
     contents: &BundleContents,
     passed: bool,
     violations: Vec<BundleViolation>,
+    signatures: Vec<CliSignatureReport>,
 ) -> BundleVerifyReportV1 {
     BundleVerifyReportV1 {
         akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -772,6 +820,7 @@ fn build_bundle_verify_report_v1(
         objects_in_bundle: contents.objects.len() as u64,
         passed,
         violations,
+        signatures,
     }
 }
 
@@ -780,13 +829,16 @@ fn run_bundle_verify(
     bundle: PathBuf,
     format: BundleImportFormat,
     allow_extra_files: bool,
+    verify_keys: Vec<PathBuf>,
+    require_signature: bool,
     label: &'static str,
 ) -> ExitCode {
+    let json = matches!(format, BundleImportFormat::Json);
     let mut file = match std::fs::File::open(&bundle) {
         Ok(f) => f,
         Err(err) => {
             let msg = format!("cannot open bundle {}: {err}", bundle.display());
-            if matches!(format, BundleImportFormat::Json) {
+            if json {
                 let _ = print_bundle_import_infra_json_error("io_error", msg.clone(), None);
             } else {
                 eprintln!("akmon: {label}: {msg}");
@@ -806,7 +858,7 @@ fn run_bundle_verify(
             let msg = err.to_string();
             let category = bundle_read_bundle_error_category(&err);
             let code = bundle_read_bundle_exit_code(&err);
-            if matches!(format, BundleImportFormat::Json) {
+            if json {
                 let _ = print_bundle_import_infra_json_error(category, msg.clone(), None);
             } else {
                 eprintln!("akmon: {label}: {msg}");
@@ -815,13 +867,38 @@ fn run_bundle_verify(
         }
     };
 
+    // Load any trusted public keys (hex -> raw 32 bytes) before signature verification.
+    let mut trusted_keys = Vec::with_capacity(verify_keys.len());
+    for key_path in &verify_keys {
+        let parsed = std::fs::read_to_string(key_path)
+            .map_err(|err| format!("cannot read --verify-key {}: {err}", key_path.display()))
+            .and_then(|hex_str| {
+                parse_public_key_hex(&hex_str)
+                    .map_err(|err| format!("--verify-key {}: {err}", key_path.display()))
+            });
+        match parsed {
+            Ok(key) => trusted_keys.push(key),
+            Err(msg) => {
+                if json {
+                    let _ = print_bundle_import_infra_json_error("verify_key_error", msg, None);
+                } else {
+                    eprintln!("akmon: {label}: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        }
+    }
+    let sig_report = verify_manifest_signatures(&contents.manifest, &trusted_keys);
     let verification = verify_bundle(&contents);
-    let passed = verification.is_clean();
+    let signatures_ok =
+        !sig_report.any_invalid() && (!require_signature || sig_report.any_verified());
+    let passed = verification.is_clean() && signatures_ok;
     let report = build_bundle_verify_report_v1(
         &bundle,
         &contents,
         passed,
         cli_violations_from_bundle_verify(&verification),
+        cli_signature_reports(&sig_report),
     );
 
     match format {
@@ -835,18 +912,24 @@ fn run_bundle_verify(
             let bundle_disp = bundle_export_output_display(bundle.as_path());
             if passed {
                 eprintln!("verified bundle: {bundle_disp}");
-                eprintln!("  session_id: {}", contents.manifest.session.id);
-                eprintln!("  events: {}", contents.events.len());
-                eprintln!("  objects: {}", contents.objects.len());
             } else {
-                eprintln!("bundle verification failed: {bundle_disp}");
-                eprintln!("  session_id: {}", contents.manifest.session.id);
-                eprintln!("  events in bundle: {}", contents.events.len());
-                eprintln!("  objects in bundle: {}", contents.objects.len());
-                eprintln!();
-                eprintln!("  violations:");
+                eprintln!("bundle verification FAILED: {bundle_disp}");
+            }
+            eprintln!("  session_id: {}", contents.manifest.session.id);
+            eprintln!("  events: {}", contents.events.len());
+            eprintln!("  objects: {}", contents.objects.len());
+            if !report.violations.is_empty() {
+                eprintln!("  integrity violations:");
                 for v in &report.violations {
                     eprintln!("    - [{}] {}", v.category, v.message);
+                }
+            }
+            if report.signatures.is_empty() {
+                eprintln!("  signatures: none");
+            } else {
+                eprintln!("  signatures:");
+                for s in &report.signatures {
+                    eprintln!("    - {} [{}] key_id={}", s.outcome, s.scheme, s.key_id);
                 }
             }
         }
@@ -868,7 +951,14 @@ fn run_bundle_import(
     rename_to: Option<uuid::Uuid>,
 ) -> ExitCode {
     if verify_only {
-        return run_bundle_verify(bundle, format, allow_extra_files, "bundle import");
+        return run_bundle_verify(
+            bundle,
+            format,
+            allow_extra_files,
+            Vec::new(),
+            false,
+            "bundle import",
+        );
     }
 
     let journal_dir = match journal {
@@ -1461,6 +1551,8 @@ pub fn run_bundle(args: &BundleArgs) -> ExitCode {
             verify_args.bundle.clone(),
             verify_args.format,
             verify_args.allow_extra_files,
+            verify_args.verify_keys.clone(),
+            verify_args.require_signature,
             "bundle verify",
         ),
         BundleCommands::Sign(sign_args) => run_bundle_sign(

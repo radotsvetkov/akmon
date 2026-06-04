@@ -151,3 +151,94 @@ fn t_bundle_sign_rejects_bad_key() {
     let contents = read_bundle(&mut f, &options).expect("read bundle");
     assert!(contents.manifest.signatures.is_none());
 }
+
+/// `akmon bundle verify --verify-key` confirms an akmon-signed bundle (mirrors agef-verify), and
+/// `--require-signature` without a key fails.
+#[test]
+fn t_bundle_verify_with_key_confirms_signature() {
+    let dir = tempdir().expect("tempdir");
+    let journal_dir = dir.path();
+    let session_id = Uuid::new_v4();
+    create_clean_session(journal_dir, session_id);
+
+    let bundle = journal_dir.join("session.akmon");
+    let export = akmon()
+        .current_dir(journal_dir)
+        .args([
+            "bundle",
+            "export",
+            &session_id.to_string(),
+            "--journal",
+            &journal_dir.display().to_string(),
+            "--output",
+            &bundle.display().to_string(),
+        ])
+        .output()
+        .expect("run bundle export");
+    assert!(export.status.success());
+
+    let key_path = journal_dir.join("signer.pk8");
+    std::fs::write(&key_path, generate_pkcs8().expect("keygen")).expect("write key");
+    let sign = akmon()
+        .args([
+            "bundle",
+            "sign",
+            &bundle.display().to_string(),
+            "--key",
+            &key_path.display().to_string(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run bundle sign");
+    assert!(sign.status.success());
+    let report: Value = serde_json::from_slice(&sign.stdout).expect("sign json");
+    let pubkey_hex = report
+        .get("public_key_hex")
+        .and_then(Value::as_str)
+        .expect("pubkey");
+    let key_file = journal_dir.join("signer.pub.hex");
+    std::fs::write(&key_file, pubkey_hex).expect("write pubkey");
+
+    // Verify with the trusted key.
+    let verify = akmon()
+        .args([
+            "bundle",
+            "verify",
+            &bundle.display().to_string(),
+            "--verify-key",
+            &key_file.display().to_string(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run bundle verify");
+    assert_eq!(
+        verify.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let v: Value = serde_json::from_slice(&verify.stdout).expect("verify json");
+    assert_eq!(v.get("passed").and_then(Value::as_bool), Some(true));
+    let sigs = v
+        .get("signatures")
+        .and_then(Value::as_array)
+        .expect("signatures");
+    assert_eq!(
+        sigs[0].get("outcome").and_then(Value::as_str),
+        Some("verified")
+    );
+
+    // --require-signature without a key fails.
+    let req = akmon()
+        .args([
+            "bundle",
+            "verify",
+            &bundle.display().to_string(),
+            "--require-signature",
+        ])
+        .output()
+        .expect("run bundle verify require");
+    assert_eq!(req.status.code(), Some(1));
+}
