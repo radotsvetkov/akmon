@@ -42,11 +42,15 @@ jobs:
           --no-default-features
           --target ${{ matrix.target }}
           -p akmon-cli
+          -p agef-verify
 
       - name: Stage for upload
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/akmon" "dist/${{ matrix.artifact }}"
+          suffix="${{ matrix.artifact }}"
+          suffix="${suffix#akmon-}"
+          cp "target/${{ matrix.target }}/release/agef-verify" "dist/agef-verify-${suffix}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -70,7 +74,7 @@ jobs:
       - name: Flatten binaries for the release
         run: |
           mkdir -p release-assets
-          find dist -type f -name 'akmon-*' -exec cp -v {} release-assets/ \;
+          find dist -type f \( -name 'akmon-*' -o -name 'agef-verify-*' \) -exec cp -v {} release-assets/ \;
           ls -la release-assets
 
       # Software Bill of Materials (CycloneDX) generated from Cargo.lock so
@@ -86,7 +90,7 @@ jobs:
       - name: Generate SHA-256 checksums
         run: |
           cd release-assets
-          sha256sum akmon-* akmon.cdx.json > SHA256SUMS
+          sha256sum akmon-* agef-verify-* akmon.cdx.json > SHA256SUMS
           cat SHA256SUMS
 
       - name: Prepare release notes body

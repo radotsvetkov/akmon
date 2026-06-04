@@ -107,6 +107,7 @@
 - [akmon inspect](./reference/inspect.md)
 - [akmon bundle export](./reference/bundle-export.md)
 - [akmon bundle import](./reference/bundle-import.md)
+- [agef-verify](./reference/agef-verify.md)
 - [akmon redact](./reference/redact.md)
 - [akmon replay](./reference/replay.md)
 - [akmon diff](./reference/diff.md)

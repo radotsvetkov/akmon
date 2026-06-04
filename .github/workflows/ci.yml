@@ -127,10 +127,14 @@ jobs:
           --no-default-features
           --target ${{ matrix.target }}
 
+      - name: Stage binaries
+        run: |
+          mkdir -p "dist/${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/akmon" "dist/${{ matrix.target }}/"
+          cp "target/${{ matrix.target }}/release/agef-verify" "dist/${{ matrix.target }}/"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: >
-            target/${{ matrix.target }}/
-            release/akmon
+          path: dist/${{ matrix.target }}/

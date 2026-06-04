@@ -94,6 +94,7 @@ Import validation aligns with AGEF structural/integrity requirements, including:
 
 ## See also
 
+- [agef-verify](./agef-verify.md) — standalone bundle verifier (no Akmon CLI)
 - `akmon bundle export`: [./bundle-export.md](./bundle-export.md)
 - `akmon verify`: [./verify.md](./verify.md)
 - `akmon inspect`: [./inspect.md](./inspect.md)
