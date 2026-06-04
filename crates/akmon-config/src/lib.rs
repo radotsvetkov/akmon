@@ -85,6 +85,49 @@ pub struct PolicyGovernanceConfig {
     pub packs: Vec<String>,
 }
 
+/// Session signing hook configuration under `[signing]` (Decision D-05).
+///
+/// Akmon does not embed a signer. It invokes a user-configured command with a
+/// completed session's head hash so the operator can wire cosign, GPG, or any
+/// signing tool, producing an independent, detached attestation over the
+/// tamper-evident session head.
+///
+/// Security: this command is read ONLY from the trusted per-user config
+/// (`~/.akmon/config.toml`), never from repo-local or project files, so cloning
+/// a malicious repository cannot inject a command to execute. The command runs
+/// via argv (no shell), so configured values are not word-split or interpreted
+/// by a shell.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SigningConfig {
+    /// Program and arguments to run. The first element is the executable. In the
+    /// arguments, every `{head}` / `{session_id}` token is substituted with the
+    /// session head hash (hex) and session UUID; the same values are also
+    /// exported as `AKMON_SESSION_HEAD` / `AKMON_SESSION_ID`. An empty list
+    /// disables signing.
+    pub command: Vec<String>,
+    /// Maximum seconds the signing command may run before it is terminated.
+    /// Defaults to [`SigningConfig::DEFAULT_TIMEOUT_SECS`] when unset.
+    pub timeout_secs: Option<u64>,
+}
+
+impl SigningConfig {
+    /// Default signing-command timeout when `timeout_secs` is unset.
+    pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
+
+    /// Returns whether a signing command is configured.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        !self.command.is_empty()
+    }
+
+    /// Returns the effective timeout, applying [`Self::DEFAULT_TIMEOUT_SECS`].
+    #[must_use]
+    pub fn effective_timeout_secs(&self) -> u64 {
+        self.timeout_secs.unwrap_or(Self::DEFAULT_TIMEOUT_SECS)
+    }
+}
+
 /// Serializable contents of `~/.akmon/config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AkmonGlobalConfig {
@@ -147,6 +190,9 @@ pub struct AkmonGlobalConfig {
     /// Enterprise policy profile/pack defaults.
     #[serde(default)]
     pub policy: PolicyGovernanceConfig,
+    /// Post-session signing hook (`[signing]`), per Decision D-05.
+    #[serde(default)]
+    pub signing: SigningConfig,
 }
 
 impl AkmonGlobalConfig {
@@ -202,6 +248,13 @@ impl AkmonGlobalConfig {
 # [policy]
 # profile = "dev"
 # packs = [".akmon/policy-packs/team.toml"]
+
+# Post-session signing hook (Decision D-05): invokes a command against a session
+# head. In the args, {head}/{session_id} are substituted, and AKMON_SESSION_HEAD
+# / AKMON_SESSION_ID are exported. Read ONLY from this trusted user config.
+# [signing]
+# command = ["/usr/local/bin/akmon-sign.sh"]   # script reads $AKMON_SESSION_HEAD
+# timeout_secs = 60
 
 # [slo]
 # min_tool_success_rate = 0.95
@@ -430,6 +483,34 @@ mod tests {
         assert_eq!(l.slo.thresholds.min_tool_success_rate, Some(0.95));
         assert_eq!(l.slo.thresholds.max_timeouts_total, Some(2));
         assert_eq!(l.slo.trend.max_success_rate_drop_abs, Some(0.1));
+    }
+
+    #[test]
+    fn signing_config_roundtrip_in_toml() {
+        let dir = tempdir().expect("tmp");
+        let path = dir.path().join("config.toml");
+        let c = AkmonGlobalConfig {
+            signing: SigningConfig {
+                command: vec!["cosign".into(), "sign-blob".into(), "--yes".into()],
+                timeout_secs: Some(120),
+            },
+            ..Default::default()
+        };
+        save_config_to(&path, &c).expect("save");
+        let l = load_config_from(&path).expect("load");
+        assert!(l.signing.is_enabled());
+        assert_eq!(l.signing.command.len(), 3);
+        assert_eq!(l.signing.effective_timeout_secs(), 120);
+    }
+
+    #[test]
+    fn signing_config_defaults_disabled() {
+        let c = AkmonGlobalConfig::default();
+        assert!(!c.signing.is_enabled());
+        assert_eq!(
+            c.signing.effective_timeout_secs(),
+            SigningConfig::DEFAULT_TIMEOUT_SECS
+        );
     }
 
     #[test]

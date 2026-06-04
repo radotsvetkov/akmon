@@ -13,6 +13,7 @@ mod policy_cmd;
 mod scout_cmd;
 mod session_index;
 mod session_transcript;
+mod signing;
 mod slo_cmd;
 mod spec_cmd;
 
@@ -307,6 +308,16 @@ enum VerifyFormat {
     Json,
 }
 
+/// Output format for `akmon sign`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum SignFormat {
+    /// Human-readable status output.
+    #[default]
+    Human,
+    /// Machine-readable JSON output for CI automation.
+    Json,
+}
+
 /// Output format for `akmon inspect`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum InspectFormat {
@@ -588,6 +599,38 @@ struct VerifyError {
     /// CLI crate version that produced this error.
     akmon_version: String,
     /// Stable infrastructure error category.
+    category: String,
+    /// Human-readable error description.
+    error: String,
+}
+
+/// Stable JSON shape for `akmon sign --format json`.
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct SignReportV1 {
+    /// CLI crate version that produced this report.
+    akmon_version: String,
+    /// Hyphenated session UUID that was signed.
+    session_id: String,
+    /// Session head hash (hex) passed to the signing command.
+    head: String,
+    /// Executable invoked (the first element of the configured command).
+    program: String,
+    /// Whether the signing command exited successfully.
+    success: bool,
+    /// Process exit code, when available.
+    exit_code: Option<i32>,
+    /// Whether the signing command was terminated for exceeding its timeout.
+    timed_out: bool,
+    /// Wall-clock duration of the signing command in milliseconds.
+    elapsed_ms: u64,
+}
+
+/// JSON shape emitted when signing cannot run (config/journal/spawn errors).
+#[derive(Debug, Serialize, serde::Deserialize)]
+struct SignError {
+    /// CLI crate version that produced this error.
+    akmon_version: String,
+    /// Stable error category.
     category: String,
     /// Human-readable error description.
     error: String,
@@ -1880,6 +1923,36 @@ Exit codes:\n\
         /// Print per-violation detail.
         #[arg(long)]
         verbose: bool,
+    },
+    /// Sign a session head with the configured signing command (Decision D-05).
+    #[command(
+        long_about = "Run the signing command from ~/.akmon/config.toml [signing] against a \
+session's head hash, producing an independent detached attestation (e.g. via cosign or GPG).\n\n\
+Akmon does not embed a signer: it invokes your configured command, substituting {head} and \
+{session_id} tokens in the arguments and exporting AKMON_SESSION_HEAD / AKMON_SESSION_ID into the \
+environment. The command is read only from the trusted per-user config, runs via argv (no shell), \
+and is terminated if it exceeds its timeout.\n\n\
+Configure it in ~/.akmon/config.toml:\n\
+  [signing]\n\
+  command = [\"/usr/local/bin/akmon-sign.sh\"]   # script reads $AKMON_SESSION_HEAD\n\
+  timeout_secs = 60\n\n\
+Example:\n\
+  akmon sign 550e8400-e29b-41d4-a716-446655440000\n\n\
+Exit codes:\n\
+  0 — signing command completed successfully\n\
+  1 — signing command ran but failed (non-zero exit or timeout)\n\
+  2 — usage error (no signing command configured)\n\
+  3 — I/O or environment error (journal/session not found, command not spawnable)"
+    )]
+    Sign {
+        /// Session UUID assigned at AgentSession construction.
+        session_id: uuid::Uuid,
+        /// Path to the journal directory. Defaults to per-user journal location ($XDG_STATE_HOME/akmon/journal).
+        #[arg(long)]
+        journal: Option<PathBuf>,
+        /// Output format: human (default) or json.
+        #[arg(long, default_value = "human")]
+        format: SignFormat,
     },
     /// Inspect a session's events and contents.
     #[command(
@@ -4188,6 +4261,201 @@ fn run_bundle_import(
     }
 }
 
+fn print_sign_json_error(category: &'static str, error: String) -> std::io::Result<()> {
+    let body = SignError {
+        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+        category: category.to_owned(),
+        error,
+    };
+    let json =
+        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
+fn print_sign_json_report(report: &SignReportV1) -> std::io::Result<()> {
+    let json =
+        serde_json::to_string_pretty(report).map_err(|e| std::io::Error::other(e.to_string()))?;
+    println!("{json}");
+    Ok(())
+}
+
+/// Signs a session head by invoking the configured `[signing]` command (Decision D-05).
+async fn run_sign(
+    session_id: uuid::Uuid,
+    journal: Option<PathBuf>,
+    format: SignFormat,
+) -> ExitCode {
+    let json = matches!(format, SignFormat::Json);
+
+    // The signing command is read ONLY from the trusted per-user config, never
+    // from repo-local files, so a cloned repository cannot inject a command.
+    let signing = load_user_global_config().signing;
+    if !signing.is_enabled() {
+        let msg = "no signing command configured; set [signing] command in ~/.akmon/config.toml"
+            .to_owned();
+        if json {
+            let _ = print_sign_json_error("no_signing_command", msg);
+        } else {
+            eprintln!("akmon: sign: {msg}");
+        }
+        return ExitCode::from(2);
+    }
+
+    let journal_dir = match journal {
+        Some(path) => path,
+        None => match default_journal_dir() {
+            Ok(path) => path,
+            Err(err) => {
+                let msg = format!("cannot resolve default journal directory: {err}");
+                if json {
+                    let _ = print_sign_json_error("sign_infrastructure_error", msg);
+                } else {
+                    eprintln!("akmon: sign: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        },
+    };
+
+    let handle = match open_journal_read_only(journal_dir.as_path(), session_id) {
+        Ok(h) => h,
+        Err(err) => {
+            let msg = format!(
+                "cannot open journal {} for session {}: {err}",
+                journal_dir.display(),
+                session_id
+            );
+            if json {
+                let _ = print_sign_json_error(verify_error_category(&msg), msg);
+            } else {
+                eprintln!("akmon: sign: {msg}");
+            }
+            return ExitCode::from(3);
+        }
+    };
+
+    // Scope the graph lock so the (non-Send) guard is dropped before the await below.
+    let head = {
+        let graph = handle
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match graph.head() {
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                let msg = "malformed session: empty event graph (no head)".to_owned();
+                if json {
+                    let _ = print_sign_json_error("sign_infrastructure_error", msg);
+                } else {
+                    eprintln!("akmon: sign: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+            Err(err) => {
+                let msg = format!("cannot read session head: {err}");
+                if json {
+                    let _ = print_sign_json_error(verify_error_category(&msg), msg);
+                } else {
+                    eprintln!("akmon: sign: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        }
+    };
+
+    let head_hex = head.to_hex();
+    let program = signing.command.first().cloned().unwrap_or_default();
+    let outcome = signing::run_signing_hook(&signing, &head_hex, &session_id.to_string()).await;
+
+    match outcome {
+        signing::SigningOutcome::Disabled => {
+            let msg = "no signing command configured".to_owned();
+            if json {
+                let _ = print_sign_json_error("no_signing_command", msg);
+            } else {
+                eprintln!("akmon: sign: {msg}");
+            }
+            ExitCode::from(2)
+        }
+        signing::SigningOutcome::SpawnError { message } => {
+            if json {
+                let _ = print_sign_json_error("signing_command_not_spawnable", message);
+            } else {
+                eprintln!("akmon: sign: {message}");
+            }
+            ExitCode::from(3)
+        }
+        signing::SigningOutcome::TimedOut { timeout } => {
+            if json {
+                let report = SignReportV1 {
+                    akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    session_id: session_id.to_string(),
+                    head: head_hex,
+                    program,
+                    success: false,
+                    exit_code: None,
+                    timed_out: true,
+                    elapsed_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                };
+                let _ = print_sign_json_report(&report);
+            } else {
+                eprintln!(
+                    "akmon: sign: signing command timed out after {}s",
+                    timeout.as_secs()
+                );
+            }
+            ExitCode::from(1)
+        }
+        signing::SigningOutcome::Completed {
+            exit_code,
+            success,
+            stdout,
+            stderr,
+            elapsed,
+        } => {
+            if json {
+                let report = SignReportV1 {
+                    akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    session_id: session_id.to_string(),
+                    head: head_hex,
+                    program,
+                    success,
+                    exit_code,
+                    timed_out: false,
+                    elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                };
+                if let Err(err) = print_sign_json_report(&report) {
+                    eprintln!("akmon: sign: failed to render JSON output: {err}");
+                    return ExitCode::from(3);
+                }
+            } else if success {
+                eprintln!("signed: session {session_id}");
+                eprintln!("  head: {head_hex}");
+                eprintln!("  command: {program}");
+                if !stdout.trim().is_empty() {
+                    eprintln!("  output: {}", stdout.trim());
+                }
+            } else {
+                eprintln!("signing failed: session {session_id}");
+                eprintln!("  head: {head_hex}");
+                eprintln!(
+                    "  exit code: {}",
+                    exit_code.map_or_else(|| "unknown".to_owned(), |c| c.to_string())
+                );
+                if !stderr.trim().is_empty() {
+                    eprintln!("  stderr: {}", stderr.trim());
+                }
+            }
+            if success {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
 fn run_verify(
     session_id: uuid::Uuid,
     journal: Option<PathBuf>,
@@ -6029,6 +6297,13 @@ async fn main() -> ExitCode {
             verbose,
         }) => {
             return run_verify(*session_id, journal.clone(), *format, *verbose);
+        }
+        Some(Commands::Sign {
+            session_id,
+            journal,
+            format,
+        }) => {
+            return run_sign(*session_id, journal.clone(), *format).await;
         }
         Some(Commands::Inspect {
             session_id,
