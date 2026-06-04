@@ -6,9 +6,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use akmon_bundle::{
-    BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest, Producer,
-    ReadBundleOptions, SessionMetadata, WriteBundleOptions, read_bundle, verify_bundle,
-    write_bundle,
+    BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest, ManifestSignature,
+    Producer, ReadBundleOptions, SCHEME_ED25519, SIG_STATEMENT_VERSION, SessionMetadata,
+    WriteBundleOptions, key_id, public_key_from_pkcs8, read_bundle, sign_statement,
+    signing_statement, verify_bundle, write_bundle,
 };
 use akmon_journal::{
     AGEF_SPEC_VERSION, Event, EventKind, Hash, HashAlgorithm, ObjectStore, RedbObjectStore,
@@ -200,6 +201,23 @@ Exit codes:\n\
   3 — I/O or environment error (bundle not found, malformed archive, etc.)"
     )]
     Verify(BundleVerifyArgs),
+    /// Sign an AGEF bundle's session head with an Ed25519 key (AGEF v0.1.2).
+    #[command(
+        long_about = "Sign an AGEF bundle's session head with an Ed25519 key (AGEF v0.1.2).\n\n\
+Reads the bundle, signs the canonical AGEF-SIG-v1 statement over its session head with the given \
+PKCS#8 Ed25519 private key, appends the detached signature to manifest.signatures[], and writes \
+the signed bundle (in place, or to --output). Prints the signer's public key as hex for \
+distribution to verifiers (`akmon bundle verify --verify-key` / `agef-verify --verify-key`).\n\n\
+Generate a key with: openssl genpkey -algorithm ed25519 -outform DER -out signer.pk8\n\n\
+Examples:\n\
+  akmon bundle sign audit.akmon --key signer.pk8\n\
+  akmon bundle sign audit.akmon --key signer.pk8 --output signed.akmon\n\n\
+Exit codes:\n\
+  0 — bundle signed successfully\n\
+  2 — usage error (unreadable or invalid Ed25519 key)\n\
+  3 — I/O or environment error (bundle not found, malformed archive, write error)"
+    )]
+    Sign(BundleSignArgs),
 }
 
 /// Arguments for `akmon bundle export`.
@@ -270,6 +288,24 @@ pub struct BundleVerifyArgs {
     #[arg(long)]
     allow_extra_files: bool,
 }
+
+/// Arguments for `akmon bundle sign`.
+#[derive(Args, Debug, Clone)]
+pub struct BundleSignArgs {
+    /// Path to the `.akmon` bundle file to sign.
+    bundle: PathBuf,
+    /// Path to a PKCS#8 Ed25519 private key (DER), e.g. from
+    /// `openssl genpkey -algorithm ed25519 -outform DER`.
+    #[arg(long)]
+    key: PathBuf,
+    /// Destination for the signed bundle. Defaults to signing the input bundle in place.
+    #[arg(long)]
+    output: Option<PathBuf>,
+    /// Output format for status messages: human (default) or json.
+    #[arg(long, default_value = "human")]
+    format: BundleImportFormat,
+}
+
 pub(crate) fn format_bundle_byte_size(bytes: u64) -> String {
     const MB: f64 = 1024.0 * 1024.0;
     const KB: f64 = 1024.0;
@@ -1214,6 +1250,197 @@ fn run_bundle_import(
 }
 
 /// Runs one `akmon bundle` subcommand.
+/// Stable JSON shape for `akmon bundle sign --format json`.
+#[derive(Debug, Serialize, Deserialize)]
+struct BundleSignReportV1 {
+    /// Producer tool name.
+    tool: String,
+    /// Akmon crate version.
+    akmon_version: String,
+    /// Path the signed bundle was written to.
+    bundle_path: String,
+    /// Session UUID from the bundle manifest.
+    session_id: String,
+    /// Signature scheme (`ed25519`).
+    scheme: String,
+    /// Signer key id (hex SHA-256 of the public key).
+    key_id: String,
+    /// Signer public key as lowercase hex (distribute this to verifiers).
+    public_key_hex: String,
+    /// Total signatures on the bundle after signing.
+    signature_count: usize,
+}
+
+/// Reads a bundle, signs its session head with an Ed25519 PKCS#8 key, and writes the signed bundle.
+fn run_bundle_sign(
+    bundle: PathBuf,
+    key_path: PathBuf,
+    output: Option<PathBuf>,
+    format: BundleImportFormat,
+) -> ExitCode {
+    let json = matches!(format, BundleImportFormat::Json);
+    let fail = |category: &str, msg: String, code: u8| -> ExitCode {
+        if json {
+            let _ = print_bundle_import_infra_json_error(category, msg, None);
+        } else {
+            eprintln!("akmon: bundle sign: {msg}");
+        }
+        ExitCode::from(code)
+    };
+
+    let mut file = match std::fs::File::open(&bundle) {
+        Ok(f) => f,
+        Err(err) => {
+            return fail(
+                "io_error",
+                format!("cannot open bundle {}: {err}", bundle.display()),
+                3,
+            );
+        }
+    };
+    let options = ReadBundleOptions {
+        allow_extra_files: false,
+        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
+    };
+    let mut contents = match read_bundle(&mut file, &options) {
+        Ok(c) => c,
+        Err(err) => {
+            let category = bundle_read_bundle_error_category(&err);
+            let code = bundle_read_bundle_exit_code(&err);
+            return fail(category, err.to_string(), code);
+        }
+    };
+    drop(file);
+
+    let pkcs8 = match std::fs::read(&key_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return fail(
+                "io_error",
+                format!("cannot read --key {}: {err}", key_path.display()),
+                3,
+            );
+        }
+    };
+    let public_key = match public_key_from_pkcs8(&pkcs8) {
+        Ok(pk) => pk,
+        Err(err) => {
+            return fail(
+                "invalid_key",
+                format!("--key {}: {err}", key_path.display()),
+                2,
+            );
+        }
+    };
+
+    // A signed bundle declares AGEF v0.1.2, the version that defines manifest.signatures[].
+    contents.manifest.agef_version = AGEF_SPEC_VERSION.to_owned();
+    let statement = {
+        let m = &contents.manifest;
+        signing_statement(
+            &m.agef_version,
+            &m.hash_algorithm,
+            &m.session.id,
+            &m.session.head,
+        )
+    };
+    let signature = match sign_statement(statement.as_bytes(), &pkcs8) {
+        Ok(sig) => sig,
+        Err(err) => return fail("invalid_key", format!("signing failed: {err}"), 2),
+    };
+    let created_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let public_key_hex = hex::encode(&public_key);
+    let kid = key_id(&public_key);
+    contents
+        .manifest
+        .signatures
+        .get_or_insert_with(Vec::new)
+        .push(ManifestSignature {
+            scheme: SCHEME_ED25519.to_owned(),
+            key_id: kid.clone(),
+            statement_version: SIG_STATEMENT_VERSION.to_owned(),
+            signature: hex::encode(&signature),
+            created_at,
+        });
+
+    // Write atomically (temp + rename) so a failed write never clobbers the input bundle.
+    let out_path = output.unwrap_or_else(|| bundle.clone());
+    let tmp_path = out_path.with_extension("akmon-signing-tmp");
+    let mut out_file = match std::fs::File::create(&tmp_path) {
+        Ok(f) => f,
+        Err(err) => {
+            return fail(
+                "io_error",
+                format!("cannot create temp file {}: {err}", tmp_path.display()),
+                3,
+            );
+        }
+    };
+    if let Err(err) = write_bundle(
+        &mut out_file,
+        &contents.manifest,
+        &contents.events,
+        &contents.objects,
+        &WriteBundleOptions::default(),
+    ) {
+        drop(out_file);
+        let _ = std::fs::remove_file(&tmp_path);
+        return fail("bundle_error", format!("bundle write failed: {err}"), 3);
+    }
+    drop(out_file);
+    if let Err(err) = std::fs::rename(&tmp_path, &out_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return fail(
+            "io_error",
+            format!(
+                "cannot finalize signed bundle {}: {err}",
+                out_path.display()
+            ),
+            3,
+        );
+    }
+
+    let signature_count = contents.manifest.signatures.as_ref().map_or(0, Vec::len);
+    match format {
+        BundleImportFormat::Json => {
+            let report = BundleSignReportV1 {
+                tool: "akmon".to_owned(),
+                akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+                bundle_path: out_path.display().to_string(),
+                session_id: contents.manifest.session.id.clone(),
+                scheme: SCHEME_ED25519.to_owned(),
+                key_id: kid,
+                public_key_hex,
+                signature_count,
+            };
+            match serde_json::to_string_pretty(&report) {
+                Ok(s) => println!("{s}"),
+                Err(err) => {
+                    return fail(
+                        "io_error",
+                        format!("failed to render JSON output: {err}"),
+                        3,
+                    );
+                }
+            }
+        }
+        BundleImportFormat::Human => {
+            let disp = bundle_export_output_display(out_path.as_path());
+            eprintln!("signed bundle: {disp}");
+            eprintln!("  session_id: {}", contents.manifest.session.id);
+            eprintln!("  scheme: {SCHEME_ED25519}");
+            eprintln!("  key_id: {kid}");
+            eprintln!("  public key (hex): {public_key_hex}");
+            eprintln!("  signatures: {signature_count}");
+            eprintln!("  to verify, distribute the public key (hex above) and run:");
+            eprintln!("    agef-verify {disp} --verify-key <file-containing-the-public-key-hex>");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 pub fn run_bundle(args: &BundleArgs) -> ExitCode {
     match &args.command {
         BundleCommands::Export(export_args) => run_bundle_export(
@@ -1235,6 +1462,12 @@ pub fn run_bundle(args: &BundleArgs) -> ExitCode {
             verify_args.format,
             verify_args.allow_extra_files,
             "bundle verify",
+        ),
+        BundleCommands::Sign(sign_args) => run_bundle_sign(
+            sign_args.bundle.clone(),
+            sign_args.key.clone(),
+            sign_args.output.clone(),
+            sign_args.format,
         ),
     }
 }

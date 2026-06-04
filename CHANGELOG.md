@@ -25,10 +25,12 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`akmon bundle verify <bundle>`:** verify an AGEF `.akmon` bundle's integrity — object re-hashing, hash-chain re-walk, and manifest head/count checks — without importing it, using the same store-independent verification path as `akmon bundle import --verify-only`.
 - **Standalone `agef-verify` binary:** a minimal, separately distributable AGEF bundle verifier for auditors and CI, independent of the Akmon CLI, journal store, and agent runtime. Built and published alongside `akmon` in release artifacts.
 - **Supply-chain CI:** `cargo-deny` gating (RustSec advisories, license policy, banned/duplicate crates, source checks) via `deny.toml`, a pinned Rust 1.88 toolchain, and release checksums plus SBOM generation.
+- **Native session signing (AGEF v0.1.2, decision D-18):** turn a tamper-evident bundle into an *attributable* one. `akmon bundle sign <bundle> --key <pkcs8>` signs a domain-separated `AGEF-SIG-v1` statement over the session head with an offline Ed25519 key, appends the detached signature to `manifest.signatures[]`, and prints the signer's public key (hex) to distribute. Verify with `akmon bundle verify --verify-key <hex-file> [--require-signature]` or the standalone `agef-verify --verify-key`. Signatures never enter the merkle hash chain, and integrity verification stays independent of signature verification. Ed25519 via `ring` (already in the dependency tree) — no new supply-chain surface; OpenPGP was rejected because every pure-Rust implementation pulls the advisory-bearing `rsa` crate.
 
 ### Changed
 
 - **`spawn_subagent` is gated off by default.** Multi-agent orchestration is an explicit non-goal of Akmon's thesis (decision document §1.2 / §3.4: "one agent, one session, one artifact"). The `spawn_subagent` tool is no longer registered in default sessions, and the agent prompt no longer references it. Set the `AKMON_EXPERIMENTAL_SUBAGENTS` environment variable to a truthy value (`1`, `true`, `yes`, or `on`) to opt the current process into the unsupported, experimental capability. This aligns the shipped tool surface with the locked thesis; the experimental flag is intentionally not part of `config.toml`.
+- **AGEF spec version bumped to `0.1.2`** (from `0.1.1`) — an additive change for the optional `manifest.signatures[]` field. Compatibility is unchanged: version matching is major.minor, so `0.1.1` readers still accept `0.1.2` bundles and ignore unknown fields.
 
 ### Fixed
 

@@ -45,6 +45,7 @@ futures-util = { version = "0.3", default-features = false, features = [
 fastembed = { version = "5", default-features = true, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 dunce = "1"
+hex.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
