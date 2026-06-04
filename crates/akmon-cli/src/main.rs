@@ -326,7 +326,6 @@ enum InspectFormat {
     Json,
 }
 
-
 /// Output format for `akmon redact` status messages.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum RedactFormat {
@@ -365,7 +364,6 @@ impl From<ReplayModeArg> for akmon_replay::ReplayMode {
         }
     }
 }
-
 
 /// Stable JSON shape for `akmon redact --format json`.
 #[derive(Debug, Serialize, Deserialize)]
@@ -1903,7 +1901,6 @@ Exit codes:\n\
     Replay(ReplayArgs),
 }
 
-
 /// Arguments for `akmon redact`.
 #[derive(Args, Debug, Clone)]
 struct RedactArgs {
@@ -1953,7 +1950,6 @@ struct ReplayArgs {
     #[arg(long, value_enum, default_value_t = ReplayFormat::Human)]
     format: ReplayFormat,
 }
-
 
 fn run_redact(
     session_id: uuid::Uuid,
@@ -2346,7 +2342,10 @@ fn run_redact(
                 "  bundle: {}",
                 bundle_cmd::bundle_export_output_display(output.as_path())
             );
-            eprintln!("  size: {}", bundle_cmd::format_bundle_byte_size(size_bytes));
+            eprintln!(
+                "  size: {}",
+                bundle_cmd::format_bundle_byte_size(size_bytes)
+            );
         }
         RedactFormat::Json => {
             let report = RedactReportV1 {

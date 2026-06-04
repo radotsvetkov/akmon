@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use akmon_bundle::{
-    BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest,
-    Producer, ReadBundleOptions, SessionMetadata, WriteBundleOptions, read_bundle, verify_bundle,
+    BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest, Producer,
+    ReadBundleOptions, SessionMetadata, WriteBundleOptions, read_bundle, verify_bundle,
     write_bundle,
 };
 use akmon_journal::{
