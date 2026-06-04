@@ -19,9 +19,26 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`akmon sign`:** sign a session head via the configured signing hook (D-05); the hook is also auto-invoked after headless runs. Documents the path to wiring cosign or GPG ahead of native signing.
+- **`akmon bundle verify <bundle>`:** verify an AGEF `.akmon` bundle's integrity — object re-hashing, hash-chain re-walk, and manifest head/count checks — without importing it, using the same store-independent verification path as `akmon bundle import --verify-only`.
+- **Standalone `agef-verify` binary:** a minimal, separately distributable AGEF bundle verifier for auditors and CI, independent of the Akmon CLI, journal store, and agent runtime. Built and published alongside `akmon` in release artifacts.
+- **Supply-chain CI:** `cargo-deny` gating (RustSec advisories, license policy, banned/duplicate crates, source checks) via `deny.toml`, a pinned Rust 1.88 toolchain, and release checksums plus SBOM generation.
+
 ### Changed
 
 - **`spawn_subagent` is gated off by default.** Multi-agent orchestration is an explicit non-goal of Akmon's thesis (decision document §1.2 / §3.4: "one agent, one session, one artifact"). The `spawn_subagent` tool is no longer registered in default sessions, and the agent prompt no longer references it. Set the `AKMON_EXPERIMENTAL_SUBAGENTS` environment variable to a truthy value (`1`, `true`, `yes`, or `on`) to opt the current process into the unsupported, experimental capability. This aligns the shipped tool surface with the locked thesis; the experimental flag is intentionally not part of `config.toml`.
+
+### Fixed
+
+- Unify the AGEF specification version to a single source of truth (`AGEF_SPEC_VERSION`) across journal metadata, replay reports, and diff reports.
+- Restore the `cargo fmt --all --check` CI gate after the `bundle_cmd` extraction introduced formatting drift.
+- Restore the `cargo test --workspace --no-default-features` CI gate: bundle-subcommand parse tests (compiled only under `not(semantic-index)`) referenced fields made private by the `bundle_cmd` extraction and predated the `bundle verify` variant.
+
+### Security
+
+- Patch `rustls-webpki` TLS advisories (RUSTSEC-2026-0098, -0099, -0104).
 
 ## [2.1.0] - 2026-05-28
 
