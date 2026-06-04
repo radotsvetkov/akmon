@@ -11,8 +11,9 @@
 - Not a prompt to paste into Cursor. It's a planning document. Cursor reads it as context; your existing Cursor system prompt drives the interaction style.
 - Not a timeline. Estimates are rough (8–10 focused weeks, but you set pace).
 - Not a marketing plan. Positioning only. Marketing is downstream of shipped code.
-**Document version:** 1.6 — June 2026
+**Document version:** 1.7 — June 2026
 **Revision history:**
+- v1.7 (June 2026) — **Repositioning** (product-owner ruling): Akmon's center of gravity moves from *the* review-aware agent to the **producer-agnostic, tamper-evident evidence & verification layer** for AI-agent sessions in regulated engineering. The bundled agent is retained as the reference / gold-fidelity producer; the keystone new producer is OpenTelemetry GenAI import (decision **D-19**, §6.11 Phase 9). Amends §1 (repositioning block) and adds D-19 + Phase 9. Substrate invariants (§1.1/§3/§4), the regulated lens (§2), and the §1.2 non-goals are unchanged — this broadens *who produces the evidence*, not *what the evidence is*.
 - v1.0 (April 2026) — Initial document.
 - v1.1 (April 2026) — Adds D-16, D-17, Item 6.10 in response to repositioning audit findings A and B (`docs/repositioning-audit.md`). No prior decisions altered.
 - v1.2 (May 2026) — Adds Item 4.3 design decisions (F1-F12), renames bundle commands to `akmon bundle ...`, and corrects D-02 manifest serialization wording to align with AGEF v0.1.1 §6.
@@ -29,6 +30,34 @@
 **LOCKED.**
  
 > Akmon is the review-aware AI coding agent for regulated engineering, whose every session is a tamper-evident, content-addressed, replayable artifact — not a side effect of a conversation, but the central deliverable.
+
+> **Repositioning amendment (v1.7, June 2026) — the trust layer, not (only) the agent.**
+> *Product-owner ruling.* The thesis above stands as the **substrate commitment** and remains the
+> gold-fidelity case, but the product's center of gravity moves from "*the* review-aware agent" to
+> **the producer-agnostic, tamper-evident evidence & verification layer for AI-agent sessions in
+> regulated engineering.** Rationale: Akmon will not out-code Cursor/Claude Code (already a §1.2
+> non-goal), and the differentiated value is the substrate + signing + independent verification — not
+> completion UX. So Akmon stops competing on *being the agent you use* and becomes the layer that
+> turns *any* agent's session into signed, independently-verifiable, replayable AGEF evidence.
+>
+> **What changes:**
+> - **Producers become plural.** The bundled agent is retained as the **reference / gold-fidelity
+>   producer** (full content → byte-level replay) and the local/air-gapped capture option — but one of
+>   several. The keystone new producer is **OpenTelemetry GenAI import** (decision D-19): ingest the
+>   telemetry agents already emit and produce AGEF. A higher-fidelity recording proxy is a possible
+>   future producer.
+> - **Investment shifts** away from the agent's completion/UX parity and toward interop (OTEL
+>   import/export), the independent verifier, the compliance crosswalk, and distribution.
+> - **The fidelity spectrum is explicit and honest:** own-agent (gold, full replay) > recording proxy
+>   (full content) > OTEL import (structural + whatever telemetry carries; sessions are marked
+>   structural-replay-only when content is absent). Every tier still yields a signed,
+>   independently-verifiable bundle.
+>
+> **What does NOT change:** the substrate invariants (content-addressed, merkle-linked, verifiable,
+> fail-closed — §1.1/§3/§4), "the session/evidence is the deliverable" (§1.1), the regulated-
+> engineering lens (§2), and the §1.2 non-goals (no completion-UX race, no multi-agent orchestration).
+> This broadens *who produces the evidence*, not *what the evidence is* — it is the natural extension
+> of the original thesis, not a reversal.
  
 ### §1.1 What the thesis commits to
  
@@ -372,6 +401,22 @@ This sub-decision is deferred to Phase 2 design (Item 2.1's design step). The ch
 10. **S10 — AGEF spec coordination.** AGEF v0.1.2 is a minor/additive bump (no breaking change; v0.1.1 readers still read v0.1.2 bundles, ignoring `signatures`). The canonical spec in `radotsvetkov/agef` MUST be updated in lockstep with implementation: revise the §A.3 non-goal, add `signatures` to the §A.5 manifest, add a signing + verification section, and bump §A.11. Appendix A of this document carries the seed (see A.5/A.14/A.11 below).
 
 **Implementation sequencing (S9 resolved: Ed25519 via `ring`).** Each step behind the standard fmt+clippy+test+deny gate: (1) `AGEF-SIG-v1` statement builder + `ManifestSignature` type + Ed25519 sign/verify (`ring`) in `akmon-bundle`, with round-trip + tamper unit tests, and bump `AGEF_SPEC_VERSION` to `0.1.2`; (2) wire verification into `akmon bundle verify` and `agef-verify` (`--verify-key` / `--require-signature`); (3) native production `akmon sign --scheme ed25519 --key …` / `akmon bundle sign`; (4) docs + AGEF spec repo update (S10); (5) a `produce → sign → verify-with-openssl` integration test (improvement-plan success metric F.1).
+
+### §5.19 Decision D-19: OpenTelemetry GenAI interop — **LOCKED direction: import-first, additive**
+
+*Added in v1.7. Implements the repositioning: Akmon ingests sessions from agents it did not produce.*
+
+**Context.** OTEL GenAI semantic conventions are becoming the de-facto capture schema for LLM/agent telemetry (OpenLLMetry, Traceloop, vendor SDKs). Ingesting them makes Akmon the tamper-evident + verifiable layer over the data the ecosystem already emits — without owning the agent. This is the keystone of the v1.7 repositioning.
+
+**Decisions (T1–T7).**
+
+1. **T1 — Import-first.** `akmon import --format otel-genai <trace>` maps an OTEL GenAI trace to an AGEF session in the journal; all existing tooling (verify/inspect/diff/replay/bundle/sign, and `agef-verify`) then applies unchanged. Export (`--format otel-genai`) is a follow-on for SIEM/observability.
+2. **T2 — Pinned, versioned convention.** Target a specific published OTEL GenAI convention version, record it on the imported session, and reject/flag unknown versions. The conventions are still incubating — the importer is explicitly versioned, not best-effort against a moving target.
+3. **T3 — Mapping.** `gen_ai` spans/events → `EventKind`: the root agent/chat span → `SessionStart`/`SessionEnd`; each model-call span → `ProviderCall` (request/response/usage from `gen_ai.*` attributes + events); tool/function spans → `ToolCall`; user/assistant message events → `UserTurn`/`AssistantTurn`. The exact table is fixed during implementation against the pinned version.
+4. **T4 — Fidelity policy (honest partial capture).** Content present in the telemetry (prompts, responses, tool I/O) is hashed into the object store as ordinary AGEF objects. Content absent from the telemetry is recorded as a typed "not-captured" placeholder, and the session is marked **structural-replay-only**. Tamper-evidence and signing apply to whatever was captured; replay fidelity degrades gracefully and visibly.
+5. **T5 — Additive, no substrate change.** OTEL import produces ordinary AGEF v0.1.x sessions/bundles; no `EventKind`, hash, store, or bundle-format change — so no substrate revision is required (`02-substrate-invariants`).
+6. **T6 — Provenance.** The imported session records `producer` = the originating tool (from `gen_ai`/service attributes) plus an "imported-by akmon" marker, so an auditor can see the evidence did not originate in Akmon's own agent.
+7. **T7 — Fidelity spectrum.** own-agent (gold, full replay) > recording proxy (future, full content) > OTEL import (structural + whatever telemetry carries). Documented so users pick a capture method by assurance need.
 
  
 ---
@@ -968,6 +1013,38 @@ Commit: `refactor(core): retire legacy audit/replay/evidence; render from journa
 **Item 8.1 — `akmon bisect`** (post-v2.0)
  
 **Item 8.2 — TUI views** (post-v2.0)
+
+---
+
+### §6.11 Phase 9 — Interop & the trust-layer pivot (v1.7)
+
+Implements decision **D-19** and the v1.7 repositioning. The center of gravity is now the
+producer-agnostic trust toolchain; the bundled agent is the reference / gold-fidelity producer.
+Each item behind the standard fmt+clippy+test+deny gate; substrate stays unchanged (D-19 T5).
+
+- **Item 9.1 — OTEL GenAI importer.** `akmon import --format otel-genai <trace>` → AGEF session.
+  Pinned convention version (T2), mapping per T3, partial-capture marking per T4, provenance per T6.
+  Tests with fixture traces including a content-bearing trace and a metadata-only (partial) trace.
+  This is the keystone; everything below either reuses the existing toolchain or is documentation.
+- **Item 9.2 — Producer-agnostic proof / case study.** Ingest a real trace from a *non-Akmon* agent
+  (e.g. an OpenLLMetry-instrumented script), `akmon bundle sign` it, and verify with `agef-verify`.
+  Publish as the wedge demo — and the vehicle for the first validated regulated user.
+- **Item 9.3 — OTEL GenAI export.** `akmon export --format otel-genai` so Akmon sessions flow into
+  existing SIEM/observability stacks. Bidirectional interop.
+- **Item 9.4 — Compliance crosswalk.** Machine-checkable mapping of AGEF/OTEL evidence fields ↔ EU AI
+  Act Art. 12/19/26, SOC 2 CC, NIST AI RMF (MEASURE 2.7 / MANAGE 4); per-domain notes for
+  DO-178C / IEC 62304 / ISO 26262. Now a core selling artifact, not a nice-to-have.
+- **Item 9.5 — Distribution.** crates.io + Homebrew for `akmon` and `agef-verify`; signed install
+  script — so the auditor-facing verifier is trivially installable anywhere.
+- **Item 9.6 (positioning) — README / docs / site rewrite** to lead with the trust-layer framing;
+  document the agent as the reference / gold-fidelity producer, not the product's reason to exist.
+- **Item 9.7 (future) — Recording-proxy producer.** High-fidelity capture at the model-API boundary
+  for shops that want replay-grade evidence without using Akmon's own agent.
+
+**Sequencing note.** 9.1 is the keystone (unlocks the whole pivot by reusing the existing
+verify/sign/diff/replay/bundle toolchain on imported sessions); 9.2 is the proof; 9.3–9.6 make it
+enterprise-legible and installable; 9.7 is a fidelity upgrade. Do not start 9.x before this v1.7
+repositioning is accepted, since it re-anchors priorities away from the agent's coding UX.
  
 ---
  
