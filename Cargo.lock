@@ -52,6 +52,7 @@ dependencies = [
  "akmon-journal",
  "ciborium",
  "hex",
+ "ring",
  "serde",
  "serde_json",
  "tar",

@@ -6,6 +6,7 @@
 //! - `objects/<hex>` path helpers and basic file I/O.
 //! - `tar.zst` bundle read/write helpers.
 //! - store-independent bundle integrity verification (see [`verify`]).
+//! - optional Ed25519 detached session signatures (see [`signing`]; AGEF v0.1.2).
 
 pub mod archive;
 pub mod error;
@@ -13,6 +14,7 @@ pub mod events;
 pub mod manifest;
 pub mod objects;
 pub mod sentinel;
+pub mod signing;
 pub mod verify;
 
 pub use archive::{
@@ -26,5 +28,9 @@ pub use objects::{object_filename, object_path, read_object_file, write_object_f
 pub use sentinel::{
     SentinelMarker, SentinelParseError, is_sentinel, sentinel_from_original,
     sentinel_to_canonical_cbor, try_parse_sentinel,
+};
+pub use signing::{
+    SCHEME_ED25519, SIG_STATEMENT_VERSION, SigningError, generate_pkcs8, key_id,
+    public_key_from_pkcs8, sign_statement, signing_statement, verify_statement,
 };
 pub use verify::{BundleVerificationReport, BundleViolation, verify_bundle, verify_bundle_strict};
