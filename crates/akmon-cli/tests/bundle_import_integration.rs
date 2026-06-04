@@ -40,6 +40,14 @@ fn run_bundle_export_with(
     cmd.output().expect("run bundle export")
 }
 
+fn run_bundle_verify_with(bundle: &Path, extra: &[&str]) -> std::process::Output {
+    let bin = akmon_bin_path();
+    let mut cmd = Command::new(bin);
+    cmd.args(["bundle", "verify", bundle.to_str().expect("utf8 path")]);
+    cmd.args(extra);
+    cmd.output().expect("run bundle verify")
+}
+
 fn run_bundle_import_with(
     bundle: &Path,
     journal_dir: &Path,
@@ -807,6 +815,35 @@ fn t_bundle_import_verify_only_passes_on_exported_bundle() {
         Some(0),
         "stderr={}",
         String::from_utf8_lossy(&imp.stderr)
+    );
+}
+
+#[test]
+fn t_bundle_verify_matches_verify_only_on_exported_bundle() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    create_clean_session(tmp.path(), sid);
+    let out_path = tmp.path().join("session.akmon");
+    let exp = run_bundle_export_with(
+        tmp.path(),
+        sid,
+        &["--output", &out_path.display().to_string()],
+    );
+    assert_eq!(exp.status.code(), Some(0));
+
+    let via_verify = run_bundle_verify_with(&out_path, &["--format", "json"]);
+    let via_import = run_bundle_import_with(&out_path, tmp.path(), &["--format", "json"]);
+    assert_eq!(via_verify.status.code(), Some(0));
+    assert_eq!(via_import.status.code(), Some(0));
+    let verify_report: BundleVerifyReportV1 =
+        serde_json::from_slice(&via_verify.stdout).expect("verify json");
+    let import_report: BundleVerifyReportV1 =
+        serde_json::from_slice(&via_import.stdout).expect("import verify-only json");
+    assert_eq!(verify_report.passed, import_report.passed);
+    assert_eq!(verify_report.session_id, import_report.session_id);
+    assert_eq!(
+        verify_report.events_in_bundle,
+        import_report.events_in_bundle
     );
 }
 

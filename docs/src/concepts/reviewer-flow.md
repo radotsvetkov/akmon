@@ -62,10 +62,10 @@ akmon redact "${SESSION_ID}" \
 A handoff is review-ready when:
 - all verification commands exit `0`,
 - replay report is pass or divergences are explicitly accepted,
-- exported bundle is present and, if redacted, passes `bundle import --verify-only`.
+- exported bundle is present and, if redacted, passes `akmon bundle verify` (or `bundle import --verify-only`).
 
 ## Troubleshooting
 
 - If `verify` fails, stop release review and inspect violation category before proceeding.
 - If `replay` diverges, treat as change-detection signal and triage expected vs unexpected drift.
-- If bundle import verify-only fails, do not distribute the bundle externally.
+- If bundle verification fails, do not distribute the bundle externally.

@@ -60,7 +60,8 @@ Infrastructure errors (cannot open or parse the archive) emit **VerifyInfraError
 | Tool | Scope |
 | --- | --- |
 | `akmon verify <session-id>` | On-disk journal / redb store |
-| `akmon bundle import --verify-only` | Same bundle checks as `agef-verify`, embedded in Akmon |
+| `akmon bundle verify` | Same bundle checks as `agef-verify`, embedded in Akmon |
+| `akmon bundle import --verify-only` | Legacy alias of `bundle verify` |
 | `agef-verify` | Bundle file only; no journal, no agent |
 
 ## See also

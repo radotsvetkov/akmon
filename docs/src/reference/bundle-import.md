@@ -34,8 +34,10 @@ akmon bundle import <bundle-path> \
 1. Validate bundle only (no local writes):
 
 ```bash
-akmon bundle import /path/to/audit.akmon --verify-only
+akmon bundle verify /path/to/audit.akmon
 ```
+
+(`akmon bundle import … --verify-only` is a legacy alias with identical behavior.)
 
 2. Import into journal:
 
@@ -94,6 +96,7 @@ Import validation aligns with AGEF structural/integrity requirements, including:
 
 ## See also
 
+- [akmon bundle verify](./bundle-verify.md)
 - [agef-verify](./agef-verify.md) — standalone bundle verifier (no Akmon CLI)
 - `akmon bundle export`: [./bundle-export.md](./bundle-export.md)
 - `akmon verify`: [./verify.md](./verify.md)

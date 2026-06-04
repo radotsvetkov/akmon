@@ -44,6 +44,7 @@ akmon verify --help
 akmon inspect --help
 akmon bundle export --help
 akmon bundle import --help
+akmon bundle verify --help
 akmon replay --help
 ```
 
@@ -120,6 +121,7 @@ Expected result: commands parse and help exits `0`.
 - [akmon inspect](./inspect.md)
 - [akmon bundle export](./bundle-export.md)
 - [akmon bundle import](./bundle-import.md)
+- [akmon bundle verify](./bundle-verify.md)
 - [akmon redact](./redact.md)
 - [akmon replay](./replay.md)
 - [akmon diff](./diff.md)
