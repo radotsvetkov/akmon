@@ -10,10 +10,13 @@
 //! the command's environment. The command is terminated if it exceeds its
 //! timeout.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use akmon_config::SigningConfig;
+use akmon_journal::SessionGraph;
+use akmon_query::{default_journal_dir, open_journal_read_only};
 
 /// Result of attempting to run the configured signing command.
 #[derive(Debug)]
@@ -106,6 +109,117 @@ pub async fn run_signing_hook(
         // The pending future (which owns the child) is dropped here; kill_on_drop
         // terminates the process.
         Err(_elapsed) => SigningOutcome::TimedOut { timeout },
+    }
+}
+
+/// Best-effort post-session signing for headless runs (Decision D-05).
+///
+/// When `[signing]` is configured, loads the session head from the journal and
+/// invokes the signing hook. Failures are reported to stderr and do not affect
+/// the caller's exit code.
+pub async fn maybe_sign_after_session(
+    session_id: uuid::Uuid,
+    journal: Option<PathBuf>,
+    signing: &SigningConfig,
+) {
+    if !signing.is_enabled() {
+        return;
+    }
+
+    let head_hex = match resolve_session_head_hex(session_id, journal) {
+        Ok(hex) => hex,
+        Err(msg) => {
+            eprintln!("akmon: sign (auto): {msg}");
+            return;
+        }
+    };
+
+    let program = signing
+        .command
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default();
+    let outcome = run_signing_hook(signing, &head_hex, &session_id.to_string()).await;
+    emit_sign_outcome(session_id, &head_hex, program, &outcome, true);
+}
+
+/// Resolves a session's head hash (hex) from the on-disk journal.
+pub fn resolve_session_head_hex(
+    session_id: uuid::Uuid,
+    journal: Option<PathBuf>,
+) -> Result<String, String> {
+    let journal_dir = match journal {
+        Some(path) => path,
+        None => default_journal_dir()
+            .map_err(|err| format!("cannot resolve default journal directory: {err}"))?,
+    };
+
+    let handle = open_journal_read_only(journal_dir.as_path(), session_id).map_err(|err| {
+        format!(
+            "cannot open journal {} for session {session_id}: {err}",
+            journal_dir.display()
+        )
+    })?;
+
+    let graph = handle
+        .graph
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let head = graph
+        .head()
+        .map_err(|err| format!("cannot read session head: {err}"))?;
+    match head {
+        Some(h) => Ok(h.to_hex()),
+        None => Err("malformed session: empty event graph (no head)".to_owned()),
+    }
+}
+
+/// Writes human-readable signing outcome lines to stderr.
+pub fn emit_sign_outcome(
+    session_id: uuid::Uuid,
+    head_hex: &str,
+    program: &str,
+    outcome: &SigningOutcome,
+    auto: bool,
+) {
+    let tag = if auto { "sign (auto)" } else { "sign" };
+    match outcome {
+        SigningOutcome::Disabled => {}
+        SigningOutcome::SpawnError { message } => {
+            eprintln!("akmon: {tag}: {message}");
+        }
+        SigningOutcome::TimedOut { timeout } => {
+            eprintln!(
+                "akmon: {tag}: signing command timed out after {}s",
+                timeout.as_secs()
+            );
+        }
+        SigningOutcome::Completed {
+            success,
+            exit_code,
+            stdout,
+            stderr,
+            ..
+        } => {
+            if *success {
+                eprintln!("akmon: {tag}: signed session {session_id}");
+                eprintln!("akmon: {tag}:   head: {head_hex}");
+                eprintln!("akmon: {tag}:   command: {program}");
+                if !stdout.trim().is_empty() {
+                    eprintln!("akmon: {tag}:   output: {}", stdout.trim());
+                }
+            } else {
+                eprintln!("akmon: {tag}: signing failed for session {session_id}");
+                eprintln!("akmon: {tag}:   head: {head_hex}");
+                eprintln!(
+                    "akmon: {tag}:   exit code: {}",
+                    exit_code.map_or_else(|| "unknown".to_owned(), |c| c.to_string())
+                );
+                if !stderr.trim().is_empty() {
+                    eprintln!("akmon: {tag}:   stderr: {}", stderr.trim());
+                }
+            }
+        }
     }
 }
 

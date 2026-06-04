@@ -20,6 +20,11 @@ the party being audited" are not sufficient on their own.
 Akmon does **not** embed a signer. `akmon sign` reads the session's head hash from the journal and
 invokes a command you configure under `[signing]` in `~/.akmon/config.toml` (Decision D-05).
 
+Headless runs (`akmon --task …`) invoke the same hook automatically after the session is
+persisted when `[signing]` is configured. Signing is best-effort: failures are logged to stderr as
+`akmon: sign (auto): …` and do not change the run's exit code. Use `akmon sign` when you need an
+explicit failure exit code or JSON report.
+
 - The command is read **only** from the trusted per-user config, never from repo-local or project
   files, so cloning a malicious repository cannot inject a command to run.
 - It runs via `argv` (no shell): configured values are not word-split or shell-interpreted.

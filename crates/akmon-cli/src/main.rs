@@ -4302,30 +4302,9 @@ async fn run_sign(
         return ExitCode::from(2);
     }
 
-    let journal_dir = match journal {
-        Some(path) => path,
-        None => match default_journal_dir() {
-            Ok(path) => path,
-            Err(err) => {
-                let msg = format!("cannot resolve default journal directory: {err}");
-                if json {
-                    let _ = print_sign_json_error("sign_infrastructure_error", msg);
-                } else {
-                    eprintln!("akmon: sign: {msg}");
-                }
-                return ExitCode::from(3);
-            }
-        },
-    };
-
-    let handle = match open_journal_read_only(journal_dir.as_path(), session_id) {
-        Ok(h) => h,
-        Err(err) => {
-            let msg = format!(
-                "cannot open journal {} for session {}: {err}",
-                journal_dir.display(),
-                session_id
-            );
+    let head_hex = match signing::resolve_session_head_hex(session_id, journal) {
+        Ok(hex) => hex,
+        Err(msg) => {
             if json {
                 let _ = print_sign_json_error(verify_error_category(&msg), msg);
             } else {
@@ -4334,37 +4313,6 @@ async fn run_sign(
             return ExitCode::from(3);
         }
     };
-
-    // Scope the graph lock so the (non-Send) guard is dropped before the await below.
-    let head = {
-        let graph = handle
-            .graph
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match graph.head() {
-            Ok(Some(h)) => h,
-            Ok(None) => {
-                let msg = "malformed session: empty event graph (no head)".to_owned();
-                if json {
-                    let _ = print_sign_json_error("sign_infrastructure_error", msg);
-                } else {
-                    eprintln!("akmon: sign: {msg}");
-                }
-                return ExitCode::from(3);
-            }
-            Err(err) => {
-                let msg = format!("cannot read session head: {err}");
-                if json {
-                    let _ = print_sign_json_error(verify_error_category(&msg), msg);
-                } else {
-                    eprintln!("akmon: sign: {msg}");
-                }
-                return ExitCode::from(3);
-            }
-        }
-    };
-
-    let head_hex = head.to_hex();
     let program = signing.command.first().cloned().unwrap_or_default();
     let outcome = signing::run_signing_hook(&signing, &head_hex, &session_id.to_string()).await;
 
@@ -4407,11 +4355,11 @@ async fn run_sign(
             }
             ExitCode::from(1)
         }
-        signing::SigningOutcome::Completed {
+        out @ signing::SigningOutcome::Completed {
             exit_code,
             success,
-            stdout,
-            stderr,
+            stdout: _,
+            stderr: _,
             elapsed,
         } => {
             if json {
@@ -4429,23 +4377,8 @@ async fn run_sign(
                     eprintln!("akmon: sign: failed to render JSON output: {err}");
                     return ExitCode::from(3);
                 }
-            } else if success {
-                eprintln!("signed: session {session_id}");
-                eprintln!("  head: {head_hex}");
-                eprintln!("  command: {program}");
-                if !stdout.trim().is_empty() {
-                    eprintln!("  output: {}", stdout.trim());
-                }
             } else {
-                eprintln!("signing failed: session {session_id}");
-                eprintln!("  head: {head_hex}");
-                eprintln!(
-                    "  exit code: {}",
-                    exit_code.map_or_else(|| "unknown".to_owned(), |c| c.to_string())
-                );
-                if !stderr.trim().is_empty() {
-                    eprintln!("  stderr: {}", stderr.trim());
-                }
+                signing::emit_sign_outcome(session_id, &head_hex, &program, &out, false);
             }
             if success {
                 ExitCode::SUCCESS
@@ -6836,6 +6769,7 @@ async fn main() -> ExitCode {
         }
         let _ = write_handoff_file(&session, &project_root, &cli.model);
         headless_persist(&project_root, &session, &cli.model, headless_started_at);
+        signing::maybe_sign_after_session(session_id, None, &global.signing).await;
         if let Some(handle) = index_thread {
             eprintln!("akmon: waiting for index to finish building...");
             eprintln!(
@@ -7083,6 +7017,7 @@ async fn main() -> ExitCode {
         }
         let _ = write_handoff_file(&session, &project_root, &cli.model);
         headless_persist(&project_root, &session, &cli.model, headless_started_at);
+        signing::maybe_sign_after_session(session_id, None, &global.signing).await;
         if let Some(handle) = index_thread {
             eprintln!("akmon: waiting for index to finish building...");
             eprintln!(
@@ -7238,6 +7173,7 @@ async fn main() -> ExitCode {
     let _ = write_handoff_file(&session, &project_root, &cli.model);
 
     headless_persist(&project_root, &session, &cli.model, headless_started_at);
+    signing::maybe_sign_after_session(session_id, None, &global.signing).await;
 
     if let Some(handle) = index_thread {
         eprintln!("akmon: waiting for index to finish building...");
