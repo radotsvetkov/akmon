@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{ReplayDivergence, ReplayError, ReplayRunOutput};
 
-const AGEF_VERSION: &str = "0.1";
-
 /// Final replay report schema emitted by Item 5.2 orchestration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayReportV1 {
@@ -79,7 +77,7 @@ pub fn assemble_report(
     let passed = divergences.is_empty();
     ReplayReportV1 {
         akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        agef_version: AGEF_VERSION.to_owned(),
+        agef_version: akmon_journal::AGEF_SPEC_VERSION.to_owned(),
         source_session_id: output.source_session_id.to_string(),
         source_head,
         replay_session_id,

@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DiffComparison, DiffDivergence, DiffMode, StructuralBreak};
 
-const AGEF_VERSION: &str = "0.1";
-
 /// Final diff report schema emitted by diff orchestration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffReportV1 {
@@ -45,7 +43,7 @@ impl DiffReportV1 {
         let matches = divergence_count == 0 && comparison.structural_break.is_none();
         Self {
             akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-            agef_version: AGEF_VERSION.to_owned(),
+            agef_version: akmon_journal::AGEF_SPEC_VERSION.to_owned(),
             session_a_id: comparison.session_a_id,
             session_b_id: comparison.session_b_id,
             mode: comparison.mode,
