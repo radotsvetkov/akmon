@@ -44,6 +44,20 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # cargo-deny runs advisories (RustSec, superset of cargo-audit), license,
+      # banned/duplicate-crate, and source checks against deny.toml at the repo root.
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          rust-version: "1.88"
+
   docs-quality:
     name: Docs Quality
     runs-on: ubuntu-latest

@@ -1,0 +1,73 @@
+# cargo-deny configuration — supply-chain gating for Akmon.
+#
+# Run locally with: cargo deny check
+# CI runs the same check via .github/workflows/ci.yml (supply-chain job).
+#
+# Akmon is a trust-first product; this file is the machine-checkable contract for
+# "no known-vulnerable, unlicensed, or untrusted dependencies ship in a release".
+
+[advisories]
+version = 2
+# RustSec advisory database. Security vulnerabilities (error[vulnerability]) are
+# never ignored here — they must be fixed (e.g. `cargo update -p <crate>`).
+#
+# The entries below are unmaintained-only advisories (error[unmaintained]) for
+# transitive dependencies with no currently-available maintained replacement.
+# They are pulled almost entirely through the optional `fastembed`/`ort` ML stack
+# and the TUI/progress dependencies, none of which are in the default build
+# (CI builds with --no-default-features). Each is accepted deliberately; revisit
+# when an upstream fix lands.
+ignore = [
+    "RUSTSEC-2023-0089", # atomic-polyfill: unmaintained (transitive; no replacement wired)
+    "RUSTSEC-2025-0141", # bincode 1.x: unmaintained (transitive; Akmon hashes via postcard/CBOR, not bincode)
+    "RUSTSEC-2026-0105", # core2: unmaintained + yanked (transitive; no maintained version exists)
+    "RUSTSEC-2025-0119", # number_prefix: unmaintained (transitive via indicatif progress bars)
+    "RUSTSEC-2024-0436", # paste: unmaintained (transitive proc-macro helper; no drop-in replacement)
+]
+
+[licenses]
+version = 2
+# SPDX identifiers permitted in the dependency closure. Akmon itself is Apache-2.0.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "MITNFA",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "NCSA",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+# Per-crate license exceptions are added here with justification if needed.
+exceptions = []
+
+[bans]
+# The lockfile currently carries a few duplicated majors (e.g. reqwest 0.12/0.13)
+# pulled transitively. Surface them as warnings rather than failing the build;
+# tighten to "deny" once the tree is deduplicated.
+multiple-versions = "warn"
+# Akmon's workspace crates reference each other via wildcard path dependencies.
+# `allow-wildcard-paths` does not apply because the crates are not marked
+# `publish = false`. Wildcard enforcement is deferred until the internal crates
+# carry explicit versions as part of crates.io publishing readiness (Track 4),
+# at which point this returns to "deny" with allow-wildcard-paths = true.
+wildcards = "allow"
+# Crates that must never appear in the dependency tree.
+deny = []
+
+[sources]
+# Only crates.io and explicitly-allowed git sources are trusted.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

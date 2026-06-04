@@ -1,0 +1,12 @@
+# Pin the toolchain so local builds match CI exactly.
+#
+# Before this file existed, contributors on newer toolchains hit clippy/lint
+# failures that CI (pinned to 1.88) did not, and vice versa. Pinning here makes
+# `cargo {build,test,clippy,fmt}` reproducible across every machine and CI.
+#
+# Keep `channel` in sync with `rust-version` in Cargo.toml and the toolchain
+# pinned in .github/workflows/*.yml.
+[toolchain]
+channel = "1.88"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

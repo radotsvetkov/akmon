@@ -73,6 +73,22 @@ jobs:
           find dist -type f -name 'akmon-*' -exec cp -v {} release-assets/ \;
           ls -la release-assets
 
+      # Software Bill of Materials (CycloneDX) generated from Cargo.lock so
+      # downstream consumers can audit the dependency closure of each release.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: release-assets/akmon.cdx.json
+
+      # SHA-256 checksums let users verify the integrity of downloaded binaries.
+      - name: Generate SHA-256 checksums
+        run: |
+          cd release-assets
+          sha256sum akmon-* akmon.cdx.json > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Prepare release notes body
         run: |
           TAG="${GITHUB_REF_NAME}"
