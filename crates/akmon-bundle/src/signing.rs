@@ -30,6 +30,9 @@ pub enum SigningError {
     /// The public key was not a 32-byte Ed25519 public key.
     #[error("invalid Ed25519 public key: expected 32 bytes, got {0}")]
     InvalidPublicKey(usize),
+    /// A public key supplied as a hex string could not be decoded.
+    #[error("public key is not valid hex")]
+    MalformedPublicKeyHex,
     /// The system random number generator could not produce a key.
     #[error("Ed25519 key generation failed")]
     KeyGeneration,
@@ -106,6 +109,19 @@ pub fn verify_statement(
 pub fn key_id(public_key: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, public_key);
     hex::encode(digest.as_ref())
+}
+
+/// Parses a raw 32-byte Ed25519 public key from a hex string (surrounding whitespace ignored).
+///
+/// Convenience for CLI `--verify-key` inputs: a verifier holds the signer's public key as 64 hex
+/// characters (the same form Akmon prints when signing). Returns [`SigningError::MalformedPublicKeyHex`]
+/// for non-hex input and [`SigningError::InvalidPublicKey`] when the decoded length is not 32.
+pub fn parse_public_key_hex(s: &str) -> Result<Vec<u8>, SigningError> {
+    let bytes = hex::decode(s.trim()).map_err(|_| SigningError::MalformedPublicKeyHex)?;
+    if bytes.len() != ED25519_PUBLIC_KEY_LEN {
+        return Err(SigningError::InvalidPublicKey(bytes.len()));
+    }
+    Ok(bytes)
 }
 
 /// Outcome of checking one `manifest.signatures[]` entry against a set of trusted keys.
@@ -297,6 +313,26 @@ mod tests {
         assert_eq!(id.len(), 64);
         assert_eq!(id, key_id(&pubkey));
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn parse_public_key_hex_roundtrips_and_rejects_bad_input() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let pubkey = public_key_from_pkcs8(&pkcs8).expect("pubkey");
+        let hexed = hex::encode(&pubkey);
+        assert_eq!(parse_public_key_hex(&hexed).expect("parse"), pubkey);
+        assert_eq!(
+            parse_public_key_hex(&format!("  {hexed}\n")).expect("trim"),
+            pubkey
+        );
+        assert!(matches!(
+            parse_public_key_hex("nothex!!"),
+            Err(SigningError::MalformedPublicKeyHex)
+        ));
+        assert!(matches!(
+            parse_public_key_hex("ab12"),
+            Err(SigningError::InvalidPublicKey(2))
+        ));
     }
 
     fn signed_manifest(pkcs8: &[u8], head: &str) -> crate::manifest::Manifest {

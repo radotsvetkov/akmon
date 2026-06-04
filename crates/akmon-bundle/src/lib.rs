@@ -31,7 +31,8 @@ pub use sentinel::{
 };
 pub use signing::{
     SCHEME_ED25519, SIG_STATEMENT_VERSION, SignatureCheck, SignatureOutcome,
-    SignatureVerificationReport, SigningError, generate_pkcs8, key_id, public_key_from_pkcs8,
-    sign_statement, signing_statement, verify_manifest_signatures, verify_statement,
+    SignatureVerificationReport, SigningError, generate_pkcs8, key_id, parse_public_key_hex,
+    public_key_from_pkcs8, sign_statement, signing_statement, verify_manifest_signatures,
+    verify_statement,
 };
 pub use verify::{BundleVerificationReport, BundleViolation, verify_bundle, verify_bundle_strict};

@@ -16,6 +16,7 @@ dependencies = [
  "akmon-journal",
  "clap",
  "dunce",
+ "hex",
  "serde",
  "serde_json",
  "tempfile",

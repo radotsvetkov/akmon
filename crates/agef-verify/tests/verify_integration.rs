@@ -3,8 +3,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
 
-use akmon_bundle::manifest::{Manifest, Producer, SessionMetadata};
-use akmon_bundle::{BundleContents, WriteBundleOptions, write_bundle};
+use akmon_bundle::manifest::{Manifest, ManifestSignature, Producer, SessionMetadata};
+use akmon_bundle::{
+    BundleContents, SCHEME_ED25519, SIG_STATEMENT_VERSION, WriteBundleOptions, generate_pkcs8,
+    key_id, public_key_from_pkcs8, sign_statement, signing_statement, write_bundle,
+};
 use akmon_journal::{AGEF_SPEC_VERSION, Event, EventKind, Hash, HashAlgorithm, digest_bytes};
 use tempfile::tempdir;
 
@@ -138,4 +141,105 @@ fn t_verify_tampered_bundle_exits_1() {
     assert_eq!(out.status.code(), Some(1));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(v.get("passed").and_then(|p| p.as_bool()), Some(false));
+}
+
+/// Signs `contents`' head with a fresh Ed25519 key, populating `manifest.signatures[]`.
+/// Returns the signer's public key as hex (for `--verify-key`).
+fn sign_bundle_head(contents: &mut BundleContents) -> String {
+    let pkcs8 = generate_pkcs8().expect("keygen");
+    let pubkey = public_key_from_pkcs8(&pkcs8).expect("pubkey");
+    let m = &contents.manifest;
+    let statement = signing_statement(
+        &m.agef_version,
+        &m.hash_algorithm,
+        &m.session.id,
+        &m.session.head,
+    );
+    let sig = sign_statement(statement.as_bytes(), &pkcs8).expect("sign");
+    contents.manifest.signatures = Some(vec![ManifestSignature {
+        scheme: SCHEME_ED25519.to_owned(),
+        key_id: key_id(&pubkey),
+        statement_version: SIG_STATEMENT_VERSION.to_owned(),
+        signature: hex::encode(&sig),
+        created_at: "2026-05-04T14:01:00Z".to_owned(),
+    }]);
+    hex::encode(&pubkey)
+}
+
+#[test]
+fn t_verify_signed_bundle_with_key_verifies() {
+    let dir = tempdir().expect("tempdir");
+    let bundle = dir.path().join("signed.akmon");
+    let key_file = dir.path().join("signer.pub.hex");
+    let mut contents = valid_bundle();
+    let pubkey_hex = sign_bundle_head(&mut contents);
+    write_bundle_file(&bundle, &contents);
+    std::fs::write(&key_file, pubkey_hex).expect("write key");
+
+    let out = agef_verify_bin()
+        .arg(&bundle)
+        .args(["--format", "json"])
+        .arg("--verify-key")
+        .arg(&key_file)
+        .output()
+        .expect("run agef-verify");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v.get("passed").and_then(|p| p.as_bool()), Some(true));
+    let sigs = v
+        .get("signatures")
+        .and_then(|x| x.as_array())
+        .expect("signatures");
+    assert_eq!(sigs.len(), 1);
+    assert_eq!(
+        sigs[0].get("outcome").and_then(|o| o.as_str()),
+        Some("verified")
+    );
+}
+
+#[test]
+fn t_verify_signed_bundle_without_key_is_unverified() {
+    let dir = tempdir().expect("tempdir");
+    let bundle = dir.path().join("signed.akmon");
+    let mut contents = valid_bundle();
+    let _ = sign_bundle_head(&mut contents);
+    write_bundle_file(&bundle, &contents);
+
+    let out = agef_verify_bin()
+        .arg(&bundle)
+        .args(["--format", "json"])
+        .output()
+        .expect("run agef-verify");
+    // No --verify-key: integrity passes and exit is 0; the signature is reported as unverified.
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    let sigs = v
+        .get("signatures")
+        .and_then(|x| x.as_array())
+        .expect("signatures");
+    assert_eq!(
+        sigs[0].get("outcome").and_then(|o| o.as_str()),
+        Some("unverified_no_key")
+    );
+}
+
+#[test]
+fn t_require_signature_without_key_fails() {
+    let dir = tempdir().expect("tempdir");
+    let bundle = dir.path().join("signed.akmon");
+    let mut contents = valid_bundle();
+    let _ = sign_bundle_head(&mut contents);
+    write_bundle_file(&bundle, &contents);
+
+    let out = agef_verify_bin()
+        .arg(&bundle)
+        .arg("--require-signature")
+        .output()
+        .expect("run agef-verify");
+    assert_eq!(out.status.code(), Some(1));
 }
