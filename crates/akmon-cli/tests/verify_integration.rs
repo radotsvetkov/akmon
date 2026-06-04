@@ -154,7 +154,7 @@ fn t_verify_json_output_for_clean_session() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let parsed: VerifyReportV1 = serde_json::from_str(&stdout).expect("parse VerifyReportV1");
     assert!(!parsed.akmon_version.is_empty());
-    assert_eq!(parsed.agef_version, "0.1.1");
+    assert_eq!(parsed.agef_version, akmon_journal::AGEF_SPEC_VERSION);
     assert_eq!(parsed.session_id, sid.to_string());
     assert!(!parsed.journal_path.is_empty());
     assert!(parsed.events_checked > 0);

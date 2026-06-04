@@ -1,4 +1,4 @@
-//! Content-addressed journal substrate for Akmon and AGEF v0.1.
+//! Content-addressed journal substrate for Akmon and AGEF v0.1.1.
 //!
 //! `akmon-journal` is the reference storage substrate for Akmon's AGEF evidence model:
 //! immutable content-addressed objects plus merkle-linked session events.
@@ -34,6 +34,7 @@ pub use event::{
     AttemptRecord, AttemptStatus, Event, EventKind, referenced_object_hashes_for_kind,
 };
 pub use hash::{BLAKE3_LEN, Hash, HashAlgorithm, SHA256_LEN, WireHash, digest_bytes};
+pub use journal_meta::JournalMeta;
 pub use object_store::{MemoryObjectStore, ObjectStore, RedbObjectStore};
 #[cfg(any(test, feature = "test-utils"))]
 pub use session_graph::MemorySessionGraph;

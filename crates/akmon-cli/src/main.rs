@@ -7403,7 +7403,7 @@ mod tests {
     ) -> akmon_replay::ReplayReportV1 {
         akmon_replay::ReplayReportV1 {
             akmon_version: "0.0.0-test".to_owned(),
-            agef_version: "0.1.1".to_owned(),
+            agef_version: AGEF_SPEC_VERSION.to_owned(),
             source_session_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
             source_head: "deadbeef".to_owned(),
             replay_session_id: replay_session_id.map(str::to_owned),

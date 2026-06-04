@@ -206,7 +206,7 @@ mod tests {
 
     fn manifest() -> Manifest {
         Manifest {
-            agef_version: "0.1.1".to_owned(),
+            agef_version: akmon_journal::AGEF_SPEC_VERSION.to_owned(),
             producer: Producer {
                 name: "akmon".to_owned(),
                 version: "2.0.0".to_owned(),

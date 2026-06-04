@@ -1,5 +1,6 @@
 //! Journal metadata persisted in the redb backing store.
 
+use crate::AGEF_SPEC_VERSION;
 use crate::hash::HashAlgorithm;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +24,7 @@ impl JournalMeta {
     /// Creates a new metadata record.
     pub fn new(hash_algorithm: HashAlgorithm, now_epoch_seconds: i64) -> Self {
         Self {
-            agef_version: "0.1".to_owned(),
+            agef_version: AGEF_SPEC_VERSION.to_owned(),
             hash_algorithm,
             created_at: now_epoch_seconds,
             schema_version: Self::SCHEMA_VERSION,
@@ -43,5 +44,11 @@ mod tests {
         let decoded: JournalMeta =
             postcard::from_bytes(&encoded).unwrap_or_else(|_| unreachable!());
         assert_eq!(decoded, meta);
+    }
+
+    #[test]
+    fn journal_meta_agef_version_matches_spec_constant() {
+        let meta = JournalMeta::new(HashAlgorithm::Sha256, 0);
+        assert_eq!(meta.agef_version, crate::AGEF_SPEC_VERSION);
     }
 }
