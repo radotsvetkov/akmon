@@ -5,6 +5,7 @@
 //! - `events.bin` length-delimited canonical-CBOR framing.
 //! - `objects/<hex>` path helpers and basic file I/O.
 //! - `tar.zst` bundle read/write helpers.
+//! - store-independent bundle integrity verification (see [`verify`]).
 
 pub mod archive;
 pub mod error;
@@ -12,9 +13,11 @@ pub mod events;
 pub mod manifest;
 pub mod objects;
 pub mod sentinel;
+pub mod verify;
 
 pub use archive::{
-    BundleContents, ReadBundleOptions, WriteBundleOptions, read_bundle, write_bundle,
+    BundleContents, ReadBundleOptions, WriteBundleOptions, read_bundle, read_verified_bundle,
+    write_bundle,
 };
 pub use error::BundleError;
 pub use events::{DEFAULT_MAX_EVENT_FRAME_LEN, EventsReader, EventsWriter};
@@ -24,3 +27,4 @@ pub use sentinel::{
     SentinelMarker, SentinelParseError, is_sentinel, sentinel_from_original,
     sentinel_to_canonical_cbor, try_parse_sentinel,
 };
+pub use verify::{BundleVerificationReport, BundleViolation, verify_bundle, verify_bundle_strict};

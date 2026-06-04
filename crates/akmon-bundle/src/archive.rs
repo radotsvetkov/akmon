@@ -188,6 +188,22 @@ pub fn read_bundle<R: Read>(
     })
 }
 
+/// Reads one AGEF bundle from `tar.zst` and verifies its integrity before returning.
+///
+/// This is the safe-by-default entry point: it calls [`read_bundle`] and then
+/// [`crate::verify::verify_bundle_strict`], returning the first integrity violation
+/// as a [`BundleError`]. Use [`read_bundle`] directly only when you intend to verify
+/// separately (for example to collect a full fail-soft report via
+/// [`crate::verify::verify_bundle`]).
+pub fn read_verified_bundle<R: Read>(
+    reader: R,
+    options: &ReadBundleOptions,
+) -> Result<BundleContents, BundleError> {
+    let contents = read_bundle(reader, options)?;
+    crate::verify::verify_bundle_strict(&contents)?;
+    Ok(contents)
+}
+
 fn append_bytes<W: Write>(
     builder: &mut tar::Builder<W>,
     path: &str,
@@ -207,7 +223,7 @@ fn path_to_unix(path: PathBuf) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn parse_algorithm(value: &str) -> Result<HashAlgorithm, BundleError> {
+pub(crate) fn parse_algorithm(value: &str) -> Result<HashAlgorithm, BundleError> {
     match value {
         "sha256" => Ok(HashAlgorithm::Sha256),
         "blake3" => Ok(HashAlgorithm::Blake3),
