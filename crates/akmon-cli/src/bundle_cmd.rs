@@ -516,6 +516,7 @@ fn run_bundle_export(
         hash_algorithm: handle.store.algorithm().to_string(),
         object_count: objects.len() as u64,
         event_count: events.len() as u64,
+        signatures: None,
         extra: BTreeMap::new(),
     };
 

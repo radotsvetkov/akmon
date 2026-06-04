@@ -108,6 +108,124 @@ pub fn key_id(public_key: &[u8]) -> String {
     hex::encode(digest.as_ref())
 }
 
+/// Outcome of checking one `manifest.signatures[]` entry against a set of trusted keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureOutcome {
+    /// A trusted key validates the signature over the reconstructed statement.
+    Verified,
+    /// The entry names a trusted key (by `key_id`) but the signature does not validate — a tampered
+    /// statement or a corrupt signature.
+    Invalid,
+    /// No trusted key validates the signature and none matches the entry's `key_id`.
+    UnverifiedNoKey,
+    /// The entry's `scheme` is not understood (only `ed25519` is defined in AGEF v0.1.2).
+    UnsupportedScheme,
+    /// The entry's `statement_version` or signature hex is malformed.
+    Malformed,
+}
+
+/// Result of checking one signature entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureCheck {
+    /// `key_id` copied from the manifest entry.
+    pub key_id: String,
+    /// `scheme` copied from the manifest entry.
+    pub scheme: String,
+    /// Verification outcome.
+    pub outcome: SignatureOutcome,
+}
+
+/// Report from verifying all of a manifest's signatures against a set of trusted public keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignatureVerificationReport {
+    /// Per-entry results, in manifest order.
+    pub checks: Vec<SignatureCheck>,
+}
+
+impl SignatureVerificationReport {
+    /// True when the manifest carried no signatures at all.
+    #[must_use]
+    pub fn is_unsigned(&self) -> bool {
+        self.checks.is_empty()
+    }
+
+    /// True when at least one entry verified against a trusted key.
+    #[must_use]
+    pub fn any_verified(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|c| c.outcome == SignatureOutcome::Verified)
+    }
+
+    /// True when any entry named a trusted key but failed verification (a hard failure).
+    #[must_use]
+    pub fn any_invalid(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|c| c.outcome == SignatureOutcome::Invalid)
+    }
+}
+
+/// Verifies every `manifest.signatures[]` entry against the supplied trusted Ed25519 public keys
+/// (raw 32-byte each).
+///
+/// The `AGEF-SIG-v1` statement is reconstructed from the manifest's own `agef_version`,
+/// `hash_algorithm`, `session.id`, and `session.head`, so a signature validates only if it covers
+/// exactly this session. Independent of bundle integrity (decision D-18, S6): run integrity
+/// verification first — this answers "who attested to this head", not "is the bundle consistent".
+#[must_use]
+pub fn verify_manifest_signatures(
+    manifest: &crate::manifest::Manifest,
+    trusted_keys: &[Vec<u8>],
+) -> SignatureVerificationReport {
+    let Some(signatures) = &manifest.signatures else {
+        return SignatureVerificationReport::default();
+    };
+    let statement = signing_statement(
+        &manifest.agef_version,
+        &manifest.hash_algorithm,
+        &manifest.session.id,
+        &manifest.session.head,
+    );
+    let checks = signatures
+        .iter()
+        .map(|sig| check_signature_entry(sig, statement.as_bytes(), trusted_keys))
+        .collect();
+    SignatureVerificationReport { checks }
+}
+
+/// Checks one signature entry, trying every trusted key (key_id is a hint, not the trust anchor).
+fn check_signature_entry(
+    sig: &crate::manifest::ManifestSignature,
+    statement: &[u8],
+    trusted_keys: &[Vec<u8>],
+) -> SignatureCheck {
+    let with = |outcome| SignatureCheck {
+        key_id: sig.key_id.clone(),
+        scheme: sig.scheme.clone(),
+        outcome,
+    };
+    if sig.scheme != SCHEME_ED25519 {
+        return with(SignatureOutcome::UnsupportedScheme);
+    }
+    if sig.statement_version != SIG_STATEMENT_VERSION {
+        return with(SignatureOutcome::Malformed);
+    }
+    let Ok(sig_bytes) = hex::decode(&sig.signature) else {
+        return with(SignatureOutcome::Malformed);
+    };
+    if trusted_keys
+        .iter()
+        .any(|k| verify_statement(statement, &sig_bytes, k).is_ok())
+    {
+        return with(SignatureOutcome::Verified);
+    }
+    if trusted_keys.iter().any(|k| key_id(k) == sig.key_id) {
+        return with(SignatureOutcome::Invalid);
+    }
+    with(SignatureOutcome::UnverifiedNoKey)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +297,102 @@ mod tests {
         assert_eq!(id.len(), 64);
         assert_eq!(id, key_id(&pubkey));
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    fn signed_manifest(pkcs8: &[u8], head: &str) -> crate::manifest::Manifest {
+        let pubkey = public_key_from_pkcs8(pkcs8).expect("pubkey");
+        let stmt = signing_statement(
+            "0.1.2",
+            "sha256",
+            "550e8400-e29b-41d4-a716-446655440000",
+            head,
+        );
+        let sig = sign_statement(stmt.as_bytes(), pkcs8).expect("sign");
+        crate::manifest::Manifest {
+            agef_version: "0.1.2".to_owned(),
+            producer: crate::manifest::Producer {
+                name: "akmon".to_owned(),
+                version: "t".to_owned(),
+            },
+            session: crate::manifest::SessionMetadata {
+                id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+                head: head.to_owned(),
+                created_at: "2026-05-04T14:00:00Z".to_owned(),
+                ended_at: "2026-05-04T14:01:00Z".to_owned(),
+            },
+            hash_algorithm: "sha256".to_owned(),
+            object_count: 1,
+            event_count: 2,
+            signatures: Some(vec![crate::manifest::ManifestSignature {
+                scheme: SCHEME_ED25519.to_owned(),
+                key_id: key_id(&pubkey),
+                statement_version: SIG_STATEMENT_VERSION.to_owned(),
+                signature: hex::encode(&sig),
+                created_at: "2026-05-04T14:01:00Z".to_owned(),
+            }]),
+            extra: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn unsigned_manifest_reports_unsigned() {
+        let mut m = signed_manifest(&generate_pkcs8().expect("keygen"), "deadbeef");
+        m.signatures = None;
+        let report = verify_manifest_signatures(&m, &[]);
+        assert!(report.is_unsigned());
+        assert!(!report.any_verified());
+    }
+
+    #[test]
+    fn valid_signature_verifies_with_trusted_key() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let pubkey = public_key_from_pkcs8(&pkcs8).expect("pubkey");
+        let m = signed_manifest(&pkcs8, "deadbeef");
+        let report = verify_manifest_signatures(&m, &[pubkey]);
+        assert!(report.any_verified());
+        assert!(!report.any_invalid());
+        assert_eq!(report.checks[0].outcome, SignatureOutcome::Verified);
+    }
+
+    #[test]
+    fn signature_without_trusted_key_is_unverified() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let m = signed_manifest(&pkcs8, "deadbeef");
+        let report = verify_manifest_signatures(&m, &[]);
+        assert!(!report.is_unsigned());
+        assert!(!report.any_verified());
+        assert_eq!(report.checks[0].outcome, SignatureOutcome::UnverifiedNoKey);
+    }
+
+    #[test]
+    fn tampered_head_makes_matching_key_invalid() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let pubkey = public_key_from_pkcs8(&pkcs8).expect("pubkey");
+        let mut m = signed_manifest(&pkcs8, "deadbeef");
+        m.session.head = "feedface".to_owned();
+        let report = verify_manifest_signatures(&m, &[pubkey]);
+        assert!(report.any_invalid());
+        assert_eq!(report.checks[0].outcome, SignatureOutcome::Invalid);
+    }
+
+    #[test]
+    fn unsupported_scheme_is_flagged() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let mut m = signed_manifest(&pkcs8, "deadbeef");
+        m.signatures.as_mut().expect("sigs")[0].scheme = "rsa".to_owned();
+        let report = verify_manifest_signatures(&m, &[]);
+        assert_eq!(
+            report.checks[0].outcome,
+            SignatureOutcome::UnsupportedScheme
+        );
+    }
+
+    #[test]
+    fn malformed_signature_hex_is_flagged() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let mut m = signed_manifest(&pkcs8, "deadbeef");
+        m.signatures.as_mut().expect("sigs")[0].signature = "nothex!!".to_owned();
+        let report = verify_manifest_signatures(&m, &[]);
+        assert_eq!(report.checks[0].outcome, SignatureOutcome::Malformed);
     }
 }

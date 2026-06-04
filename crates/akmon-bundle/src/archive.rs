@@ -253,6 +253,7 @@ mod tests {
             hash_algorithm: "sha256".to_owned(),
             object_count: 1,
             event_count: 2,
+            signatures: None,
             extra: BTreeMap::new(),
         }
     }

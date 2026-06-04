@@ -56,6 +56,7 @@ fn valid_bundle() -> BundleContents {
         hash_algorithm: "sha256".to_owned(),
         object_count: 2,
         event_count: 2,
+        signatures: None,
         extra: BTreeMap::new(),
     };
 

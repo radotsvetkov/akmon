@@ -20,6 +20,10 @@ pub struct Manifest {
     pub object_count: u64,
     /// Number of events in `events.bin`.
     pub event_count: u64,
+    /// Optional detached signatures over the session head (AGEF v0.1.2 §A.14). Absent ⇒ unsigned;
+    /// omitted from serialized JSON when `None`, so unsigned manifests are byte-identical to v0.1.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signatures: Option<Vec<ManifestSignature>>,
     /// Forward-compatible extra metadata fields.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -45,6 +49,24 @@ pub struct SessionMetadata {
     pub created_at: String,
     /// RFC3339 end timestamp.
     pub ended_at: String,
+}
+
+/// A detached signature over the session head (AGEF v0.1.2 §A.14).
+///
+/// Optional manifest metadata; never part of the event hash chain (decision D-18, S5). A signer
+/// covers the canonical `AGEF-SIG-v1` statement (see [`crate::signing::signing_statement`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestSignature {
+    /// Signature scheme. `ed25519` is the only scheme defined in AGEF v0.1.2.
+    pub scheme: String,
+    /// Key identifier: lowercase hex SHA-256 of the signer's raw public key.
+    pub key_id: String,
+    /// Version tag of the signed statement (`AGEF-SIG-v1`).
+    pub statement_version: String,
+    /// Detached signature bytes as lowercase hex.
+    pub signature: String,
+    /// RFC3339 timestamp when the signature was produced.
+    pub created_at: String,
 }
 
 impl Manifest {
@@ -220,6 +242,7 @@ mod tests {
             hash_algorithm: "sha256".to_owned(),
             object_count: 2,
             event_count: 3,
+            signatures: None,
             extra: BTreeMap::from([("x_extra".to_owned(), serde_json::json!({"z":1,"a":2}))]),
         }
     }

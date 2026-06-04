@@ -2283,6 +2283,7 @@ fn run_redact(
         hash_algorithm: algorithm.to_string(),
         object_count: derivative_objects.len() as u64,
         event_count: rewritten_events.len() as u64,
+        signatures: None,
         extra: BTreeMap::new(),
     };
 
