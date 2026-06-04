@@ -11,13 +11,14 @@
 - Not a prompt to paste into Cursor. It's a planning document. Cursor reads it as context; your existing Cursor system prompt drives the interaction style.
 - Not a timeline. Estimates are rough (8–10 focused weeks, but you set pace).
 - Not a marketing plan. Positioning only. Marketing is downstream of shipped code.
-**Document version:** 1.4 — June 2026
+**Document version:** 1.5 — June 2026
 **Revision history:**
 - v1.0 (April 2026) — Initial document.
 - v1.1 (April 2026) — Adds D-16, D-17, Item 6.10 in response to repositioning audit findings A and B (`docs/repositioning-audit.md`). No prior decisions altered.
 - v1.2 (May 2026) — Adds Item 4.3 design decisions (F1-F12), renames bundle commands to `akmon bundle ...`, and corrects D-02 manifest serialization wording to align with AGEF v0.1.1 §6.
 - v1.3 (June 2026) — Reconciles §4 and §6.8 with shipped reality: Item 6.10 (akmon-core legacy retirement) is reclassified from a v2.0.0 release gate to tracked post-v2.x debt, because v2.0.0 and v2.1.0 shipped with the legacy audit/evidence surface coexisting with the journal substrate. Coexistence is now explicitly accepted and documented (product-owner ruling) rather than a silent gate bypass. No LOCKED positioning (§1–§3) altered; no substrate invariant altered.
 - v1.4 (June 2026) — Completes D-05 with **D-18: native session signing** (offline-first OpenPGP/x509), and specifies the corresponding **AGEF v0.1.2** additive substrate change (optional `manifest.signatures[]`). Product-owner ruling: "offline GPG/x509 first" (no keyless/Sigstore; transparency-log anchoring deferred). This is a substrate-level change (bundle/manifest format) authorized by this revision per `02-substrate-invariants.mdc`; the canonical AGEF spec in `radotsvetkov/agef` must be updated in lockstep (S10). One sub-decision (S9, crypto backend / dependency) is left OPEN pending explicit approval before implementation, per the no-silent-dependency rule. No LOCKED positioning (§1–§3) altered.
+- v1.5 (June 2026) — Resolves D-18's open sub-decision **S9** and revises **S3**: the first native scheme is **Ed25519 (`ed25519`) via `ring`**, not OpenPGP. Reason: OpenPGP (any pure-Rust impl, e.g. rPGP) transitively requires the `rsa` crate, which carries an unpatched advisory (RUSTSEC-2023-0071, "Marvin"); `cargo deny check advisories` FAILS, and `deny.toml` policy never ignores vulnerabilities — shipping a signer that drags a flagged CVE into a trust product is self-defeating. `ring` is already in the dependency tree, so the chosen scheme adds **zero** new supply-chain surface. Auditors verify with `openssl`/`ssh-keygen -Y` (the non-Akmon-tool goal still holds). The signing envelope, statement, manifest field, and verify flow are unchanged; X.509/ECDSA remains a documented future scheme. Product-owner ruling. No LOCKED positioning (§1–§3) altered.
 ---
  
 # Layer 1 — Locked positioning
@@ -355,25 +356,21 @@ This sub-decision is deferred to Phase 2 design (Item 2.1's design step). The ch
    head:<lowercase-hex>
    ```
    The `AGEF-SIG-v1` tag versions the statement independently of the bundle.
-3. **S3 — Schemes (offline-first).** `openpgp-detached` (OpenPGP detached signature) ships first; `x509-cms` (detached CMS/PKCS#7) is reserved as the enterprise option and MAY land in the same minor. Explicitly **excluded** here (per the ruling): keyless/Sigstore and any network/transparency-log dependency — those conflict with the air-gap story and are a later additive layer (improvement plan Track 1 P1).
+3. **S3 — Schemes (offline-first).** `ed25519` — a raw Ed25519 signature over the statement bytes, via `ring` — ships first (see S9 for why OpenPGP was rejected). `ecdsa-p256` with X.509 is the reserved enterprise/PKI option and MAY land in a later minor. Explicitly **excluded** (per the ruling): keyless/Sigstore and any network/transparency-log dependency — those conflict with the air-gap story and are a later additive layer (improvement plan Track 1 P1).
 4. **S4 — Manifest schema (AGEF v0.1.2, additive).** `manifest.json` gains an OPTIONAL `signatures` array; absence ⇒ unsigned (fully backward compatible — existing readers already tolerate unknown manifest fields via the flattened `extra` map). Each entry:
    ```json
-   { "scheme": "openpgp-detached", "key_id": "<fingerprint>",
+   { "scheme": "ed25519", "key_id": "<key fingerprint>",
      "statement_version": "AGEF-SIG-v1", "signature": "<base64>",
      "created_at": "<rfc3339>" }
    ```
 5. **S5 — Signatures are outside the event hash chain.** Like all manifest metadata (D-02), signatures are *not* part of any event hash. They sign the head — the chain root — so they authenticate the whole chain without being inside it. Adding or counter-signing never mutates the head or any event/object hash; multiple signatures (counter-signing) are allowed.
 6. **S6 — Verification semantics.** Integrity verification (object re-hash, chain re-walk, head/closure — the existing path) runs first and is **independent** of signatures. Then, if `signatures` is present and the verifier was given a trusted public key (`--verify-key`), each signature is checked against the reconstructed `AGEF-SIG-v1` statement and reported per-signature. Rules: present key + valid sig ⇒ verified; present key + invalid sig ⇒ **hard failure (exit 1)**; signatures present but no key ⇒ "signed, not verified (no key provided)" (not a failure); `--require-signature` makes absent-or-unverified a failure.
 7. **S7 — Key trust model (v0.1.2).** Out-of-band public-key distribution: the verifier supplies the trusted key(s). No PKI chain building, no web-of-trust, no transparency log in this step — documented explicitly as the v0.1.2 trust boundary. Existence-at-time anchoring (Rekor / RFC-3161 TSA) is a separate additive layer.
-8. **S8 — CLI surface.** `akmon sign <session-id> --scheme openpgp --key <key-id>` produces a native detached signature over the statement and records it (journal: a `signatures` sidecar; bundle: embedded in `manifest.signatures[]` at export, plus `akmon bundle sign <bundle> --key …` to sign an existing bundle). The existing hook-based `akmon sign` (`SigningConfig`, e.g. cosign) is retained unchanged as the generic escape hatch. `akmon bundle verify <bundle> [--verify-key <pub>] [--require-signature]` and `agef-verify <bundle> [--verify-key <pub>] [--require-signature]` gain signature verification.
-9. **S9 — Crypto backend / dependency — *OPEN, requires explicit approval before implementation* (no-silent-dependency rule).** Options:
-   - **(a) Shell out to system `gpg` / `openssl`** — zero new Rust dependencies; runtime dependency on those binaries; consistent with the existing hook philosophy and the local-first/offline thesis. *Recommended for v0.1.2.*
-   - **(b) Pure-Rust OpenPGP (`sequoia-openpgp`)** — no external binary; large dependency/build surface; strongest in-process correctness.
-   - **(c) Minimal pure-Rust (`pgp` / `rsa` / `ed25519-dalek`)** — lighter than sequoia; more glue code.
-   The recommendation is **(a)** (smallest substrate footprint, no dependency-review burden, matches the air-gap story). The choice is deferred to an explicit ruling before code lands, per `99-non-negotiable` / `04-v2-scope-discipline`.
+8. **S8 — CLI surface.** `akmon sign <session-id> --scheme ed25519 --key <pkcs8-key-file>` produces a native detached signature over the statement and records it (journal: a `signatures` sidecar; bundle: embedded in `manifest.signatures[]` at export, plus `akmon bundle sign <bundle> --key …` to sign an existing bundle). The existing hook-based `akmon sign` (`SigningConfig`, e.g. cosign) is retained unchanged as the generic escape hatch. `akmon bundle verify <bundle> [--verify-key <pub>] [--require-signature]` and `agef-verify <bundle> [--verify-key <pub>] [--require-signature]` gain signature verification.
+9. **S9 — Crypto backend — RESOLVED (v1.5): Ed25519 via `ring`, zero new dependencies.** OpenPGP was the v1.4 plan, but every pure-Rust OpenPGP implementation transitively pulls the `rsa` crate, which carries the unpatched RUSTSEC-2023-0071 ("Marvin") advisory; `cargo deny check advisories` FAILS on it and `deny.toml` never ignores vulnerabilities. Rather than weaken the supply-chain gate that is itself part of the product's trust story, the native scheme is **Ed25519 produced and verified with `ring`** — already in the dependency tree (via rustls), so it adds *zero* new supply-chain surface. Keys are PKCS#8 (private) / SPKI (public), both openssl-compatible; signature bytes are base64 in the manifest. Rejected: shelling out to `gpg`/`openssl` (would make the standalone `agef-verify` depend on those binaries, defeating its purpose); `sequoia-openpgp` and rPGP (`rsa` advisory + dependency weight).
 10. **S10 — AGEF spec coordination.** AGEF v0.1.2 is a minor/additive bump (no breaking change; v0.1.1 readers still read v0.1.2 bundles, ignoring `signatures`). The canonical spec in `radotsvetkov/agef` MUST be updated in lockstep with implementation: revise the §A.3 non-goal, add `signatures` to the §A.5 manifest, add a signing + verification section, and bump §A.11. Appendix A of this document carries the seed (see A.5/A.14/A.11 below).
 
-**Implementation sequencing (after S9 is ruled).** Suggested order, each behind the standard fmt+clippy+test gate: (1) `AGEF-SIG-v1` statement builder + `ManifestSignature` type in `akmon-bundle` (additive, `Option`), bump `AGEF_SPEC_VERSION` to `0.1.2`; (2) signature *verification* in `akmon-bundle` + wire into `akmon bundle verify` and `agef-verify` (verify before produce — lets us test against fixtures); (3) native signature *production* via the chosen backend + `akmon sign --scheme`/`akmon bundle sign`; (4) docs + AGEF spec repo update (S10); (5) a `produce → sign → verify-with-non-Akmon-tool` integration test (improvement-plan success metric F.1).
+**Implementation sequencing (S9 resolved: Ed25519 via `ring`).** Each step behind the standard fmt+clippy+test+deny gate: (1) `AGEF-SIG-v1` statement builder + `ManifestSignature` type + Ed25519 sign/verify (`ring`) in `akmon-bundle`, with round-trip + tamper unit tests, and bump `AGEF_SPEC_VERSION` to `0.1.2`; (2) wire verification into `akmon bundle verify` and `agef-verify` (`--verify-key` / `--require-signature`); (3) native production `akmon sign --scheme ed25519 --key …` / `akmon bundle sign`; (4) docs + AGEF spec repo update (S10); (5) a `produce → sign → verify-with-openssl` integration test (improvement-plan success metric F.1).
 
  
 ---
@@ -1044,8 +1041,8 @@ the chain interior — see §A.14). Older v0.1.x readers ignore the field.
 ```json
 "signatures": [
   {
-    "scheme": "openpgp-detached",
-    "key_id": "<signer fingerprint / key id>",
+    "scheme": "ed25519",
+    "key_id": "<signer public-key fingerprint>",
     "statement_version": "AGEF-SIG-v1",
     "signature": "<base64 detached signature bytes>",
     "created_at": "<rfc3339>"
@@ -1136,9 +1133,11 @@ head:<lowercase-hex-of-session-head>
 The statement binds the signature to a specific session, hash algorithm, and head, preventing reuse
 of a signature outside its intended context.
 
-**Schemes.** v0.1.2 defines `openpgp-detached` (an OpenPGP detached signature over the statement
-bytes). `x509-cms` (detached CMS/PKCS#7) is reserved. Keyless/transparency-log schemes are out of
-scope for v0.1.x.
+**Schemes.** v0.1.2 defines `ed25519` — a raw Ed25519 signature (RFC 8032) over the statement bytes,
+with the public key distributed as SPKI/PEM (openssl-compatible). `ecdsa-p256` with X.509 is reserved
+for PKI-oriented deployments. Keyless/transparency-log schemes are out of scope for v0.1.x. (OpenPGP
+was considered and rejected: every pure-Rust OpenPGP implementation requires the `rsa` crate, which
+carries an unpatched advisory — see decision D-18 S9.)
 
 **Placement.** Signatures live in `manifest.signatures[]` (§A.5). Because the head already commits
 to the entire DAG, a single signature authenticates the whole session; multiple entries allow
