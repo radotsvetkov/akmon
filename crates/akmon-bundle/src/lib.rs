@@ -9,6 +9,7 @@
 //! - optional Ed25519 detached session signatures (see [`signing`]; AGEF v0.1.2).
 
 pub mod archive;
+pub mod capture;
 pub mod error;
 pub mod events;
 pub mod manifest;
@@ -21,6 +22,7 @@ pub use archive::{
     BundleContents, ReadBundleOptions, WriteBundleOptions, read_bundle, read_verified_bundle,
     write_bundle,
 };
+pub use capture::{OtelCaptureInfo, otel_capture_info};
 pub use error::BundleError;
 pub use events::{DEFAULT_MAX_EVENT_FRAME_LEN, EventsReader, EventsWriter};
 pub use manifest::{Manifest, ManifestSignature, Producer, SessionMetadata};

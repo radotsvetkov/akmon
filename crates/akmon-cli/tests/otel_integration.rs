@@ -230,6 +230,163 @@ fn t_otel_import_then_sign_then_verify_roundtrip() {
     );
 }
 
+/// A STRUCTURAL OTEL import, once exported, surfaces its capture level through `bundle verify`,
+/// and `--require-capture full` rejects it (F1 — a metadata-only bundle must not read as VERIFIED).
+#[test]
+fn t_structural_bundle_verify_surfaces_capture_and_require_capture_fails() {
+    let dir = tempdir().expect("tempdir");
+    let journal_dir = dir.path().join("journal");
+    let trace = write_fixture(dir.path(), "trace_b.json", FIXTURE_B);
+
+    // a. Import the structural (metadata-only) trace.
+    let import = akmon()
+        .args([
+            "otel",
+            "import",
+            &trace,
+            "--journal",
+            &journal_dir.display().to_string(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run otel import");
+    assert_eq!(
+        import.status.code(),
+        Some(0),
+        "import stderr={}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let import_json: Value = serde_json::from_slice(&import.stdout).expect("import json");
+    let session_id = import_json
+        .get("session_id")
+        .and_then(Value::as_str)
+        .expect("session_id")
+        .to_owned();
+
+    // b. Export the session as an AGEF bundle.
+    let bundle = dir.path().join("structural.akmon");
+    let export = akmon()
+        .args([
+            "bundle",
+            "export",
+            &session_id,
+            "--journal",
+            &journal_dir.display().to_string(),
+            "--output",
+            &bundle.display().to_string(),
+        ])
+        .output()
+        .expect("run bundle export");
+    assert!(
+        export.status.success(),
+        "export stderr={}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+
+    // c. `bundle verify --format json` surfaces capture.level == "structural" (integrity passes).
+    let verify = akmon()
+        .args([
+            "bundle",
+            "verify",
+            &bundle.display().to_string(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run bundle verify");
+    assert_eq!(
+        verify.status.code(),
+        Some(0),
+        "verify stderr={}",
+        String::from_utf8_lossy(&verify.stderr)
+    );
+    let verify_json: Value = serde_json::from_slice(&verify.stdout).expect("verify json");
+    assert_eq!(
+        verify_json.get("passed").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        verify_json
+            .pointer("/capture/level")
+            .and_then(Value::as_str),
+        Some("structural")
+    );
+
+    // d. `--require-capture full` rejects the structural bundle (exit 1).
+    let require = akmon()
+        .args([
+            "bundle",
+            "verify",
+            &bundle.display().to_string(),
+            "--require-capture",
+            "full",
+        ])
+        .output()
+        .expect("run bundle verify require-capture");
+    assert_eq!(
+        require.status.code(),
+        Some(1),
+        "require-capture stderr={}",
+        String::from_utf8_lossy(&require.stderr)
+    );
+}
+
+/// Replaying an OTEL-imported session is refused with exit 2 (F2 — evidence records are not
+/// replayable executions).
+#[test]
+fn t_replay_refuses_otel_imported_session() {
+    let dir = tempdir().expect("tempdir");
+    let journal_dir = dir.path().join("journal");
+    let trace = write_fixture(dir.path(), "trace_a.json", FIXTURE_A);
+
+    let import = akmon()
+        .args([
+            "otel",
+            "import",
+            &trace,
+            "--journal",
+            &journal_dir.display().to_string(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run otel import");
+    assert_eq!(
+        import.status.code(),
+        Some(0),
+        "import stderr={}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    let import_json: Value = serde_json::from_slice(&import.stdout).expect("import json");
+    let session_id = import_json
+        .get("session_id")
+        .and_then(Value::as_str)
+        .expect("session_id")
+        .to_owned();
+
+    let replay = akmon()
+        .args([
+            "replay",
+            &session_id,
+            "--journal",
+            &journal_dir.display().to_string(),
+        ])
+        .output()
+        .expect("run replay");
+    assert_eq!(
+        replay.status.code(),
+        Some(2),
+        "replay stderr={}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&replay.stderr);
+    assert!(
+        stderr.contains("OTEL") && stderr.contains("not replayable"),
+        "refusal message missing; stderr={stderr}"
+    );
+}
+
 /// A legacy (semconv <= v1.36) message-event trace is a usage error (exit 2).
 #[test]
 fn t_otel_import_rejects_legacy() {

@@ -11,8 +11,9 @@ use std::process::ExitCode;
 
 use akmon_bundle::{
     BundleContents, BundleError, BundleVerificationReport, BundleViolation,
-    DEFAULT_MAX_EVENT_FRAME_LEN, ReadBundleOptions, SignatureOutcome, SignatureVerificationReport,
-    parse_public_key_hex, read_bundle, verify_bundle, verify_manifest_signatures,
+    DEFAULT_MAX_EVENT_FRAME_LEN, OtelCaptureInfo, ReadBundleOptions, SignatureOutcome,
+    SignatureVerificationReport, otel_capture_info, parse_public_key_hex, read_bundle,
+    verify_bundle, verify_manifest_signatures,
 };
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
@@ -40,6 +41,9 @@ struct Cli {
     /// Fail (exit 1) unless at least one signature verifies against a `--verify-key`.
     #[arg(long, default_value_t = false)]
     require_signature: bool,
+    /// Fail unless the session captured full message content (rejects metadata-only OTEL imports).
+    #[arg(long, value_enum, value_name = "LEVEL")]
+    require_capture: Option<RequireCapture>,
 }
 
 /// Human-readable or JSON output mode.
@@ -50,6 +54,13 @@ enum OutputFormat {
     Human,
     /// `BundleVerifyReportV1`-compatible JSON on stdout.
     Json,
+}
+
+/// Required capture level for `--require-capture`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RequireCapture {
+    /// Require that the session captured full message content.
+    Full,
 }
 
 /// Machine-readable bundle verification result (compatible with `akmon bundle import --verify-only`).
@@ -74,6 +85,20 @@ struct BundleVerifyReportV1 {
     violations: Vec<ReportViolation>,
     /// Per-signature verification results (empty when the bundle is unsigned).
     signatures: Vec<SignatureReport>,
+    /// OTEL-import capture level, or `null` for native (non-OTEL) bundles. A native bundle is
+    /// full-fidelity by construction; an OTEL import with `level == "structural"` carries metadata
+    /// only (the source telemetry did not capture message content).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture: Option<CaptureField>,
+}
+
+/// OTEL-import capture metadata for JSON output (F1).
+#[derive(Debug, Serialize)]
+struct CaptureField {
+    /// Capture level: `full` (message content captured) or `structural` (metadata only).
+    level: String,
+    /// Source OpenTelemetry semantic-conventions version (for example `1.37.0`).
+    source_semconv: String,
 }
 
 /// One signature-verification result for JSON output.
@@ -196,6 +221,31 @@ fn report_violation(v: &BundleViolation) -> ReportViolation {
     }
 }
 
+/// Category string used for the synthetic violation emitted when `--require-capture full` fails.
+const CAPTURE_REQUIREMENT_CATEGORY: &str = "capture_requirement_unmet";
+
+/// Whether an OTEL import satisfies `--require-capture full`.
+///
+/// Native bundles (`capture == None`) are full-fidelity and always pass. An OTEL import passes only
+/// when its `capture_level` is exactly `"full"`. Returns `None` (no requirement) when
+/// `require_capture` is unset.
+fn capture_requirement_unmet(
+    require_capture: Option<RequireCapture>,
+    capture: Option<&OtelCaptureInfo>,
+) -> Option<String> {
+    match require_capture {
+        None => None,
+        Some(RequireCapture::Full) => match capture {
+            None => None,
+            Some(info) if info.capture_level == "full" => None,
+            Some(info) => Some(format!(
+                "--require-capture full: session capture level is '{}', not 'full' (metadata-only OTEL import; source telemetry did not capture message content)",
+                info.capture_level
+            )),
+        },
+    }
+}
+
 /// Builds the machine-readable verification report for a parsed bundle.
 fn build_verify_report(
     bundle_path: &Path,
@@ -203,10 +253,22 @@ fn build_verify_report(
     verification: &BundleVerificationReport,
     sig_report: &SignatureVerificationReport,
     require_signature: bool,
+    capture: Option<&OtelCaptureInfo>,
+    require_capture: Option<RequireCapture>,
 ) -> BundleVerifyReportV1 {
     let integrity_ok = verification.is_clean();
     let signatures_ok =
         !sig_report.any_invalid() && (!require_signature || sig_report.any_verified());
+    let capture_unmet = capture_requirement_unmet(require_capture, capture);
+    let mut violations = report_violations(verification);
+    if let Some(reason) = &capture_unmet {
+        violations.push(ReportViolation {
+            category: CAPTURE_REQUIREMENT_CATEGORY.to_owned(),
+            event_hash: None,
+            object_hash: None,
+            message: reason.clone(),
+        });
+    }
     BundleVerifyReportV1 {
         akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
         agef_version: contents.manifest.agef_version.clone(),
@@ -214,9 +276,13 @@ fn build_verify_report(
         session_id: contents.manifest.session.id.clone(),
         events_in_bundle: contents.events.len() as u64,
         objects_in_bundle: contents.objects.len() as u64,
-        passed: integrity_ok && signatures_ok,
-        violations: report_violations(verification),
+        passed: integrity_ok && signatures_ok && capture_unmet.is_none(),
+        violations,
         signatures: signature_reports(sig_report),
+        capture: capture.map(|info| CaptureField {
+            level: info.capture_level.clone(),
+            source_semconv: info.source_semconv.clone(),
+        }),
     }
 }
 
@@ -240,6 +306,32 @@ fn print_json_infra_error(category: &str, error: String) -> io::Result<()> {
     Ok(())
 }
 
+/// Short suffix appended to the success headline so a structural import never reads as a bare
+/// "verified bundle". Native bundles (`None`) and full OTEL imports add nothing.
+fn capture_human_suffix(capture: Option<&CaptureField>) -> String {
+    match capture {
+        Some(c) if c.level == "structural" => " — capture: STRUCTURAL (metadata only)".to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Prominent capture line for the human report body, or `None` for native (non-OTEL) bundles.
+fn capture_human_line(capture: Option<&CaptureField>) -> Option<String> {
+    let c = capture?;
+    match c.level.as_str() {
+        "structural" => Some(format!(
+            "capture: STRUCTURAL (metadata only — message content was NOT captured by the source telemetry; source semconv {})",
+            c.source_semconv
+        )),
+        "full" => Some("capture: FULL (OTEL import; message content captured)".to_owned()),
+        other => Some(format!(
+            "capture: {} (OTEL import; source semconv {})",
+            other.to_uppercase(),
+            c.source_semconv
+        )),
+    }
+}
+
 /// Emits a human-readable verification outcome.
 fn print_human_report(
     bundle_path: &Path,
@@ -247,14 +339,18 @@ fn print_human_report(
     report: &BundleVerifyReportV1,
 ) {
     let bundle_disp = bundle_path.display();
+    let capture_suffix = capture_human_suffix(report.capture.as_ref());
     if report.passed {
-        eprintln!("verified bundle: {bundle_disp}");
+        eprintln!("verified bundle (integrity + signature){capture_suffix}: {bundle_disp}");
     } else {
         eprintln!("bundle verification FAILED: {bundle_disp}");
     }
     eprintln!("  session_id: {}", contents.manifest.session.id);
     eprintln!("  events: {}", contents.events.len());
     eprintln!("  objects: {}", contents.objects.len());
+    if let Some(line) = capture_human_line(report.capture.as_ref()) {
+        eprintln!("  {line}");
+    }
     if !report.violations.is_empty() {
         eprintln!("  integrity violations:");
         for v in &report.violations {
@@ -283,6 +379,7 @@ fn run_verify(
     allow_extra_files: bool,
     verify_keys: Vec<PathBuf>,
     require_signature: bool,
+    require_capture: Option<RequireCapture>,
 ) -> ExitCode {
     let json = matches!(format, OutputFormat::Json);
     let bundle = match validated_bundle_path(bundle_path.as_path()) {
@@ -354,6 +451,7 @@ fn run_verify(
         }
     }
     let sig_report = verify_manifest_signatures(&contents.manifest, &trusted_keys);
+    let capture = otel_capture_info(&contents);
 
     let report = build_verify_report(
         &bundle,
@@ -361,6 +459,8 @@ fn run_verify(
         &verification,
         &sig_report,
         require_signature,
+        capture.as_ref(),
+        require_capture,
     );
 
     if json {
@@ -387,5 +487,6 @@ fn main() -> ExitCode {
         cli.allow_extra_files,
         cli.verify_keys,
         cli.require_signature,
+        cli.require_capture,
     )
 }

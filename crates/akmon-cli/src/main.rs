@@ -2520,6 +2520,46 @@ fn print_replay_json_error(error: &akmon_replay::ReplayInfraError) -> std::io::R
     Ok(())
 }
 
+/// Returns `true` if the session's `SessionStart` config object marks it as an OTEL import (F2).
+///
+/// Loads the session read-only, resolves the `SessionStart` event's `config_hash`, fetches those
+/// bytes from the object store, and checks for `akmon_otel_config == true`. Any failure to resolve
+/// (missing session, missing object, non-JSON config) returns `false` so the normal replay path —
+/// with its own richer error reporting — still runs; this guard only ever *adds* a refusal, never
+/// suppresses a legitimate error.
+fn session_is_otel_import(journal_dir: &Path, session_id: uuid::Uuid) -> bool {
+    let Ok(handle) = open_journal_read_only(journal_dir, session_id) else {
+        return false;
+    };
+    let config_hash = {
+        let graph = handle
+            .graph
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Ok(history) = graph.history() else {
+            return false;
+        };
+        history.iter().find_map(|(_, event)| match &event.kind {
+            EventKind::SessionStart { config_hash, .. } => Some(config_hash.clone()),
+            _ => None,
+        })
+    };
+    let Some(config_hash) = config_hash else {
+        return false;
+    };
+    let Ok(Some(bytes)) = handle.store.get(&config_hash) else {
+        return false;
+    };
+    matches!(
+        serde_json::from_slice::<serde_json::Value>(bytes.as_ref())
+            .ok()
+            .as_ref()
+            .and_then(|v| v.get("akmon_otel_config"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    )
+}
+
 async fn run_replay(args: ReplayArgs) -> ExitCode {
     let format = args.format;
     let source_journal_dir = match args.journal.clone() {
@@ -2583,6 +2623,33 @@ async fn run_replay(args: ReplayArgs) -> ExitCode {
             };
         }
     };
+    // F2: imported OTEL sessions are evidence records, not replayable executions. Refuse before
+    // entering the replay engine (which would otherwise error or silently mislead). Exit 2 (usage).
+    if session_is_otel_import(source_journal_dir.as_path(), args.session_id) {
+        let infra = akmon_replay::ReplayInfraError {
+            akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+            error: "imported OTEL sessions are evidence records, not replayable executions; replay is unsupported for OTEL-imported sessions".to_owned(),
+            category: "otel_import_not_replayable".to_owned(),
+            source_session_id: Some(args.session_id.to_string()),
+            missing_provider_id: None,
+            missing_tool_id: None,
+            missing_object_hash: None,
+        };
+        return match format {
+            ReplayFormat::Json => match print_replay_json_error(&infra) {
+                Ok(()) => ExitCode::from(2),
+                Err(render_err) => {
+                    eprintln!("akmon replay: failed to render JSON output: {render_err}");
+                    ExitCode::from(2)
+                }
+            },
+            ReplayFormat::Human => {
+                eprintln!("akmon replay: {}", infra.error);
+                ExitCode::from(2)
+            }
+        };
+    }
+
     let result = run_replay_result(args, source_journal_dir, persist_journal_dir.clone()).await;
     match result {
         Ok(report) => match format {

@@ -243,3 +243,178 @@ fn t_require_signature_without_key_fails() {
         .expect("run agef-verify");
     assert_eq!(out.status.code(), Some(1));
 }
+
+/// Builds a clean bundle whose `SessionStart` config object is an OTEL config object with the
+/// given `capture_level` (mirrors `akmon_otel::objects::config_object_bytes` byte shape; the
+/// importer is not needed — only the right object bytes matter to the verifier).
+fn otel_bundle(capture_level: &str) -> BundleContents {
+    let (cwd_hash, cwd_bytes) = object(0x11);
+    let config_bytes = serde_json::to_vec(&serde_json::json!({
+        "akmon_otel_config": true,
+        "schema": "akmon-otel-config-v1",
+        "capture_level": capture_level,
+        "source_semconv": "1.37.0",
+        "provider": "openai",
+        "model": "gpt-4o",
+        "conversation_id": serde_json::Value::Null,
+        "agent": serde_json::Value::Null,
+    }))
+    .expect("config json");
+    let config_hash = digest_bytes(algo(), &config_bytes);
+
+    let start = Event {
+        parents: vec![],
+        kind: EventKind::SessionStart {
+            cwd_hash: cwd_hash.clone(),
+            config_hash: config_hash.clone(),
+        },
+        emitted_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("ts"),
+        sequence: 0,
+    };
+    let start_hash = start.content_hash(algo()).expect("start hash");
+    let end = Event {
+        parents: vec![start_hash],
+        kind: EventKind::SessionEnd { summary_hash: None },
+        emitted_at: time::OffsetDateTime::from_unix_timestamp(1_700_000_001).expect("ts"),
+        sequence: 1,
+    };
+    let end_hash = end.content_hash(algo()).expect("end hash");
+
+    let objects = HashMap::from([(cwd_hash, cwd_bytes), (config_hash, config_bytes)]);
+    let manifest = Manifest {
+        agef_version: AGEF_SPEC_VERSION.to_owned(),
+        producer: Producer {
+            name: "akmon".to_owned(),
+            version: "test".to_owned(),
+        },
+        session: SessionMetadata {
+            id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            head: end_hash.to_hex(),
+            created_at: "2026-05-04T14:00:00Z".to_owned(),
+            ended_at: "2026-05-04T14:01:00Z".to_owned(),
+        },
+        hash_algorithm: "sha256".to_owned(),
+        object_count: 2,
+        event_count: 2,
+        signatures: None,
+        extra: BTreeMap::new(),
+    };
+    BundleContents {
+        manifest,
+        events: vec![start, end],
+        objects,
+    }
+}
+
+/// (a) A structural OTEL bundle surfaces `capture.level == "structural"`; integrity still passes.
+#[test]
+fn t_structural_otel_bundle_surfaces_capture() {
+    let dir = tempdir().expect("tempdir");
+    let bundle = dir.path().join("structural.akmon");
+    write_bundle_file(&bundle, &otel_bundle("structural"));
+
+    let out = agef_verify_bin()
+        .arg(&bundle)
+        .args(["--format", "json"])
+        .output()
+        .expect("run agef-verify");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v.get("passed").and_then(|p| p.as_bool()), Some(true));
+    assert_eq!(
+        v.pointer("/capture/level").and_then(|x| x.as_str()),
+        Some("structural")
+    );
+    assert_eq!(
+        v.pointer("/capture/source_semconv")
+            .and_then(|x| x.as_str()),
+        Some("1.37.0")
+    );
+}
+
+/// (a) `--require-capture full` rejects a structural OTEL bundle (exit 1, passed == false).
+#[test]
+fn t_structural_otel_bundle_fails_require_capture_full() {
+    let dir = tempdir().expect("tempdir");
+    let bundle = dir.path().join("structural.akmon");
+    write_bundle_file(&bundle, &otel_bundle("structural"));
+
+    let out = agef_verify_bin()
+        .arg(&bundle)
+        .args(["--format", "json", "--require-capture", "full"])
+        .output()
+        .expect("run agef-verify");
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v.get("passed").and_then(|p| p.as_bool()), Some(false));
+    let categories: Vec<&str> = v
+        .get("violations")
+        .and_then(|x| x.as_array())
+        .expect("violations")
+        .iter()
+        .filter_map(|x| x.get("category").and_then(|c| c.as_str()))
+        .collect();
+    assert!(
+        categories.contains(&"capture_requirement_unmet"),
+        "categories={categories:?}"
+    );
+}
+
+/// (b) A full OTEL bundle passes `--require-capture full` (exit 0).
+#[test]
+fn t_full_otel_bundle_passes_require_capture_full() {
+    let dir = tempdir().expect("tempdir");
+    let bundle = dir.path().join("full.akmon");
+    write_bundle_file(&bundle, &otel_bundle("full"));
+
+    let out = agef_verify_bin()
+        .arg(&bundle)
+        .args(["--format", "json", "--require-capture", "full"])
+        .output()
+        .expect("run agef-verify");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v.get("passed").and_then(|p| p.as_bool()), Some(true));
+    assert_eq!(
+        v.pointer("/capture/level").and_then(|x| x.as_str()),
+        Some("full")
+    );
+}
+
+/// (c) A native bundle (no OTEL config) has `capture == null` and passes `--require-capture full`.
+#[test]
+fn t_native_bundle_capture_null_and_passes_require_capture() {
+    let dir = tempdir().expect("tempdir");
+    let bundle = dir.path().join("native.akmon");
+    write_bundle_file(&bundle, &valid_bundle());
+
+    let out = agef_verify_bin()
+        .arg(&bundle)
+        .args(["--format", "json", "--require-capture", "full"])
+        .output()
+        .expect("run agef-verify");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v.get("passed").and_then(|p| p.as_bool()), Some(true));
+    // `capture` is omitted (skip_serializing_if None) for native bundles → absent or null.
+    assert!(
+        v.get("capture").map(|c| c.is_null()).unwrap_or(true),
+        "capture should be null/absent for native bundle, got {:?}",
+        v.get("capture")
+    );
+}
