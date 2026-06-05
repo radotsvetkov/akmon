@@ -59,4 +59,5 @@ Expected result: `true` for a valid exported bundle.
 
 - [akmon bundle import](./bundle-import.md)
 - [agef-verify](./agef-verify.md)
+- [akmon bundle prove-openssl](./bundle-prove-openssl.md)
 - [akmon verify](./verify.md)

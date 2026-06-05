@@ -16,6 +16,7 @@ pub mod manifest;
 pub mod objects;
 pub mod sentinel;
 pub mod signing;
+pub mod spki;
 pub mod verify;
 
 pub use archive::{
@@ -37,4 +38,5 @@ pub use signing::{
     public_key_from_pkcs8, sign_statement, signing_statement, verify_manifest_signatures,
     verify_statement,
 };
+pub use spki::{ED25519_SPKI_DER_LEN, ed25519_spki_der, ed25519_spki_pem};
 pub use verify::{BundleVerificationReport, BundleViolation, verify_bundle, verify_bundle_strict};

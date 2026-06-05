@@ -109,6 +109,7 @@
 - [akmon bundle import](./reference/bundle-import.md)
 - [akmon bundle verify](./reference/bundle-verify.md)
 - [agef-verify](./reference/agef-verify.md)
+- [akmon bundle prove-openssl](./reference/bundle-prove-openssl.md)
 - [akmon redact](./reference/redact.md)
 - [akmon replay](./reference/replay.md)
 - [akmon diff](./reference/diff.md)

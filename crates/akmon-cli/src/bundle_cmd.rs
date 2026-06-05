@@ -279,6 +279,29 @@ Exit codes:\n\
   3 — I/O or environment error (bundle not found, malformed archive, write error)"
     )]
     Sign(BundleSignArgs),
+    /// Emit artifacts to verify a bundle's signature with stock `openssl` alone (AGEF v0.1.2).
+    #[command(
+        long_about = "Emit the artifacts a third party needs to verify a bundle's Ed25519 \
+signature with stock OpenSSL 3.x — no Akmon binary, no cloud (metric F.1).\n\n\
+Reads the signed bundle (read-only), reconstructs the canonical AGEF-SIG-v1 statement over its \
+session head, extracts the matching detached signature from manifest.signatures[], and writes \
+three files into --out-dir: statement.bin (the exact signed message), signature.bin (the 64-byte \
+raw signature), and pubkey.pem (the supplied public key in SPKI PEM form). It then prints the \
+exact openssl command to run. This signs nothing and never modifies the bundle.\n\n\
+The signature is selected by matching the supplied --verify-key (the signer's public key as 64 \
+hex chars, the same artifact `akmon bundle sign` prints) against manifest.signatures[].key_id.\n\n\
+NOTE: stock LibreSSL (macOS /usr/bin/openssl) cannot verify Ed25519; the verifier needs \
+OpenSSL 3.x.\n\n\
+Examples:\n\
+  akmon bundle prove-openssl audit.akmon --verify-key signer.pub.hex\n\
+  akmon bundle prove-openssl audit.akmon --verify-key signer.pub.hex --out-dir ./proof\n\
+  akmon bundle prove-openssl audit.akmon --verify-key signer.pub.hex --format json\n\n\
+Exit codes:\n\
+  0 — artifacts written; printed openssl command is ready to run\n\
+  1 — no signature matches the supplied key, or the signature is unsupported/malformed\n\
+  3 — I/O or environment error (bundle/--verify-key unreadable, malformed archive, out-dir not writable)"
+    )]
+    ProveOpenssl(crate::bundle_prove::BundleProveArgs),
 }
 
 /// Arguments for `akmon bundle export`.
@@ -703,7 +726,7 @@ fn run_bundle_export(
 
     ExitCode::SUCCESS
 }
-fn bundle_read_bundle_error_category(err: &BundleError) -> &'static str {
+pub(crate) fn bundle_read_bundle_error_category(err: &BundleError) -> &'static str {
     match err {
         BundleError::Io(_) => "io_error",
         BundleError::InvalidArchive(_) => "invalid_archive",
@@ -723,7 +746,7 @@ fn bundle_read_bundle_error_category(err: &BundleError) -> &'static str {
     }
 }
 
-fn bundle_read_bundle_exit_code(err: &BundleError) -> u8 {
+pub(crate) fn bundle_read_bundle_exit_code(err: &BundleError) -> u8 {
     match err {
         BundleError::Io(_) => 3,
         _ => 1,
@@ -1662,5 +1685,8 @@ pub fn run_bundle(args: &BundleArgs) -> ExitCode {
             sign_args.output.clone(),
             sign_args.format,
         ),
+        BundleCommands::ProveOpenssl(prove_args) => {
+            crate::bundle_prove::run_bundle_prove_openssl(prove_args)
+        }
     }
 }

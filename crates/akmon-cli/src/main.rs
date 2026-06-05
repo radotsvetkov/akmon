@@ -2,6 +2,7 @@
 
 mod audit_cmd;
 mod bundle_cmd;
+mod bundle_prove;
 mod cli_forward;
 mod cli_project;
 mod config_cmd;

@@ -67,4 +67,5 @@ Infrastructure errors (cannot open or parse the archive) emit **VerifyInfraError
 ## See also
 
 - [akmon bundle import](./bundle-import.md)
+- [akmon bundle prove-openssl](./bundle-prove-openssl.md)
 - [akmon verify](./verify.md)
