@@ -14,6 +14,7 @@ members = [
     "crates/akmon-replay",
     "crates/akmon-diff",
     "crates/agef-verify",
+    "crates/akmon-otel",
 ]
 
 [workspace.dependencies]

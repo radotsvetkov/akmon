@@ -210,6 +210,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "akmon-otel"
+version = "2.1.0"
+dependencies = [
+ "akmon-journal",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+ "uuid",
+]
+
+[[package]]
 name = "akmon-query"
 version = "2.1.0"
 dependencies = [

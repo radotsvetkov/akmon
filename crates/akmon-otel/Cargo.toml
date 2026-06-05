@@ -1,0 +1,27 @@
+[package]
+name = "akmon-otel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Import OpenTelemetry GenAI (semconv v1.37.0) traces into AGEF sessions (Item 9.1)."
+
+[dependencies]
+akmon-journal = { path = "../akmon-journal" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+time = { workspace = true }
+# Required only to name `ImportReport.session_id: Uuid`. `uuid` is already a
+# workspace dependency and a transitive requirement of `akmon-journal`'s public
+# `SessionGraph` trait, so this adds no new supply-chain surface.
+uuid = { workspace = true }
+
+[dev-dependencies]
+# Same crate as above; the `test-utils` feature exposes `MemorySessionGraph`
+# (the in-memory `SessionGraph`) for tests only, keeping it out of the library
+# build. This is not a new dependency.
+akmon-journal = { path = "../akmon-journal", features = ["test-utils"] }
