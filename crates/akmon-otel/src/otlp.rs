@@ -88,6 +88,11 @@ pub struct SpanEvent {
     /// Event name (legacy GenAI message events start with `gen_ai.`).
     #[serde(default)]
     pub name: String,
+    /// Event attributes. For legacy (<= v1.36) GenAI message events these carry
+    /// the message body (`role`, `content`, `id`, `tool_calls`, `index`,
+    /// `finish_reason`, `message`).
+    #[serde(default)]
+    pub attributes: Vec<KeyValue>,
 }
 
 /// A single attribute key/value pair.
@@ -190,6 +195,43 @@ pub struct NormalizedSpan {
     pub has_legacy_genai_event: bool,
     /// Flattened attribute map keyed by attribute name.
     pub attributes: BTreeMap<String, AnyValue>,
+    /// Span events, each with its own flattened attribute map. Legacy (<= v1.36)
+    /// GenAI message bodies are carried here in OTLP source order.
+    pub events: Vec<NormalizedEvent>,
+}
+
+/// A span event with its attributes flattened into a sorted, typed map.
+///
+/// Legacy (<= v1.36) GenAI message events (`gen_ai.user.message`,
+/// `gen_ai.system.message`, `gen_ai.assistant.message`, `gen_ai.tool.message`,
+/// `gen_ai.choice`) carry the message body as event attributes; this type exposes
+/// them with the same typed accessors as [`NormalizedSpan`].
+#[derive(Debug, Clone)]
+pub struct NormalizedEvent {
+    /// Event name.
+    pub name: String,
+    /// Flattened event-attribute map keyed by attribute name.
+    pub attributes: BTreeMap<String, AnyValue>,
+}
+
+impl NormalizedEvent {
+    /// Reads a string-typed event attribute by key.
+    #[must_use]
+    pub fn attr_str(&self, key: &str) -> Option<&str> {
+        self.attributes.get(key).and_then(AnyValue::as_str)
+    }
+
+    /// Reads an integer-typed event attribute by key (parsing the OTLP int-string).
+    #[must_use]
+    pub fn attr_i64(&self, key: &str) -> Option<i64> {
+        self.attributes.get(key).and_then(AnyValue::as_i64)
+    }
+
+    /// True when this event carries the given attribute key.
+    #[must_use]
+    pub fn has_attr(&self, key: &str) -> bool {
+        self.attributes.contains_key(key)
+    }
 }
 
 impl NormalizedSpan {
@@ -221,6 +263,15 @@ impl NormalizedSpan {
     #[must_use]
     pub fn has_attr(&self, key: &str) -> bool {
         self.attributes.contains_key(key)
+    }
+
+    /// Iterates over this span's events whose name equals `name`, in OTLP source
+    /// order.
+    pub fn events_named<'a>(
+        &'a self,
+        name: &'static str,
+    ) -> impl Iterator<Item = &'a NormalizedEvent> {
+        self.events.iter().filter(move |e| e.name == name)
     }
 }
 
@@ -270,6 +321,24 @@ fn normalize_span(span: &Span) -> NormalizedSpan {
         .iter()
         .any(|event| event.name.starts_with("gen_ai."));
 
+    // Flatten each event's attributes, preserving OTLP source order between events
+    // (intra-span event order is load-bearing for multi-message legacy bodies).
+    let events = span
+        .events
+        .iter()
+        .map(|event| {
+            let mut event_attributes = BTreeMap::new();
+            for kv in &event.attributes {
+                // Last-writer-wins on duplicate keys, matching span-attr handling.
+                event_attributes.insert(kv.key.clone(), kv.value.clone());
+            }
+            NormalizedEvent {
+                name: event.name.clone(),
+                attributes: event_attributes,
+            }
+        })
+        .collect();
+
     NormalizedSpan {
         span_id: span.span_id.clone(),
         parent_span_id: span.parent_span_id.clone(),
@@ -278,6 +347,7 @@ fn normalize_span(span: &Span) -> NormalizedSpan {
         end_unix_nano: end,
         has_legacy_genai_event,
         attributes,
+        events,
     }
 }
 
@@ -317,6 +387,23 @@ mod tests {
         let json = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"x","events":[{"name":"gen_ai.user.message"}]}]}]}]}"#;
         let spans = parse_and_normalize(json).unwrap_or_else(|_| unreachable!());
         assert!(spans[0].has_legacy_genai_event);
+    }
+
+    #[test]
+    fn event_attributes_round_trip_into_normalized_event() {
+        let json = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"x","events":[{"name":"gen_ai.user.message","attributes":[{"key":"role","value":{"stringValue":"user"}},{"key":"content","value":{"stringValue":"hi"}},{"key":"index","value":{"intValue":"0"}}]}]}]}]}]}"#;
+        let spans = parse_and_normalize(json).unwrap_or_else(|_| unreachable!());
+        let span = &spans[0];
+        assert_eq!(span.events.len(), 1);
+        let event = span
+            .events_named("gen_ai.user.message")
+            .next()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(event.attr_str("role"), Some("user"));
+        assert_eq!(event.attr_str("content"), Some("hi"));
+        assert_eq!(event.attr_i64("index"), Some(0));
+        assert!(event.has_attr("content"));
+        assert!(!event.has_attr("missing"));
     }
 
     #[test]

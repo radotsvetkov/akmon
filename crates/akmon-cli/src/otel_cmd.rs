@@ -39,9 +39,12 @@ pub enum OtelCommands {
     /// Import an OTLP/JSON OpenTelemetry GenAI trace into a new AGEF session.
     #[command(
         long_about = "Import an OTLP/JSON OpenTelemetry GenAI trace into a new AGEF session.\n\n\
-Parses a single OTLP `ExportTraceServiceRequest` JSON document using the semconv >= v1.37.0 \
-structured GenAI attributes, maps its spans onto AGEF events in a deterministic order, stores \
-every referenced content object, and appends the events to a fresh session in the local journal. \
+Parses a single OTLP `ExportTraceServiceRequest` JSON document using either the semconv >= \
+v1.37.0 structured GenAI attributes or the supported legacy (<= v1.36) message-event forms \
+(`gen_ai.system.message` / `gen_ai.user.message` / `gen_ai.assistant.message` / \
+`gen_ai.tool.message` / `gen_ai.choice`, reduced to the same structured content), maps its spans \
+onto AGEF events in a deterministic order, stores every referenced content object, and appends \
+the events to a fresh session in the local journal. \
 The produced session is a valid AGEF merkle chain, so it composes directly with the rest of the \
 toolchain:\n\
   akmon otel import trace.json --journal ./j\n\
@@ -60,7 +63,7 @@ Examples:\n\
   akmon otel import trace.json --format json\n\n\
 Exit codes:\n\
   0 — trace imported successfully\n\
-  2 — usage error (unparseable trace, legacy <=v1.36 form, multiple sessions, or empty trace)\n\
+  2 — usage error (unparseable trace, unrecognized legacy gen_ai.* event, multiple sessions, or empty trace)\n\
   3 — I/O or environment error (trace file unreadable, journal store/graph failure)"
     )]
     Import(OtelImportArgs),

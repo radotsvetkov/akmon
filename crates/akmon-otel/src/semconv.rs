@@ -62,6 +62,49 @@ pub const TOOL_DESCRIPTION: &str = "gen_ai.tool.description";
 /// `error.type` (OTLP semconv): present when the span recorded an error.
 pub const ERROR_TYPE: &str = "error.type";
 
+// --- Legacy (<= v1.36) span-event names ---
+//
+// These are the five supported legacy GenAI message-event forms. A span carrying
+// these events (rather than the structured `gen_ai.input.messages` /
+// `gen_ai.output.messages` attributes) is reduced to the same structured content.
+
+/// Legacy `gen_ai.system.message` event (system instruction body).
+pub const EVENT_SYSTEM_MESSAGE: &str = "gen_ai.system.message";
+/// Legacy `gen_ai.user.message` event (user message body).
+pub const EVENT_USER_MESSAGE: &str = "gen_ai.user.message";
+/// Legacy `gen_ai.assistant.message` event (assistant message body).
+pub const EVENT_ASSISTANT_MESSAGE: &str = "gen_ai.assistant.message";
+/// Legacy `gen_ai.tool.message` event (tool result body).
+pub const EVENT_TOOL_MESSAGE: &str = "gen_ai.tool.message";
+/// Legacy `gen_ai.choice` event (model response choice body).
+pub const EVENT_CHOICE: &str = "gen_ai.choice";
+
+/// The five supported legacy GenAI message-event names.
+pub const SUPPORTED_LEGACY_EVENTS: [&str; 5] = [
+    EVENT_SYSTEM_MESSAGE,
+    EVENT_USER_MESSAGE,
+    EVENT_ASSISTANT_MESSAGE,
+    EVENT_TOOL_MESSAGE,
+    EVENT_CHOICE,
+];
+
+// --- Legacy (<= v1.36) event-body attribute keys ---
+
+/// Legacy event-body `role` attribute.
+pub const BODY_ROLE: &str = "role";
+/// Legacy event-body `content` attribute.
+pub const BODY_CONTENT: &str = "content";
+/// Legacy event-body `id` attribute (tool call/result id).
+pub const BODY_ID: &str = "id";
+/// Legacy event-body `tool_calls` attribute (JSON array of OpenAI-style calls).
+pub const BODY_TOOL_CALLS: &str = "tool_calls";
+/// Legacy event-body `index` attribute (choice index).
+pub const BODY_INDEX: &str = "index";
+/// Legacy event-body `finish_reason` attribute (choice finish reason).
+pub const BODY_FINISH_REASON: &str = "finish_reason";
+/// Legacy event-body `message` attribute (a `gen_ai.choice` nested message JSON).
+pub const BODY_MESSAGE: &str = "message";
+
 /// The recognized GenAI operation kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {

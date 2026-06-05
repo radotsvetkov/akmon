@@ -6,10 +6,13 @@ pub enum OtelImportError {
     /// The input bytes are not a well-formed OTLP/JSON `ExportTraceServiceRequest`.
     #[error("otel trace parse error: {0}")]
     Parse(String),
-    /// The trace uses the legacy (semconv <= v1.36) message-event form, which is
-    /// not supported; re-export with semconv >= 1.37 structured attributes.
+    /// An unrecognized legacy `gen_ai.*` span event was found that cannot be
+    /// reduced to structured content. The five supported legacy message events
+    /// (`gen_ai.system.message`, `gen_ai.user.message`,
+    /// `gen_ai.assistant.message`, `gen_ai.tool.message`, `gen_ai.choice`) are
+    /// imported automatically.
     #[error(
-        "legacy <=v1.36 message-event form detected; re-export with semconv >=1.37 structured GenAI attributes"
+        "an unrecognized legacy gen_ai.* span event was found that cannot be reduced to structured content; supported legacy message events are imported automatically"
     )]
     LegacySemconvUnsupported,
     /// The trace contains more than one `gen_ai.conversation.id`, implying

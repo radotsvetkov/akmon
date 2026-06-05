@@ -1,5 +1,14 @@
-//! Import OpenTelemetry GenAI traces (semconv v1.37.0 structured form) into AGEF
-//! sessions (Akmon Item 9.1).
+//! Import OpenTelemetry GenAI traces into AGEF sessions (Akmon Item 9.1).
+//!
+//! Both the semconv >= v1.37.0 *structured* form (`gen_ai.input.messages` /
+//! `gen_ai.output.messages` role+parts attributes) and the legacy (<= v1.36)
+//! *message-event* form (`gen_ai.system.message` / `gen_ai.user.message` /
+//! `gen_ai.assistant.message` / `gen_ai.tool.message` / `gen_ai.choice` span
+//! events) are supported. The legacy form is reduced to the *same* canonical
+//! role+parts JSON the structured path hashes, so legacy and structured telemetry
+//! describing identical logical content produce identical content-object hashes
+//! (see [`synthesize_structured_from_legacy`] for the precise reduction and its
+//! documented limitations).
 //!
 //! [`import_otel_genai`] parses an OTLP/JSON `ExportTraceServiceRequest`, maps its
 //! GenAI spans onto AGEF [`EventKind`](akmon_journal::EventKind) values in a total
@@ -26,7 +35,9 @@ mod semconv;
 
 pub use canonical::canonical_json_bytes;
 pub use error::OtelImportError;
-pub use otlp::{AnyValue, ExportTraceServiceRequest, NormalizedSpan, Span, parse_and_normalize};
+pub use otlp::{
+    AnyValue, ExportTraceServiceRequest, NormalizedEvent, NormalizedSpan, Span, parse_and_normalize,
+};
 pub use semconv::{CaptureLevel, Operation, SEMCONV_VERSION};
 
 use akmon_journal::{AttemptRecord, AttemptStatus, EventKind, Hash, ObjectStore, SessionGraph};
@@ -60,9 +71,11 @@ pub struct ImportReport {
 /// Imports an OTLP/JSON GenAI trace into a fresh, empty AGEF session.
 ///
 /// The trace must be a single OTLP `ExportTraceServiceRequest` JSON object using
-/// the semconv >= v1.37.0 structured GenAI attributes. Spans are mapped to AGEF
-/// events in a total deterministic order (start time ascending, then span id
-/// ascending), bracketed by exactly one synthetic
+/// either the semconv >= v1.37.0 structured GenAI attributes or the supported
+/// legacy (<= v1.36) message-event forms (which are reduced to the same
+/// structured content). Spans are mapped to AGEF events in a total deterministic
+/// order (start time ascending, then span id ascending), bracketed by exactly one
+/// synthetic
 /// [`SessionStart`](akmon_journal::EventKind::SessionStart) and one terminal
 /// [`SessionEnd`](akmon_journal::EventKind::SessionEnd). Content objects are
 /// stored via `store.put`; events are appended via `graph.append`.
@@ -73,8 +86,9 @@ pub struct ImportReport {
 ///
 /// - [`OtelImportError::Parse`] when the bytes are not valid OTLP/JSON.
 /// - [`OtelImportError::EmptyTrace`] when no spans are present.
-/// - [`OtelImportError::LegacySemconvUnsupported`] when the legacy (<= v1.36)
-///   message-event form is detected (F8).
+/// - [`OtelImportError::LegacySemconvUnsupported`] when an *unrecognized* legacy
+///   `gen_ai.*` span event is present that cannot be reduced to structured
+///   content (F8). The five supported legacy message events are imported.
 /// - [`OtelImportError::MultipleSessions`] when more than one
 ///   `gen_ai.conversation.id` is present (F6).
 /// - [`OtelImportError::Journal`] when an object-store or graph operation fails.
@@ -151,23 +165,24 @@ fn span_operation(span: &NormalizedSpan) -> Option<Operation> {
         .and_then(Operation::from_name)
 }
 
-/// Rejects legacy (<= v1.36) traces (F8).
+/// Refuses only legacy `gen_ai.*` span events that are not among the five
+/// supported message-event forms (F8).
 ///
-/// A trace is legacy when any span carries a `gen_ai.`-prefixed span event, or
-/// when the deprecated `gen_ai.system` attribute appears anywhere while no
-/// structured `gen_ai.input.messages` / `gen_ai.output.messages` attribute is
-/// present anywhere in the trace.
+/// Supported legacy events (`gen_ai.system.message`, `gen_ai.user.message`,
+/// `gen_ai.assistant.message`, `gen_ai.tool.message`, `gen_ai.choice`) are
+/// imported by reduction to structured content, so they are *not* refused. Any
+/// other `gen_ai.`-prefixed span event is one we cannot losslessly reduce; per
+/// the honesty posture we refuse it rather than silently drop its content. The
+/// deprecated `gen_ai.system` attribute is no longer grounds for refusal — it is
+/// provider identity, consumed by `collect_session_meta`, not message content.
 fn detect_legacy(spans: &[NormalizedSpan]) -> Result<(), OtelImportError> {
-    let any_legacy_event = spans.iter().any(|s| s.has_legacy_genai_event);
-    if any_legacy_event {
-        return Err(OtelImportError::LegacySemconvUnsupported);
-    }
-
-    let any_deprecated_system = spans.iter().any(|s| s.has_attr(semconv::SYSTEM_DEPRECATED));
-    let any_structured_messages = spans
-        .iter()
-        .any(|s| s.has_attr(semconv::INPUT_MESSAGES) || s.has_attr(semconv::OUTPUT_MESSAGES));
-    if any_deprecated_system && !any_structured_messages {
+    let any_unsupported = spans.iter().any(|s| {
+        s.events.iter().any(|e| {
+            e.name.starts_with("gen_ai.")
+                && !semconv::SUPPORTED_LEGACY_EVENTS.contains(&e.name.as_str())
+        })
+    });
+    if any_unsupported {
         return Err(OtelImportError::LegacySemconvUnsupported);
     }
     Ok(())
@@ -222,12 +237,40 @@ fn compute_capture_level(spans: &[NormalizedSpan]) -> CaptureLevel {
             || s.has_attr(semconv::OUTPUT_MESSAGES)
             || s.has_attr(semconv::TOOL_CALL_ARGUMENTS)
             || s.has_attr(semconv::TOOL_CALL_RESULT)
+            || span_has_legacy_content(s)
     });
     if any_content {
         CaptureLevel::Full
     } else {
         CaptureLevel::Structural
     }
+}
+
+/// True when a span carries at least one supported legacy message event whose
+/// body holds real content (a non-empty `content` / `tool_calls` / `message`).
+///
+/// A bodiless legacy event (for example `{name:"gen_ai.user.message"}` with no
+/// attributes) contributes no content, so it does not promote the capture level
+/// to [`CaptureLevel::Full`]. This predicate is the single source of truth for
+/// "does this span have real legacy content"; the synthesis helpers gate on the
+/// same notion (a synthesized slot is `None` unless at least one real body part
+/// was produced), so capture level and slot content cannot disagree.
+fn span_has_legacy_content(span: &NormalizedSpan) -> bool {
+    span.events.iter().any(|e| {
+        if !semconv::SUPPORTED_LEGACY_EVENTS.contains(&e.name.as_str()) {
+            return false;
+        }
+        event_has_body_content(e)
+    })
+}
+
+/// True when a legacy event carries a non-empty `content`, `tool_calls`, or
+/// `message` body attribute.
+fn event_has_body_content(event: &NormalizedEvent) -> bool {
+    let nonempty_str = |key: &str| event.attr_str(key).map(|s| !s.is_empty()).unwrap_or(false);
+    nonempty_str(semconv::BODY_CONTENT)
+        || nonempty_str(semconv::BODY_TOOL_CALLS)
+        || nonempty_str(semconv::BODY_MESSAGE)
 }
 
 /// Session-level metadata captured for the config object.
@@ -475,7 +518,7 @@ impl<'a, S: ObjectStore, G: SessionGraph> Emitter<'a, S, G> {
     /// Builds the response-slot object bytes: real output content if present, else
     /// a response metadata envelope.
     fn response_object_bytes(&self, span: &NormalizedSpan) -> Vec<u8> {
-        if let Some(content) = parse_content_attr(span, semconv::OUTPUT_MESSAGES) {
+        if let Some(content) = output_messages_value(span) {
             return real_content_bytes(&content);
         }
         let mut attrs = Map::new();
@@ -526,11 +569,346 @@ fn parse_content_attr(span: &NormalizedSpan, key: &str) -> Option<Value> {
     }
 }
 
+/// Synthesized structured equivalents of a legacy span's message bodies (F8).
+///
+/// Each slot mirrors a structured content attribute: `system_instructions` is a
+/// bare parts array (matching `gen_ai.system_instructions`), `input_messages` is
+/// an array of role+parts message objects (matching `gen_ai.input.messages`), and
+/// `output_messages` is an array of assistant message objects (matching
+/// `gen_ai.output.messages`). A slot is `None` when no legacy event produced real
+/// content for it, so the slot and [`span_has_legacy_content`] always agree.
+#[derive(Debug, Default)]
+struct SynthMessages {
+    system_instructions: Option<Value>,
+    input_messages: Option<Value>,
+    output_messages: Option<Value>,
+}
+
+/// Reduces a legacy (<= v1.36) span's message events to structured-identical
+/// `serde_json::Value`s (the central correctness lever).
+///
+/// The reduction is byte-identical to the structured path for the supported
+/// single-turn text + tool_call shapes whenever legacy bodies are round-trippable
+/// JSON. Documented limitations on exact hash-match parity with *real-world*
+/// structured emitters:
+///
+/// - Per-message `finish_reason` is lifted from the `gen_ai.choice` body into the
+///   assistant message object (to match the v1.37 per-message field). Whether a
+///   given real-world v1.37 emitter actually emits `finish_reason` *inside*
+///   `output.messages` (vs. only the span-level `gen_ai.response.finish_reasons`)
+///   is emitter-dependent and not guaranteed; parity therefore holds for telemetry
+///   that agrees on this placement.
+/// - Tool-call `arguments` that are JSON strings are parsed to a value so they
+///   match the structured object form, but only round-trippable JSON canonicalizes
+///   identically (a differently-formatted or non-JSON `arguments` string cannot
+///   match a structured object).
+/// - `gen_ai.tool.message` reduction to a `tool_call_response` part is best-effort
+///   and has no structured fixture validating exact part-shape parity.
+///
+/// Deterministic role -> slot routing: `gen_ai.system.message` -> system; a
+/// `gen_ai.user.message` / `gen_ai.tool.message` -> input; a
+/// `gen_ai.assistant.message` -> input *only* when a `gen_ai.choice` exists in the
+/// same span (then the choice is the response), otherwise the assistant message is
+/// the response -> output; `gen_ai.choice` -> output. This avoids double-claiming
+/// an assistant event as both request history and response.
+fn synthesize_structured_from_legacy(span: &NormalizedSpan) -> SynthMessages {
+    let has_choice = span.events_named(semconv::EVENT_CHOICE).next().is_some();
+
+    // system_instructions: concatenation of all system events' parts, as a bare
+    // parts array (NOT wrapped in role), matching `gen_ai.system_instructions`.
+    let mut system_parts: Vec<Value> = Vec::new();
+    for event in span.events_named(semconv::EVENT_SYSTEM_MESSAGE) {
+        if let Some(content) = event.attr_str(semconv::BODY_CONTENT) {
+            if !content.is_empty() {
+                system_parts.extend(content_to_parts(content));
+            }
+        }
+    }
+    let system_instructions = if system_parts.is_empty() {
+        None
+    } else {
+        Some(Value::Array(system_parts))
+    };
+
+    // input_messages: one role+parts object per legacy input event, in event order.
+    let mut input_messages: Vec<Value> = Vec::new();
+    let mut output_messages: Vec<Value> = Vec::new();
+    // Choices are ordered by their `index` body attribute (then event order) so
+    // multi-choice (n > 1) responses are deterministic.
+    let mut choices: Vec<(i64, usize, Value)> = Vec::new();
+    for (event_pos, event) in span.events.iter().enumerate() {
+        match event.name.as_str() {
+            n if n == semconv::EVENT_USER_MESSAGE => {
+                if let Some(msg) = legacy_user_message(event) {
+                    input_messages.push(msg);
+                }
+            }
+            n if n == semconv::EVENT_TOOL_MESSAGE => {
+                if let Some(msg) = legacy_tool_message(event) {
+                    input_messages.push(msg);
+                }
+            }
+            n if n == semconv::EVENT_ASSISTANT_MESSAGE => {
+                if let Some(msg) = legacy_assistant_message(event) {
+                    if has_choice {
+                        // History turn: belongs to the request.
+                        input_messages.push(msg);
+                    } else {
+                        // No choice: this assistant message IS the response.
+                        output_messages.push(msg);
+                    }
+                }
+            }
+            n if n == semconv::EVENT_CHOICE => {
+                if let Some(msg) = legacy_choice_message(event) {
+                    let index = event.attr_i64(semconv::BODY_INDEX).unwrap_or(0);
+                    choices.push((index, event_pos, msg));
+                }
+            }
+            _ => {}
+        }
+    }
+    choices.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    output_messages.extend(choices.into_iter().map(|(_, _, msg)| msg));
+
+    SynthMessages {
+        system_instructions,
+        input_messages: if input_messages.is_empty() {
+            None
+        } else {
+            Some(Value::Array(input_messages))
+        },
+        output_messages: if output_messages.is_empty() {
+            None
+        } else {
+            Some(Value::Array(output_messages))
+        },
+    }
+}
+
+/// Converts a legacy event-body `content` string into the structured `parts`
+/// array shape (`[{"type":"text","content": <string>}]`).
+///
+/// Pass-through only happens for a JSON array whose elements are objects carrying
+/// a recognized `type` (already structured parts); any other shape — a plain
+/// string, a JSON array of scalars, or non-array JSON — is wrapped verbatim as a
+/// single text part. This is the most hash-critical reduction: a legacy
+/// `content:"Weather in Paris?"` must yield the exact same part as the structured
+/// text part.
+fn content_to_parts(content: &str) -> Vec<Value> {
+    if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(content) {
+        let already_parts = !items.is_empty()
+            && items
+                .iter()
+                .all(|item| item.get("type").and_then(Value::as_str).is_some());
+        if already_parts {
+            return items;
+        }
+    }
+    let mut part = Map::new();
+    part.insert("type".to_owned(), Value::String("text".to_owned()));
+    part.insert("content".to_owned(), Value::String(content.to_owned()));
+    vec![Value::Object(part)]
+}
+
+/// Builds a `{"role": role, "parts": [..]}` message object.
+fn legacy_message_object(role: &str, parts: Vec<Value>) -> Value {
+    let mut obj = Map::new();
+    obj.insert("role".to_owned(), Value::String(role.to_owned()));
+    obj.insert("parts".to_owned(), Value::Array(parts));
+    Value::Object(obj)
+}
+
+/// Reduces a `gen_ai.user.message` event to a `{"role":"user","parts":[..]}`
+/// object, or `None` when it has no real content.
+///
+/// The role is taken from the body `role` attribute when present (it is `"user"`
+/// by event semantics), so a structurally-identical structured user message
+/// matches byte-for-byte.
+fn legacy_user_message(event: &NormalizedEvent) -> Option<Value> {
+    let content = event.attr_str(semconv::BODY_CONTENT)?;
+    if content.is_empty() {
+        return None;
+    }
+    let role = event.attr_str(semconv::BODY_ROLE).unwrap_or("user");
+    Some(legacy_message_object(role, content_to_parts(content)))
+}
+
+/// Reduces a `gen_ai.tool.message` event to a `{"role":"tool","parts":[..]}`
+/// object with a `tool_call_response` part, or `None` when it has no content.
+///
+/// Best-effort: the `tool_call_response` part shape is not validated against a
+/// structured fixture (see [`synthesize_structured_from_legacy`]).
+fn legacy_tool_message(event: &NormalizedEvent) -> Option<Value> {
+    let content = event.attr_str(semconv::BODY_CONTENT)?;
+    if content.is_empty() {
+        return None;
+    }
+    let mut part = Map::new();
+    part.insert(
+        "type".to_owned(),
+        Value::String("tool_call_response".to_owned()),
+    );
+    if let Some(id) = event.attr_str(semconv::BODY_ID) {
+        part.insert("id".to_owned(), Value::String(id.to_owned()));
+    }
+    part.insert("response".to_owned(), parse_json_or_string(content));
+    Some(legacy_message_object("tool", vec![Value::Object(part)]))
+}
+
+/// Reduces a *history* `gen_ai.assistant.message` event to a
+/// `{"role":"assistant","parts":[text..., tool_call...]}` object, or `None` when
+/// it carries no content and no tool calls.
+fn legacy_assistant_message(event: &NormalizedEvent) -> Option<Value> {
+    let text_parts = event
+        .attr_str(semconv::BODY_CONTENT)
+        .filter(|c| !c.is_empty())
+        .map(content_to_parts)
+        .unwrap_or_default();
+    let tool_call_parts = event
+        .attr_str(semconv::BODY_TOOL_CALLS)
+        .filter(|c| !c.is_empty())
+        .map(tool_calls_to_parts)
+        .unwrap_or_default();
+    if text_parts.is_empty() && tool_call_parts.is_empty() {
+        return None;
+    }
+    let mut parts = text_parts;
+    parts.extend(tool_call_parts);
+    Some(legacy_message_object("assistant", parts))
+}
+
+/// Reduces a `gen_ai.choice` event to an assistant message object matching the
+/// structured `gen_ai.output.messages` element shape, or `None` when it carries
+/// neither text nor tool-call content.
+///
+/// The nested `message` body (`{content?, tool_calls?}`) is read either from a
+/// JSON `message` attribute or from discrete `content` / `tool_calls`
+/// attributes. The choice-level `finish_reason` is lifted into the message object
+/// as a `finish_reason` key (only when present).
+fn legacy_choice_message(event: &NormalizedEvent) -> Option<Value> {
+    let message = event
+        .attr_str(semconv::BODY_MESSAGE)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+
+    let content_str = message
+        .as_ref()
+        .and_then(|m| m.get(semconv::BODY_CONTENT))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| event.attr_str(semconv::BODY_CONTENT).map(str::to_owned));
+
+    let text_parts = content_str
+        .as_deref()
+        .filter(|c| !c.is_empty())
+        .map(content_to_parts)
+        .unwrap_or_default();
+
+    // tool_calls: from the nested message object (as a JSON Value) or a discrete
+    // `tool_calls` JSON-string attribute.
+    let tool_calls_value = message
+        .as_ref()
+        .and_then(|m| m.get(semconv::BODY_TOOL_CALLS))
+        .cloned()
+        .or_else(|| {
+            event
+                .attr_str(semconv::BODY_TOOL_CALLS)
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        });
+    let tool_call_parts = tool_calls_value
+        .map(|v| tool_calls_value_to_parts(&v))
+        .unwrap_or_default();
+
+    if text_parts.is_empty() && tool_call_parts.is_empty() {
+        return None;
+    }
+
+    // Build parts text-first, then tool_call (matching structured array order).
+    let mut parts = text_parts;
+    parts.extend(tool_call_parts);
+    let mut obj = Map::new();
+    obj.insert("role".to_owned(), Value::String("assistant".to_owned()));
+    obj.insert("parts".to_owned(), Value::Array(parts));
+    if let Some(finish) = event.attr_str(semconv::BODY_FINISH_REASON) {
+        obj.insert("finish_reason".to_owned(), Value::String(finish.to_owned()));
+    }
+    Some(Value::Object(obj))
+}
+
+/// Parses a `tool_calls` JSON-string into structured `tool_call` parts.
+fn tool_calls_to_parts(raw: &str) -> Vec<Value> {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(value) => tool_calls_value_to_parts(&value),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Converts an OpenAI-style `tool_calls` array value into structured `tool_call`
+/// parts (`{"type":"tool_call","id":..,"name":..,"arguments":..}`).
+///
+/// `arguments` JSON strings are parsed to a value so they match the structured
+/// object form (only round-trippable JSON canonicalizes identically).
+fn tool_calls_value_to_parts(value: &Value) -> Vec<Value> {
+    let Some(calls) = value.as_array() else {
+        return Vec::new();
+    };
+    let mut parts = Vec::new();
+    for call in calls {
+        let mut part = Map::new();
+        part.insert("type".to_owned(), Value::String("tool_call".to_owned()));
+        if let Some(id) = call.get("id").and_then(Value::as_str) {
+            part.insert("id".to_owned(), Value::String(id.to_owned()));
+        }
+        let function = call.get("function");
+        if let Some(name) = function.and_then(|f| f.get("name")).and_then(Value::as_str) {
+            part.insert("name".to_owned(), Value::String(name.to_owned()));
+        }
+        if let Some(arguments) = function.and_then(|f| f.get("arguments")) {
+            let arguments_value = match arguments {
+                Value::String(s) => parse_json_or_string(s),
+                other => other.clone(),
+            };
+            part.insert("arguments".to_owned(), arguments_value);
+        }
+        parts.push(Value::Object(part));
+    }
+    parts
+}
+
+/// Parses a string as JSON, falling back to the verbatim string on parse error.
+fn parse_json_or_string(raw: &str) -> Value {
+    serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+}
+
+/// Returns the request system-instructions value: the structured attribute if
+/// present, else the synthesized legacy value.
+fn system_instructions_value(span: &NormalizedSpan) -> Option<Value> {
+    parse_content_attr(span, semconv::SYSTEM_INSTRUCTIONS)
+        .or_else(|| synthesize_structured_from_legacy(span).system_instructions)
+}
+
+/// Returns the request input-messages value: the structured attribute if present,
+/// else the synthesized legacy value.
+fn input_messages_value(span: &NormalizedSpan) -> Option<Value> {
+    parse_content_attr(span, semconv::INPUT_MESSAGES)
+        .or_else(|| synthesize_structured_from_legacy(span).input_messages)
+}
+
+/// Returns the response output-messages value: the structured attribute if
+/// present, else the synthesized legacy value.
+fn output_messages_value(span: &NormalizedSpan) -> Option<Value> {
+    parse_content_attr(span, semconv::OUTPUT_MESSAGES)
+        .or_else(|| synthesize_structured_from_legacy(span).output_messages)
+}
+
 /// Builds the full request content object from real input attributes (system
 /// instructions + input messages). Returns `None` when neither is present.
+///
+/// Structured attributes take precedence per slot; synthesized legacy values fill
+/// only otherwise-empty slots.
 fn extract_request_content(span: &NormalizedSpan) -> Option<Value> {
-    let system = parse_content_attr(span, semconv::SYSTEM_INSTRUCTIONS);
-    let input = parse_content_attr(span, semconv::INPUT_MESSAGES);
+    let system = system_instructions_value(span);
+    let input = input_messages_value(span);
     if system.is_none() && input.is_none() {
         return None;
     }
@@ -544,12 +922,13 @@ fn extract_request_content(span: &NormalizedSpan) -> Option<Value> {
     Some(Value::Object(obj))
 }
 
-/// Extracts the first user message's content from `gen_ai.input.messages`.
+/// Extracts the first user message's content from the (structured or synthesized
+/// legacy) input messages.
 ///
 /// Returns the user message value when real input content is present and contains
 /// a `role == "user"` entry; otherwise `None`.
 fn extract_user_content(span: &NormalizedSpan) -> Option<Value> {
-    let input = parse_content_attr(span, semconv::INPUT_MESSAGES)?;
+    let input = input_messages_value(span)?;
     let messages = input.as_array()?;
     let user = messages
         .iter()
@@ -557,14 +936,15 @@ fn extract_user_content(span: &NormalizedSpan) -> Option<Value> {
     Some(user.clone())
 }
 
-/// Extracts assistant message content from `gen_ai.output.messages`.
+/// Extracts assistant message content from the (structured or synthesized legacy)
+/// output messages.
 ///
 /// Returns `Some((message_value, tool_calls_value))` when real output content is
 /// present and contains an assistant message: `message_value` holds the
 /// assistant's text parts (an array, possibly empty), and `tool_calls_value` is
 /// `Some` when the assistant message contains `tool_call` parts.
 fn extract_assistant_content(span: &NormalizedSpan) -> Option<(Value, Option<Value>)> {
-    let output = parse_content_attr(span, semconv::OUTPUT_MESSAGES)?;
+    let output = output_messages_value(span)?;
     let messages = output.as_array()?;
     let assistant = messages
         .iter()
@@ -618,6 +998,17 @@ mod tests {
     const FIXTURE_B: &[u8] = br#"{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"agef-demo-agent"}}]},"scopeSpans":[{"scope":{"name":"opentelemetry.instrumentation.openai_v2"},"spans":[{"traceId":"4bf92f3577b34da6a3ce929d0e0e4736","spanId":"00f067aa0ba902b7","parentSpanId":"","name":"chat gpt-4o","kind":3,"startTimeUnixNano":"1748000000000000000","endTimeUnixNano":"1748000001500000000","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},{"key":"gen_ai.provider.name","value":{"stringValue":"openai"}},{"key":"gen_ai.request.model","value":{"stringValue":"gpt-4o"}},{"key":"gen_ai.response.model","value":{"stringValue":"gpt-4o-2024-08-06"}},{"key":"gen_ai.response.id","value":{"stringValue":"chatcmpl-Abc123"}},{"key":"gen_ai.conversation.id","value":{"stringValue":"conv-7f3a"}},{"key":"gen_ai.request.temperature","value":{"doubleValue":0.2}},{"key":"gen_ai.request.max_tokens","value":{"intValue":"512"}},{"key":"gen_ai.usage.input_tokens","value":{"intValue":"31"}},{"key":"gen_ai.usage.output_tokens","value":{"intValue":"19"}},{"key":"gen_ai.response.finish_reasons","value":{"arrayValue":{"values":[{"stringValue":"tool_calls"}]}}}]},{"traceId":"4bf92f3577b34da6a3ce929d0e0e4736","spanId":"1a2b3c4d5e6f7081","parentSpanId":"00f067aa0ba902b7","name":"execute_tool get_weather","kind":1,"startTimeUnixNano":"1748000001500000000","endTimeUnixNano":"1748000001800000000","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},{"key":"gen_ai.tool.name","value":{"stringValue":"get_weather"}},{"key":"gen_ai.tool.call.id","value":{"stringValue":"call_x"}}]}]}]}]}"#;
 
     const FIXTURE_LEGACY: &[u8] = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"abcd","spanId":"1111","parentSpanId":"","name":"chat","kind":3,"startTimeUnixNano":"1","endTimeUnixNano":"2","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}}],"events":[{"name":"gen_ai.user.message"}]}]}]}]}"#;
+
+    // FIXTURE_C: the legacy (<= v1.36) message-event form of the SAME logical
+    // session as FIXTURE_A. Same trace/span ids, same provider/model/conversation/
+    // usage attributes, identical `execute_tool` span. The chat span carries NO
+    // structured content attributes; instead it carries gen_ai.* message events:
+    //   - gen_ai.system.message  content="You are a helpful weather assistant."
+    //   - gen_ai.user.message    content="Weather in Paris?"
+    //   - gen_ai.choice          index=0, finish_reason="tool_calls", message=
+    //       {"tool_calls":[{"id":"call_x","type":"function","function":
+    //         {"name":"get_weather","arguments":"{\"location\":\"Paris\"}"}}]}
+    const FIXTURE_C: &[u8] = br#"{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"agef-demo-agent"}}]},"scopeSpans":[{"scope":{"name":"opentelemetry.instrumentation.openai_v2"},"spans":[{"traceId":"4bf92f3577b34da6a3ce929d0e0e4736","spanId":"00f067aa0ba902b7","parentSpanId":"","name":"chat gpt-4o","kind":3,"startTimeUnixNano":"1748000000000000000","endTimeUnixNano":"1748000001500000000","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},{"key":"gen_ai.provider.name","value":{"stringValue":"openai"}},{"key":"gen_ai.request.model","value":{"stringValue":"gpt-4o"}},{"key":"gen_ai.response.model","value":{"stringValue":"gpt-4o-2024-08-06"}},{"key":"gen_ai.response.id","value":{"stringValue":"chatcmpl-Abc123"}},{"key":"gen_ai.conversation.id","value":{"stringValue":"conv-7f3a"}},{"key":"gen_ai.request.temperature","value":{"doubleValue":0.2}},{"key":"gen_ai.request.max_tokens","value":{"intValue":"512"}},{"key":"gen_ai.usage.input_tokens","value":{"intValue":"31"}},{"key":"gen_ai.usage.output_tokens","value":{"intValue":"19"}},{"key":"gen_ai.response.finish_reasons","value":{"arrayValue":{"values":[{"stringValue":"tool_calls"}]}}}],"events":[{"name":"gen_ai.system.message","attributes":[{"key":"content","value":{"stringValue":"You are a helpful weather assistant."}}]},{"name":"gen_ai.user.message","attributes":[{"key":"content","value":{"stringValue":"Weather in Paris?"}}]},{"name":"gen_ai.choice","attributes":[{"key":"index","value":{"intValue":"0"}},{"key":"finish_reason","value":{"stringValue":"tool_calls"}},{"key":"message","value":{"stringValue":"{\"tool_calls\":[{\"id\":\"call_x\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"location\\\":\\\"Paris\\\"}\"}}]}"}}]}]},{"traceId":"4bf92f3577b34da6a3ce929d0e0e4736","spanId":"1a2b3c4d5e6f7081","parentSpanId":"00f067aa0ba902b7","name":"execute_tool get_weather","kind":1,"startTimeUnixNano":"1748000001500000000","endTimeUnixNano":"1748000001800000000","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},{"key":"gen_ai.tool.name","value":{"stringValue":"get_weather"}},{"key":"gen_ai.tool.call.id","value":{"stringValue":"call_x"}},{"key":"gen_ai.tool.call.arguments","value":{"stringValue":"{\"location\":\"Paris\"}"}},{"key":"gen_ai.tool.call.result","value":{"stringValue":"rainy, 57F"}}]}]}]}]}"#;
 
     fn stores() -> (Arc<MemoryObjectStore>, MemorySessionGraph) {
         let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
@@ -795,20 +1186,59 @@ mod tests {
     }
 
     #[test]
-    fn legacy_event_form_is_rejected() {
+    fn unknown_legacy_event_is_rejected() {
+        // An UNSUPPORTED legacy gen_ai.* event (not one of the five forms) is
+        // refused: we never silently drop legacy content we cannot reduce (F8).
+        let json = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"abcd","spanId":"1111","parentSpanId":"","name":"chat","kind":3,"startTimeUnixNano":"1","endTimeUnixNano":"2","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}}],"events":[{"name":"gen_ai.some_future.event"}]}]}]}]}"#;
         let (store, mut graph) = stores();
-        let err = import_otel_genai(FIXTURE_LEGACY, store.as_ref(), &mut graph)
-            .expect_err("legacy form must be rejected");
+        let err = import_otel_genai(json, store.as_ref(), &mut graph)
+            .expect_err("unrecognized legacy event must be rejected");
         assert!(matches!(err, OtelImportError::LegacySemconvUnsupported));
     }
 
     #[test]
-    fn deprecated_system_without_messages_is_rejected() {
+    fn bodiless_supported_legacy_event_imports_as_structural() {
+        // A supported legacy event with NO body (FIXTURE_LEGACY's bodiless
+        // gen_ai.user.message) is NOT refused; it imports as Structural because it
+        // carries no real content.
+        let (store, mut graph) = stores();
+        let report = import_otel_genai(FIXTURE_LEGACY, store.as_ref(), &mut graph)
+            .unwrap_or_else(|_| panic!());
+        assert_eq!(report.capture_level, CaptureLevel::Structural);
+        let verify = graph.verify().unwrap_or_else(|_| unreachable!());
+        assert!(verify.is_clean(), "session must verify clean: {verify:?}");
+    }
+
+    #[test]
+    fn deprecated_system_imports_as_structural() {
+        // Under the new policy `gen_ai.system` alone (provider identity, no legacy
+        // events) is NO LONGER refused: it imports as a Structural session with
+        // provider = "openai" recorded in the config object.
         let json = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"a","spanId":"1","parentSpanId":"","name":"chat","kind":3,"startTimeUnixNano":"1","endTimeUnixNano":"2","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},{"key":"gen_ai.system","value":{"stringValue":"openai"}}]}]}]}]}"#;
         let (store, mut graph) = stores();
-        let err = import_otel_genai(json, store.as_ref(), &mut graph)
-            .expect_err("deprecated system without messages must be rejected");
-        assert!(matches!(err, OtelImportError::LegacySemconvUnsupported));
+        let report =
+            import_otel_genai(json, store.as_ref(), &mut graph).unwrap_or_else(|_| panic!());
+        assert_eq!(report.capture_level, CaptureLevel::Structural);
+        assert_eq!(report.provider_calls, 1);
+
+        let history = graph.history().unwrap_or_else(|_| unreachable!());
+        // The config object (SessionStart) records provider = "openai".
+        let (_, start_event) = history.first().unwrap_or_else(|| unreachable!());
+        let EventKind::SessionStart { config_hash, .. } = &start_event.kind else {
+            unreachable!()
+        };
+        let bytes = store
+            .get(config_hash)
+            .unwrap_or_else(|_| unreachable!())
+            .unwrap_or_else(|| unreachable!());
+        let config: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            config.get("provider").and_then(Value::as_str),
+            Some("openai")
+        );
+
+        let verify = graph.verify().unwrap_or_else(|_| unreachable!());
+        assert!(verify.is_clean(), "session must verify clean: {verify:?}");
     }
 
     #[test]
@@ -874,5 +1304,185 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The content-object hashes carrying real content, by slot, for hash-match
+    /// comparison. Excludes the SessionStart config/cwd hashes (compared
+    /// separately and not part of the content-equality property).
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct ContentSlots {
+        user_prompt: Option<Hash>,
+        assistant_message: Option<Hash>,
+        assistant_tool_calls: Option<Hash>,
+        provider_request: Option<Hash>,
+        provider_response: Option<Hash>,
+        tool_input: Option<Hash>,
+        tool_output: Option<Hash>,
+    }
+
+    fn content_slots(history: &[(Hash, Event)]) -> ContentSlots {
+        let mut slots = ContentSlots::default();
+        for (_, event) in history {
+            match &event.kind {
+                EventKind::UserTurn { prompt_hash } => {
+                    slots.user_prompt = Some(prompt_hash.clone());
+                }
+                EventKind::AssistantTurn {
+                    message_hash,
+                    tool_calls_hash,
+                } => {
+                    slots.assistant_message = Some(message_hash.clone());
+                    slots.assistant_tool_calls = tool_calls_hash.clone();
+                }
+                EventKind::ProviderCall { attempts, .. } => {
+                    if let Some(attempt) = attempts.first() {
+                        slots.provider_request = Some(attempt.request_hash.clone());
+                        slots.provider_response = attempt.response_hash.clone();
+                    }
+                }
+                EventKind::ToolCall {
+                    input_hash,
+                    output_hash,
+                    ..
+                } => {
+                    slots.tool_input = Some(input_hash.clone());
+                    slots.tool_output = Some(output_hash.clone());
+                }
+                _ => {}
+            }
+        }
+        slots
+    }
+
+    #[test]
+    fn fixture_c_legacy_matches_fixture_a_content_hashes() {
+        // The load-bearing property: legacy (FIXTURE_C) and structured (FIXTURE_A)
+        // telemetry describing the SAME logical content produce the SAME
+        // content-object hashes, because both route through the same
+        // real_content_bytes / canonical_json_bytes path over structurally-equal
+        // synthesized values.
+        let (store_a, mut graph_a) = stores();
+        let report_a = import_otel_genai(FIXTURE_A, store_a.as_ref(), &mut graph_a)
+            .unwrap_or_else(|_| panic!());
+        let (store_c, mut graph_c) = stores();
+        let report_c = import_otel_genai(FIXTURE_C, store_c.as_ref(), &mut graph_c)
+            .unwrap_or_else(|_| panic!());
+
+        // Both must be Full-capture, one provider call, one tool call.
+        assert_eq!(report_a.capture_level, CaptureLevel::Full);
+        assert_eq!(report_c.capture_level, CaptureLevel::Full);
+        assert_eq!(report_a.provider_calls, 1);
+        assert_eq!(report_c.provider_calls, 1);
+        assert_eq!(report_a.tool_calls, 1);
+        assert_eq!(report_c.tool_calls, 1);
+
+        let history_a = graph_a.history().unwrap_or_else(|_| unreachable!());
+        let history_c = graph_c.history().unwrap_or_else(|_| unreachable!());
+        let slots_a = content_slots(&history_a);
+        let slots_c = content_slots(&history_c);
+
+        // Slot-by-slot equality (stronger than a sorted multiset compare).
+        assert_eq!(
+            slots_a.user_prompt, slots_c.user_prompt,
+            "UserTurn.prompt_hash must match"
+        );
+        assert_eq!(
+            slots_a.assistant_message, slots_c.assistant_message,
+            "AssistantTurn.message_hash must match"
+        );
+        assert_eq!(
+            slots_a.assistant_tool_calls, slots_c.assistant_tool_calls,
+            "AssistantTurn.tool_calls_hash must match"
+        );
+        assert_eq!(
+            slots_a.provider_request, slots_c.provider_request,
+            "ProviderCall request_hash must match"
+        );
+        assert_eq!(
+            slots_a.provider_response, slots_c.provider_response,
+            "ProviderCall response_hash must match"
+        );
+        assert_eq!(
+            slots_a.tool_input, slots_c.tool_input,
+            "ToolCall input_hash must match"
+        );
+        assert_eq!(
+            slots_a.tool_output, slots_c.tool_output,
+            "ToolCall output_hash must match"
+        );
+        // Whole-struct equality as a belt-and-braces guard.
+        assert_eq!(slots_a, slots_c);
+
+        // Every content slot is actually populated (not all-None matching).
+        assert!(slots_c.user_prompt.is_some());
+        assert!(slots_c.assistant_tool_calls.is_some());
+        assert!(slots_c.provider_request.is_some());
+        assert!(slots_c.provider_response.is_some());
+        assert!(slots_c.tool_input.is_some());
+        assert!(slots_c.tool_output.is_some());
+
+        let verify = graph_c.verify().unwrap_or_else(|_| unreachable!());
+        assert!(
+            verify.is_clean(),
+            "legacy session must verify clean: {verify:?}"
+        );
+    }
+
+    #[test]
+    fn fixture_c_legacy_full_capture_emits_all_turns_and_verifies() {
+        let (store, mut graph) = stores();
+        let report =
+            import_otel_genai(FIXTURE_C, store.as_ref(), &mut graph).unwrap_or_else(|_| panic!());
+
+        assert_eq!(report.capture_level, CaptureLevel::Full);
+        assert_eq!(report.provider_calls, 1);
+        assert_eq!(report.tool_calls, 1);
+
+        let history = graph.history().unwrap_or_else(|_| unreachable!());
+        let kinds = kinds(&history);
+
+        assert!(matches!(
+            kinds.first(),
+            Some(EventKind::SessionStart { .. })
+        ));
+        assert!(matches!(kinds.last(), Some(EventKind::SessionEnd { .. })));
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, EventKind::UserTurn { .. }))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, EventKind::ProviderCall { .. }))
+        );
+        assert!(kinds.iter().any(|k| matches!(
+            k,
+            EventKind::AssistantTurn {
+                tool_calls_hash: Some(_),
+                ..
+            }
+        )));
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, EventKind::ToolCall { .. }))
+        );
+
+        let user_pos = kinds
+            .iter()
+            .position(|k| matches!(k, EventKind::UserTurn { .. }))
+            .unwrap_or_else(|| unreachable!());
+        let provider_pos = kinds
+            .iter()
+            .position(|k| matches!(k, EventKind::ProviderCall { .. }))
+            .unwrap_or_else(|| unreachable!());
+        assert!(
+            user_pos < provider_pos,
+            "UserTurn must precede ProviderCall"
+        );
+
+        let verify = graph.verify().unwrap_or_else(|_| unreachable!());
+        assert!(verify.is_clean(), "session must verify clean: {verify:?}");
     }
 }

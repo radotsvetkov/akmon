@@ -26,9 +26,15 @@ const FIXTURE_A: &str = r#"{"resourceSpans":[{"resource":{"attributes":[{"key":"
 // crates/akmon-otel/src/lib.rs tests so the two stay consistent.
 const FIXTURE_B: &str = r#"{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"agef-demo-agent"}}]},"scopeSpans":[{"scope":{"name":"opentelemetry.instrumentation.openai_v2"},"spans":[{"traceId":"4bf92f3577b34da6a3ce929d0e0e4736","spanId":"00f067aa0ba902b7","parentSpanId":"","name":"chat gpt-4o","kind":3,"startTimeUnixNano":"1748000000000000000","endTimeUnixNano":"1748000001500000000","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},{"key":"gen_ai.provider.name","value":{"stringValue":"openai"}},{"key":"gen_ai.request.model","value":{"stringValue":"gpt-4o"}},{"key":"gen_ai.response.model","value":{"stringValue":"gpt-4o-2024-08-06"}},{"key":"gen_ai.response.id","value":{"stringValue":"chatcmpl-Abc123"}},{"key":"gen_ai.conversation.id","value":{"stringValue":"conv-7f3a"}},{"key":"gen_ai.request.temperature","value":{"doubleValue":0.2}},{"key":"gen_ai.request.max_tokens","value":{"intValue":"512"}},{"key":"gen_ai.usage.input_tokens","value":{"intValue":"31"}},{"key":"gen_ai.usage.output_tokens","value":{"intValue":"19"}},{"key":"gen_ai.response.finish_reasons","value":{"arrayValue":{"values":[{"stringValue":"tool_calls"}]}}}]},{"traceId":"4bf92f3577b34da6a3ce929d0e0e4736","spanId":"1a2b3c4d5e6f7081","parentSpanId":"00f067aa0ba902b7","name":"execute_tool get_weather","kind":1,"startTimeUnixNano":"1748000001500000000","endTimeUnixNano":"1748000001800000000","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"execute_tool"}},{"key":"gen_ai.tool.name","value":{"stringValue":"get_weather"}},{"key":"gen_ai.tool.call.id","value":{"stringValue":"call_x"}}]}]}]}]}"#;
 
-// Legacy form: a single span carrying a `gen_ai.user.message` span event
-// (semconv <= v1.36), which the importer must reject (F8).
+// Supported legacy form: a span carrying a `gen_ai.user.message` span event
+// (semconv <= v1.36) with no body. It is now IMPORTED (not refused) and, because
+// the event carries no real content, reports structural capture.
 const FIXTURE_LEGACY: &str = r#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"abcd","spanId":"1111","parentSpanId":"","name":"chat","kind":3,"startTimeUnixNano":"1","endTimeUnixNano":"2","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},{"key":"gen_ai.system","value":{"stringValue":"openai"}}],"events":[{"name":"gen_ai.user.message","timeUnixNano":"1","attributes":[]}]}]}]}]}"#;
+
+// Unrecognized legacy form: a span carrying a `gen_ai.*` span event that is NOT
+// one of the five supported message-event forms, which the importer must reject
+// rather than silently drop (F8).
+const FIXTURE_UNKNOWN_LEGACY: &str = r#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"abcd","spanId":"1111","parentSpanId":"","name":"chat","kind":3,"startTimeUnixNano":"1","endTimeUnixNano":"2","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}}],"events":[{"name":"gen_ai.some_future.event","timeUnixNano":"1","attributes":[]}]}]}]}]}"#;
 
 /// Writes `contents` to `<dir>/<name>` and returns the path display string.
 fn write_fixture(dir: &std::path::Path, name: &str, contents: &str) -> String {
@@ -387,12 +393,51 @@ fn t_replay_refuses_otel_imported_session() {
     );
 }
 
-/// A legacy (semconv <= v1.36) message-event trace is a usage error (exit 2).
+/// A supported legacy (semconv <= v1.36) message-event trace is now IMPORTED.
+/// FIXTURE_LEGACY's bodiless `gen_ai.user.message` carries no real content, so it
+/// imports successfully (exit 0) with structural capture.
 #[test]
-fn t_otel_import_rejects_legacy() {
+fn t_otel_import_supported_legacy_imports_structural() {
     let dir = tempdir().expect("tempdir");
     let journal_dir = dir.path().join("journal");
     let trace = write_fixture(dir.path(), "trace_legacy.json", FIXTURE_LEGACY);
+
+    let out = akmon()
+        .args([
+            "otel",
+            "import",
+            &trace,
+            "--journal",
+            &journal_dir.display().to_string(),
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run otel import");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).expect("import json");
+    assert_eq!(
+        v.get("capture_level").and_then(Value::as_str),
+        Some("structural")
+    );
+}
+
+/// An UNRECOGNIZED legacy `gen_ai.*` span event is a usage error (exit 2): we
+/// never silently drop legacy content we cannot reduce (F8).
+#[test]
+fn t_otel_import_rejects_unknown_legacy_event() {
+    let dir = tempdir().expect("tempdir");
+    let journal_dir = dir.path().join("journal");
+    let trace = write_fixture(
+        dir.path(),
+        "trace_unknown_legacy.json",
+        FIXTURE_UNKNOWN_LEGACY,
+    );
 
     let out = akmon()
         .args([
