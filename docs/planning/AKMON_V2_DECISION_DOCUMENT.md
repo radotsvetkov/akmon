@@ -11,8 +11,9 @@
 - Not a prompt to paste into Cursor. It's a planning document. Cursor reads it as context; your existing Cursor system prompt drives the interaction style.
 - Not a timeline. Estimates are rough (8–10 focused weeks, but you set pace).
 - Not a marketing plan. Positioning only. Marketing is downstream of shipped code.
-**Document version:** 1.7 — June 2026
+**Document version:** 1.8 — June 2026
 **Revision history:**
+- v1.8 (June 2026) — Adds **D-20: operator-identity binding** (§5.20) and the corresponding **AGEF v0.1.3** additive substrate change (OPTIONAL `manifest.operator_attestations[]` + an `AGEF-OPERATOR-v1` statement). Binds a self-asserted, separately-signed operator/human-accountability claim to the session head, verifiable offline with `openssl`, with out-of-band key trust — closing the EU AI Act Art.14 / Art.12(3) "which accountable human" gap without PKI/DID/cloud. Substrate change (bundle/manifest format) authorized by this revision per `02-substrate-invariants.mdc`; the `AGEF-SIG-v1` head statement and `prove-openssl` bytes are byte-untouched; the in-statement identity-binding form is REJECTED. Designed via three independent perspectives (architect + cryptographic red-team + backward-compat review). The canonical `radotsvetkov/agef` spec is owed a v0.1.3 lockstep update (O11; D-18's v0.1.2 spec update is also still pending). No LOCKED positioning (§1–§3) altered.
 - v1.7 (June 2026) — **Repositioning** (product-owner ruling): Akmon's center of gravity moves from *the* review-aware agent to the **producer-agnostic, tamper-evident evidence & verification layer** for AI-agent sessions in regulated engineering. The bundled agent is retained as the reference / gold-fidelity producer; the keystone new producer is OpenTelemetry GenAI import (decision **D-19**, §6.11 Phase 9). Amends §1 (repositioning block) and adds D-19 + Phase 9. Substrate invariants (§1.1/§3/§4), the regulated lens (§2), and the §1.2 non-goals are unchanged — this broadens *who produces the evidence*, not *what the evidence is*.
 - v1.0 (April 2026) — Initial document.
 - v1.1 (April 2026) — Adds D-16, D-17, Item 6.10 in response to repositioning audit findings A and B (`docs/repositioning-audit.md`). No prior decisions altered.
@@ -417,6 +418,40 @@ This sub-decision is deferred to Phase 2 design (Item 2.1's design step). The ch
 5. **T5 — Additive, no substrate change.** OTEL import produces ordinary AGEF v0.1.x sessions/bundles; no `EventKind`, hash, store, or bundle-format change — so no substrate revision is required (`02-substrate-invariants`).
 6. **T6 — Provenance.** The imported session records `producer` = the originating tool (from `gen_ai`/service attributes) plus an "imported-by akmon" marker, so an auditor can see the evidence did not originate in Akmon's own agent.
 7. **T7 — Fidelity spectrum.** own-agent (gold, full replay) > recording proxy (future, full content) > OTEL import (structural + whatever telemetry carries). Documented so users pick a capture method by assurance need.
+
+### §5.20 Decision D-20: Operator-identity binding — **LOCKED direction: additive, separately-signed `AGEF-OPERATOR-v1` attestation (AGEF v0.1.3)**
+
+*Added in v1.8. Builds on D-18 (native signing). Product-owner-delegated ruling, designed via three independent perspectives — architect, cryptographic red-team, and backward-compatibility review (June 2026). This is a substrate-level change (bundle/manifest format) authorized by this revision per `02-substrate-invariants.mdc`.*
+
+**Context.** D-18 made a session attributable to a *key* (who **sealed** it). It does not record *which accountable human/role* stands behind the session — the axis EU AI Act Art.14 (human oversight) and Art.12(3) (record-keeping) require, and the one place Microsoft's DID-based agent identity currently leads (`docs/planning/competitive-microsoft-agt.md`). D-20 adds an **operator attestation**: a separately-signed claim binding a self-asserted operator identity to a specific session head, verifiable offline with `openssl`, with out-of-band key trust. It is strictly additive and never folds into the `AGEF-SIG-v1` head statement — the in-statement form is **rejected**, because changing the head-statement bytes would break the `prove-openssl` wedge shipped under D-18 / metric F.1.
+
+**Design decisions (O1–O11).** Mirror D-18's S-series; the red-team's MUST-FIX items are encoded as locked requirements.
+
+1. **O1 — Attestation target.** Sign a domain-separated *operator statement* binding the operator identity to the **session head** (which commits to the entire event/object DAG), the `session_id`, and the protocol context (`agef_version`, `hash_algorithm`). Distinct trust axis from the head signature: D-18 answers "which key sealed this"; D-20 answers "which accountable operator stands behind this head."
+2. **O2 — Statement format (`AGEF-OPERATOR-v1`).** Canonical UTF-8, fixed field order, LF-terminated, no other whitespace; the four self-asserted identity fields are ALL inside the signed bytes (so the displayed strings are exactly what was signed):
+   ```
+   AGEF-OPERATOR-v1
+   agef_version:0.1.3
+   hash_algorithm:<sha256|blake3>
+   session_id:<uuid>
+   head:<lowercase-hex>
+   operator_id:<self-asserted; required, non-empty>
+   display_name:<self-asserted; "" if unset>
+   role:<self-asserted; "" if unset>
+   org:<self-asserted; "" if unset>
+   ```
+   The `AGEF-OPERATOR-v1` first-line tag domain-separates this from `AGEF-SIG-v1` (different first line + field set ⇒ an Ed25519 signature over one can never validate as the other). **Anti-transplant:** binding `head` + `session_id` prevents lifting an attestation onto a different session/head. **Documented boundary (decided, not overlooked):** the statement deliberately does NOT bind the head-signer's `key_id`. Cross-session transplant is fully prevented; the narrower "same head re-sealed by a different signer, victim attestation reused" case is handled by the verifier checking the head-signature axis (`--verify-key`) independently — "operator O attested head X" ∧ "signer S sealed head X" is established by checking both axes, not by coupling them in one signature. A future `AGEF-OPERATOR-v2` MAY add a `sig_key_id` line if single-signature endorsement semantics are ever needed.
+3. **O3 — Scheme.** `ed25519` via `ring` — the exact primitive D-18 uses (`generate_pkcs8`/`public_key_from_pkcs8`/`sign_statement`/`verify_statement`/`key_id`). **Zero new dependencies** (the trust-product supply-chain gate, D-18 S9, holds).
+4. **O4 — Manifest schema (AGEF v0.1.3, additive).** `manifest.json` gains an OPTIONAL `operator_attestations` array (plural, mirroring `signatures[]`, to allow operator + reviewer/approver). Absence ⇒ "unattributed" (fully valid). Each entry: `scheme`, `key_id` (lowercase-hex SHA-256 of the operator public key), `statement_version` (`AGEF-OPERATOR-v1`), `operator_id`/`display_name`/`role`/`org` (all SIGNED), `signature` (lowercase hex), `created_at` (RFC3339). **`created_at` is NOT in the signed statement** — it is unverifiable, backdatable self-reported provenance (mirrors `ManifestSignature.created_at`); folding an unanchored clock into the signature would be security theater (existence-at-time anchoring stays a deferred layer, per D-18 S7). Identity fields MUST contain no `\n`/`\r` (rejected at attest, flagged `Malformed` at verify) to prevent statement-line injection.
+5. **O5 — Outside the event hash chain.** Like `signatures[]` (D-18 S5), operator attestations are manifest metadata, not part of any event/object hash. The head, every event hash, every object hash, the `AGEF-SIG-v1` statement, and the `prove-openssl` bytes are **byte-untouched** whether or not an attestation is present. (Verified against the code: the head commits to events only; `signing_statement` covers four scalar fields; the canonical-JSON manifest is never re-hashed against the head.)
+6. **O6 — Verification semantics.** Independent of integrity AND of head-signature verification. The verifier reconstructs the `AGEF-OPERATOR-v1` statement from the manifest session fields + the entry's stored identity fields and checks it against supplied trusted operator keys: trusted key + valid ⇒ `verified`; trusted key matches `key_id` but invalid ⇒ **hard failure (exit 1)**; present but no trusted key ⇒ `unverified_no_key` (surfaced, not a failure); absent ⇒ `unattributed` (not a failure). Entries whose `statement_version != AGEF-OPERATOR-v1` or `scheme != ed25519` are rejected **before** any verification attempt (domain-separation guard). `--require-operator` makes absent-or-unverified a failure; `--require-operator-key <hex-file>` requires that a *specific* trusted operator key attested (presence of arbitrary self-asserted text is never sufficient).
+7. **O7 — Trust model.** Out-of-band operator-key distribution (verifier supplies/maps trusted keys). NO PKI, NO DID, NO web-of-trust, NO transparency log — preserves the offline/no-cloud/openssl wedge. `key_id` is a matching hint, never the trust anchor.
+8. **O8 — Honesty / presentation (load-bearing).** "Verified" attaches to the **key**, never to the self-asserted string. Human + JSON output present identity as *claimed/self-asserted* and separate `operator_key_verified` (boolean) from the asserted `operator_id`/`role`/`org`, so no reader concludes "Akmon verified that ceo@company.com approved this" when only a key's signature was checked. Self-asserted fields are escaped/quoted on display (attacker-controlled text). A trust product must never overstate what it proved.
+9. **O9 — CLI surface.** `akmon bundle attest <bundle> --key <pkcs8> --operator-id <id> [--display-name --role --org] [--output]` adds an attestation (analogue of `bundle sign`, factored over a library `build_operator_attestation`). `akmon bundle verify` and `agef-verify` gain `--operator-key <hex-file>` (repeatable) and `--require-operator`/`--require-operator-key`, surfacing per-attestation outcomes in human + `BundleVerifyReportV1.operators[]`. `akmon bundle prove-openssl --operator-key <hex-file>` additionally emits `operator_statement.bin`/`operator_signature.bin`/`operator_pubkey.pem` (a flat statement file — NOT canonical JSON — so the same `openssl pkeyutl -verify … -rawin` recipe verifies the operator claim with no Akmon binary; without the flag, prove-openssl output is byte-identical to today). **`attest` MUST NOT rewrite `agef_version` on an already-head-signed bundle** (it would invalidate the prior `AGEF-SIG-v1` signature): it sets `agef_version=0.1.3` only for previously-unsigned bundles, otherwise leaves it untouched (the attestation carries its own version inside its own statement).
+10. **O10 — Multiple attestations.** Allowed (operator + reviewer/approver). The verdict is set-based (order-independent); the verifier reports ALL attestations and never collapses to a single "the operator"; `--require-operator-key` checks a specific key; duplicate `key_id` entries are rejected/deduped so array-padding cannot drown the signal.
+11. **O11 — Version + AGEF spec coordination.** AGEF v0.1.2 → **v0.1.3**, additive minor (`AGEF_SPEC_VERSION` in `akmon-journal`; `validate_agef_version` already accepts any `0.1.x`, so v0.1.1/v0.1.2 bundles still verify and old readers ignore the new field via the flattened `extra` map). The canonical `radotsvetkov/agef` spec MUST be updated in lockstep (§A.3 non-goal, §A.5 `operator_attestations`, new §A.15, §A.11 bump) — this **cannot be done from the Akmon repo** and is an external follow-up (note: D-18's v0.1.2 spec update is also still pending externally).
+
+**Implementation sequencing (Build #7 — each step behind fmt+clippy+test+deny, and the frozen F.1 openssl e2e harness staying green):** (1) `operator_statement` + `OperatorAttestation` type + `build_operator_attestation` + `verify_operator_attestations`/report types in `akmon-bundle`, with statement-golden / roundtrip / tamper / domain-separation / newline-injection unit tests; bump `AGEF_SPEC_VERSION` to `0.1.3` and add `operator_attestations: None` to every `Manifest{}` site; (2) `akmon bundle attest` (new thin module); (3) `--operator-key`/`--require-operator`/`--require-operator-key` + `operators[]` report in `akmon bundle verify` and `agef-verify`; (4) `prove-openssl --operator-key` operator artifacts; (5) docs (reference + walkthrough) + AGEF spec repo update (O11, external); (6) an `attest → openssl-verify the operator statement` integration test + a regression test asserting head-signature/`prove-openssl` bytes are unchanged with and without an attestation.
 
  
 ---
@@ -1128,6 +1163,27 @@ the chain interior — see §A.14). Older v0.1.x readers ignore the field.
 ]
 ```
  
+**AGEF v0.1.3 (additive):** `manifest.json` MAY also carry an optional `operator_attestations` array
+binding an accountable operator/human identity to the session head (§A.15). Absence ⇒ "unattributed";
+presence changes no event or object hash and does not affect `signatures[]` or the `AGEF-SIG-v1` head
+statement. Older v0.1.x readers ignore the field.
+
+```json
+"operator_attestations": [
+  {
+    "scheme": "ed25519",
+    "key_id": "<operator public-key fingerprint>",
+    "statement_version": "AGEF-OPERATOR-v1",
+    "operator_id": "alice@example.com",
+    "display_name": "Alice Approver",
+    "role": "approver",
+    "org": "Example GmbH",
+    "signature": "<lowercase-hex detached signature bytes>",
+    "created_at": "<rfc3339; NOT part of the signed statement>"
+  }
+]
+```
+
 ## A.6 Event structure
  
 ```
@@ -1180,7 +1236,7 @@ A bundle passes verification when all events' computed hashes match their claime
  
 ## A.11 Versioning
  
-- v0.x — pre-stable; breaking changes allowed. Within v0.1: v0.1.1 fixed the event wire framing; v0.1.2 adds the OPTIONAL `manifest.signatures[]` envelope (§A.14) — additive only, so v0.1.1 readers still read v0.1.2 bundles (ignoring the field).
+- v0.x — pre-stable; breaking changes allowed. Within v0.1: v0.1.1 fixed the event wire framing; v0.1.2 adds the OPTIONAL `manifest.signatures[]` envelope (§A.14) — additive only, so v0.1.1 readers still read v0.1.2 bundles (ignoring the field); v0.1.3 adds the OPTIONAL `manifest.operator_attestations[]` envelope (§A.15) — additive only, so v0.1.1/v0.1.2 readers still read v0.1.3 bundles (ignoring the field).
 - v1.0 — first stable major. Bundles produced against v1.0 readable by all v1.x readers.
 - v2.0 — next breaking major. v1.x bundles MAY be readable by v2.x tools with explicit opt-in.
 ## A.12 Governance
@@ -1232,6 +1288,53 @@ are reported as "unverified" (integrity is still established). Verifiers MAY off
 **Trust model (v0.1.2).** Public keys are distributed out of band; AGEF does not specify a PKI,
 web-of-trust, or transparency log. Existence-at-time anchoring (e.g., RFC-3161 / Rekor) is a future
 additive layer.
+
+## A.15 Operator attestation (v0.1.3, OPTIONAL)
+
+AGEF v0.1.3 defines an OPTIONAL operator-attestation envelope so a session's *human/role accountability*
+can be asserted and checked independently of who produced or sealed it. It is additive: it never alters
+the event hash chain, the object store, any content hash, or the `AGEF-SIG-v1` head signature (§A.14).
+
+**Signed statement (`AGEF-OPERATOR-v1`).** A canonical, domain-separated UTF-8 statement (fixed field
+order, LF line endings, no trailing whitespace); the four identity fields are signed (`display_name`/
+`role`/`org` default to the empty string when unset; `operator_id` is required and non-empty; none may
+contain `\n` or `\r`):
+
+```
+AGEF-OPERATOR-v1
+agef_version:0.1.3
+hash_algorithm:<sha256|blake3>
+session_id:<uuid>
+head:<lowercase-hex-of-session-head>
+operator_id:<...>
+display_name:<...>
+role:<...>
+org:<...>
+```
+
+Binding `session_id` + `head` prevents reuse of an attestation outside its session. The
+`AGEF-OPERATOR-v1` tag domain-separates it from `AGEF-SIG-v1` (a signature over one can never validate
+as the other).
+
+**Scheme.** `ed25519` over the statement bytes (RFC 8032); public key SPKI/PEM (openssl-compatible) —
+the same primitive as §A.14, so an operator claim is verifiable with stock `openssl` over a second
+statement file.
+
+**Placement.** Attestations live in `manifest.operator_attestations[]` (§A.5), as manifest metadata
+excluded from event hashing. Multiple entries are allowed (e.g. operator + reviewer).
+
+**Verification (extends §A.10).** Independent of integrity and of head-signature verification. For each
+entry whose `statement_version` is `AGEF-OPERATOR-v1` and `scheme` is `ed25519`, the verifier
+reconstructs the statement from the manifest session fields + the entry's identity fields and checks it
+against trusted operator keys: trusted + valid ⇒ verified; trusted key + invalid ⇒ hard failure;
+present with no trusted key ⇒ "unverified (no key)"; absent ⇒ "unattributed". `created_at` is
+non-signed, self-reported provenance. **Verifiers MUST present "verified" as a property of the KEY,
+never of the self-asserted identity string** (a name is only as trustworthy as the out-of-band
+key→identity mapping). A `require-operator` / `require-operator-key` mode treats absent/unverified (or
+a missing specific key) as failure.
+
+**Trust model (v0.1.3).** Operator public keys are distributed out of band; AGEF specifies no PKI,
+DID, web-of-trust, or transparency log. This preserves offline, no-cloud, openssl-only verification.
  
 ---
  
