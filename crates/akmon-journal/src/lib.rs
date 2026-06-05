@@ -27,7 +27,7 @@ pub mod session_graph;
 ///
 /// Update when bumping the spec version (see <https://github.com/radotsvetkov/agef>). The CLI's
 /// `VerifyReportV1.agef_version` field reads from this constant.
-pub const AGEF_SPEC_VERSION: &str = "0.1.2";
+pub const AGEF_SPEC_VERSION: &str = "0.1.3";
 
 pub use error::{JournalError, Result};
 pub use event::{

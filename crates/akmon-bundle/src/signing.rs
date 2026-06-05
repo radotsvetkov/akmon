@@ -39,6 +39,10 @@ pub enum SigningError {
     /// Verification failed: wrong key, malformed signature, or a tampered statement.
     #[error("Ed25519 signature verification failed")]
     VerificationFailed,
+    /// An operator-identity field was empty or contained a `\n`/`\r`, which would break the
+    /// line-oriented `AGEF-OPERATOR-v1` statement framing (decision D-20; an injection guard).
+    #[error("operator identity field contains an illegal newline or is empty")]
+    IllegalOperatorField,
 }
 
 /// Builds the canonical `AGEF-SIG-v1` statement that a signature covers.
@@ -242,6 +246,280 @@ fn check_signature_entry(
     with(SignatureOutcome::UnverifiedNoKey)
 }
 
+// ----------------------------------------------------------------------------------------------
+// Operator-identity attestations (decision D-20; AGEF v0.1.3 §A.15).
+//
+// Purely additive over the AGEF-SIG-v1 head-signing scheme above: a separate, domain-separated
+// statement (`AGEF-OPERATOR-v1`) binds a named human/role to the SAME session head, so a head
+// signature can never be confused with an operator attestation and vice versa.
+// ----------------------------------------------------------------------------------------------
+
+/// Version tag of the canonical operator-identity statement (decision D-20; AGEF v0.1.3 §A.15).
+pub const OPERATOR_STATEMENT_VERSION: &str = "AGEF-OPERATOR-v1";
+
+/// The four operator identity fields bound by an `AGEF-OPERATOR-v1` attestation.
+///
+/// Every field is part of the signed statement; the manifest also records a `created_at` timestamp
+/// that is metadata only and is NOT signed (see [`crate::manifest::OperatorAttestation`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperatorIdentity {
+    /// Stable operator identifier (for example an email, employee id, or service account).
+    pub operator_id: String,
+    /// Human-readable display name of the operator.
+    pub display_name: String,
+    /// Role the operator acted in for this session (for example `release-engineer`).
+    pub role: String,
+    /// Organization the operator belongs to.
+    pub org: String,
+}
+
+/// Builds the canonical `AGEF-OPERATOR-v1` statement that an operator attestation covers.
+///
+/// Fixed nine-line field order, LF line endings, a single trailing newline, and no other whitespace
+/// (decision D-20; AGEF v0.1.3 §A.15). The first four lines mirror [`signing_statement`] so an
+/// attestation binds to exactly one session; the last four lines carry the operator identity.
+/// Callers pass the manifest's own `agef_version`, `hash_algorithm`, hyphenated `session_id`, and
+/// lowercase-hex `head` verbatim, plus the operator identity fields.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn operator_statement(
+    agef_version: &str,
+    hash_algorithm: &str,
+    session_id: &str,
+    head_hex: &str,
+    operator_id: &str,
+    display_name: &str,
+    role: &str,
+    org: &str,
+) -> String {
+    format!(
+        "{OPERATOR_STATEMENT_VERSION}\n\
+         agef_version:{agef_version}\n\
+         hash_algorithm:{hash_algorithm}\n\
+         session_id:{session_id}\n\
+         head:{head_hex}\n\
+         operator_id:{operator_id}\n\
+         display_name:{display_name}\n\
+         role:{role}\n\
+         org:{org}\n"
+    )
+}
+
+/// Validates a single operator identity field for the line-oriented statement framing.
+///
+/// Rejects any value containing a `\n` or `\r`, which would otherwise inject extra lines into (or
+/// truncate) the `AGEF-OPERATOR-v1` statement and let two distinct identities collapse to the same
+/// signed bytes (decision D-20; an injection guard). Returns
+/// [`SigningError::IllegalOperatorField`] on rejection.
+pub fn validate_operator_field(value: &str) -> Result<(), SigningError> {
+    if value.contains('\n') || value.contains('\r') {
+        return Err(SigningError::IllegalOperatorField);
+    }
+    Ok(())
+}
+
+/// Builds a signed [`OperatorAttestation`](crate::manifest::OperatorAttestation) binding `identity`
+/// to the manifest's session head (decision D-20; AGEF v0.1.3 §A.15).
+///
+/// Reconstructs the `AGEF-OPERATOR-v1` statement from the manifest's own `agef_version`,
+/// `hash_algorithm`, `session.id`, and `session.head` plus the four identity fields, signs it with
+/// the PKCS#8 Ed25519 private key, and records the result. `created_at` is recorded verbatim as
+/// unsigned metadata.
+///
+/// # Errors
+///
+/// Returns [`SigningError::IllegalOperatorField`] if `operator_id` is empty or if any of the four
+/// identity fields contains a `\n`/`\r`, and [`SigningError::InvalidPrivateKey`] if `pkcs8` is not a
+/// valid Ed25519 private key.
+pub fn build_operator_attestation(
+    manifest: &crate::manifest::Manifest,
+    identity: &OperatorIdentity,
+    pkcs8: &[u8],
+    created_at: &str,
+) -> Result<crate::manifest::OperatorAttestation, SigningError> {
+    if identity.operator_id.is_empty() {
+        return Err(SigningError::IllegalOperatorField);
+    }
+    validate_operator_field(&identity.operator_id)?;
+    validate_operator_field(&identity.display_name)?;
+    validate_operator_field(&identity.role)?;
+    validate_operator_field(&identity.org)?;
+
+    let public_key = public_key_from_pkcs8(pkcs8)?;
+    let statement = operator_statement(
+        &manifest.agef_version,
+        &manifest.hash_algorithm,
+        &manifest.session.id,
+        &manifest.session.head,
+        &identity.operator_id,
+        &identity.display_name,
+        &identity.role,
+        &identity.org,
+    );
+    let signature = sign_statement(statement.as_bytes(), pkcs8)?;
+    Ok(crate::manifest::OperatorAttestation {
+        scheme: SCHEME_ED25519.to_owned(),
+        key_id: key_id(&public_key),
+        statement_version: OPERATOR_STATEMENT_VERSION.to_owned(),
+        operator_id: identity.operator_id.clone(),
+        display_name: identity.display_name.clone(),
+        role: identity.role.clone(),
+        org: identity.org.clone(),
+        signature: hex::encode(&signature),
+        created_at: created_at.to_owned(),
+    })
+}
+
+/// Outcome of checking one `manifest.operator_attestations[]` entry against a set of trusted keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatorOutcome {
+    /// A trusted key validates the attestation over the reconstructed `AGEF-OPERATOR-v1` statement.
+    Verified,
+    /// The entry names a trusted key (by `key_id`) but the signature does not validate — a tampered
+    /// identity, a tampered head, or a corrupt signature.
+    Invalid,
+    /// No trusted key validates the attestation and none matches the entry's `key_id`.
+    UnverifiedNoKey,
+    /// The entry's `scheme` is not understood (only `ed25519` is defined in AGEF v0.1.3).
+    UnsupportedScheme,
+    /// The entry's `statement_version`, signature hex, or an identity field is malformed (an
+    /// identity field containing `\n`/`\r` is rejected before any verification — a domain-separation
+    /// and injection guard).
+    Malformed,
+}
+
+/// Result of checking one operator-attestation entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorCheck {
+    /// `key_id` copied from the manifest entry.
+    pub key_id: String,
+    /// `scheme` copied from the manifest entry.
+    pub scheme: String,
+    /// `operator_id` copied from the manifest entry.
+    pub operator_id: String,
+    /// `display_name` copied from the manifest entry.
+    pub display_name: String,
+    /// `role` copied from the manifest entry.
+    pub role: String,
+    /// `org` copied from the manifest entry.
+    pub org: String,
+    /// `created_at` copied from the manifest entry.
+    pub created_at: String,
+    /// Verification outcome.
+    pub outcome: OperatorOutcome,
+}
+
+/// Report from verifying all of a manifest's operator attestations against trusted public keys.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperatorVerificationReport {
+    /// Per-entry results, in manifest order.
+    pub checks: Vec<OperatorCheck>,
+}
+
+impl OperatorVerificationReport {
+    /// True when the manifest carried no operator attestations at all.
+    #[must_use]
+    pub fn is_unattributed(&self) -> bool {
+        self.checks.is_empty()
+    }
+
+    /// True when at least one entry verified against a trusted key.
+    #[must_use]
+    pub fn any_verified(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|c| c.outcome == OperatorOutcome::Verified)
+    }
+
+    /// True when any entry named a trusted key but failed verification (a hard failure).
+    #[must_use]
+    pub fn any_invalid(&self) -> bool {
+        self.checks
+            .iter()
+            .any(|c| c.outcome == OperatorOutcome::Invalid)
+    }
+}
+
+/// Verifies every `manifest.operator_attestations[]` entry against the supplied trusted Ed25519
+/// public keys (raw 32-byte each) (decision D-20; AGEF v0.1.3 §A.15).
+///
+/// The `AGEF-OPERATOR-v1` statement is reconstructed from the manifest's own `agef_version`,
+/// `hash_algorithm`, `session.id`, and `session.head`, plus the identity fields stored in the
+/// entry, so an attestation validates only if it covers exactly this session AND the recorded
+/// identity. `key_id` is a hint for matching, never the trust anchor. Independent of bundle
+/// integrity and of head signatures: this answers "who claims to have operated this session".
+#[must_use]
+pub fn verify_operator_attestations(
+    manifest: &crate::manifest::Manifest,
+    trusted_operator_keys: &[Vec<u8>],
+) -> OperatorVerificationReport {
+    let Some(attestations) = &manifest.operator_attestations else {
+        return OperatorVerificationReport::default();
+    };
+    let checks = attestations
+        .iter()
+        .map(|att| check_operator_entry(att, manifest, trusted_operator_keys))
+        .collect();
+    OperatorVerificationReport { checks }
+}
+
+/// Checks one operator-attestation entry, trying every trusted key (key_id is a hint, not the
+/// trust anchor).
+fn check_operator_entry(
+    att: &crate::manifest::OperatorAttestation,
+    manifest: &crate::manifest::Manifest,
+    trusted_keys: &[Vec<u8>],
+) -> OperatorCheck {
+    let with = |outcome| OperatorCheck {
+        key_id: att.key_id.clone(),
+        scheme: att.scheme.clone(),
+        operator_id: att.operator_id.clone(),
+        display_name: att.display_name.clone(),
+        role: att.role.clone(),
+        org: att.org.clone(),
+        created_at: att.created_at.clone(),
+        outcome,
+    };
+    if att.scheme != SCHEME_ED25519 {
+        return with(OperatorOutcome::UnsupportedScheme);
+    }
+    if att.statement_version != OPERATOR_STATEMENT_VERSION {
+        return with(OperatorOutcome::Malformed);
+    }
+    // Reject any identity field with embedded newlines BEFORE verifying: such bytes can never have
+    // been produced by a well-formed signer and would let two identities share signed bytes.
+    if validate_operator_field(&att.operator_id).is_err()
+        || validate_operator_field(&att.display_name).is_err()
+        || validate_operator_field(&att.role).is_err()
+        || validate_operator_field(&att.org).is_err()
+    {
+        return with(OperatorOutcome::Malformed);
+    }
+    let Ok(sig_bytes) = hex::decode(&att.signature) else {
+        return with(OperatorOutcome::Malformed);
+    };
+    let statement = operator_statement(
+        &manifest.agef_version,
+        &manifest.hash_algorithm,
+        &manifest.session.id,
+        &manifest.session.head,
+        &att.operator_id,
+        &att.display_name,
+        &att.role,
+        &att.org,
+    );
+    if trusted_keys
+        .iter()
+        .any(|k| verify_statement(statement.as_bytes(), &sig_bytes, k).is_ok())
+    {
+        return with(OperatorOutcome::Verified);
+    }
+    if trusted_keys.iter().any(|k| key_id(k) == att.key_id) {
+        return with(OperatorOutcome::Invalid);
+    }
+    with(OperatorOutcome::UnverifiedNoKey)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +644,7 @@ mod tests {
                 signature: hex::encode(&sig),
                 created_at: "2026-05-04T14:01:00Z".to_owned(),
             }]),
+            operator_attestations: None,
             extra: std::collections::BTreeMap::new(),
         }
     }
@@ -430,5 +709,203 @@ mod tests {
         m.signatures.as_mut().expect("sigs")[0].signature = "nothex!!".to_owned();
         let report = verify_manifest_signatures(&m, &[]);
         assert_eq!(report.checks[0].outcome, SignatureOutcome::Malformed);
+    }
+
+    // --- Operator-identity attestations (decision D-20; AGEF v0.1.3 §A.15) ----------------------
+
+    fn sample_identity() -> OperatorIdentity {
+        OperatorIdentity {
+            operator_id: "alice@example.com".to_owned(),
+            display_name: "Alice Example".to_owned(),
+            role: "release-engineer".to_owned(),
+            org: "Acme".to_owned(),
+        }
+    }
+
+    /// Builds an unsigned base manifest with no attestations, at the current head.
+    fn base_manifest(head: &str) -> crate::manifest::Manifest {
+        let mut m = signed_manifest(&generate_pkcs8().expect("keygen"), head);
+        m.signatures = None;
+        m
+    }
+
+    /// Builds a manifest carrying a single operator attestation from `pkcs8`/`identity` over `head`.
+    fn attested_manifest(
+        pkcs8: &[u8],
+        identity: &OperatorIdentity,
+        head: &str,
+    ) -> crate::manifest::Manifest {
+        let mut m = base_manifest(head);
+        let att = build_operator_attestation(&m, identity, pkcs8, "2026-06-06T00:00:00Z")
+            .expect("build attestation");
+        m.operator_attestations = Some(vec![att]);
+        m
+    }
+
+    #[test]
+    fn operator_statement_is_canonical() {
+        let stmt = operator_statement(
+            "0.1.3",
+            "sha256",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "ab12cd",
+            "alice@example.com",
+            "Alice Example",
+            "release-engineer",
+            "Acme",
+        );
+        assert_eq!(
+            stmt,
+            "AGEF-OPERATOR-v1\nagef_version:0.1.3\nhash_algorithm:sha256\n\
+             session_id:550e8400-e29b-41d4-a716-446655440000\nhead:ab12cd\n\
+             operator_id:alice@example.com\ndisplay_name:Alice Example\n\
+             role:release-engineer\norg:Acme\n"
+        );
+    }
+
+    #[test]
+    fn build_then_verify_roundtrips() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let pubkey = public_key_from_pkcs8(&pkcs8).expect("pubkey");
+        let m = attested_manifest(&pkcs8, &sample_identity(), "deadbeef");
+        let report = verify_operator_attestations(&m, &[pubkey]);
+        assert!(report.any_verified());
+        assert!(!report.any_invalid());
+        assert_eq!(report.checks[0].outcome, OperatorOutcome::Verified);
+        assert_eq!(report.checks[0].operator_id, "alice@example.com");
+        assert_eq!(report.checks[0].role, "release-engineer");
+    }
+
+    #[test]
+    fn tampered_identity_field_makes_matching_key_invalid() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let pubkey = public_key_from_pkcs8(&pkcs8).expect("pubkey");
+        let mut m = attested_manifest(&pkcs8, &sample_identity(), "deadbeef");
+        // Flip a byte of the stored display_name; the key still matches by key_id.
+        m.operator_attestations.as_mut().expect("atts")[0].display_name =
+            "Alice Examplf".to_owned();
+        let report = verify_operator_attestations(&m, &[pubkey]);
+        assert!(report.any_invalid());
+        assert_eq!(report.checks[0].outcome, OperatorOutcome::Invalid);
+    }
+
+    #[test]
+    fn tampered_head_makes_attestation_invalid() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let pubkey = public_key_from_pkcs8(&pkcs8).expect("pubkey");
+        let mut m = attested_manifest(&pkcs8, &sample_identity(), "deadbeef");
+        m.session.head = "feedface".to_owned();
+        let report = verify_operator_attestations(&m, &[pubkey]);
+        assert!(report.any_invalid());
+        assert_eq!(report.checks[0].outcome, OperatorOutcome::Invalid);
+    }
+
+    #[test]
+    fn attestation_without_trusted_key_is_unverified() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let m = attested_manifest(&pkcs8, &sample_identity(), "deadbeef");
+        let report = verify_operator_attestations(&m, &[]);
+        assert!(!report.is_unattributed());
+        assert!(!report.any_verified());
+        assert_eq!(report.checks[0].outcome, OperatorOutcome::UnverifiedNoKey);
+    }
+
+    #[test]
+    fn unattributed_manifest_reports_unattributed() {
+        let m = base_manifest("deadbeef");
+        let report = verify_operator_attestations(&m, &[]);
+        assert!(report.is_unattributed());
+        assert!(!report.any_verified());
+    }
+
+    #[test]
+    fn newline_in_field_rejected_at_build() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let m = base_manifest("deadbeef");
+        let mut id = sample_identity();
+        id.display_name = "Alice\nExample".to_owned();
+        let err = build_operator_attestation(&m, &id, &pkcs8, "2026-06-06T00:00:00Z").unwrap_err();
+        assert!(matches!(err, SigningError::IllegalOperatorField));
+        // A carriage return is rejected too.
+        let mut id_cr = sample_identity();
+        id_cr.org = "Ac\rme".to_owned();
+        assert!(matches!(
+            build_operator_attestation(&m, &id_cr, &pkcs8, "2026-06-06T00:00:00Z"),
+            Err(SigningError::IllegalOperatorField)
+        ));
+    }
+
+    #[test]
+    fn newline_in_field_flagged_malformed_at_verify() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let pubkey = public_key_from_pkcs8(&pkcs8).expect("pubkey");
+        let mut m = attested_manifest(&pkcs8, &sample_identity(), "deadbeef");
+        // Inject a newline into a stored field after the fact; verification must reject it before
+        // attempting any signature check (domain-separation + injection guard).
+        m.operator_attestations.as_mut().expect("atts")[0].role = "release\nengineer".to_owned();
+        let report = verify_operator_attestations(&m, &[pubkey]);
+        assert_eq!(report.checks[0].outcome, OperatorOutcome::Malformed);
+    }
+
+    #[test]
+    fn empty_operator_id_rejected_at_build() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let m = base_manifest("deadbeef");
+        let mut id = sample_identity();
+        id.operator_id = String::new();
+        let err = build_operator_attestation(&m, &id, &pkcs8, "2026-06-06T00:00:00Z").unwrap_err();
+        assert!(matches!(err, SigningError::IllegalOperatorField));
+    }
+
+    #[test]
+    fn unsupported_scheme_flagged() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let mut m = attested_manifest(&pkcs8, &sample_identity(), "deadbeef");
+        m.operator_attestations.as_mut().expect("atts")[0].scheme = "rsa".to_owned();
+        let report = verify_operator_attestations(&m, &[]);
+        assert_eq!(report.checks[0].outcome, OperatorOutcome::UnsupportedScheme);
+    }
+
+    #[test]
+    fn malformed_signature_hex_flagged() {
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let mut m = attested_manifest(&pkcs8, &sample_identity(), "deadbeef");
+        m.operator_attestations.as_mut().expect("atts")[0].signature = "nothex!!".to_owned();
+        let report = verify_operator_attestations(&m, &[]);
+        assert_eq!(report.checks[0].outcome, OperatorOutcome::Malformed);
+    }
+
+    #[test]
+    fn cross_statement_non_confusion() {
+        // An AGEF-SIG-v1 head signature over the SAME session head must NOT verify when placed in
+        // an OperatorAttestation and checked as AGEF-OPERATOR-v1 — proves domain separation.
+        let pkcs8 = generate_pkcs8().expect("keygen");
+        let pubkey = public_key_from_pkcs8(&pkcs8).expect("pubkey");
+        let id = sample_identity();
+        let mut m = base_manifest("deadbeef");
+        // Sign the HEAD statement (AGEF-SIG-v1), not the operator statement.
+        let head_stmt = signing_statement(
+            &m.agef_version,
+            &m.hash_algorithm,
+            &m.session.id,
+            &m.session.head,
+        );
+        let head_sig = sign_statement(head_stmt.as_bytes(), &pkcs8).expect("sign head");
+        m.operator_attestations = Some(vec![crate::manifest::OperatorAttestation {
+            scheme: SCHEME_ED25519.to_owned(),
+            key_id: key_id(&pubkey),
+            statement_version: OPERATOR_STATEMENT_VERSION.to_owned(),
+            operator_id: id.operator_id.clone(),
+            display_name: id.display_name.clone(),
+            role: id.role.clone(),
+            org: id.org.clone(),
+            signature: hex::encode(&head_sig),
+            created_at: "2026-06-06T00:00:00Z".to_owned(),
+        }]);
+        let report = verify_operator_attestations(&m, &[pubkey]);
+        // The trusted key matches by key_id, but the head signature does not cover the operator
+        // statement, so the outcome is Invalid (NOT Verified).
+        assert_ne!(report.checks[0].outcome, OperatorOutcome::Verified);
+        assert_eq!(report.checks[0].outcome, OperatorOutcome::Invalid);
     }
 }

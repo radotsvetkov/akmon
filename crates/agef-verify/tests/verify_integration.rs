@@ -60,6 +60,7 @@ fn valid_bundle() -> BundleContents {
         object_count: 2,
         event_count: 2,
         signatures: None,
+        operator_attestations: None,
         extra: BTreeMap::new(),
     };
 
@@ -297,6 +298,7 @@ fn otel_bundle(capture_level: &str) -> BundleContents {
         object_count: 2,
         event_count: 2,
         signatures: None,
+        operator_attestations: None,
         extra: BTreeMap::new(),
     };
     BundleContents {

@@ -2297,6 +2297,7 @@ fn run_redact(
         object_count: derivative_objects.len() as u64,
         event_count: rewritten_events.len() as u64,
         signatures: None,
+        operator_attestations: None,
         extra: BTreeMap::new(),
     };
 

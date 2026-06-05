@@ -127,6 +127,7 @@ mod tests {
             object_count: 2,
             event_count: 2,
             signatures: None,
+            operator_attestations: None,
             extra: BTreeMap::new(),
         };
         BundleContents {

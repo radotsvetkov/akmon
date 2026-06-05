@@ -669,6 +669,7 @@ fn run_bundle_export(
         object_count: objects.len() as u64,
         event_count: events.len() as u64,
         signatures: None,
+        operator_attestations: None,
         extra: BTreeMap::new(),
     };
 
@@ -1568,7 +1569,8 @@ fn run_bundle_sign(
         }
     };
 
-    // A signed bundle declares AGEF v0.1.2, the version that defines manifest.signatures[].
+    // A signed bundle is stamped with the current AGEF spec version (signatures[] were
+    // introduced in v0.1.2).
     contents.manifest.agef_version = AGEF_SPEC_VERSION.to_owned();
     let statement = {
         let m = &contents.manifest;

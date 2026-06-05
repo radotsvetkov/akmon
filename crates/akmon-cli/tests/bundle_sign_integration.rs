@@ -92,7 +92,7 @@ fn t_bundle_sign_then_signature_verifies() {
     };
     let contents = read_bundle(&mut f, &options).expect("read signed bundle");
     assert_eq!(contents.manifest.signatures.as_ref().map(Vec::len), Some(1));
-    assert_eq!(contents.manifest.agef_version, "0.1.2");
+    assert_eq!(contents.manifest.agef_version, "0.1.3");
 
     let pubkey = parse_public_key_hex(pubkey_hex).expect("parse published pubkey");
     let verification = verify_manifest_signatures(&contents.manifest, &[pubkey]);

@@ -24,6 +24,11 @@ pub struct Manifest {
     /// omitted from serialized JSON when `None`, so unsigned manifests are byte-identical to v0.1.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signatures: Option<Vec<ManifestSignature>>,
+    /// Optional operator-identity attestations binding a named human/role to the session head
+    /// (decision D-20; AGEF v0.1.3 §A.15). Absent ⇒ unattributed; omitted from serialized JSON when
+    /// `None`, so manifests without operator attestations are byte-identical to prior versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_attestations: Option<Vec<OperatorAttestation>>,
     /// Forward-compatible extra metadata fields.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -66,6 +71,38 @@ pub struct ManifestSignature {
     /// Detached signature bytes as lowercase hex.
     pub signature: String,
     /// RFC3339 timestamp when the signature was produced.
+    pub created_at: String,
+}
+
+/// An operator-identity attestation binding a named human and role to the session head
+/// (decision D-20; AGEF v0.1.3 §A.15).
+///
+/// Optional manifest metadata; never part of the event hash chain (decision D-20, additive-only). An
+/// attester covers the canonical `AGEF-OPERATOR-v1` statement (see
+/// [`crate::signing::operator_statement`]), which binds the four identity fields to the session's
+/// `agef_version`, `hash_algorithm`, `session_id`, and `head`. The four identity fields
+/// (`operator_id`, `display_name`, `role`, `org`) are part of the signed statement; `created_at` is
+/// metadata only and is NOT signed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperatorAttestation {
+    /// Signature scheme. `ed25519` is the only scheme defined in AGEF v0.1.3.
+    pub scheme: String,
+    /// Key identifier: lowercase hex SHA-256 of the attester's raw public key.
+    pub key_id: String,
+    /// Version tag of the signed statement (`AGEF-OPERATOR-v1`).
+    pub statement_version: String,
+    /// Stable operator identifier (signed). For example an email, employee id, or service account.
+    pub operator_id: String,
+    /// Human-readable display name of the operator (signed).
+    pub display_name: String,
+    /// Role the operator acted in for this session (signed). For example `release-engineer`.
+    pub role: String,
+    /// Organization the operator belongs to (signed).
+    pub org: String,
+    /// Detached signature bytes as lowercase hex over the `AGEF-OPERATOR-v1` statement.
+    pub signature: String,
+    /// RFC3339 timestamp when the attestation was produced. Metadata only; NOT part of the signed
+    /// statement.
     pub created_at: String,
 }
 
@@ -243,6 +280,7 @@ mod tests {
             object_count: 2,
             event_count: 3,
             signatures: None,
+            operator_attestations: None,
             extra: BTreeMap::from([("x_extra".to_owned(), serde_json::json!({"z":1,"a":2}))]),
         }
     }
