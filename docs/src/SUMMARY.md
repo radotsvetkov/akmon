@@ -105,6 +105,7 @@
 - [CLI Reference](./reference/cli.md)
 - [akmon verify](./reference/verify.md)
 - [akmon sign](./reference/sign.md)
+- [akmon bundle keygen](./reference/bundle-keygen.md)
 - [akmon inspect](./reference/inspect.md)
 - [akmon bundle export](./reference/bundle-export.md)
 - [akmon bundle import](./reference/bundle-import.md)

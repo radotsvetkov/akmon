@@ -17,8 +17,13 @@ the party being audited" are not sufficient on their own.
 
 ## How it works
 
-Akmon does **not** embed a signer. `akmon sign` reads the session's head hash from the journal and
-invokes a command you configure under `[signing]` in `~/.akmon/config.toml` (Decision D-05).
+Akmon does **not** embed a signer here. `akmon sign` reads the session's head hash from the journal
+and invokes a command you configure under `[signing]` in `~/.akmon/config.toml` (Decision D-05).
+
+> For the **native** detached-signature path (no external signing hook), use `akmon bundle sign`,
+> which signs an exported bundle with an Ed25519 key made by
+> [`akmon bundle keygen`](./bundle-keygen.md). `openssl genpkey` is **not** a substitute for
+> `keygen`: it emits PKCS#8 v1, which `ring` rejects.
 
 Headless runs (`akmon --task …`) invoke the same hook automatically after the session is
 persisted when `[signing]` is configured. Signing is best-effort: failures are logged to stderr as
@@ -111,4 +116,6 @@ Expected result: `true` when the configured signing command exits `0`.
 ## See also
 
 - [akmon verify](./verify.md)
+- [akmon bundle keygen](./bundle-keygen.md)
+- [akmon bundle prove-openssl](./bundle-prove-openssl.md)
 - [AGEF specification](https://github.com/radotsvetkov/agef)

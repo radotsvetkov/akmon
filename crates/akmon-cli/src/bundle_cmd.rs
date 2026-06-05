@@ -269,7 +269,9 @@ Reads the bundle, signs the canonical AGEF-SIG-v1 statement over its session hea
 PKCS#8 Ed25519 private key, appends the detached signature to manifest.signatures[], and writes \
 the signed bundle (in place, or to --output). Prints the signer's public key as hex for \
 distribution to verifiers (`akmon bundle verify --verify-key` / `agef-verify --verify-key`).\n\n\
-Generate a key with: openssl genpkey -algorithm ed25519 -outform DER -out signer.pk8\n\n\
+Generate a key with: akmon bundle keygen --out signer.pk8 (writes the raw PKCS#8 v2 DER this \
+command expects). NOTE: `openssl genpkey -algorithm ed25519` emits PKCS#8 v1, which ring rejects — \
+it is NOT a usable key for this command.\n\n\
 Examples:\n\
   akmon bundle sign audit.akmon --key signer.pk8\n\
   akmon bundle sign audit.akmon --key signer.pk8 --output signed.akmon\n\n\
@@ -302,6 +304,26 @@ Exit codes:\n\
   3 — I/O or environment error (bundle/--verify-key unreadable, malformed archive, out-dir not writable)"
     )]
     ProveOpenssl(crate::bundle_prove::BundleProveArgs),
+    /// Generate an Ed25519 signing key for `akmon bundle sign` (AGEF v0.1.2).
+    #[command(
+        long_about = "Generate a fresh Ed25519 signing key for `akmon bundle sign`.\n\n\
+Writes the raw PKCS#8 v2 DER private key to --out (the exact byte form `akmon bundle sign --key` \
+consumes), created with 0600 permissions on unix at create time. It refuses to overwrite an \
+existing --out unless --force is given, so it never silently destroys a private key. It always \
+surfaces the public key (64 hex chars) and its key_id so you can hand the public half to verifiers; \
+--public-out also writes the public-key hex to a file for `akmon bundle verify --verify-key` / \
+`akmon bundle prove-openssl --verify-key`.\n\n\
+This is the supported way to make a usable key: `openssl genpkey -algorithm ed25519` emits PKCS#8 \
+v1, which ring REJECTS — so an openssl-generated key cannot sign an Akmon bundle.\n\n\
+Examples:\n\
+  akmon bundle keygen --out signer.pk8\n\
+  akmon bundle keygen --out signer.pk8 --public-out signer.pub.hex\n\
+  akmon bundle keygen --out signer.pk8 --force --format json\n\n\
+Exit codes:\n\
+  0 — key written; public key hex + key_id surfaced\n\
+  3 — I/O error, refuse-to-clobber (use --force), or key generation failure"
+    )]
+    Keygen(crate::bundle_keygen::BundleKeygenArgs),
 }
 
 /// Arguments for `akmon bundle export`.
@@ -388,8 +410,8 @@ pub struct BundleVerifyArgs {
 pub struct BundleSignArgs {
     /// Path to the `.akmon` bundle file to sign.
     bundle: PathBuf,
-    /// Path to a PKCS#8 Ed25519 private key (DER), e.g. from
-    /// `openssl genpkey -algorithm ed25519 -outform DER`.
+    /// Path to a PKCS#8 v2 Ed25519 private key (raw DER), as produced by
+    /// `akmon bundle keygen --out`. (`openssl genpkey` emits PKCS#8 v1, which is rejected.)
     #[arg(long)]
     key: PathBuf,
     /// Destination for the signed bundle. Defaults to signing the input bundle in place.
@@ -1688,5 +1710,6 @@ pub fn run_bundle(args: &BundleArgs) -> ExitCode {
         BundleCommands::ProveOpenssl(prove_args) => {
             crate::bundle_prove::run_bundle_prove_openssl(prove_args)
         }
+        BundleCommands::Keygen(keygen_args) => crate::bundle_keygen::run_bundle_keygen(keygen_args),
     }
 }

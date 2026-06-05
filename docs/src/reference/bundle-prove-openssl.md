@@ -22,9 +22,11 @@ signed statement, extracts the matching signature, and re-encodes the supplied p
 
 ## Prerequisites
 
-- A signed `.akmon` bundle (see [akmon sign](./sign.md) / produced by `akmon bundle sign`).
-- The signer's public key as 64 hex characters in a file — the same artifact `akmon bundle sign`
-  prints and `akmon bundle verify --verify-key` consumes.
+- A signed `.akmon` bundle produced by `akmon bundle sign`. The signing key is made with
+  [`akmon bundle keygen`](./bundle-keygen.md) — note that `openssl genpkey` emits PKCS#8 v1, which
+  `ring` rejects, so it is **not** a substitute for `keygen`.
+- The signer's public key as 64 hex characters in a file — the same artifact `akmon bundle keygen`
+  (`--public-out`) / `akmon bundle sign` produces and `akmon bundle verify --verify-key` consumes.
 - **OpenSSL 3.x** for the verification step. Stock LibreSSL (the macOS `/usr/bin/openssl`) cannot
   verify Ed25519 — it lacks `-rawin` and cannot load Ed25519 keys. Use an OpenSSL 3.x build.
 
@@ -71,6 +73,7 @@ trusts.
 
 ## See also
 
+- [akmon bundle keygen](./bundle-keygen.md)
 - [akmon bundle verify](./bundle-verify.md)
 - [akmon sign](./sign.md)
 - [agef-verify](./agef-verify.md)
