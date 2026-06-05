@@ -13,6 +13,7 @@
 - [Tutorials overview](./tutorials/overview.md)
 - [Local-first developer flow (Ollama)](./tutorials/local-first-ollama.md)
 - [CI headless governance flow](./tutorials/ci-headless-governance.md)
+- [Third-party OTEL trace to offline openssl proof](./tutorials/otel-to-openssl-walkthrough.md)
 - [Step-by-step (Rust, Go, Python, Elixir)](./tutorials/step-by-step.md)
 - [Enterprise policy rollout](./tutorials/enterprise-policy-rollout.md)
 - [Example projects](./tutorials/example-projects.md)
