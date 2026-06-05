@@ -10,6 +10,7 @@ mod doctor_cmd;
 mod evidence_cmd;
 mod export_cmd;
 mod import_cmd;
+mod otel_cmd;
 mod policy_cmd;
 mod scout_cmd;
 mod session_index;
@@ -1774,6 +1775,16 @@ Bundles are portable artifacts containing a complete session graph plus all refe
 They are produced by `akmon bundle export` and consumed by `akmon bundle import`. \
 The bundle format is AGEF-compliant (see github.com/radotsvetkov/agef).")]
     Bundle(bundle_cmd::BundleArgs),
+    /// OpenTelemetry operations: import OTLP/JSON GenAI traces into AGEF sessions.
+    #[command(
+        long_about = "OpenTelemetry operations: import OTLP/JSON GenAI traces into AGEF \
+sessions.\n\n\
+`akmon otel import` ingests a single OTLP/JSON OpenTelemetry GenAI trace (semconv >= v1.37.0 \
+structured form) into a fresh AGEF session in the local journal. The producer-agnostic result \
+composes with `akmon bundle export` / `sign` / `verify` and the standalone `agef-verify` tool, so \
+a non-Akmon OTel trace can become a signed, independently-verifiable AGEF bundle."
+    )]
+    Otel(otel_cmd::OtelArgs),
     /// Verify a session's integrity (chain, hashes, object closure).
     #[command(
         long_about = "Verify the on-disk journal for the given session ID. Checks parent chain, \
@@ -4741,6 +4752,7 @@ async fn main() -> ExitCode {
             };
         }
         Some(Commands::Bundle(bundle_args)) => return bundle_cmd::run_bundle(bundle_args),
+        Some(Commands::Otel(otel_args)) => return otel_cmd::run_otel(otel_args),
         Some(Commands::New(args)) => {
             return cli_project::run_new(&cli, args, &cwd).await;
         }

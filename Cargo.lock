@@ -75,6 +75,7 @@ dependencies = [
  "akmon-index",
  "akmon-journal",
  "akmon-models",
+ "akmon-otel",
  "akmon-query",
  "akmon-replay",
  "akmon-tools",

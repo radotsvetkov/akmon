@@ -30,6 +30,7 @@ akmon-diff = { path = "../akmon-diff" }
 akmon-index = { path = "../akmon-index", optional = true }
 akmon-journal = { path = "../akmon-journal" }
 akmon-models = { path = "../akmon-models" }
+akmon-otel = { path = "../akmon-otel" }
 akmon-query = { path = "../akmon-query" }
 akmon-replay = { path = "../akmon-replay" }
 akmon-tools = { path = "../akmon-tools" }
