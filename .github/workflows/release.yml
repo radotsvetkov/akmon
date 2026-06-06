@@ -56,7 +56,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          # Upload BOTH the akmon and agef-verify binaries staged above (each matrix
+          # row's dist/ holds exactly its two binaries). Uploading only the akmon
+          # artifact left agef-verify-* missing in the release job, breaking SHA256SUMS.
+          path: dist/*
 
   release:
     name: Publish GitHub Release
