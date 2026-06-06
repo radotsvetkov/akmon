@@ -56,14 +56,29 @@ Other commands round out the lifecycle: `bundle export` and `bundle import`, `in
 
 ## Quickstart
 
-You can install Akmon in two ways.
+You can install Akmon two ways.
+
+Each GitHub release attaches prebuilt `akmon` and `agef-verify` binaries for Linux and macOS, plus a `SHA256SUMS` file so you can check what you downloaded. For Linux on x86_64:
 
 ```bash
-# Prebuilt binaries are on the GitHub releases page (Linux and macOS).
-curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 -o ~/bin/akmon
-chmod +x ~/bin/akmon
+base=https://github.com/radotsvetkov/akmon/releases/latest/download
+curl -LO $base/akmon-linux-x86_64
+curl -LO $base/agef-verify-linux-x86_64
+curl -LO $base/SHA256SUMS
 
-# Or build from source. This is also how you get the standalone agef-verify today.
+# Check the downloads against the published checksums before installing.
+sha256sum --check --ignore-missing SHA256SUMS
+
+chmod +x akmon-linux-x86_64 agef-verify-linux-x86_64
+mv akmon-linux-x86_64 ~/bin/akmon
+mv agef-verify-linux-x86_64 ~/bin/agef-verify
+```
+
+On macOS the file names are `akmon-darwin-arm64` and `agef-verify-darwin-arm64` for Apple silicon, or the `-x86_64` variants for Intel, and you check them with `shasum -a 256 --check --ignore-missing SHA256SUMS`.
+
+Or build from source on any platform:
+
+```bash
 cargo install --git https://github.com/radotsvetkov/akmon akmon
 cargo install --git https://github.com/radotsvetkov/akmon agef-verify
 ```
