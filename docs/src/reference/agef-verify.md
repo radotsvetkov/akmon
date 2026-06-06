@@ -34,6 +34,27 @@ Optional flags:
   `akmon bundle import`).
 - `--format human|json` — default `human`.
 
+## Operator identity (`--operator-key`)
+
+`agef-verify` checks operator attestations recorded by [`akmon bundle attest`](./bundle-attest.md)
+with the same flags as [`akmon bundle verify`](./bundle-verify.md):
+
+- `--operator-key <HEX_FILE>` — a trusted operator Ed25519 public key (64 hex chars). Repeatable.
+  Each `manifest.operator_attestations[]` entry is verified against the supplied keys.
+- `--require-operator` — fail (exit 1) unless at least one operator attestation verifies against an
+  `--operator-key`.
+- `--require-operator-key <HEX_FILE>` — fail unless that specific key has a verified attestation.
+  Repeatable; each listed key is also trusted for verification.
+
+"Verified" attaches to the **key**, not the name. The JSON carries the self-asserted
+`operator_id`/`role`/`org` strings verbatim, but the only trust signal is the distinct boolean
+`operator_key_verified` (`true` only for outcome `verified` against a key you supplied). Trust in the
+name is out-of-band.
+
+```bash
+agef-verify /path/to/audit.akmon --operator-key operator.pub.hex --require-operator --format json
+```
+
 ## Exit codes
 
 | Code | Meaning |
@@ -67,5 +88,6 @@ Infrastructure errors (cannot open or parse the archive) emit **VerifyInfraError
 ## See also
 
 - [akmon bundle import](./bundle-import.md)
+- [akmon bundle attest](./bundle-attest.md)
 - [akmon bundle prove-openssl](./bundle-prove-openssl.md)
 - [akmon verify](./verify.md)

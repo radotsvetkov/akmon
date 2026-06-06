@@ -99,6 +99,35 @@ A valid signature prints `Signature Verified Successfully` and exits `0`. Tamper
 `statement.bin` (or using the wrong signature) makes `openssl` print `Signature Verification
 Failure` and exit non-zero.
 
+## Optional: bind an operator identity
+
+The head signature proves the bundle's integrity is authentic, but says nothing about **who**
+operated the session. To attach a named operator (and have it verify offline too), generate an
+operator key, attest, and pass `--operator-key` to verify and to `prove-openssl`.
+
+```bash
+akmon bundle keygen --out operator.pk8 --public-out operator.pub.hex
+akmon bundle attest ./audit.akmon --key operator.pk8 --operator-id ops@example.com --role approver
+akmon bundle verify ./audit.akmon --verify-key signer.pub.hex --require-signature \
+  --operator-key operator.pub.hex --require-operator --format json
+akmon bundle prove-openssl ./audit.akmon --verify-key signer.pub.hex \
+  --operator-key operator.pub.hex --out-dir ./proof
+```
+
+The last step emits three more files alongside the head-signature artifacts —
+`operator_statement.bin`, `operator_signature.bin`, `operator_pubkey.pem` — and a third party
+verifies the operator attestation with OpenSSL 3.x alone:
+
+```bash
+openssl pkeyutl -verify -pubin -inkey ./proof/operator_pubkey.pem -rawin -in ./proof/operator_statement.bin -sigfile ./proof/operator_signature.bin
+```
+
+**Trust the key, not the name.** Verification proves only that the holder of `operator.pub.hex`
+signed the `operator_id`/`role` claims — it does not prove the person is who the name says. A
+verifier decides which operator key they trust **out-of-band** (a directory, a roster, a key
+ceremony); only then does the self-asserted name carry weight. See
+[akmon bundle attest](../reference/bundle-attest.md).
+
 ## Honesty: this is STRUCTURAL capture, not full replay
 
 The source instrumentation did not capture message content (the content-off default), so Akmon
