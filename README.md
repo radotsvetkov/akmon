@@ -56,9 +56,17 @@ Other commands round out the lifecycle: `bundle export` and `bundle import`, `in
 
 ## Quickstart
 
-You can install Akmon two ways.
+You can install Akmon a few ways.
 
-Each GitHub release attaches prebuilt `akmon` and `agef-verify` binaries for Linux and macOS, plus a `SHA256SUMS` file so you can check what you downloaded. For Linux on x86_64:
+On macOS or Linux with Homebrew:
+
+```bash
+brew tap radotsvetkov/akmon
+brew install akmon         # the CLI
+brew install agef-verify   # the standalone verifier for auditors
+```
+
+Or grab the prebuilt binaries directly. Each GitHub release attaches prebuilt `akmon` and `agef-verify` binaries for Linux and macOS, plus a `SHA256SUMS` file so you can check what you downloaded. For Linux on x86_64:
 
 ```bash
 base=https://github.com/radotsvetkov/akmon/releases/latest/download
