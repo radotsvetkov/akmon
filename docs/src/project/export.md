@@ -13,14 +13,14 @@ Typical outputs include `CLAUDE.md`, `AGENTS.md`, `.cursor/rules/akmon.mdc`, `.k
 ## Export to a specific tool
 
 ```bash
-akmon export --tool claude-code   # → CLAUDE.md
-akmon export --tool codex         # → AGENTS.md
-akmon export --tool cursor        # → .cursor/rules/akmon.mdc
-akmon export --tool kiro          # → .kiro/steering/akmon.md
-akmon export --tool gemini        # → GEMINI.md
-akmon export --tool copilot       # → .github/copilot-instructions.md
-akmon export --tool windsurf      # → .windsurfrules
-akmon export --tool cline         # → .clinerules
+akmon export --tool claude-code   # writes CLAUDE.md
+akmon export --tool codex         # writes AGENTS.md
+akmon export --tool cursor        # writes .cursor/rules/akmon.mdc
+akmon export --tool kiro          # writes .kiro/steering/akmon.md
+akmon export --tool gemini        # writes GEMINI.md
+akmon export --tool copilot       # writes .github/copilot-instructions.md
+akmon export --tool windsurf      # writes .windsurfrules
+akmon export --tool cline         # writes .clinerules
 ```
 
 ## Preview without writing

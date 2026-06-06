@@ -1,6 +1,6 @@
 # Slash Commands
 
-Documented for Akmon `2.1.0`.
+Documented for Akmon `2.2.0`.
 
 In `akmon chat`, type `/` then command name. Use `/help` in-session as runtime source of truth.
 

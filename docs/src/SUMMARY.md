@@ -32,17 +32,21 @@
 
 ---
 
+# Use cases
+
+- [Record who approved an AI change](./use-cases/operator-sign-off.md)
+- [Verify evidence on an air-gapped machine](./use-cases/air-gapped-audit.md)
+- [Assemble a signed evidence pack for a release](./use-cases/release-evidence-pack.md)
+
+---
+
 # Tutorials
 
 - [Tutorials overview](./tutorials/overview.md)
 - [Local-first developer flow (Ollama)](./tutorials/local-first-ollama.md)
 - [CI headless governance flow](./tutorials/ci-headless-governance.md)
 - [Third-party OTEL trace to offline openssl proof](./tutorials/otel-to-openssl-walkthrough.md)
-- [Step-by-step (Rust, Go, Python, Elixir)](./tutorials/step-by-step.md)
 - [Enterprise policy rollout](./tutorials/enterprise-policy-rollout.md)
-- [Example projects](./tutorials/example-projects.md)
-- [Multi-agent and automation](./tutorials/multi-agent-automation.md)
-- [Architecture patterns](./tutorials/architecture-patterns.md)
 
 ---
 
@@ -92,16 +96,6 @@ The bundled coding agent is the reference, gold-fidelity producer. Use it when y
 - [TypeScript Projects](./languages/typescript.md)
 - [Go Projects](./languages/go.md)
 - [Other Languages](./languages/other.md)
-
-## Examples
-
-- [Build a REST API (Rust + Axum)](./examples/rust-axum-api.md)
-- [Build a CLI tool (Python)](./examples/python-cli.md)
-- [Python (Flask and FastAPI)](./examples/python-flask-fastapi.md)
-- [Elixir / Phoenix](./examples/elixir-phoenix.md)
-- [Build a Next.js app (TypeScript)](./examples/typescript-nextjs.md)
-- [Refactor an existing project](./examples/refactoring.md)
-- [Analyze a codebase](./examples/codebase-analysis.md)
 
 ## Agent features
 

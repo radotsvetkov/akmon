@@ -24,7 +24,7 @@ go mod init example.com/my-api
 go get github.com/gin-gonic/gin gorm.io/gorm gorm.io/driver/postgres
 akmon init
 akmon --plan --task "REST API for a blog with Gin, GORM + Postgres,
-JWT middleware, handler → service → repository layout"
+JWT middleware, handler to service to repository layout"
 ```
 
 ## Common Go tasks

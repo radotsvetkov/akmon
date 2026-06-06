@@ -1,6 +1,6 @@
 # Tutorial: Third-party OTEL trace to offline openssl proof
 
-Documented for Akmon `2.1.0`.
+Documented for Akmon `2.2.0`.
 
 Time estimate: 15-20 minutes  
 Complexity: Intermediate
@@ -13,9 +13,10 @@ auditors who must check that record **with stock `openssl` alone**: no Akmon bin
 no vendor lock-in.
 
 This is the headline trust loop, end to end, on what real agents emit **today**: a real-framework
-OTLP trace becomes an AGEF bundle that a counterparty verifies offline. It is the concrete answer
-to the gaps competitors leave: HMAC-only or unsigned manifests, no standalone verifier,
-cloud-locked verification, and "cannot replay."
+OTLP trace becomes an AGEF bundle that a counterparty verifies offline. It is producer-agnostic; it
+does not require Akmon's own agent at all. It is the concrete answer to the gaps competitors leave:
+HMAC-only or unsigned manifests, no standalone verifier, cloud-locked verification, and "cannot
+replay."
 
 ## What you will have at the end
 

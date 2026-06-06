@@ -30,7 +30,7 @@ cargo new my-api && cd my-api
 akmon --plan \
   --task "build a REST API with user authentication,
   PostgreSQL via SQLx, JWT tokens,
-  layered architecture (handler → service → repository),
+  layered architecture (handler to service to repository),
   and proper error handling"
 ```
 
