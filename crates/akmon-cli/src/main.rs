@@ -1,6 +1,7 @@
 //! Akmon CLI — project discovery, optional `AKMON.md`, and headless `--task` runs.
 
 mod audit_cmd;
+mod bundle_attest;
 mod bundle_cmd;
 mod bundle_keygen;
 mod bundle_prove;

@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use akmon_bundle::{
     BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest, ManifestSignature,
-    OtelCaptureInfo, Producer, ReadBundleOptions, SCHEME_ED25519, SIG_STATEMENT_VERSION,
-    SessionMetadata, SignatureOutcome, SignatureVerificationReport, WriteBundleOptions, key_id,
-    otel_capture_info, parse_public_key_hex, public_key_from_pkcs8, read_bundle, sign_statement,
-    signing_statement, verify_bundle, verify_manifest_signatures, write_bundle,
+    OperatorOutcome, OperatorVerificationReport, OtelCaptureInfo, Producer, ReadBundleOptions,
+    SCHEME_ED25519, SIG_STATEMENT_VERSION, SessionMetadata, SignatureOutcome,
+    SignatureVerificationReport, WriteBundleOptions, key_id, otel_capture_info,
+    parse_public_key_hex, public_key_from_pkcs8, read_bundle, sign_statement, signing_statement,
+    verify_bundle, verify_manifest_signatures, verify_operator_attestations, write_bundle,
 };
 use akmon_journal::{
     AGEF_SPEC_VERSION, Event, EventKind, Hash, HashAlgorithm, ObjectStore, RedbObjectStore,
@@ -100,6 +101,10 @@ pub struct BundleVerifyReportV1 {
     /// Per-signature verification results (empty when the bundle is unsigned).
     #[serde(default)]
     signatures: Vec<CliSignatureReport>,
+    /// Per-operator-attestation verification results (empty when the bundle is unattributed). NOT
+    /// skipped when empty, so an absent operator attestation is observable as `[]`.
+    #[serde(default)]
+    operators: Vec<CliOperatorReport>,
     /// OTEL-import capture level, or `null` for native (non-OTEL) bundles. A native bundle is
     /// full-fidelity by construction; an OTEL import with `level == "structural"` carries metadata
     /// only (the source telemetry did not capture message content).
@@ -149,6 +154,83 @@ fn cli_signature_reports(report: &SignatureVerificationReport) -> Vec<CliSignatu
             outcome: signature_outcome_str(&c.outcome).to_owned(),
         })
         .collect()
+}
+
+/// One operator-attestation verification result for `akmon bundle verify --format json` (D-20).
+///
+/// The honesty contract (O8): `operator_key_verified` is the only field that attests trust — it is
+/// `true` ONLY when a trusted operator key validated the signed `AGEF-OPERATOR-v1` statement. The
+/// identity fields (`operator_id`, `display_name`, `role`, `org`) are self-asserted and
+/// attacker-controlled; they are reported verbatim but their truth is gated entirely by
+/// `operator_key_verified`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CliOperatorReport {
+    /// `key_id` from the manifest entry (hex SHA-256 of the attester public key).
+    key_id: String,
+    /// Signature scheme (`ed25519`).
+    scheme: String,
+    /// Self-asserted operator identifier (signed but attacker-controlled until verified).
+    operator_id: String,
+    /// Self-asserted operator display name.
+    display_name: String,
+    /// Self-asserted operator role.
+    role: String,
+    /// Self-asserted operator organization.
+    org: String,
+    /// RFC3339 timestamp the attestation was produced (unsigned metadata).
+    created_at: String,
+    /// Outcome: `verified`, `invalid`, `unverified_no_key`, `unsupported_scheme`, or `malformed`.
+    outcome: String,
+    /// `true` ONLY when `outcome == verified` (a trusted operator key validated the attestation).
+    /// This is the one field a verifier may trust; the identity strings above are self-asserted.
+    operator_key_verified: bool,
+}
+
+/// Stable lowercase outcome string for [`CliOperatorReport::outcome`].
+fn operator_outcome_str(outcome: &OperatorOutcome) -> &'static str {
+    match outcome {
+        OperatorOutcome::Verified => "verified",
+        OperatorOutcome::Invalid => "invalid",
+        OperatorOutcome::UnverifiedNoKey => "unverified_no_key",
+        OperatorOutcome::UnsupportedScheme => "unsupported_scheme",
+        OperatorOutcome::Malformed => "malformed",
+    }
+}
+
+/// Maps the library operator report into CLI-compatible JSON entries (parallels
+/// [`cli_signature_reports`]).
+fn cli_operator_reports(report: &OperatorVerificationReport) -> Vec<CliOperatorReport> {
+    report
+        .checks
+        .iter()
+        .map(|c| CliOperatorReport {
+            key_id: c.key_id.clone(),
+            scheme: c.scheme.clone(),
+            operator_id: c.operator_id.clone(),
+            display_name: c.display_name.clone(),
+            role: c.role.clone(),
+            org: c.org.clone(),
+            created_at: c.created_at.clone(),
+            outcome: operator_outcome_str(&c.outcome).to_owned(),
+            operator_key_verified: c.outcome == OperatorOutcome::Verified,
+        })
+        .collect()
+}
+
+/// Escapes control characters (anything below `0x20`, plus `0x7f`) in a self-asserted, attacker-
+/// controlled operator identity field before printing it in the human report (O8). Without this a
+/// crafted `operator_id` containing a newline or terminal escape could spoof the surrounding report
+/// lines. Renders such bytes as `\xNN` so the value stays on one visible line.
+fn sanitize_operator_field(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if (ch as u32) < 0x20 || ch == '\u{7f}' {
+            out.push_str(&format!("\\x{:02x}", ch as u32));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Machine-readable bundle import result (`akmon bundle import --format json`).
@@ -324,6 +406,31 @@ Exit codes:\n\
   3 — I/O error, refuse-to-clobber (use --force), or key generation failure"
     )]
     Keygen(crate::bundle_keygen::BundleKeygenArgs),
+    /// Record a signed operator attestation on a bundle (AGEF v0.1.3, decision D-20).
+    #[command(
+        long_about = "Record a signed operator attestation on an AGEF bundle (AGEF v0.1.3).\n\n\
+Answers \"who claims to have operated this session\" — independently of the bundle's integrity hash \
+chain and of any head signature. Reads the bundle, signs the canonical AGEF-OPERATOR-v1 statement \
+over its session head plus the four operator identity fields (operator-id, display-name, role, org) \
+with the given PKCS#8 Ed25519 private key, appends the attestation to manifest.operator_attestations[], \
+and writes the bundle (in place, or to --output). It is purely additive: an existing AGEF-SIG-v1 head \
+signature is left byte-untouched (agef_version is only stamped when the bundle has no head \
+signatures). Prints the operator's public key as hex for distribution to verifiers; the private key \
+is NEVER printed.\n\n\
+The identity fields are self-asserted: a verifier learns nothing about WHO the operator is until \
+they verify the attestation against a trusted operator public key (`akmon bundle verify \
+--operator-key` / `agef-verify --operator-key`).\n\n\
+Generate a key with: akmon bundle keygen --out operator.pk8 (writes the raw PKCS#8 v2 DER this \
+command expects). NOTE: `openssl genpkey -algorithm ed25519` emits PKCS#8 v1, which ring rejects.\n\n\
+Examples:\n\
+  akmon bundle attest audit.akmon --key operator.pk8 --operator-id alice@example.com --role approver\n\
+  akmon bundle attest audit.akmon --key operator.pk8 --operator-id alice@example.com --output attested.akmon\n\n\
+Exit codes:\n\
+  0 — bundle attested successfully\n\
+  2 — usage error (unreadable or invalid Ed25519 key, or an empty/illegal operator identity field)\n\
+  3 — I/O or environment error (bundle not found, malformed archive, write error)"
+    )]
+    Attest(crate::bundle_attest::BundleAttestArgs),
 }
 
 /// Arguments for `akmon bundle export`.
@@ -400,6 +507,18 @@ pub struct BundleVerifyArgs {
     /// Fail (exit 1) unless at least one signature verifies against a `--verify-key`.
     #[arg(long)]
     require_signature: bool,
+    /// Trusted operator Ed25519 public key as hex (64 chars), read from a file. Repeatable. When
+    /// provided, each `manifest.operator_attestations[]` entry is verified against these keys
+    /// (AGEF v0.1.3, decision D-20).
+    #[arg(long = "operator-key", value_name = "HEX_FILE")]
+    operator_keys: Vec<PathBuf>,
+    /// Fail (exit 1) unless at least one operator attestation verifies against an `--operator-key`.
+    #[arg(long)]
+    require_operator: bool,
+    /// Trusted operator public key (hex file) that MUST have attested: fail unless THIS specific key
+    /// has a verified attestation. Repeatable; implies trusting these keys for verification.
+    #[arg(long = "require-operator-key", value_name = "HEX_FILE")]
+    require_operator_keys: Vec<PathBuf>,
     /// Fail unless the session captured full message content (rejects metadata-only OTEL imports).
     #[arg(long, value_enum, value_name = "LEVEL")]
     require_capture: Option<RequireCapture>,
@@ -850,8 +969,15 @@ fn exit_bundle_verify_failed(
     format: BundleImportFormat,
     violations: Vec<BundleViolation>,
 ) -> ExitCode {
-    let report =
-        build_bundle_verify_report_v1(bundle, contents, false, violations, Vec::new(), None);
+    let report = build_bundle_verify_report_v1(
+        bundle,
+        contents,
+        false,
+        violations,
+        Vec::new(),
+        Vec::new(),
+        None,
+    );
     match format {
         BundleImportFormat::Json => {
             if let Err(err) = print_bundle_verify_json_report(&report) {
@@ -900,12 +1026,14 @@ fn capture_requirement_unmet(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_bundle_verify_report_v1(
     bundle_path: &Path,
     contents: &BundleContents,
     passed: bool,
     violations: Vec<BundleViolation>,
     signatures: Vec<CliSignatureReport>,
+    operators: Vec<CliOperatorReport>,
     capture: Option<&OtelCaptureInfo>,
 ) -> BundleVerifyReportV1 {
     BundleVerifyReportV1 {
@@ -918,6 +1046,7 @@ fn build_bundle_verify_report_v1(
         passed,
         violations,
         signatures,
+        operators,
         capture: capture.map(|info| CliCaptureField {
             level: info.capture_level.clone(),
             source_semconv: info.source_semconv.clone(),
@@ -951,6 +1080,78 @@ fn capture_human_line(capture: Option<&CliCaptureField>) -> Option<String> {
     }
 }
 
+/// Loads a trusted operator public key (hex file -> raw 32 bytes) for `--operator-key` /
+/// `--require-operator-key`. Mirrors the `--verify-key` loader's error contract.
+fn load_operator_key(key_path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read_to_string(key_path)
+        .map_err(|err| format!("cannot read --operator-key {}: {err}", key_path.display()))
+        .and_then(|hex_str| {
+            parse_public_key_hex(&hex_str)
+                .map_err(|err| format!("--operator-key {}: {err}", key_path.display()))
+        })
+}
+
+/// Computes whether the operator-attestation requirements are satisfied (decision D-20).
+///
+/// An invalid attestation against a trusted key is ALWAYS a hard failure (via `any_invalid()`),
+/// mirroring head signatures, even without `--require-operator`. `--require-operator` additionally
+/// demands at least one verified attestation, and each `--require-operator-key` demands that THAT
+/// specific key (`key_id`) has a verified attestation.
+fn operator_requirements_ok(
+    op_report: &OperatorVerificationReport,
+    require_operator: bool,
+    required_operator_key_ids: &[String],
+) -> bool {
+    if op_report.any_invalid() {
+        return false;
+    }
+    if require_operator && !op_report.any_verified() {
+        return false;
+    }
+    required_operator_key_ids.iter().all(|required_kid| {
+        op_report
+            .checks
+            .iter()
+            .any(|c| c.outcome == OperatorOutcome::Verified && &c.key_id == required_kid)
+    })
+}
+
+/// Emits the human-readable operator-attestation block (decision D-20, honesty contract O8).
+///
+/// "verified" attaches to the KEY, never the self-asserted identity string. Self-asserted fields are
+/// attacker-controlled and are sanitized ([`sanitize_operator_field`]) before printing so they
+/// cannot spoof the surrounding report. Each line is written via `emit` (so both `akmon` and
+/// `agef-verify` can share the same wording).
+fn print_operator_human_block(operators: &[CliOperatorReport], mut emit: impl FnMut(String)) {
+    if operators.is_empty() {
+        emit("operator: none (unattributed)".to_owned());
+        return;
+    }
+    emit("operators:".to_owned());
+    for op in operators {
+        let oid = sanitize_operator_field(&op.operator_id);
+        let role = sanitize_operator_field(&op.role);
+        let org = sanitize_operator_field(&op.org);
+        let key_id = &op.key_id;
+        let scheme = &op.scheme;
+        let line = match op.outcome.as_str() {
+            "verified" => format!(
+                "  - verified by operator key key_id={key_id} -- self-asserted operator_id=\"{oid}\" role=\"{role}\" org=\"{org}\""
+            ),
+            "unverified_no_key" => format!(
+                "  - present but UNVERIFIED (no trusted operator key) -- self-asserted operator_id=\"{oid}\" (do not trust this name)"
+            ),
+            "invalid" => format!(
+                "  - INVALID signature for trusted operator key key_id={key_id} (tampered identity/head or corrupt signature; HARD FAIL)"
+            ),
+            other => format!(
+                "  - {other} [{scheme}] key_id={key_id} -- self-asserted operator_id=\"{oid}\" (do not trust this name)"
+            ),
+        };
+        emit(line);
+    }
+}
+
 /// Verifies a bundle file without journal access (Item 4.3 / F4).
 #[allow(clippy::too_many_arguments)]
 fn run_bundle_verify(
@@ -959,6 +1160,9 @@ fn run_bundle_verify(
     allow_extra_files: bool,
     verify_keys: Vec<PathBuf>,
     require_signature: bool,
+    operator_keys: Vec<PathBuf>,
+    require_operator: bool,
+    require_operator_keys: Vec<PathBuf>,
     require_capture: Option<RequireCapture>,
     label: &'static str,
 ) -> ExitCode {
@@ -1018,12 +1222,51 @@ fn run_bundle_verify(
         }
     }
     let sig_report = verify_manifest_signatures(&contents.manifest, &trusted_keys);
+
+    // Load trusted operator keys: the union of --operator-key and --require-operator-key. Each
+    // --require-operator-key is ALSO trusted for verification, and its key_id is recorded so we can
+    // demand that THAT specific key produced a verified attestation.
+    let mut operator_trusted_keys: Vec<Vec<u8>> = Vec::new();
+    for key_path in &operator_keys {
+        match load_operator_key(key_path) {
+            Ok(key) => operator_trusted_keys.push(key),
+            Err(msg) => {
+                if json {
+                    let _ = print_bundle_import_infra_json_error("operator_key_error", msg, None);
+                } else {
+                    eprintln!("akmon: {label}: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        }
+    }
+    let mut required_operator_key_ids: Vec<String> = Vec::new();
+    for key_path in &require_operator_keys {
+        match load_operator_key(key_path) {
+            Ok(key) => {
+                required_operator_key_ids.push(key_id(&key));
+                operator_trusted_keys.push(key);
+            }
+            Err(msg) => {
+                if json {
+                    let _ = print_bundle_import_infra_json_error("operator_key_error", msg, None);
+                } else {
+                    eprintln!("akmon: {label}: {msg}");
+                }
+                return ExitCode::from(3);
+            }
+        }
+    }
+    let op_report = verify_operator_attestations(&contents.manifest, &operator_trusted_keys);
+    let operator_ok =
+        operator_requirements_ok(&op_report, require_operator, &required_operator_key_ids);
+
     let verification = verify_bundle(&contents);
     let capture = otel_capture_info(&contents);
     let signatures_ok =
         !sig_report.any_invalid() && (!require_signature || sig_report.any_verified());
     let capture_unmet = capture_requirement_unmet(require_capture, capture.as_ref());
-    let passed = verification.is_clean() && signatures_ok && capture_unmet.is_none();
+    let passed = verification.is_clean() && signatures_ok && operator_ok && capture_unmet.is_none();
     let mut violations = cli_violations_from_bundle_verify(&verification);
     if let Some(reason) = &capture_unmet {
         violations.push(BundleViolation {
@@ -1039,6 +1282,7 @@ fn run_bundle_verify(
         passed,
         violations,
         cli_signature_reports(&sig_report),
+        cli_operator_reports(&op_report),
         capture.as_ref(),
     );
 
@@ -1077,6 +1321,7 @@ fn run_bundle_verify(
                     eprintln!("    - {} [{}] key_id={}", s.outcome, s.scheme, s.key_id);
                 }
             }
+            print_operator_human_block(&report.operators, |line| eprintln!("  {line}"));
         }
     }
 
@@ -1102,6 +1347,9 @@ fn run_bundle_import(
             allow_extra_files,
             Vec::new(),
             false,
+            Vec::new(),
+            false,
+            Vec::new(),
             None,
             "bundle import",
         );
@@ -1700,6 +1948,9 @@ pub fn run_bundle(args: &BundleArgs) -> ExitCode {
             verify_args.allow_extra_files,
             verify_args.verify_keys.clone(),
             verify_args.require_signature,
+            verify_args.operator_keys.clone(),
+            verify_args.require_operator,
+            verify_args.require_operator_keys.clone(),
             verify_args.require_capture,
             "bundle verify",
         ),
@@ -1713,5 +1964,6 @@ pub fn run_bundle(args: &BundleArgs) -> ExitCode {
             crate::bundle_prove::run_bundle_prove_openssl(prove_args)
         }
         BundleCommands::Keygen(keygen_args) => crate::bundle_keygen::run_bundle_keygen(keygen_args),
+        BundleCommands::Attest(attest_args) => crate::bundle_attest::run_bundle_attest(attest_args),
     }
 }
