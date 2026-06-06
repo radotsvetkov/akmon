@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Akmon — review-aware AI coding agent for regulated engineering</title>
-  <meta name="description" content="Review-aware AI coding agent for regulated engineering. Tamper-evident, replayable session artifacts with deterministic diff and verification.">
-  <meta property="og:title" content="Akmon — review-aware AI coding agent">
-  <meta property="og:description" content="Deterministic, tamper-evident session evidence for regulated engineering teams.">
+  <title>Akmon: tamper-evident evidence and verification layer for AI agents</title>
+  <meta name="description" content="Akmon turns any AI agent session into a portable, signed, tamper-evident record. Sits on top of any agent through OpenTelemetry. Verify a signature offline with nothing but openssl.">
+  <meta property="og:title" content="Akmon: evidence and verification layer for AI agents">
+  <meta property="og:description" content="Producer-agnostic, tamper-evident evidence for AI agents. Portable signed records anyone can verify offline with openssl, no Akmon install and no cloud.">
   <meta property="og:url" content="https://radotsvetkov.github.io/akmon">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Bebas+Neue&family=Crimson+Pro:ital,wght@0,300;0,400;1,300&display=swap" rel="stylesheet">
@@ -902,7 +902,7 @@
 <nav>
   <a class="nav-logo" href="#">
     <span class="nav-name">Akmon</span>
-    <span class="nav-version">v2.1.0</span>
+    <span class="nav-version">v2.2.0</span>
   </a>
   <ul class="nav-links" id="nav-links">
     <li><a href="#why">Product</a></li>
@@ -940,19 +940,20 @@
 
   <h1 class="hero-title"><span class="hero-ak">AK</span><span class="hero-mon">MON</span></h1>
 
-  <p class="hero-tagline">AI coding sessions you can verify, replay, and defend in review.</p>
+  <p class="hero-tagline">Prove what any AI agent did. Offline, with no lock-in.</p>
   <p class="section-body" style="max-width:760px;text-align:center;margin-bottom:20px">
-    Akmon is a terminal-first AI coding agent for regulated engineering teams that need explicit policy boundaries,
-    auditable tool activity, and portable session evidence across local development and CI.
+    Akmon is a tamper-evident evidence and verification layer for AI agents. It sits on top of whatever agent
+    you already run, through OpenTelemetry or with Akmon's own reference agent, and turns every session into a
+    portable, signed record. A third party can verify a signature offline with nothing but openssl. No Akmon install, no cloud.
   </p>
 
   <div class="hero-pills">
-    <span class="pill pill-amber">regulated engineering focus</span>
-    <span class="pill pill-amber">tamper-evident evidence</span>
+    <span class="pill pill-amber">works with any agent</span>
+    <span class="pill pill-amber">tamper-evident</span>
+    <span class="pill">offline openssl verify</span>
+    <span class="pill">signed evidence</span>
+    <span class="pill">operator identity</span>
     <span class="pill">single rust binary</span>
-    <span class="pill">policy boundaries</span>
-    <span class="pill">replay + diff + verify</span>
-    <span class="pill">provider optionality</span>
   </div>
 
   <div class="hero-actions">
@@ -962,8 +963,8 @@
     <a href="./docs/" class="btn btn-secondary">
       Read the docs →
     </a>
-    <a href="./docs/releases/v2.1.0.html" class="btn btn-secondary">
-      v2.1.0 release notes →
+    <a href="./docs/releases/v2.2.0.html" class="btn btn-secondary">
+      v2.2.0 release notes →
     </a>
     <a href="https://github.com/radotsvetkov/akmon" class="btn btn-secondary">
       GitHub
@@ -976,25 +977,23 @@
         <div class="dot dot-red"></div>
         <div class="dot dot-yellow"></div>
         <div class="dot dot-green"></div>
-        <span class="terminal-title">akmon — ~/my-project — claude-haiku — Anthropic</span>
+        <span class="terminal-title">akmon: any agent trace to an offline proof</span>
       </div>
       <div class="terminal-body">
-        <div><span class="t-prompt">~/payments-service</span> <span class="t-dim">$</span> <span class="t-cmd">akmon</span></div>
-        <div class="t-dim">  ▓▓▓▓ akmon v2.1.0 · ~/my-project · claude-haiku · Anthropic</div>
+        <div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon otel import trace.json --journal ./journal</span></div>
+        <div class="t-dim">  imported session 9f2e4c1a  capture_level=structural</div>
         <br>
-        <div><span class="t-amber">You:</span> <span class="t-cmd">trace token validation flow and list policy-relevant risks</span></div>
+        <div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon bundle export 9f2e4c1a --journal ./journal --output audit.akmon</span></div>
+        <div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon bundle sign audit.akmon --key signer.pk8</span></div>
+        <div class="t-green">  ✓ signed (ed25519)</div>
         <br>
-        <div><span class="t-blue">  → semantic_search</span><span class="t-dim">  "token validation flow"</span></div>
-        <div><span class="t-green">  ✓ semantic_search</span>  <span class="t-dim">4 results                    [Tab to expand]</span></div>
-        <div><span class="t-blue">  → read_file</span><span class="t-dim">  src/auth/middleware.rs</span></div>
-        <div><span class="t-green">  ✓ read_file</span>  <span class="t-dim">287 lines</span></div>
-        <div><span class="t-blue">  → read_file</span><span class="t-dim">  src/api/token_guard.rs</span></div>
-        <div><span class="t-green">  ✓ read_file</span>  <span class="t-dim">164 lines</span></div>
+        <div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon bundle verify audit.akmon --verify-key signer.pub --require-signature</span></div>
+        <div class="t-green">  ✓ integrity + signature valid</div>
         <br>
-        <div><span class="t-amber">Akmon:</span> <span class="t-cmd">Validation happens in <span class="t-blue">src/auth/middleware.rs</span> and <span class="t-blue">src/api/token_guard.rs</span>.</span></div>
-        <div><span class="t-cmd">I found expiry + issuer checks, and one endpoint missing audience validation.</span> <span class="t-bar"></span></div>
-        <br>
-        <div class="t-dim">  a1b2c3d4 · tokens:4,821 · <span style="color:var(--green)">cache:8,779</span> · ~$0.004 · step 3</div>
+        <div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon bundle prove-openssl audit.akmon --verify-key signer.pub --out-dir proof</span></div>
+        <div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin \</span></div>
+        <div><span class="t-cmd">    -in proof/statement.bin -sigfile proof/signature.bin</span></div>
+        <div><span class="t-green">  Signature Verified Successfully</span> <span class="t-bar"></span></div>
       </div>
     </div>
   </div>
@@ -1006,9 +1005,9 @@
     <div class="showcase-head">
       <div class="live-badge"><span class="live-dot" aria-hidden="true"></span> Live preview</div>
       <div class="section-label">// unique to akmon</div>
-      <h2 class="section-title" style="margin-bottom:16px">See the agent loop</h2>
+      <h2 class="section-title" style="margin-bottom:16px">See the verification pipeline</h2>
       <p class="section-body" style="max-width:560px;margin:0 auto;text-align:center">
-        Realistic workflow preview for regulated teams: scoped discovery, policy-gated changes, then verifiable evidence checks.
+        Take any agent's OpenTelemetry trace, sign it, verify it, and emit a proof a stranger can check with plain openssl.
         The sequence below cycles through a representative run.
       </p>
     </div>
@@ -1018,13 +1017,13 @@
           <div class="dot dot-red"></div>
           <div class="dot dot-yellow"></div>
           <div class="dot dot-green"></div>
-          <span class="terminal-title">akmon — live session preview</span>
+          <span class="terminal-title">akmon: live session preview</span>
         </div>
         <div class="terminal-body" id="live-demo-body">
           <!-- filled by script -->
         </div>
       </div>
-      <p class="demo-caption" id="live-demo-caption">Step 1 — You steer; Akmon proposes tools.</p>
+      <p class="demo-caption" id="live-demo-caption">Step 1: import any agent's OpenTelemetry trace.</p>
     </div>
   </div>
 </section>
@@ -1033,52 +1032,52 @@
 <section class="why" id="why">
   <div class="container">
     <div class="section-label">// why akmon</div>
-    <h2 class="section-title">Built for review,<br>not just generation</h2>
+    <h2 class="section-title">The evidence is<br>the product</h2>
     <p class="section-body">
-      Akmon is designed for teams that need defensible software change history:
-      explicit permissions, portable session evidence, deterministic checks, and provider control.
+      Akmon does not replace your agent. It sits on top of it and turns each session into a sealed record
+      that someone else can verify independently, with standard tools, even on a machine that never had Akmon installed.
     </p>
 
     <div class="why-grid">
       <div class="why-card">
-        <span class="why-icon">📋</span>
-        <h3>Session evidence first</h3>
-        <p>Every run can produce structured audit and evidence artifacts that survive beyond chat history and support review workflows.</p>
+        <span class="why-icon">🔌</span>
+        <h3>Sits on top of any agent</h3>
+        <p>Import any OpenTelemetry GenAI trace with <code>akmon otel import</code>. It reads the v1.37 structured form and the older v1.36 message-event form that most agents still emit.</p>
       </div>
       <div class="why-card">
-        <span class="why-icon">🔒</span>
-        <h3>Policy boundaries</h3>
-        <p>Filesystem, shell, network, and tool actions are policy-evaluated, so sensitive operations are governed instead of implied.</p>
+        <span class="why-icon">🔏</span>
+        <h3>Tamper-evident and signed</h3>
+        <p>Each session is a content-addressed, hash-linked record. <code>akmon bundle sign</code> adds an offline Ed25519 signature over the head, so a record is attributable to a key.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">🔍</span>
+        <h3>Verify offline with openssl</h3>
+        <p><code>akmon bundle prove-openssl</code> writes a statement, signature, and public key. A stranger checks the signature with plain <code>openssl</code>, no Akmon and no cloud.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">🧰</span>
+        <h3>Standalone verifier for auditors</h3>
+        <p><code>agef-verify</code> is a small, separate binary. An auditor can confirm integrity and authorship without installing the full Akmon toolchain.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">🪪</span>
+        <h3>Operator identity</h3>
+        <p><code>akmon bundle attest</code> records the accountable person behind a session, signed separately from the head, so a record carries who, not just what.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">📐</span>
+        <h3>Honest capture levels</h3>
+        <p>Own-agent runs are <code>full</code> and replay deterministically. Imported traces are <code>structural</code> and never dressed up as full recordings. The level is signed into the record.</p>
+      </div>
+      <div class="why-card">
+        <span class="why-icon">📦</span>
+        <h3>Portable AGEF bundles</h3>
+        <p>Evidence exports as a single content-addressed AGEF bundle (v0.1.3) you can hand off, archive, and verify anywhere. Signatures and attestations are optional add-ons.</p>
       </div>
       <div class="why-card">
         <span class="why-icon">⚙️</span>
         <h3>Single Rust binary</h3>
-        <p>Terminal-first operation in local shells, SSH, and CI without dependency on editor plugin runtime stacks.</p>
-      </div>
-      <div class="why-card">
-        <span class="why-icon">🔑</span>
-        <h3>Provider optionality</h3>
-        <p>Use local or hosted models with your own credentials and routing choices, instead of binding engineering workflows to one vendor.</p>
-      </div>
-      <div class="why-card">
-        <span class="why-icon">💰</span>
-        <h3>Cost transparency</h3>
-        <p>Token usage, cache effects, and run cost estimates stay visible so teams can reason about budget and drift over time.</p>
-      </div>
-      <div class="why-card">
-        <span class="why-icon">🔍</span>
-        <h3>Change control + replayability</h3>
-        <p>Review write hunks before approval, compare sessions with <code>akmon diff</code>, and validate deterministic behavior with replay workflows.</p>
-      </div>
-      <div class="why-card">
-        <span class="why-icon">📈</span>
-        <h3>Reliability gates</h3>
-        <p>Use <code>akmon slo verify</code> and <code>akmon slo trend</code> to enforce reliability thresholds in CI instead of relying on ad hoc confidence.</p>
-      </div>
-      <div class="why-card">
-        <span class="why-icon">🛡️</span>
-        <h3>Governed rollout profiles</h3>
-        <p>Move from <code>dev</code> to <code>staging</code> to <code>prod</code> using deterministic profile + policy-pack layering and effective-policy inspection.</p>
+        <p>Runs in local shells, SSH, and CI with no plugin runtime stack. Deterministic <code>akmon replay</code> is available for sessions Akmon produced itself.</p>
       </div>
     </div>
   </div>
@@ -1086,17 +1085,19 @@
 
 <section class="install" id="trust-pipeline">
   <div class="container">
-    <div class="section-label">// v2.x session evidence model</div>
-    <h2 class="section-title">Operate with confidence</h2>
+    <div class="section-label">// the producer-agnostic pipeline</div>
+    <h2 class="section-title">From any agent to an offline proof</h2>
     <p class="section-body" style="max-width:720px">
-      v2.1.0 builds on the v2.0.0 reviewable session lifecycle: run, inspect, replay, diff, verify, and evidence export — with resume, schema-validated tools, and tighter config wiring. Sessions remain content-addressed, cryptographically linked, replayable, and portable as AGEF bundles.
+      Make a key, import any agent's OpenTelemetry trace, export a portable bundle, sign it, verify it, and emit a proof a stranger can check with plain openssl. The verification chain is the same whether the session came from Akmon's own agent or another tool. Akmon v2.2.0 implements AGEF v0.1.3.
     </p>
     <div class="code-block" style="margin-top:28px">
-      akmon --yes --output json --task "run tests and summarize" | tee run.json<br>
-      akmon audit verify .akmon/audit/&lt;session-id&gt;.jsonl<br>
-      akmon evidence verify .akmon/evidence/&lt;session-id&gt;.json<br>
-      akmon slo verify .akmon/evidence/&lt;session-id&gt;.json --strict<br>
-      akmon slo trend .akmon/evidence/&lt;session-id&gt;.json --baseline-dir .akmon/evidence/history --window 20 --strict
+      akmon bundle keygen --out signer.pk8 --public-out signer.pub<br>
+      akmon otel import trace.json --journal ./journal<br>
+      akmon bundle export &lt;session-id&gt; --journal ./journal --output audit.akmon<br>
+      akmon bundle sign audit.akmon --key signer.pk8<br>
+      akmon bundle verify audit.akmon --verify-key signer.pub --require-signature<br>
+      akmon bundle prove-openssl audit.akmon --verify-key signer.pub --out-dir proof<br>
+      openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin -in proof/statement.bin -sigfile proof/signature.bin
     </div>
   </div>
 </section>
@@ -1104,8 +1105,8 @@
 <!-- LINK TO BOOK: full comparison lives in docs (keeps this page light) -->
 <section class="compare-strip" id="compare" aria-label="Comparison with other tools">
   <p>
-    Wondering how Akmon differs from other coding agents?
-    <a href="./docs/comparison.html">Other tools vs Akmon</a> — short notes in the docs, not a billboard here.
+    Wondering how Akmon compares to Microsoft's agent governance tooling?
+    <a href="./docs/comparison.html">Microsoft vs Akmon</a>. Short, sourced notes in the docs, not a billboard here.
   </p>
 </section>
 
@@ -1115,70 +1116,100 @@
     <div class="section-label">// get started</div>
     <h2 class="section-title">Install in seconds</h2>
     <p class="section-body" style="max-width:640px;margin-top:12px;margin-bottom:8px">
-      GitHub Releases attach a real binary per platform. Writing to <code>/usr/local/bin</code> usually requires <code>sudo</code> on macOS — installing to <code>~/bin</code> avoids that. If a download is HTML instead of a binary, the matching release asset is missing (cut a <code>v*</code> tag after the release workflow runs).
+      GitHub Releases attach real <code>akmon</code> and <code>agef-verify</code> binaries per platform, plus a <code>SHA256SUMS</code> file. Writing to <code>/usr/local/bin</code> usually requires <code>sudo</code> on macOS, so installing to <code>~/bin</code> avoids that. If a download is HTML instead of a binary, the matching release asset is missing (cut a <code>v*</code> tag after the release workflow runs).
     </p>
 
     <div class="install-tabs">
-      <button type="button" class="tab active" onclick="showTab('mac-arm', this)">macOS ARM</button>
+      <button type="button" class="tab active" onclick="showTab('homebrew', this)">Homebrew</button>
+      <button type="button" class="tab" onclick="showTab('mac-arm', this)">macOS ARM</button>
       <button type="button" class="tab" onclick="showTab('mac-x64', this)">macOS Intel</button>
       <button type="button" class="tab" onclick="showTab('linux', this)">Linux</button>
       <button type="button" class="tab" onclick="showTab('source', this)">From source</button>
       <button type="button" class="tab" onclick="showTab('ollama', this)">With Ollama</button>
     </div>
 
-    <div id="mac-arm" class="tab-panel active">
+    <div id="homebrew" class="tab-panel active">
+      <div class="code-block">
+        <button class="copy-btn" onclick="copy(this, 'brew tap radotsvetkov/akmon\nbrew install akmon\nbrew install agef-verify')">copy</button>
+        <span class="comment"># macOS or Linux with Homebrew. The tap is live.</span><br>
+        brew <span class="keyword">tap</span> radotsvetkov/akmon<br>
+        brew <span class="keyword">install</span> akmon
+        <span class="comment">        # the CLI</span><br>
+        brew <span class="keyword">install</span> agef-verify
+        <span class="comment">  # the standalone verifier for auditors</span><br>
+        <br>
+        akmon <span class="keyword">--version</span>
+        <span class="comment">  # akmon 2.2.0</span><br>
+        <span class="comment"># Verifying with openssl needs OpenSSL 3.x: brew install openssl@3</span>
+      </div>
+    </div>
+
+    <div id="mac-arm" class="tab-panel">
       <div class="code-block">
         <button class="copy-btn" onclick="copy(this, 'mkdir -p ~/bin && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 -o ~/bin/akmon && chmod +x ~/bin/akmon')">copy</button>
-        <span class="comment"># Apple Silicon — M1, M2, M3, M4 (no sudo)</span><br>
+        <span class="comment"># Apple Silicon: M1, M2, M3, M4 (no sudo)</span><br>
         mkdir -p ~/bin<br>
         curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \<br>
         &nbsp;&nbsp;-o ~/bin/akmon &amp;&amp; chmod +x ~/bin/akmon<br>
+        <span class="comment"># The standalone verifier ships on every release too:</span><br>
+        curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/agef-verify-darwin-arm64 \<br>
+        &nbsp;&nbsp;-o ~/bin/agef-verify &amp;&amp; chmod +x ~/bin/agef-verify<br>
         <span class="comment"># If `akmon` is not found, add ~/bin to PATH (zsh):</span><br>
         <span class="comment"># echo 'export PATH=&quot;$HOME/bin:$PATH&quot;' &gt;&gt; ~/.zshrc &amp;&amp; source ~/.zshrc</span><br>
-        <span class="comment"># Alternative: sudo curl … -o /usr/local/bin/akmon &amp;&amp; sudo chmod +x /usr/local/bin/akmon</span><br>
         <br>
         akmon <span class="keyword">--version</span>
-        <span class="comment">  # akmon 2.1.0</span><br>
+        <span class="comment">  # akmon 2.2.0</span><br>
         akmon <span class="keyword">config</span>
         <span class="comment">  # run setup wizard</span>
         <br>
-        cd your-project<br>
-        akmon <span class="keyword">--yes</span> <span class="keyword">--task</span> "summarize failing tests and propose minimal fixes"
+        <span class="comment"># Import any agent's OTEL trace, then sign and verify it</span><br>
+        akmon <span class="keyword">otel import</span> trace.json --journal ./journal
       </div>
     </div>
 
     <div id="mac-x64" class="tab-panel">
       <div class="code-block">
-        <button class="copy-btn" onclick="copy(this, 'mkdir -p ~/bin && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 -o ~/bin/akmon && chmod +x ~/bin/akmon')">copy</button>
+        <button class="copy-btn" onclick="copy(this, 'mkdir -p ~/bin && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 -o ~/bin/akmon && chmod +x ~/bin/akmon && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/agef-verify-darwin-x86_64 -o ~/bin/agef-verify && chmod +x ~/bin/agef-verify')">copy</button>
         mkdir -p ~/bin<br>
         curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 \<br>
         &nbsp;&nbsp;-o ~/bin/akmon &amp;&amp; chmod +x ~/bin/akmon<br>
+        <span class="comment"># The standalone verifier for auditors:</span><br>
+        curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/agef-verify-darwin-x86_64 \<br>
+        &nbsp;&nbsp;-o ~/bin/agef-verify &amp;&amp; chmod +x ~/bin/agef-verify<br>
         <br>
         akmon <span class="keyword">--version</span>
+        <span class="comment">  # akmon 2.2.0</span>
       </div>
     </div>
 
     <div id="linux" class="tab-panel">
       <div class="code-block">
-        <button class="copy-btn" onclick="copy(this, 'mkdir -p ~/bin && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 -o ~/bin/akmon && chmod +x ~/bin/akmon')">copy</button>
+        <button class="copy-btn" onclick="copy(this, 'mkdir -p ~/bin && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 -o ~/bin/akmon && chmod +x ~/bin/akmon && curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/agef-verify-linux-x86_64 -o ~/bin/agef-verify && chmod +x ~/bin/agef-verify')">copy</button>
         mkdir -p ~/bin<br>
         curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \<br>
         &nbsp;&nbsp;-o ~/bin/akmon &amp;&amp; chmod +x ~/bin/akmon<br>
+        <span class="comment"># The standalone verifier for auditors:</span><br>
+        curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/agef-verify-linux-x86_64 \<br>
+        &nbsp;&nbsp;-o ~/bin/agef-verify &amp;&amp; chmod +x ~/bin/agef-verify<br>
         <br>
         akmon <span class="keyword">--version</span>
+        <span class="comment">  # akmon 2.2.0</span>
       </div>
     </div>
 
     <div id="source" class="tab-panel">
       <div class="code-block">
-        <button class="copy-btn" onclick="copy(this, 'git clone https://github.com/radotsvetkov/akmon\ncd akmon\nmkdir -p ~/bin\ncargo build --release --no-default-features\ncp target/release/akmon ~/bin/')">copy</button>
+        <button class="copy-btn" onclick="copy(this, 'cargo install --git https://github.com/radotsvetkov/akmon akmon\ncargo install --git https://github.com/radotsvetkov/akmon agef-verify')">copy</button>
+        <span class="comment"># Install both binaries straight from the repo:</span><br>
+        cargo <span class="keyword">install</span> --git https://github.com/radotsvetkov/akmon akmon<br>
+        cargo <span class="keyword">install</span> --git https://github.com/radotsvetkov/akmon agef-verify<br>
+        <br>
+        <span class="comment"># Or build from a clone:</span><br>
         git clone https://github.com/radotsvetkov/akmon<br>
         cd akmon<br>
-        <br>
-        <span class="comment"># Slim build — 3.4MB, no semantic indexing</span><br>
+        <span class="comment"># Slim build: 3.4MB, no semantic indexing</span><br>
         cargo build <span class="keyword">--release</span> <span class="keyword">--no-default-features</span><br>
-        <br>
-        <span class="comment"># Full build — 20MB, with semantic indexing</span><br>
+        <span class="comment"># Full build: 20MB, with semantic indexing</span><br>
         cargo build <span class="keyword">--release</span><br>
         <br>
         mkdir -p ~/bin<br>
@@ -1191,7 +1222,7 @@
         <span class="comment"># 1. Install Ollama from https://ollama.com</span><br>
         ollama pull qwen2.5-coder:7b<br>
         <br>
-        <span class="comment"># 2. Install Akmon (example: Apple Silicon → ~/bin)</span><br>
+        <span class="comment"># 2. Install Akmon (example: Apple Silicon to ~/bin)</span><br>
         mkdir -p ~/bin<br>
         curl -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \<br>
         &nbsp;&nbsp;-o ~/bin/akmon &amp;&amp; chmod +x ~/bin/akmon<br>
@@ -1268,8 +1299,9 @@
         <div class="section-label">// trust model</div>
         <h2 class="section-title">You see<br>everything</h2>
         <p class="section-body" style="margin-bottom: 40px;">
-          Akmon logs every action to a JSONL audit file.
-          Every session ends with a full summary—so you can see what ran, what it cost, and what changed.
+          When you run Akmon's own agent, every action lands in a JSONL audit log and a content-addressed
+          evidence record. That record is the raw material the trust layer seals, signs, and exports as a
+          portable bundle anyone can verify later.
         </p>
         <ul class="audit-points">
           <li>
@@ -1350,7 +1382,7 @@
     <div class="section-label">// community</div>
     <h2 class="section-title">Built in the open</h2>
     <p class="section-body" style="max-width:620px">
-      Akmon is Apache 2.0—friendly to shipping CLI wrappers, internal forks, and agent experiments.
+      Akmon is Apache 2.0, friendly to shipping CLI wrappers, internal forks, and agent experiments.
       Issues, docs fixes, and focused PRs are welcome.
     </p>
     <div class="contrib-grid">
@@ -1360,7 +1392,7 @@
       </div>
       <div class="contrib-card">
         <h3>Documentation</h3>
-        <p>The book covers <a href="./docs/tutorials/overview.html">tutorials</a>, <a href="./docs/reference/capabilities.html">capabilities</a>, and <a href="./docs/tutorials/multi-agent-automation.html">automation patterns</a>—help us keep examples sharp.</p>
+        <p>The book covers <a href="./docs/tutorials/overview.html">tutorials</a>, <a href="./docs/reference/capabilities.html">capabilities</a>, and <a href="./docs/tutorials/multi-agent-automation.html">automation patterns</a>. Help us keep examples sharp.</p>
       </div>
       <div class="contrib-card">
         <h3>License</h3>
@@ -1374,11 +1406,10 @@
 <section class="cta-section" id="cta">
   <div class="container">
     <div class="section-label">// get started</div>
-    <h2 class="section-title">Ship with confidence.</h2>
+    <h2 class="section-title">Prove what your agents do.</h2>
     <p class="section-body">
-      The AI agent that respects your security, your budget,
-      and your workflow. Single binary. No subscription.
-      Every action audited.
+      Turn any AI agent's session into a portable, signed record. Verify it offline with
+      nothing but openssl, on a machine that never had Akmon installed. No cloud, no lock-in.
     </p>
     <div class="cta-actions">
       <a href="#install" class="btn btn-primary">↓ Install Akmon</a>
@@ -1399,9 +1430,10 @@
     </div>
     <div class="footer-right">
       <a href="./docs/">Documentation</a>
+      <a href="./docs/releases/v2.2.0.html">v2.2.0 notes</a>
       <a href="./docs/releases/v2.1.0.html">v2.1.0 notes</a>
       <a href="./docs/releases/v2.0.0.html">v2.0.0 notes</a>
-      <a href="./docs/comparison.html">Vs others</a>
+      <a href="./docs/comparison.html">Vs Microsoft</a>
       <a href="https://github.com/radotsvetkov/akmon">GitHub</a>
       <a href="https://github.com/radotsvetkov/akmon/releases">Releases</a>
       <a href="./docs/security.html">Security</a>
@@ -1433,20 +1465,20 @@
     if (!body || !cap) return;
     var frames = [
       {
-        cap: 'Step 1 — Headless task for governed automation',
-        html: '<div><span class="t-prompt">~/payments</span> <span class="t-dim">$</span> <span class="t-cmd">akmon --yes --output json --task "harden idempotency checks"</span></div><br><div class="t-dim">  session_id: 9f2e...  status: completed</div>'
+        cap: 'Step 1: import any agent\'s OpenTelemetry trace',
+        html: '<div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon otel import trace.json --journal ./journal</span></div><br><div class="t-dim">  imported session 9f2e4c1a</div><div class="t-dim">  capture_level=structural  (metadata, not a full replay)</div><div class="t-dim">  provider calls + tool calls preserved</div>'
       },
       {
-        cap: 'Step 2 — Tool calls are explicit and auditable',
-        html: '<div><span class="t-blue">  → semantic_search</span><span class="t-dim">  "idempotency capture"</span></div><div><span class="t-green">  ✓ semantic_search</span>  <span class="t-dim">4 hits</span></div><div><span class="t-blue">  → read_file</span><span class="t-dim">  src/api/capture.rs</span></div><div><span class="t-green">  ✓ read_file</span>  <span class="t-dim">412 lines</span></div><div><span class="t-blue">  → apply_patch</span><span class="t-dim">  src/api/capture.rs</span></div><div><span class="t-green">  ✓ apply_patch</span>  <span class="t-dim">mode=applied</span></div>'
+        cap: 'Step 2: export a portable bundle and sign it',
+        html: '<div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon bundle export 9f2e4c1a --journal ./journal --output audit.akmon</span></div><div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon bundle sign audit.akmon --key signer.pk8</span></div><div><span class="t-green">  ✓</span> <span class="t-dim">offline ed25519 signature over the session head</span></div>'
       },
       {
-        cap: 'Step 3 — Verify integrity and evidence linkage',
-        html: '<div><span class="t-prompt">~/payments</span> <span class="t-dim">$</span> <span class="t-cmd">akmon audit verify .akmon/audit/9f2e....jsonl</span></div><div><span class="t-green">  ✓</span> <span class="t-dim">valid chain</span></div><div><span class="t-prompt">~/payments</span> <span class="t-dim">$</span> <span class="t-cmd">akmon evidence verify .akmon/evidence/9f2e....json</span></div><div><span class="t-green">  ✓</span> <span class="t-dim">schema + linkage valid</span></div><div><span class="t-prompt">~/payments</span> <span class="t-dim">$</span> <span class="t-cmd">akmon verify 9f2e....</span></div><div><span class="t-green">  ✓</span> <span class="t-dim">session integrity passed</span></div>'
+        cap: 'Step 3: verify integrity, signature, and capture level',
+        html: '<div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon bundle verify audit.akmon --verify-key signer.pub --require-signature</span></div><div><span class="t-green">  ✓</span> <span class="t-dim">integrity valid</span></div><div><span class="t-green">  ✓</span> <span class="t-dim">signature valid</span></div><div><span class="t-dim">  capture_level=structural  (imports do not replay; this is honest)</span></div>'
       },
       {
-        cap: 'Step 4 — Reliability and cost are first-class signals',
-        html: '<div class="t-amber">  Summary</div><div class="t-dim">  tool_calls=11 success=11 failures=0</div><div class="t-dim">  tokens=38,102 cache=29,440 est_cost_usd=0.031</div><div class="t-dim">  reliability_metrics + replay_metadata captured</div><div class="t-dim">  artifacts: .akmon/audit/...  .akmon/evidence/...</div>'
+        cap: 'Step 4: prove it with openssl alone, no Akmon',
+        html: '<div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">akmon bundle prove-openssl audit.akmon --verify-key signer.pub --out-dir proof</span></div><div class="t-dim">  wrote statement.bin  signature.bin  pubkey.pem</div><div><span class="t-prompt">~/audit</span> <span class="t-dim">$</span> <span class="t-cmd">openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin -in proof/statement.bin -sigfile proof/signature.bin</span></div><div><span class="t-green">  Signature Verified Successfully</span></div>'
       }
     ];
     var i = 0;

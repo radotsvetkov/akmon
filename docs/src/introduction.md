@@ -1,41 +1,59 @@
 # Introduction
 
-Akmon is the review-aware AI coding agent for regulated engineering.
-It is built for teams where "the model suggested it" is not enough evidence to merge, release, or certify software changes.
-Every session is captured as a tamper-evident, content-addressed artifact that can be replayed, compared, and verified later.
+Akmon is a tamper-evident evidence and verification layer for AI agents.
+It sits on top of whatever agent you already run, through OpenTelemetry or with Akmon's own reference agent.
+Every session becomes a portable, content-addressed, cryptographically signed record that someone else can verify for themselves.
 
-Akmon is intentionally not a "best autocomplete UX" product.
-It is a terminal-first control plane for AI-assisted code change work where traceability, deterministic evidence, and explicit operator control are non-negotiable.
-The core question is simple: when an auditor, reviewer, or incident responder asks what happened, can you prove it?
+The point that matters most: a third party can check a signature offline with nothing but `openssl`, with no Akmon install and no cloud service.
+That is the whole pitch. When an AI agent changes something, you may have to prove later what it actually did, to a regulator or auditor who does not trust you and does not run your tools.
+Under the EU AI Act, the high-risk logging obligations in Article 12 and Annex IV start to apply on 2 August 2026.
 
-This page explains the problem Akmon is designed to solve, the design choices behind it, what ships in v2.x (latest **v2.1.0**), and where Akmon is intentionally not trying to compete.
+Akmon is producer-agnostic. The verification chain is the product, not the agent.
+This page explains the problem Akmon is designed to solve, the design choices behind it, what ships in v2.x (latest **v2.2.0**, AGEF v0.1.3), and where Akmon is intentionally not trying to compete.
 
-## v2.1.0 highlights
+## v2.2.0 highlights
 
-On top of the v2.0.0 evidence substrate (unchanged AGEF v0.1.1), v2.1.0 closes several production gaps: journal-backed session resume, repeat-limit FSM crash fix, JSON Schema validation before tool dispatch, config.toml wiring for model/Ollama/MCP/deadlines, and git/config hardening. See [release notes](./releases/v2.1.0.md).
+v2.2.0 is the trust-layer release. It turns Akmon into a producer-agnostic evidence and verification layer and makes that claim provable end to end. The toolchain:
+
+- Import any agent: `akmon otel import <trace.json>` turns an OpenTelemetry GenAI trace into an AGEF session. It reads the current v1.37 structured form and the older v1.36-and-earlier message-event form that most deployed agents still emit. The capture level is recorded honestly (imports are `structural`, never dressed up as a full recording).
+- Generate a key: `akmon bundle keygen --out k.pk8 --public-out k.pub` creates an Ed25519 signing key (PKCS#8 v2).
+- Sign: `akmon bundle sign <bundle> --key k.pk8` adds an offline Ed25519 signature over the session head.
+- Attest an operator: `akmon bundle attest <bundle> --key op.pk8 --operator-id you@org --role approver` records the accountable person behind a session.
+- Verify: `akmon bundle verify <bundle> --verify-key k.pub --require-signature` checks integrity, the signature, any operator attestation, and the capture level.
+- Prove with openssl: `akmon bundle prove-openssl <bundle> --verify-key k.pub --out-dir proof` writes the statement, signature, and public key so anyone can check the signature with plain `openssl`.
+- Verify on its own: `agef-verify <bundle> --verify-key k.pub` is a small, separate binary for auditors that does not need the full Akmon install.
+
+See the [release notes](./releases/v2.2.0.md) and the walkthrough, [from an OTEL trace to an offline openssl proof](./tutorials/otel-to-openssl-walkthrough.md).
 
 ## The problem Akmon was built to solve
 
-AI coding agents can now produce meaningful code changes, but many environments still cannot rely on them for critical work.
-The blocker is usually not raw model capability.
-The blocker is evidence quality.
+When an AI agent changes something, you may have to prove later what it actually did.
+The person asking could be a regulator, a security reviewer, or an incident team, and it might be years after the fact.
+They may not trust you, and they may not run your tools.
+The blocker is usually not raw model capability. The blocker is evidence quality.
 
+Most agent telemetry cannot stand up to that.
+It lives in process memory, or in mutable, unsigned spans, and "the AI did it" is not an answer anyone will accept.
 Teams repeatedly run into the same questions:
 
 - What exactly did the agent read?
 - What tools did it call?
 - What side effects happened on disk or in shell?
 - Which policy decision allowed each side effect?
-- Can we replay the run and validate that the artifact is still intact?
+- Can a third party verify the record's integrity and authorship without trusting you?
 
 In many tools, those answers are partial or ephemeral.
 You get a useful session in the moment, but weak forensic value later.
 That gap is acceptable for low-risk prototyping.
 It is a hard stop for regulated release workflows.
 
+Akmon treats the evidence itself as the thing you ship.
+It takes a session, either your own or one from any OpenTelemetry-instrumented agent, and turns it into a sealed record.
+Someone else can then check that record's integrity and authorship independently, with standard tools, even on a machine that has never heard of Akmon.
+
 Provider lock-in is the second recurring failure mode.
 Model quality, latency, legal terms, and cost change over time.
-If your coding workflow depends on one provider's roadmap, your engineering process inherits that business risk.
+If your agent workflow depends on one provider's roadmap, your engineering process inherits that business risk.
 Regulated teams and enterprise teams often need optionality: local models for sensitive code paths, hosted models for throughput, and explicit controls over where prompts go.
 
 Operational portability is the third issue.
@@ -111,40 +129,41 @@ Teams typically get better outcomes when they separate work into:
 
 This reduces context drift and makes outcomes easier to reproduce.
 
-## The session evidence model in v2.0.0
+## The evidence and verification model
 
-v2.0.0 centers Akmon around a deterministic session evidence workflow.
-The system records each run as a content-addressed event journal with cryptographic chain integrity.
-That gives reviewers a concrete object to inspect instead of reconstructing behavior from partial logs.
+Akmon records each session as a content-addressed event journal with cryptographic chain integrity.
+That gives a reviewer a concrete object to inspect instead of reconstructing behavior from partial logs.
+The session, whether Akmon produced it or it came in from another agent's trace, is then exported as a portable AGEF bundle that can be signed and verified anywhere.
 
 At a high level:
 
 - Events are linked in order and integrity-checked.
-- Session contents can be replayed deterministically against recorded providers/tools.
+- A bundle can carry an offline Ed25519 signature over the session head, and an operator attestation that records the accountable person.
+- A third party can verify integrity and authorship with `agef-verify`, or with plain `openssl` after `akmon bundle prove-openssl`, with no Akmon install required.
 - Two sessions can be compared structurally and at field level.
-- Evidence can be exported into AGEF bundles for portability.
+- Sessions Akmon produced itself can be replayed deterministically against recorded providers and tools.
 
-Akmon v2.0.0 implements AGEF v0.1.1 as a practical reference implementation for portable AI-agent session evidence.
-The goal is operational interoperability and verifiability, not vendor-specific lock-in.
+Akmon implements AGEF v0.1.3 as a practical reference implementation for portable AI-agent session evidence.
+v0.1.3 adds two optional pieces on top of the hash chain: offline Ed25519 signatures and operator attestations. Both are optional, so a plain bundle stays small and older readers keep working.
+The goal is operational interoperability and independent verifiability, not vendor-specific lock-in.
 
-### Command surface in v2.0.0
+### Command surface
 
-v2.0.0 command workflow centers around:
+The verification chain is the core:
 
-- `chat` / `--task` for execution entry points,
-- `doctor` for provider diagnostics,
-- `inspect` and `diff` for session analysis,
-- `verify`, `audit`, and `evidence` for integrity and evidence validation,
-- `replay` for deterministic comparison,
-- `bundle export` / `bundle import` and `redact` for portable and sanitized handoff.
+- `otel import` to bring in any OpenTelemetry GenAI trace (v1.37 structured and the legacy v1.36-and-earlier message-event form),
+- `bundle keygen`, `bundle sign`, and `bundle attest` to produce a key, sign the head, and record an operator,
+- `bundle verify`, `agef-verify`, and `bundle prove-openssl` for integrity, signature, attestation, and capture checks, including offline `openssl` proof,
+- `bundle export` / `bundle import`, `inspect`, `diff`, and `redact` for portable and sanitized handoff,
+- `chat` / `--task` for Akmon's own reference agent, with `audit`, `evidence`, `verify`, and `replay` for full-capture sessions.
 
 These commands are meant to compose.
-A common pattern is:
+A common pattern for an imported session is:
 
-1. run a task,
-2. inspect/diff output,
-3. verify/audit integrity,
-4. export/redact evidence for downstream review.
+1. import a trace with `otel import`,
+2. export it as a bundle and sign it,
+3. verify integrity, signature, and capture level,
+4. emit an `openssl` proof a stranger can check.
 
 ## Who Akmon is for
 

@@ -1,6 +1,6 @@
 [book]
 title = "Akmon"
-description = "The AI coding agent built for developers who take security seriously"
+description = "Tamper-evident evidence and verification layer for AI agents."
 authors = ["Rado Tsvetkov"]
 language = "en"
 src = "src"
