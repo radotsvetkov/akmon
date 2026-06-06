@@ -20,7 +20,7 @@ Typical guidance injected for Rust codebases:
 - Document public items (`rustdoc`)
 - Use `spawn_blocking` for CPU-heavy work inside async runtimes
 
-Framework-specific notes (e.g. Axum handlers thin → services; SQLx `query!` and pools) are added when dependencies match.
+Framework-specific notes (e.g. Axum handlers stay thin and delegate to services; SQLx `query!` and pools) are added when dependencies match.
 
 ## Example: plan an Axum API
 

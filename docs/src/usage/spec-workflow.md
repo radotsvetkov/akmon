@@ -1,7 +1,7 @@
 # Spec Workflow
 
 For building new features from scratch with structured planning.
-Three phases: requirements → design → tasks → implementation.
+Three phases: requirements, then design, then tasks, then implementation.
 
 ## Overview
 
@@ -21,7 +21,7 @@ akmon spec auth-system implement
 
 Artifacts live under `.akmon/specs/<name>/`.
 
-## Phase 1 — Requirements
+## Phase 1: Requirements
 
 ```bash
 akmon spec payment-flow \
@@ -31,7 +31,7 @@ akmon spec payment-flow \
 
 Produces `.akmon/specs/payment-flow/requirements.md` with user stories, acceptance criteria, scope, and open questions.
 
-## Phase 2 — Design
+## Phase 2: Design
 
 ```bash
 akmon spec payment-flow design
@@ -39,7 +39,7 @@ akmon spec payment-flow design
 
 Reads `requirements.md`, analyzes the codebase, and writes `design.md` with architecture, new components, modified files, and data flow.
 
-## Phase 3 — Tasks
+## Phase 3: Tasks
 
 ```bash
 akmon spec payment-flow tasks

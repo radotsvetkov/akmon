@@ -5,7 +5,7 @@ Documented for Akmon `2.1.0`.
 ## Who this is for
 
 Operators who want to bind a **named human (or service account) and a role** to an AGEF bundle's
-session — answering "who claims to have operated this session" — on top of the bundle's integrity
+session, answering "who claims to have operated this session", on top of the bundle's integrity
 hash chain and any head signature. `akmon bundle attest` records a signed `AGEF-OPERATOR-v1`
 operator attestation in `manifest.operator_attestations[]`. Verifiers later check it with
 [`akmon bundle verify --operator-key`](./bundle-verify.md) or
@@ -15,7 +15,7 @@ operator attestation in `manifest.operator_attestations[]`. Verifiers later chec
 
 An attestation is a signature over the four self-asserted identity fields (`operator_id`,
 `display_name`, `role`, `org`) plus the session head. Verification proves only that **the holder of
-a particular private key signed those fields** — it does **not** prove the person is who the
+a particular private key signed those fields**. It does **not** prove the person is who the
 `operator_id` string claims. Trust in the identity is **out-of-band**: a verifier decides which
 `key_id` (public key) they trust, by some external process (an HR directory, a key-distribution
 ceremony, a signed roster), and only then does the self-asserted name carry weight. Verification
@@ -35,7 +35,7 @@ verifier supplied. Akmon never claims the name is true on its own.
 - A `.akmon` bundle on disk (signed or unsigned).
 - An Ed25519 private key in raw **PKCS#8 v2 DER** form, as produced by
   [`akmon bundle keygen --out`](./bundle-keygen.md). (`openssl genpkey` emits PKCS#8 v1, which the
-  signing path rejects — see the keygen honesty note.)
+  signing path rejects. See the keygen honesty note.)
 - A stable `--operator-id` (an email, employee id, or service account). It is required and must not
   contain a newline or carriage return.
 
@@ -56,11 +56,11 @@ akmon bundle verify /path/to/audit.akmon --operator-key operator.pub.hex --requi
 
 ## Optional flags
 
-- `--display-name <NAME>` — human-readable display name (signed). Defaults to empty.
-- `--role <ROLE>` — role the operator acted in, for example `approver` (signed). Defaults to empty.
-- `--org <ORG>` — organization the operator belongs to (signed). Defaults to empty.
-- `--output <FILE>` — write the attested bundle here instead of attesting in place.
-- `--format human|json` — default `human`. JSON emits **BundleAttestReportV1** with `tool`,
+- `--display-name <NAME>`: human-readable display name (signed). Defaults to empty.
+- `--role <ROLE>`: role the operator acted in, for example `approver` (signed). Defaults to empty.
+- `--org <ORG>`: organization the operator belongs to (signed). Defaults to empty.
+- `--output <FILE>`: write the attested bundle here instead of attesting in place.
+- `--format human|json`: default `human`. JSON emits **BundleAttestReportV1** with `tool`,
   `akmon_version`, `bundle_path`, `session_id`, `operator_id`, `role`, `key_id`, `public_key_hex`,
   and `output_path`. The private key is never printed.
 

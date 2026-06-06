@@ -1,6 +1,6 @@
 # Exporting Context
 
-Export **`AKMON.md`** to native formats for other AI tools — useful for teams using mixed workflows.
+Export **`AKMON.md`** to native formats for other AI tools, useful for teams using mixed workflows.
 
 ## Export to all tools
 

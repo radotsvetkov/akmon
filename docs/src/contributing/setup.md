@@ -15,10 +15,10 @@ cd akmon
 ## Build
 
 ```bash
-# Slim / faster — no default feature bundles
+# Slim / faster, no default feature bundles
 cargo build --release --no-default-features
 
-# Full — semantic indexing and related deps
+# Full: semantic indexing and related deps
 cargo build --release
 ```
 

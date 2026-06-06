@@ -12,7 +12,7 @@ Akmon detects TypeScript from **`tsconfig.json`** and frameworks from **`package
 ## Conventions (steering)
 
 - `strict: true`
-- Avoid `any` — prefer `unknown` + narrowing
+- Avoid `any`: prefer `unknown` + narrowing
 - **Zod** (or similar) at API boundaries
 - Path aliases instead of deep relative imports
 - Discriminated unions for state machines

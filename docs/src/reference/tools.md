@@ -6,14 +6,14 @@ Akmon’s agent invokes **tools** the model chooses from a fixed registry. Avail
 
 ### Read & navigate
 
-- **read_file** — read a file inside the sandbox.
-- **list_directory** — list directory entries.
-- **search** — ripgrep-style content search.
+- **read_file**: read a file inside the sandbox.
+- **list_directory**: list directory entries.
+- **search**: ripgrep-style content search.
 
 ### Edit
 
-- **write_file** — create/overwrite (with confirmation and diff preview).
-- **edit** / patch-style tools — apply targeted edits (with confirmation where configured).
+- **write_file**: create/overwrite (with confirmation and diff preview).
+- **edit** / patch-style tools: apply targeted edits (with confirmation where configured).
 
 #### Dry-run diff preview (`file_change_set`)
 
@@ -40,15 +40,15 @@ Practical flow:
 
 ### Git
 
-- **git** — status, diff, log, add, commit, etc. (see [Git integration](../features/git.md)).
+- **git**: status, diff, log, add, commit, etc. (see [Git integration](../features/git.md)).
 
 ### Network
 
-- **web_fetch** — HTTPS fetch with SSRF protections (optional via flag).
+- **web_fetch**: HTTPS fetch with SSRF protections (optional via flag).
 
 ### Semantic
 
-- **semantic_search** — embedding search when `--index` and full build (see [Semantic search](../features/semantic-search.md)).
+- **semantic_search**: embedding search when `--index` and full build (see [Semantic search](../features/semantic-search.md)).
 
 ### MCP
 

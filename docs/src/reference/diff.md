@@ -63,8 +63,8 @@ Pretty-printed `DiffReportV1` (schema owned by the `akmon-diff` crate). Suitable
 
 ## See also
 
-- [akmon replay](./replay.md) — replay comparison and exit-code discipline aligned with diff
-- [akmon inspect](./inspect.md) — single-event inspection; `--resolve` preview rules are aligned with diff resolve mode
+- [akmon replay](./replay.md): replay comparison and exit-code discipline aligned with diff
+- [akmon inspect](./inspect.md): single-event inspection; `--resolve` preview rules are aligned with diff resolve mode
 
 ---
 

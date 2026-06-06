@@ -2,7 +2,7 @@
 
 Documented for Akmon `2.1.0`.
 
-End-to-end pattern: **plan → scaffold → implement in layers → test**.
+End-to-end pattern: **plan, scaffold, implement in layers, then test**.
 
 ## Scenario
 
@@ -42,8 +42,8 @@ Review `.akmon/plans/*.md` before implementation.
 
 Typical sequence:
 
-1. `error.rs` — error types + `IntoResponse`
-2. `state.rs` — shared `PgPool`
+1. `error.rs`: error types + `IntoResponse`
+2. `state.rs`: shared `PgPool`
 3. Repositories / services
 4. Routes + integration tests (`sqlx::test`)
 

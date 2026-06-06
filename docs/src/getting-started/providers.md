@@ -5,10 +5,10 @@
 | Provider | Best for | Approx. cost |
 |---|---|---|
 | Ollama | Privacy, offline work, free | Free |
-| Anthropic | Highest quality | $0.80–15 per million tokens |
+| Anthropic | Highest quality | $0.80 to 15 per million tokens |
 | OpenRouter | Model flexibility, one key | Varies by model |
-| Groq | Speed, cheap inference | $0.05–0.59 per million |
-| OpenAI | GPT models | $0.15–5 per million |
+| Groq | Speed, cheap inference | $0.05 to 0.59 per million |
+| OpenAI | GPT models | $0.15 to 5 per million |
 | Azure OpenAI | Enterprise, compliance | Same as OpenAI |
 | Amazon Bedrock | AWS environments, VPC | Same as Anthropic |
 
@@ -86,7 +86,7 @@ akmon chat --bedrock \
   --model anthropic.claude-haiku-4-5-v1:0
 ```
 
-Supported Bedrock models (examples — check AWS for current list):
+Supported Bedrock models (examples, check AWS for current list):
 - `anthropic.claude-haiku-4-5-v1:0`
 - `anthropic.claude-sonnet-4-6-v1:0`
 - `anthropic.claude-opus-4-6-v1:0`
@@ -127,7 +127,7 @@ Per-provider pages: [Ollama](../providers/ollama.md), [Anthropic](../providers/a
 
 ## Troubleshooting flow (`akmon doctor providers` + `akmon config explain-provider`)
 
-Routing behavior is **unchanged**—these commands only **explain** which resolver branch would win for your current `--model`, flags, and `~/.akmon/config.toml`.
+Routing behavior is **unchanged**. These commands only **explain** which resolver branch would win for your current `--model`, flags, and `~/.akmon/config.toml`.
 
 ### Walkthrough: “Why am I on Ollama instead of OpenAI?”
 
@@ -138,7 +138,7 @@ Routing behavior is **unchanged**—these commands only **explain** which resolv
    akmon config explain-provider --json
    ```
 
-   Read `selected_provider`, then scan `candidates[]` in `priority_order` order. Each row states why a branch was skipped, matched, or would have failed (named prerequisites only—no secrets).
+   Read `selected_provider`, then scan `candidates[]` in `priority_order` order. Each row states why a branch was skipped, matched, or would have failed (named prerequisites only, no secrets).
 
 2. Cross-check health and endpoints:
 
@@ -149,7 +149,7 @@ Routing behavior is **unchanged**—these commands only **explain** which resolv
 
    The JSON report includes the same `provider_resolution` block plus reachability and masked key checks.
 
-3. Fix the **first** issue that applies: missing env vars or flags listed under `missing_prerequisites`, Azure endpoint/key mismatch, or Ollama not running—then re-run step 1.
+3. Fix the **first** issue that applies: missing env vars or flags listed under `missing_prerequisites`, Azure endpoint/key mismatch, or Ollama not running. Then re-run step 1.
 
 ### Doctor-only checklist
 

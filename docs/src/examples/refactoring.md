@@ -39,7 +39,7 @@ replace unwrap/expect with proper error types and propagation
 **Add tests**
 
 ```
-add tests for src/auth — happy paths, invalid input, mocked I/O
+add tests for src/auth: happy paths, invalid input, mocked I/O
 ```
 
 **Performance**
@@ -54,7 +54,7 @@ profile hot paths; propose top 3 bottlenecks with fixes
 review API handlers: validation, authz gaps, sensitive data in logs
 ```
 
-Akmon shows diffs before writes — review each change.
+Akmon shows diffs before writes. Review each change.
 
 ## Outcome
 

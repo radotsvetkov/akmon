@@ -4,11 +4,11 @@ Providers live in **`akmon-models`**. Each backend implements the **`LlmProvider
 
 ## Steps (overview)
 
-1. **Backend module** — add a submodule under `crates/akmon-models/src/` for the API (HTTP, signing, streaming parse).
-2. **Implement `LlmProvider`** — map Akmon’s generic message/tool format to the vendor API; handle token usage and errors.
-3. **Wire config** — extend `akmon-config` / CLI parsing for keys, base URLs, and model id conventions.
-4. **Detection** — update provider auto-detection order (env vars, flags) in CLI/config.
-5. **Tests** — unit-test request JSON and response parsing with fixtures; avoid live API calls in CI.
+1. **Backend module**: add a submodule under `crates/akmon-models/src/` for the API (HTTP, signing, streaming parse).
+2. **Implement `LlmProvider`**: map Akmon’s generic message/tool format to the vendor API; handle token usage and errors.
+3. **Wire config**: extend `akmon-config` / CLI parsing for keys, base URLs, and model id conventions.
+4. **Detection**: update provider auto-detection order (env vars, flags) in CLI/config.
+5. **Tests**: unit-test request JSON and response parsing with fixtures; avoid live API calls in CI.
 
 ## Conventions
 
@@ -18,5 +18,5 @@ Providers live in **`akmon-models`**. Each backend implements the **`LlmProvider
 
 ## See also
 
-- [Architecture](./architecture.md) — crate graph and `LlmProvider`.
-- [Development setup](./setup.md) — build and test commands.
+- [Architecture](./architecture.md): crate graph and `LlmProvider`.
+- [Development setup](./setup.md): build and test commands.

@@ -6,7 +6,7 @@ The full text is in the repository root as [`LICENSE`](https://github.com/radots
 
 ## Why Apache 2.0 for an AI agent tool?
 
-Apache 2.0 is widely used for infrastructure and developer tooling. For projects like Akmon—**local-first coding agents, automation glue, and integrations with other tools**—it offers:
+Apache 2.0 is widely used for infrastructure and developer tooling. For projects like Akmon, which bundles **local-first coding agents, automation glue, and integrations with other tools**, it offers:
 
 - **Clear redistribution terms** when you ship Akmon inside containers, internal CLIs, or custom distributions.
 - **Explicit patent grant** language, which matters when you combine agent runtimes with proprietary stacks or enterprise policies.

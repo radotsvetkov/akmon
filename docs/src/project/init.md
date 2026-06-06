@@ -1,6 +1,6 @@
 # `akmon init`
 
-Analyzes your project and generates **`AKMON.md`** — structured project memory used in every session.
+Analyzes your project and generates **`AKMON.md`**, structured project memory used in every session.
 
 ## Usage
 

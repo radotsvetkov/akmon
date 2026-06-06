@@ -1,19 +1,27 @@
-# Evidence Artifact
+# Evidence artifact
 
-Documented for Akmon `2.1.0`.
+Documented for Akmon `2.2.0`.
 
 ## Who this is for
 
-Developers and reviewers who need portable run evidence for CI and audit workflows.
+Developers, reviewers, and compliance engineers who need a portable, machine-checkable record of what a reference-agent run did, for CI gating and audit handoff.
+
+## Where the evidence artifact sits
+
+Akmon is an evidence and verification layer. The evidence artifact is the CI-facing summary of a reference-agent run. It is a deterministic JSON document that links the run's replay metadata, audit-chain integrity, policy decisions, tool timeline, reliability metrics, and touched files into one object a pipeline can verify in a single step.
+
+It is distinct from the portable AGEF bundle. The evidence artifact is for in-repo CI gating. The AGEF bundle is for external, offline, signed handoff. They are complementary, and a regulated workflow usually produces both: the evidence artifact gates the merge, the signed bundle is the record a third party verifies later. See [Security model](./security.md) for the verification layer, and the audit chain it builds on in [Audit log](./audit-log.md).
+
+This artifact comes from Akmon's own reference agent, which records `full` capture. An OpenTelemetry import is a `structural` capture and does not produce this artifact.
 
 ## What you will have at the end
 
 - A clear model of what Akmon records in evidence artifacts.
-- Commands to validate artifact integrity and enforce reliability gates.
+- Commands to validate artifact integrity and enforce reliability gates in CI.
 
 ## Prerequisites
 
-- A completed headless run (`akmon --task ...`) that emitted artifacts.
+- A completed headless reference-agent run (`akmon --task ...`) that emitted artifacts.
 
 ## Steps
 
@@ -25,7 +33,7 @@ akmon --task "run tests and summarize failures" --output json --yes | tee run.js
 
 2. Locate the evidence artifact path.
 
-Akmon writes a deterministic evidence artifact per successful/budget-stopped headless run:
+Akmon writes a deterministic evidence artifact per successful or budget-stopped headless run:
 
 ```text
 .akmon/evidence/<session-id>.json
@@ -33,7 +41,7 @@ Akmon writes a deterministic evidence artifact per successful/budget-stopped hea
 
 You can override the location with `--evidence-path <path>`.
 
-3. Verify evidence and linked audit chain:
+3. Verify the evidence and its linked audit chain:
 
 ```bash
 akmon evidence verify .akmon/evidence/<session-id>.json
@@ -41,13 +49,13 @@ akmon evidence verify .akmon/evidence/<session-id>.json
 
 ## Why it exists
 
-The artifact is designed for CI/PR automation and links:
+The artifact is designed for CI and PR automation and links:
 
 - replay metadata (`replay_metadata` hashes),
 - audit-chain integrity (`audit.audit_chain_valid`, `session_final_hash`),
-- policy decision summary,
-- tool execution timeline + aggregates,
-- reliability/SLO metrics,
+- the policy decision summary,
+- the tool execution timeline and aggregates,
+- reliability and SLO metrics,
 - touched files and verification outcomes.
 
 ## Schema version
@@ -56,7 +64,7 @@ Artifacts include:
 
 - `evidence_schema_version` (currently `evidence.v1`)
 
-Consumers should validate schema version before strict parsing.
+Consumers should validate the schema version before strict parsing.
 
 ## Example
 
@@ -114,12 +122,12 @@ Consumers should validate schema version before strict parsing.
 
 ## Validation
 
-`akmon evidence verify` checks schema support, replay metadata shape, linked audit-chain integrity, and session hash consistency.
+`akmon evidence verify` checks schema support, replay metadata shape, the linked audit-chain integrity, and session hash consistency.
 
 Exit codes:
 
 - `0`: evidence valid
-- `1`: evidence invalid/missing/tampered
+- `1`: evidence invalid, missing, or tampered
 
 ## Verification
 
@@ -128,7 +136,18 @@ SESSION_ID="$(jq -r '.session_id' run.json)"
 akmon evidence verify ".akmon/evidence/${SESSION_ID}.json"
 ```
 
-Expected result: command exits `0` and reports valid schema/session linkage.
+Expected result: the command exits `0` and reports valid schema and session linkage.
+
+## From in-repo evidence to a signed, offline-verifiable bundle
+
+The evidence artifact proves integrity to a party who can run Akmon against your repository. To hand the same session to a party who does not trust you and does not run your tools, export it as a signed AGEF bundle:
+
+1. Generate a signing key once: `akmon bundle keygen --out signer.pk8 --public-out signer.pub`.
+2. Export and sign the session: `akmon bundle export <session-id> --output session.akmon`, then `akmon bundle sign session.akmon --key signer.pk8`.
+3. Optionally record the accountable operator: `akmon bundle attest session.akmon --key operator.pk8 --operator-id you@org --role approver`.
+4. The recipient verifies with `akmon bundle verify session.akmon --verify-key signer.pub --require-signature`, or with the standalone `agef-verify`, or with stock `openssl` after `akmon bundle prove-openssl`.
+
+The evidence artifact and the bundle are anchored to the same content-addressed session, so the `session_final_hash` you gated on in CI is the head the signature covers.
 
 ## Enforcing SLOs in CI
 
@@ -148,7 +167,7 @@ Example GitHub Actions step:
       --strict
 ```
 
-Trend/regression check against prior evidence history:
+Trend and regression check against prior evidence history:
 
 ```yaml
 - name: Detect reliability regressions
@@ -161,18 +180,21 @@ Trend/regression check against prior evidence history:
 
 ## Troubleshooting
 
-- If evidence verify fails, confirm artifact path and JSON validity.
-- If session linkage errors appear, ensure audit/evidence files are from the same session.
+- If evidence verify fails, confirm the artifact path and JSON validity.
+- If session linkage errors appear, ensure the audit and evidence files are from the same session.
 - If SLO gates fail, inspect thresholds and `reliability_metrics` fields before relaxing policy.
 
 ## Policy provenance and hash impact
 
-Evidence keeps replay metadata `policy_hash`, which is computed from the effective
-runtime policy mode/config after profile/pack/local/override merge. Any change in
-selected profile or pack contents deterministically changes `policy_hash`, enabling
-CI/PR systems to detect policy-governance drift even when behavior changes are subtle.
+Evidence keeps the replay metadata `policy_hash`, which is computed from the effective runtime policy mode and config after the profile, pack, project-local, and override merge. Any change in the selected profile or pack contents deterministically changes `policy_hash`, so CI and PR systems can detect policy-governance drift even when behavior changes are subtle. See [Policy profiles and packs](./policy-profiles.md).
 
 ## Migration note
 
-Treat `evidence_schema_version` as required for parsers and reject unknown versions.
-`reliability_metrics` is additive and stable-keyed for CI automation.
+Treat `evidence_schema_version` as required for parsers and reject unknown versions. `reliability_metrics` is additive and stable-keyed for CI automation.
+
+## See also
+
+- [Audit log](./audit-log.md)
+- [Security model](./security.md)
+- [Reliability and SLO metrics](./reliability-slos.md)
+- [Regulated reviewer flow](../concepts/reviewer-flow.md)

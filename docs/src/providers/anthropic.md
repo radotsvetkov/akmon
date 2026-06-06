@@ -1,6 +1,6 @@
 # Anthropic
 
-Claude models via the Anthropic API — strong default for quality on code tasks.
+Claude models via the Anthropic API, a strong default for quality on code tasks.
 
 ## Auth
 

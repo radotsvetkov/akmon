@@ -1,63 +1,97 @@
 # Installation
 
-Documented for Akmon `2.1.0`.
+Documented for Akmon `2.2.0`.
 
 ## Who this is for
 
-Engineers installing Akmon on macOS or Linux for local development, CI, or remote shell usage.
+Engineers and auditors installing Akmon on macOS or Linux. Two binaries ship from this project:
+
+- `akmon`, the full evidence and verification layer (import, sign, attest, verify, prove, and the bundled reference agent).
+- `agef-verify`, a small standalone verifier. An auditor who only needs to check a bundle can install this one binary, without the full Akmon CLI.
+
+If you only receive signed bundles to verify, install `agef-verify` (or use plain `openssl`, see the [quick start](./quickstart.md)). If you produce evidence, install `akmon`.
 
 ## What you will have at the end
 
-- A runnable `akmon` binary on `PATH`.
+- An `akmon` binary on `PATH` (and optionally `agef-verify`).
 - A verified installation (`akmon --version`).
-- A clear fallback path for source builds.
+- A clear fallback from Homebrew to prebuilt binaries to a source build.
 
 ## Prerequisites
 
 - Shell access on macOS or Linux.
-- `curl` available.
+- `curl` available for the prebuilt-binary path.
+- Homebrew for the tap path.
 - `Rust 1.88+` only if building from source.
+- OpenSSL 3.x only if you intend to verify Ed25519 signatures with plain `openssl`. The macOS system `/usr/bin/openssl` is LibreSSL and cannot verify Ed25519.
 
-## Steps
+## Option 1: Homebrew tap (recommended)
 
-1. Install from a release binary (recommended).
+The tap is live. It installs both binaries and keeps them updated through `brew upgrade`.
 
-## Requirements
-
-- **Git** — for project context and git operations
-- **Rust 1.88+** — only if building from source
-- **Ollama** — optional, for local offline models
-
-## Option 1 — Pre-built binary (recommended)
-
-Releases on GitHub include **`akmon-darwin-arm64`**, **`akmon-darwin-x86_64`**, and **`akmon-linux-x86_64`**. They are slim builds (`--no-default-features`, no bundled semantic index).
-
-### Install without `sudo` (recommended)
-
-Put the binary in **`~/bin`** and ensure it is on your `PATH`:
-
-**macOS — Apple Silicon**
 ```bash
-mkdir -p ~/bin
-curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-arm64 \
-  -o ~/bin/akmon && chmod +x ~/bin/akmon
+brew tap radotsvetkov/akmon
+brew install akmon
+brew install agef-verify
 ```
 
-**macOS — Intel**
+Verify:
+
 ```bash
-mkdir -p ~/bin
-curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-darwin-x86_64 \
-  -o ~/bin/akmon && chmod +x ~/bin/akmon
+akmon --version
+# e.g. akmon 2.2.0
+agef-verify --version
 ```
 
-**Linux — x86_64**
+## Option 2: Prebuilt binaries
+
+Each GitHub release publishes platform binaries for both tools plus a `SHA256SUMS` file. The asset names are `akmon-darwin-arm64`, `akmon-darwin-x86_64`, `akmon-linux-x86_64`, and the matching `agef-verify-*` names. These are slim builds (`--no-default-features`, no bundled semantic index).
+
+### Download and verify the checksum
+
+Always verify the checksum before running a downloaded binary. The release `SHA256SUMS` file is the reference.
+
+**macOS, Apple Silicon**
+
 ```bash
 mkdir -p ~/bin
-curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \
-  -o ~/bin/akmon && chmod +x ~/bin/akmon
+base=https://github.com/radotsvetkov/akmon/releases/latest/download
+curl -fsSL -L "$base/akmon-darwin-arm64" -o ~/bin/akmon
+curl -fsSL -L "$base/SHA256SUMS" -o /tmp/SHA256SUMS
+# Confirm the line for akmon-darwin-arm64 matches your file
+shasum -a 256 ~/bin/akmon
+grep akmon-darwin-arm64 /tmp/SHA256SUMS
+chmod +x ~/bin/akmon
 ```
 
-**Shell PATH (zsh example)** — if `akmon` is not found:
+**macOS, Intel**
+
+```bash
+mkdir -p ~/bin
+base=https://github.com/radotsvetkov/akmon/releases/latest/download
+curl -fsSL -L "$base/akmon-darwin-x86_64" -o ~/bin/akmon
+curl -fsSL -L "$base/SHA256SUMS" -o /tmp/SHA256SUMS
+shasum -a 256 ~/bin/akmon
+grep akmon-darwin-x86_64 /tmp/SHA256SUMS
+chmod +x ~/bin/akmon
+```
+
+**Linux, x86_64**
+
+```bash
+mkdir -p ~/bin
+base=https://github.com/radotsvetkov/akmon/releases/latest/download
+curl -fsSL -L "$base/akmon-linux-x86_64" -o ~/bin/akmon
+curl -fsSL -L "$base/SHA256SUMS" -o /tmp/SHA256SUMS
+sha256sum ~/bin/akmon
+grep akmon-linux-x86_64 /tmp/SHA256SUMS
+chmod +x ~/bin/akmon
+```
+
+Install `agef-verify` the same way, substituting the `agef-verify-*` asset name.
+
+**Shell PATH (zsh example)**, if `akmon` is not found:
+
 ```bash
 echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
@@ -70,46 +104,46 @@ sudo curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/downloa
   -o /usr/local/bin/akmon && sudo chmod +x /usr/local/bin/akmon
 ```
 
-(Use the correct asset name for your platform.)
+Use the correct asset name for your platform, and verify the checksum before first run.
 
 ### Troubleshooting downloads
 
-| Symptom | Cause / fix |
+| Symptom | Cause and fix |
 |--------|-------------|
-| **Permission denied** writing to `/usr/local/bin` | Use `~/bin` + `PATH`, or prefix `sudo` on both `curl` and `chmod`. |
-| **Small file / `Not: command not found`** when running `akmon` | GitHub returned an HTML error page (often **404**). Ensure a release exists with that asset name (tag the repo so the [release workflow](https://github.com/radotsvetkov/akmon/blob/main/.github/workflows/release.yml) uploads binaries). Check with `file ~/bin/akmon` — it should say “Mach-O” or “ELF”, not “HTML”. |
-| **`curl: (56) Failure writing output`** | Destination directory missing or not writable; use `mkdir -p ~/bin` or fix permissions. |
+| Checksum line does not match | Re-download. A mismatch means a partial download or a tampered file. Do not run it. |
+| Permission denied writing to `/usr/local/bin` | Use `~/bin` plus `PATH`, or prefix `sudo` on both `curl` and `chmod`. |
+| Small file, or `Not: command not found` when running `akmon` | GitHub returned an HTML error page (often a 404). Confirm a release exists with that asset name. Check with `file ~/bin/akmon`, which should report Mach-O or ELF, not HTML. |
+| `curl: (56) Failure writing output` | Destination directory missing or not writable. Run `mkdir -p ~/bin` or fix permissions. |
 
 **Verify**
+
 ```bash
 akmon --version
-# e.g. akmon 2.1.0
+# e.g. akmon 2.2.0
 ```
 
-2. If binary install fails, build from source.
-
-## Option 2 — From source
+## Option 3: From source
 
 ```bash
 git clone https://github.com/radotsvetkov/akmon
 cd akmon
 
-# Slim build — no semantic indexing, smaller binary
+# Slim build, no semantic indexing, smaller binary
 cargo build --release --no-default-features
 
-# Full build — with semantic indexing
+# Full build, with semantic indexing
 cargo build --release
 
 mkdir -p ~/bin
 cp target/release/akmon ~/bin/
+cp target/release/agef-verify ~/bin/
 ```
 
-3. (Optional) Install from crates.io if available in your workflow.
-
-## Option 3 — cargo install
+Or install directly with cargo:
 
 ```bash
-cargo install akmon
+cargo install --git https://github.com/radotsvetkov/akmon akmon
+cargo install --git https://github.com/radotsvetkov/akmon agef-verify
 ```
 
 ## Verification
@@ -120,12 +154,13 @@ akmon --version
 akmon --help
 ```
 
-Expected result: all commands succeed and print usage/version output.
+Expected result: all commands succeed and print usage or version output.
 
 ## Troubleshooting
 
 - If `akmon` is not found, add `~/bin` to `PATH` and restart your shell.
-- If downloaded file is HTML, verify the release asset name and tag availability.
+- If a downloaded file is HTML, verify the release asset name and tag availability.
+- If `openssl` cannot verify a signature on macOS, you are likely on LibreSSL. Install OpenSSL 3.x (see [akmon bundle prove-openssl](../reference/bundle-prove-openssl.md)).
 - For provider failures after install, run `akmon doctor providers`.
 
 ## Using over SSH
@@ -136,7 +171,7 @@ Akmon is a single static binary. Copy it to any remote machine:
 scp ~/bin/akmon user@remote:~/bin/
 ssh user@remote
 export PATH="$HOME/bin:$PATH"
-akmon chat
+akmon --version
 ```
 
 ## Using in Docker
@@ -161,18 +196,31 @@ ENTRYPOINT ["akmon"]
     sudo curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/akmon-linux-x86_64 \
       -o /usr/local/bin/akmon && sudo chmod +x /usr/local/bin/akmon
 
-- name: Run task
-  env:
-    ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+- name: Verify a bundle
   run: |
-    akmon --yes --output json \
-      --task "run tests and summarize failures" \
-      | jq .result
+    akmon bundle verify build/session.akmon --verify-key signer.pub.hex --require-signature --format json \
+      | jq .passed
+```
+
+For auditors who only verify, install just the standalone binary:
+
+```yaml
+- name: Install agef-verify
+  run: |
+    sudo curl -fsSL -L https://github.com/radotsvetkov/akmon/releases/latest/download/agef-verify-linux-x86_64 \
+      -o /usr/local/bin/agef-verify && sudo chmod +x /usr/local/bin/agef-verify
 ```
 
 ## Uninstalling
 
 ```bash
-rm -f ~/bin/akmon /usr/local/bin/akmon
+rm -f ~/bin/akmon ~/bin/agef-verify /usr/local/bin/akmon /usr/local/bin/agef-verify
 rm -rf ~/.akmon   # removes config, sessions, audit logs
+```
+
+If you installed through Homebrew:
+
+```bash
+brew uninstall akmon agef-verify
+brew untap radotsvetkov/akmon
 ```

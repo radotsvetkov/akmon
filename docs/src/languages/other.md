@@ -1,6 +1,6 @@
 # Other Languages
 
-Akmon includes profiles beyond Rust, Python, TypeScript, and Go — for example **JavaScript**, **Java**, **C#**, **Elixir**, **Swift**, **Kotlin**, **Dart**, **C++**, **Zig**, and more. Detection uses manifests (`pom.xml`, `*.csproj`, `mix.exs`, `Package.swift`, `pubspec.yaml`, …).
+Akmon includes profiles beyond Rust, Python, TypeScript, and Go, for example **JavaScript**, **Java**, **C#**, **Elixir**, **Swift**, **Kotlin**, **Dart**, **C++**, **Zig**, and more. Detection uses manifests (`pom.xml`, `*.csproj`, `mix.exs`, `Package.swift`, `pubspec.yaml`, …).
 
 ## JavaScript (no `tsconfig.json`)
 

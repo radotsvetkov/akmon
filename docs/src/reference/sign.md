@@ -7,7 +7,7 @@ Documented for Akmon `2.1.0`.
 Reviewers and operators who need an **independent, detached attestation** over a recorded
 session. Akmon's journal is tamper-evident by construction (a merkle hash chain), but tamper-
 evidence proves internal consistency, not provenance. A signature over the session head lets a
-third party verify *who* attested to the session — the property auditors ask for when "logs from
+third party verify *who* attested to the session, the property auditors ask for when "logs from
 the party being audited" are not sufficient on their own.
 
 ## What you will have at the end

@@ -1,6 +1,6 @@
 # Architecture patterns for agent-assisted development
 
-Akmon does not dictate your system architecture—it **documents and executes** against the architecture you describe. These patterns work well in practice.
+Akmon does not dictate your system architecture. It **documents and executes** against the architecture you describe. These patterns work well in practice.
 
 ## Single repo, single source of truth (`AKMON.md`)
 
@@ -12,7 +12,7 @@ Akmon does not dictate your system architecture—it **documents and executes** 
 - Run `akmon --plan` before refactors that touch many modules.
 - Use `/update-context` in the TUI when editing `AKMON.md` mid-session.
 
-**Risk:** Drift if nobody updates **Current sprint**—treat it like a stand-up note.
+**Risk:** Drift if nobody updates **Current sprint**. Treat it like a stand-up note.
 
 ## Planner / implementer split
 
@@ -25,11 +25,11 @@ Akmon does not dictate your system architecture—it **documents and executes** 
 
 **Risk:** Plans can go stale; re-run plan if main branch moved.
 
-## Spec-driven (requirements → design → tasks)
+## Spec-driven (requirements, design, tasks)
 
 **When:** New features with unclear scope; need written artifacts for review.
 
-**How:** [Spec workflow](../usage/spec-workflow.md) — `akmon spec …` phases under `.akmon/specs/`.
+**How:** [Spec workflow](../usage/spec-workflow.md). Run `akmon spec …` phases under `.akmon/specs/`.
 
 **Risk:** More ceremony; best when the spec is genuinely reviewed by humans.
 
@@ -42,7 +42,7 @@ Akmon does not dictate your system architecture—it **documents and executes** 
 - Narrow `--task` in automation; require PR for merges.
 - Keep destructive operations out of unattended jobs.
 
-**Risk:** Broad tasks in `--yes` can still surprise you—scope tightly.
+**Risk:** Broad tasks in `--yes` can still surprise you. Scope tightly.
 
 ## Multi-service repos (monorepo)
 
@@ -53,7 +53,7 @@ Akmon does not dictate your system architecture—it **documents and executes** 
 - One `AKMON.md` at root with **Architecture** mapping services; or per-service nested guides linked from root.
 - Run Akmon from the **service subdirectory** when the sandbox should be minimal.
 
-**Risk:** Wrong working directory → wrong paths; always `cd` to the intended git root.
+**Risk:** Wrong working directory means wrong paths; always `cd` to the intended git root.
 
 ## Documentation as contract
 
@@ -64,7 +64,7 @@ Akmon does not dictate your system architecture—it **documents and executes** 
 - Commit plans under `.akmon/plans/` as part of the change record.
 - Export audit JSONL to your retention system.
 
-**Risk:** Treat plans as non-authoritative unless your process says otherwise—they are agent output, not legal sign-off.
+**Risk:** Treat plans as non-authoritative unless your process says otherwise. They are agent output, not legal sign-off.
 
 ## Choosing a pattern
 

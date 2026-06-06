@@ -1,6 +1,6 @@
 # Custom OpenAI-compatible endpoints
 
-Any server that speaks the OpenAI Chat Completions (or compatible) HTTP API — for example **LM Studio**, **vLLM**, **LiteLLM**, **Together**, **Mistral**, or a corporate gateway.
+Any server that speaks the OpenAI Chat Completions (or compatible) HTTP API, for example **LM Studio**, **vLLM**, **LiteLLM**, **Together**, **Mistral**, or a corporate gateway.
 
 ## CLI
 

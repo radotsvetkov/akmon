@@ -28,21 +28,21 @@ akmon bundle verify /path/to/audit.akmon --format json
 
 Optional flags:
 
-- `--allow-extra-files` — tolerate unknown files inside the archive (default is strict reject).
-- `--format human|json` — default `human`.
+- `--allow-extra-files`: tolerate unknown files inside the archive (default is strict reject).
+- `--format human|json`: default `human`.
 
 ## Operator identity (`--operator-key`)
 
 [`akmon bundle attest`](./bundle-attest.md) records signed operator attestations on a bundle. To
 check them at verify time:
 
-- `--operator-key <HEX_FILE>` — a trusted operator Ed25519 public key (64 hex chars). Repeatable.
+- `--operator-key <HEX_FILE>`: a trusted operator Ed25519 public key (64 hex chars). Repeatable.
   Each `manifest.operator_attestations[]` entry is verified against the supplied keys; a matching,
   cryptographically valid attestation reports outcome `verified`. An attested bundle verified
-  **without** a trusted key reports `unverified_no_key` — not a failure on its own.
-- `--require-operator` — fail (exit 1) unless **at least one** operator attestation verifies against
+  **without** a trusted key reports `unverified_no_key`, not a failure on its own.
+- `--require-operator`: fail (exit 1) unless **at least one** operator attestation verifies against
   an `--operator-key`.
-- `--require-operator-key <HEX_FILE>` — fail unless **that specific** key has a verified attestation.
+- `--require-operator-key <HEX_FILE>`: fail unless **that specific** key has a verified attestation.
   Repeatable; each listed key is also trusted for verification.
 
 "Verified" attaches to the **key**, not the name. The JSON `operators[]` entries carry the

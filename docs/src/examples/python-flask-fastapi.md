@@ -1,4 +1,4 @@
-# Python web services — Flask & FastAPI
+# Python web services: Flask and FastAPI
 
 Documented for Akmon `2.1.0`.
 
@@ -20,7 +20,7 @@ This example complements the [Python language guide](../languages/python.md) and
 - A **single headless implementation pass** (`akmon --yes`) with tests.
 - **AKMON.md** steering for framework-specific layout (app factory vs `main.py`, router modules, etc.).
 
-## Flask — readiness endpoint
+## Flask: readiness endpoint
 
 **Context in `AKMON.md`:** Document how the app is created (`create_app`), where config lives, and the test command (`pytest`).
 
@@ -30,7 +30,7 @@ akmon --yes --task "Implement /api/ready per the latest plan; use application fa
 pytest
 ```
 
-## FastAPI — authenticated route
+## FastAPI: authenticated route
 
 **Context:** List dependencies used for auth (e.g. `OAuth2PasswordBearer`, custom `get_current_user`).
 
@@ -43,7 +43,7 @@ pytest
 ## Tips
 
 - Put **one** test command in **Conventions** so every session agrees on verification.
-- If you use **OpenAPI**, mention where the spec is generated—helps the agent avoid duplicate route definitions.
+- If you use **OpenAPI**, mention where the spec is generated. This helps the agent avoid duplicate route definitions.
 - For long handlers, prefer **plan mode** first so file boundaries are explicit before writes.
 
 See also: [Headless mode](../usage/headless.md), [Security model](../features/security.md).

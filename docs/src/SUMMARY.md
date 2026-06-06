@@ -2,9 +2,33 @@
 
 [Introduction](./introduction.md)
 
-- [Other tools vs Akmon](./comparison.md)
+# Concepts and trust
+
+- [Trust model](./concepts/trust-model.md)
+- [Architecture](./concepts/architecture.md)
+- [Verifying evidence](./concepts/verifying-evidence.md)
+- [Compliance](./concepts/compliance.md)
 - [Glossary](./concepts/glossary.md)
 - [Regulated reviewer flow](./concepts/reviewer-flow.md)
+- [Other tools vs Akmon](./comparison.md)
+
+---
+
+# Evidence and verification
+
+- [akmon bundle keygen](./reference/bundle-keygen.md)
+- [akmon sign](./reference/sign.md)
+- [akmon bundle attest](./reference/bundle-attest.md)
+- [akmon bundle verify](./reference/bundle-verify.md)
+- [agef-verify](./reference/agef-verify.md)
+- [akmon bundle prove-openssl](./reference/bundle-prove-openssl.md)
+- [akmon bundle export](./reference/bundle-export.md)
+- [akmon bundle import](./reference/bundle-import.md)
+- [akmon inspect](./reference/inspect.md)
+- [akmon redact](./reference/redact.md)
+- [akmon replay](./reference/replay.md)
+- [akmon diff](./reference/diff.md)
+- [akmon verify](./reference/verify.md)
 
 ---
 
@@ -17,7 +41,7 @@
 - [Step-by-step (Rust, Go, Python, Elixir)](./tutorials/step-by-step.md)
 - [Enterprise policy rollout](./tutorials/enterprise-policy-rollout.md)
 - [Example projects](./tutorials/example-projects.md)
-- [Multi-agent & automation](./tutorials/multi-agent-automation.md)
+- [Multi-agent and automation](./tutorials/multi-agent-automation.md)
 - [Architecture patterns](./tutorials/architecture-patterns.md)
 
 ---
@@ -31,64 +55,9 @@
 
 ---
 
-# Using Akmon
-
-- [Interactive Mode](./usage/interactive.md)
-- [Headless Mode](./usage/headless.md)
-- [Plan Mode](./usage/plan-mode.md)
-- [Architect Mode](./usage/architect-mode.md)
-- [Spec Workflow](./usage/spec-workflow.md)
-
----
-
-# Project Setup
-
-- [akmon init](./project/init.md)
-- [AKMON.md Reference](./project/akmon-md.md)
-- [Importing Context](./project/import.md)
-- [Exporting Context](./project/export.md)
-
----
-
-# Language Guides
-
-- [Rust Projects](./languages/rust.md)
-- [Python Projects](./languages/python.md)
-- [TypeScript Projects](./languages/typescript.md)
-- [Go Projects](./languages/go.md)
-- [Other Languages](./languages/other.md)
-
----
-
-# Examples
-
-- [Build a REST API — Rust + Axum](./examples/rust-axum-api.md)
-- [Build a CLI tool — Python](./examples/python-cli.md)
-- [Python — Flask & FastAPI](./examples/python-flask-fastapi.md)
-- [Elixir / Phoenix](./examples/elixir-phoenix.md)
-- [Build a Next.js app — TypeScript](./examples/typescript-nextjs.md)
-- [Refactor an existing project](./examples/refactoring.md)
-- [Analyze a codebase](./examples/codebase-analysis.md)
-
----
-
-# Features
-
-- [Semantic Search](./features/semantic-search.md)
-- [Git Integration](./features/git.md)
-- [MCP Tools](./features/mcp.md)
-- [Audit Log](./features/audit-log.md)
-- [Policy Profiles & Packs](./features/policy-profiles.md)
-- [Evidence Artifact](./features/evidence.md)
-- [Security Model](./features/security.md)
-- [Reliability & SLO Metrics](./features/reliability-slos.md)
-- [Cost Transparency](./features/cost.md)
-
----
-
 # Providers
 
-- [Ollama — Local](./providers/ollama.md)
+- [Ollama (Local)](./providers/ollama.md)
 - [Anthropic](./providers/anthropic.md)
 - [OpenRouter](./providers/openrouter.md)
 - [OpenAI](./providers/openai.md)
@@ -99,33 +68,69 @@
 
 ---
 
+# Bundled reference agent
+
+The bundled coding agent is the reference, gold-fidelity producer. Use it when you want a full recording that replays deterministically. The evidence and verification layer above works with any producer through OpenTelemetry.
+
+- [Interactive Mode](./usage/interactive.md)
+- [Headless Mode](./usage/headless.md)
+- [Plan Mode](./usage/plan-mode.md)
+- [Architect Mode](./usage/architect-mode.md)
+- [Spec Workflow](./usage/spec-workflow.md)
+
+## Project setup
+
+- [akmon init](./project/init.md)
+- [AKMON.md Reference](./project/akmon-md.md)
+- [Importing Context](./project/import.md)
+- [Exporting Context](./project/export.md)
+
+## Language guides
+
+- [Rust Projects](./languages/rust.md)
+- [Python Projects](./languages/python.md)
+- [TypeScript Projects](./languages/typescript.md)
+- [Go Projects](./languages/go.md)
+- [Other Languages](./languages/other.md)
+
+## Examples
+
+- [Build a REST API (Rust + Axum)](./examples/rust-axum-api.md)
+- [Build a CLI tool (Python)](./examples/python-cli.md)
+- [Python (Flask and FastAPI)](./examples/python-flask-fastapi.md)
+- [Elixir / Phoenix](./examples/elixir-phoenix.md)
+- [Build a Next.js app (TypeScript)](./examples/typescript-nextjs.md)
+- [Refactor an existing project](./examples/refactoring.md)
+- [Analyze a codebase](./examples/codebase-analysis.md)
+
+## Agent features
+
+- [Semantic Search](./features/semantic-search.md)
+- [Git Integration](./features/git.md)
+- [MCP Tools](./features/mcp.md)
+- [Audit Log](./features/audit-log.md)
+- [Policy Profiles and Packs](./features/policy-profiles.md)
+- [Evidence Artifact](./features/evidence.md)
+- [Security Model](./features/security.md)
+- [Reliability and SLO Metrics](./features/reliability-slos.md)
+- [Cost Transparency](./features/cost.md)
+
+---
+
 # Reference
 
 - [Capabilities](./reference/capabilities.md)
 - [CLI Reference](./reference/cli.md)
-- [akmon verify](./reference/verify.md)
-- [akmon sign](./reference/sign.md)
-- [akmon bundle keygen](./reference/bundle-keygen.md)
-- [akmon bundle attest](./reference/bundle-attest.md)
-- [akmon inspect](./reference/inspect.md)
-- [akmon bundle export](./reference/bundle-export.md)
-- [akmon bundle import](./reference/bundle-import.md)
-- [akmon bundle verify](./reference/bundle-verify.md)
-- [agef-verify](./reference/agef-verify.md)
-- [akmon bundle prove-openssl](./reference/bundle-prove-openssl.md)
-- [akmon redact](./reference/redact.md)
-- [akmon replay](./reference/replay.md)
-- [akmon diff](./reference/diff.md)
 - [Slash Commands](./reference/slash-commands.md)
 - [Configuration Reference](./reference/config.md)
+- [Tools Reference](./reference/tools.md)
+- [Environment Variables](./reference/env-vars.md)
 - [Release notes: v2.2.0](./releases/v2.2.0.md)
 - [Release notes: v2.1.0](./releases/v2.1.0.md)
 - [Release notes: v2.0.0](./releases/v2.0.0.md)
 - [Release notes: v1.8.2](./releases/v1.8.2.md)
 - [Release notes: v1.8.1](./releases/v1.8.1.md)
 - [Release notes: v1.8.0](./releases/v1.8.0.md)
-- [Tools Reference](./reference/tools.md)
-- [Environment Variables](./reference/env-vars.md)
 
 ---
 
