@@ -19,6 +19,8 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-06-06
+
 ### Added
 
 - **`akmon sign`:** sign a session head via the configured signing hook (D-05); the hook is also auto-invoked after headless runs. Documents the path to wiring cosign or GPG ahead of native signing.
