@@ -17,3 +17,8 @@ typescript_repository/
 .cursor/
 .specstory/
 .vscode/
+
+# Internal planning / AI-session working docs (kept private, see akmon-internal-docs)
+docs/planning/
+docs/agent-session-audit-*.md
+docs/repositioning-audit.md

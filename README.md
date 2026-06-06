@@ -132,11 +132,11 @@ Microsoft ships a solid governance runtime, the open-source Agent Governance Too
 
 That gap is where Akmon fits. It is portable, signed, cloud-independent, agent-aware, and replayable.
 
-Akmon is not trying to replace any of that, and there are places where Microsoft is clearly ahead. Its distribution is one: Purview and the Copilot Control System are already in every Microsoft 365 tenant. Confidential Ledger's offline-verifiable receipts are another, and so is Microsoft's weight in the standards bodies. A single tool will not match those. Akmon is meant to complement them: seal what Purview captures, and export and verify what Foundry traces. The full, sourced comparison is in [docs/planning/competitive-microsoft-agt.md](docs/planning/competitive-microsoft-agt.md).
+Akmon is not trying to replace any of that, and there are places where Microsoft is clearly ahead. Its distribution is one: Purview and the Copilot Control System are already in every Microsoft 365 tenant. Confidential Ledger's offline-verifiable receipts are another, and so is Microsoft's weight in the standards bodies. A single tool will not match those. Akmon is meant to complement them: seal what Purview captures, and export and verify what Foundry traces.
 
 ## Compliance
 
-Akmon is built to help you produce evidence for frameworks like the EU AI Act (Article 12 and Annex IV logging, with high-risk obligations from 2 August 2026), the NIST AI Risk Management Framework (MEASURE 2.8), and SOC 2 (CC7.x and CC8.1). It is not a compliance certification, and it does not guarantee compliance. The mapping from AGEF evidence to specific controls is still a draft and is pending legal review. You can read it in [docs/planning/compliance-crosswalk.md](docs/planning/compliance-crosswalk.md).
+Akmon is built to help you produce evidence for frameworks like the EU AI Act (Article 12 and Annex IV logging, with high-risk obligations from 2 August 2026), the NIST AI Risk Management Framework (MEASURE 2.8), and SOC 2 (CC7.x and CC8.1). It is not a compliance certification, and it does not guarantee compliance. Treat any mapping from AGEF evidence to specific controls as something to validate with your own compliance and legal teams.
 
 ## The bundled agent
 
@@ -163,7 +163,6 @@ Akmon's records follow the [AGEF specification](https://github.com/radotsvetkov/
 - Reference for `bundle keygen`: [docs/src/reference/bundle-keygen.md](docs/src/reference/bundle-keygen.md)
 - Reference for `bundle attest`: [docs/src/reference/bundle-attest.md](docs/src/reference/bundle-attest.md)
 - Reference for `bundle prove-openssl`: [docs/src/reference/bundle-prove-openssl.md](docs/src/reference/bundle-prove-openssl.md)
-- Distribution plan: [docs/planning/distribution-plan.md](docs/planning/distribution-plan.md)
 
 ## Contributing
 
