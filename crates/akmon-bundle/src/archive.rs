@@ -9,6 +9,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read, Write};
 use std::path::PathBuf;
 
+/// Default cap on the total number of bytes a single bundle is allowed to decompress to.
+///
+/// Reading stops with [`BundleError::BundleTooLarge`] once a `tar.zst` would expand past this,
+/// so a tiny malicious archive cannot exhaust memory on the machine reading it (the
+/// decompression-bomb guard). 1 GiB is generous for real agent sessions while still bounding
+/// the worst case.
+pub const DEFAULT_MAX_BUNDLE_DECODED_BYTES: u64 = 1 << 30;
+
 /// Fully-materialized bundle contents.
 #[derive(Debug, Clone)]
 pub struct BundleContents {
@@ -102,10 +110,23 @@ pub fn read_bundle<R: Read>(
     reader: R,
     options: &ReadBundleOptions,
 ) -> Result<BundleContents, BundleError> {
+    read_bundle_limited(reader, options, DEFAULT_MAX_BUNDLE_DECODED_BYTES)
+}
+
+/// Like [`read_bundle`], but with an explicit cap on total decompressed bytes.
+///
+/// The public entry point always enforces [`DEFAULT_MAX_BUNDLE_DECODED_BYTES`]; this inner
+/// form exists so the decompression-bomb guard can be exercised in tests with a tiny cap
+/// instead of allocating gigabytes.
+fn read_bundle_limited<R: Read>(
+    reader: R,
+    options: &ReadBundleOptions,
+    max_decoded_bytes: u64,
+) -> Result<BundleContents, BundleError> {
     let decoder = zstd::Decoder::new(reader).map_err(|err| {
         BundleError::InvalidCompression(format!("zstd decoder init failed: {err}"))
     })?;
-    let mut archive = tar::Archive::new(decoder);
+    let mut archive = tar::Archive::new(LimitedReader::new(decoder, max_decoded_bytes));
 
     let mut manifest_bytes: Option<Vec<u8>> = None;
     let mut events_bytes: Option<Vec<u8>> = None;
@@ -113,10 +134,10 @@ pub fn read_bundle<R: Read>(
 
     let entries = archive
         .entries()
-        .map_err(|err| BundleError::InvalidArchive(format!("tar entries failed: {err}")))?;
+        .map_err(|err| archive_read_error(err, max_decoded_bytes, "tar entries failed"))?;
     for entry in entries {
         let mut entry = entry
-            .map_err(|err| BundleError::InvalidArchive(format!("tar entry read failed: {err}")))?;
+            .map_err(|err| archive_read_error(err, max_decoded_bytes, "tar entry read failed"))?;
         if !entry.header().entry_type().is_file() {
             continue;
         }
@@ -126,7 +147,9 @@ pub fn read_bundle<R: Read>(
             .to_path_buf();
         let path_str = path_to_unix(path);
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|err| archive_read_error(err, max_decoded_bytes, "tar entry payload"))?;
 
         match path_str.as_str() {
             "manifest.json" => manifest_bytes = Some(bytes),
@@ -231,6 +254,72 @@ pub(crate) fn parse_algorithm(value: &str) -> Result<HashAlgorithm, BundleError>
     }
 }
 
+/// Sentinel carried inside an [`std::io::Error`] when the decoded-byte budget is spent.
+#[derive(Debug)]
+struct DecodedSizeLimitExceeded;
+
+impl std::fmt::Display for DecodedSizeLimitExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("decompressed size limit exceeded")
+    }
+}
+
+impl std::error::Error for DecodedSizeLimitExceeded {}
+
+/// `Read` adapter that errors once more than `limit` total bytes have been pulled from the
+/// inner stream. Wrapping the zstd decoder with this caps a bundle's total decompressed size,
+/// so a small archive cannot expand without bound (the decompression-bomb guard).
+struct LimitedReader<R> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R> LimitedReader<R> {
+    fn new(inner: R, limit: u64) -> Self {
+        Self {
+            inner,
+            remaining: limit,
+        }
+    }
+}
+
+impl<R: Read> Read for LimitedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            // Budget spent: a clean end of stream still returns 0, but any further byte means
+            // the decompressed output exceeds the cap.
+            let mut probe = [0_u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    DecodedSizeLimitExceeded,
+                )),
+            };
+        }
+        let cap = std::cmp::min(buf.len() as u64, self.remaining) as usize;
+        let read = self.inner.read(&mut buf[..cap])?;
+        self.remaining -= read as u64;
+        Ok(read)
+    }
+}
+
+/// Maps an I/O error raised while reading the archive: the decoded-size sentinel becomes
+/// [`BundleError::BundleTooLarge`]; anything else becomes a contextual archive error.
+fn archive_read_error(err: std::io::Error, limit: u64, context: &str) -> BundleError {
+    if err
+        .get_ref()
+        .is_some_and(|inner| inner.downcast_ref::<DecodedSizeLimitExceeded>().is_some())
+    {
+        BundleError::BundleTooLarge(limit)
+    } else {
+        BundleError::InvalidArchive(format!("{context}: {err}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +386,39 @@ mod tests {
         assert_eq!(parsed.manifest.agef_version, manifest.agef_version);
         assert_eq!(parsed.events.len(), events.len());
         assert_eq!(parsed.objects.len(), 1);
+    }
+
+    #[test]
+    fn t_decompression_size_limit_rejected() {
+        let manifest = sample_manifest();
+        let events = vec![sample_event(0), sample_event(1)];
+        let object_hash = Hash::from_bytes(HashAlgorithm::Sha256, [0xAB; 32]);
+        let objects = HashMap::from([(object_hash, b"hello".to_vec())]);
+
+        let mut out = Vec::new();
+        write_bundle(
+            &mut out,
+            &manifest,
+            &events,
+            &objects,
+            &WriteBundleOptions::default(),
+        )
+        .expect("write");
+
+        // A tiny decoded-byte cap makes reading fail with BundleTooLarge rather than panic or
+        // exhaust memory: this is the decompression-bomb guard firing.
+        let err = read_bundle_limited(Cursor::new(out.clone()), &ReadBundleOptions::default(), 16)
+            .expect_err("tiny cap must reject");
+        assert!(
+            matches!(err, BundleError::BundleTooLarge(16)),
+            "expected BundleTooLarge(16), got {err:?}"
+        );
+
+        // The same bundle reads cleanly under the generous default cap.
+        assert!(
+            read_bundle(Cursor::new(out), &ReadBundleOptions::default()).is_ok(),
+            "a normal bundle must read under the default cap"
+        );
     }
 
     #[test]

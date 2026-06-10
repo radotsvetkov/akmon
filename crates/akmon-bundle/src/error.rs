@@ -62,4 +62,14 @@ pub enum BundleError {
     /// Bundle contains unknown non-normative files while strict mode is active.
     #[error("unknown file in bundle: {0}")]
     UnknownBundleFile(String),
+
+    /// The bundle's decompressed size exceeded the safety limit before it could be read.
+    ///
+    /// This guards against decompression bombs: a small `tar.zst` that expands to many
+    /// gigabytes and exhausts memory on the machine reading it (for example an auditor
+    /// running `agef-verify`). Raise the limit deliberately for legitimately large bundles.
+    #[error(
+        "bundle decompressed size exceeds the {0}-byte safety limit (possible decompression bomb)"
+    )]
+    BundleTooLarge(u64),
 }

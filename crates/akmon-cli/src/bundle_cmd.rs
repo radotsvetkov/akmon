@@ -885,6 +885,7 @@ pub(crate) fn bundle_read_bundle_error_category(err: &BundleError) -> &'static s
         BundleError::ObjectHashMismatch(_) => "object_hash_mismatch",
         BundleError::HeadMismatch { .. } => "head_mismatch",
         BundleError::UnknownBundleFile(_) => "unknown_bundle_file",
+        BundleError::BundleTooLarge(_) => "bundle_too_large",
     }
 }
 

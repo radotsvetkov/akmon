@@ -20,8 +20,8 @@ pub mod spki;
 pub mod verify;
 
 pub use archive::{
-    BundleContents, ReadBundleOptions, WriteBundleOptions, read_bundle, read_verified_bundle,
-    write_bundle,
+    BundleContents, DEFAULT_MAX_BUNDLE_DECODED_BYTES, ReadBundleOptions, WriteBundleOptions,
+    read_bundle, read_verified_bundle, write_bundle,
 };
 pub use capture::{OtelCaptureInfo, otel_capture_info};
 pub use error::BundleError;
