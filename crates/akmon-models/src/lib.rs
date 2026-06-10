@@ -17,6 +17,7 @@ mod openai_compat;
 mod provider_error;
 mod provider_resolution;
 mod stream;
+mod text;
 mod tool_def;
 
 use std::sync::Arc;

@@ -475,7 +475,7 @@ fn mask_key(k: &str) -> String {
     if k.len() <= 8 {
         "****".into()
     } else {
-        let prefix = &k[..8];
+        let prefix: String = k.chars().take(8).collect();
         format!("{prefix}****")
     }
 }

@@ -327,7 +327,10 @@ fn truncate_body(s: &str) -> String {
     if s.len() <= MAX {
         s.to_string()
     } else {
-        format!("{prefix}…", prefix = &s[..MAX])
+        format!(
+            "{prefix}…",
+            prefix = crate::text::truncate_at_char_boundary(s, MAX)
+        )
     }
 }
 

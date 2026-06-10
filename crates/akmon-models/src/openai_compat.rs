@@ -451,7 +451,10 @@ fn truncate(s: &str) -> String {
     if s.len() <= M {
         s.to_string()
     } else {
-        format!("{prefix}…", prefix = &s[..M])
+        format!(
+            "{prefix}…",
+            prefix = crate::text::truncate_at_char_boundary(s, M)
+        )
     }
 }
 

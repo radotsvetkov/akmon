@@ -628,7 +628,7 @@ async fn run_bedrock_response_stream(
             _ => ModelError::BackendUnavailable {
                 message: format!(
                     "HTTP {status}: {snippet}",
-                    snippet = &text[..text.len().min(512)]
+                    snippet = crate::text::truncate_at_char_boundary(&text, 512)
                 ),
             },
         };
