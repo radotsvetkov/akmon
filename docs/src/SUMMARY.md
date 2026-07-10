@@ -119,6 +119,7 @@ The bundled coding agent is the reference, gold-fidelity producer. Use it when y
 - [Configuration Reference](./reference/config.md)
 - [Tools Reference](./reference/tools.md)
 - [Environment Variables](./reference/env-vars.md)
+- [Release notes: v2.2.1](./releases/v2.2.1.md)
 - [Release notes: v2.2.0](./releases/v2.2.0.md)
 - [Release notes: v2.1.0](./releases/v2.1.0.md)
 - [Release notes: v2.0.0](./releases/v2.0.0.md)

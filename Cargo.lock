@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agef-verify"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-bundle",
  "akmon-journal",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-bundle"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-journal",
  "ciborium",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-cli"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-bundle",
  "akmon-config",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-config"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-core",
  "dirs 5.0.1",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-core"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "chrono",
  "dunce",
@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-diff"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-journal",
  "akmon-models",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-index"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-core",
  "bincode",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-journal"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-models"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-core",
  "akmon-journal",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-otel"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-journal",
  "hex",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-query"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-config",
  "akmon-core",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-replay"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-core",
  "akmon-journal",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-tools"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-core",
  "akmon-index",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "akmon-tui"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "akmon-config",
  "akmon-core",
