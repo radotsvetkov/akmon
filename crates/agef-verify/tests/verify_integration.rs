@@ -245,6 +245,80 @@ fn t_require_signature_without_key_fails() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+/// A signature that names a trusted key by `key_id` but no longer validates (a tampered signature
+/// byte, distinct from a tampered statement) is reported `invalid`, not `unverified_no_key`, and
+/// fails verification even without `--require-signature` (the entry claims a trusted key's
+/// authorship, so a mismatch is always a hard failure).
+#[test]
+fn t_tampered_signature_bytes_makes_matching_key_invalid() {
+    let dir = tempdir().expect("tempdir");
+    let bundle = dir.path().join("signed.akmon");
+    let key_file = dir.path().join("signer.pub.hex");
+    let mut contents = valid_bundle();
+    let pubkey_hex = sign_bundle_head(&mut contents);
+
+    // Flip a byte in the signature hex, leaving key_id (and everything else) untouched.
+    let sigs = contents.manifest.signatures.as_mut().expect("signatures");
+    let mut sig_bytes = hex::decode(&sigs[0].signature).expect("decode sig");
+    sig_bytes[0] ^= 0xFF;
+    sigs[0].signature = hex::encode(sig_bytes);
+
+    write_bundle_file(&bundle, &contents);
+    std::fs::write(&key_file, pubkey_hex).expect("write key");
+
+    let out = agef_verify_bin()
+        .arg(&bundle)
+        .args(["--format", "json"])
+        .arg("--verify-key")
+        .arg(&key_file)
+        .output()
+        .expect("run agef-verify");
+    assert_eq!(out.status.code(), Some(1));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(v.get("passed").and_then(|p| p.as_bool()), Some(false));
+    let sigs = v
+        .get("signatures")
+        .and_then(|x| x.as_array())
+        .expect("signatures");
+    assert_eq!(
+        sigs[0].get("outcome").and_then(|o| o.as_str()),
+        Some("invalid")
+    );
+}
+
+/// Signatures are additive manifest metadata outside the hash chain, so an intermediary can strip
+/// them without breaking integrity: a plain verify still passes (no signatures reported), while
+/// `--require-signature` is the only guard that catches the downgrade.
+#[test]
+fn t_stripped_signatures_pass_plain_verify_but_fail_require_signature() {
+    let dir = tempdir().expect("tempdir");
+    let bundle = dir.path().join("stripped.akmon");
+    let mut contents = valid_bundle();
+    let _ = sign_bundle_head(&mut contents);
+    contents.manifest.signatures = None;
+    write_bundle_file(&bundle, &contents);
+
+    let plain = agef_verify_bin()
+        .arg(&bundle)
+        .args(["--format", "json"])
+        .output()
+        .expect("run agef-verify");
+    assert_eq!(plain.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&plain.stdout).expect("json");
+    assert_eq!(v.get("passed").and_then(|p| p.as_bool()), Some(true));
+    assert_eq!(
+        v.get("signatures").and_then(|x| x.as_array()).map(Vec::len),
+        Some(0)
+    );
+
+    let required = agef_verify_bin()
+        .arg(&bundle)
+        .arg("--require-signature")
+        .output()
+        .expect("run agef-verify");
+    assert_eq!(required.status.code(), Some(1));
+}
+
 /// Builds a clean bundle whose `SessionStart` config object is an OTEL config object with the
 /// given `capture_level` (mirrors `akmon_otel::objects::config_object_bytes` byte shape; the
 /// importer is not needed — only the right object bytes matter to the verifier).

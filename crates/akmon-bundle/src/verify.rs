@@ -620,6 +620,106 @@ mod tests {
     }
 
     #[test]
+    fn t_invalid_manifest_head_detected() {
+        let mut contents = valid_bundle();
+        // Not a valid hex digest for the active algorithm at all.
+        contents.manifest.session.head = "not-a-hex-digest".to_owned();
+        let report = verify_bundle(&contents);
+        assert!(categories(&report).contains(&"invalid_manifest_head"));
+        assert!(matches!(
+            verify_bundle_strict(&contents),
+            Err(BundleError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn t_unsupported_hash_algorithm_detected() {
+        let mut contents = valid_bundle();
+        contents.manifest.hash_algorithm = "md5".to_owned();
+        let report = verify_bundle(&contents);
+        assert!(categories(&report).contains(&"unsupported_hash_algorithm"));
+        assert!(matches!(
+            verify_bundle_strict(&contents),
+            Err(BundleError::UnsupportedHashAlgorithm(_))
+        ));
+    }
+
+    #[test]
+    fn t_session_end_duplicate_detected() {
+        let mut contents = valid_bundle();
+        // Append a second SessionEnd chained onto the first.
+        let terminal_hash = contents.events[1].content_hash(algo()).expect("hash");
+        contents.events.push(Event {
+            parents: vec![terminal_hash.clone()],
+            kind: EventKind::SessionEnd { summary_hash: None },
+            emitted_at: ts(1_700_000_002),
+            sequence: 2,
+        });
+        contents.manifest.event_count = 3;
+        let new_terminal = contents.events[2].content_hash(algo()).expect("hash");
+        contents.manifest.session.head = new_terminal.to_hex();
+
+        let report = verify_bundle(&contents);
+        assert!(categories(&report).contains(&"session_end_duplicate"));
+    }
+
+    #[test]
+    fn t_session_end_not_terminal_detected() {
+        let mut contents = valid_bundle();
+        // Append a non-SessionEnd event after the single SessionEnd, so it is no longer terminal.
+        let terminal_hash = contents.events[1].content_hash(algo()).expect("hash");
+        let (cwd_hash, cwd_bytes) = object(0x33);
+        let (config_hash, config_bytes) = object(0x34);
+        contents.objects.insert(cwd_hash.clone(), cwd_bytes);
+        contents.objects.insert(config_hash.clone(), config_bytes);
+        contents.events.push(Event {
+            parents: vec![terminal_hash.clone()],
+            kind: EventKind::SessionStart {
+                cwd_hash,
+                config_hash,
+            },
+            emitted_at: ts(1_700_000_002),
+            sequence: 2,
+        });
+        contents.manifest.event_count = 3;
+        contents.manifest.object_count = 4;
+        let new_terminal = contents.events[2].content_hash(algo()).expect("hash");
+        contents.manifest.session.head = new_terminal.to_hex();
+
+        let report = verify_bundle(&contents);
+        assert!(categories(&report).contains(&"session_end_not_terminal"));
+    }
+
+    #[test]
+    fn t_first_event_not_session_start_detected() {
+        let mut contents = valid_bundle();
+        // Swap the first event's kind to SessionEnd instead of SessionStart.
+        contents.events[0].kind = EventKind::SessionEnd { summary_hash: None };
+
+        let report = verify_bundle(&contents);
+        assert!(categories(&report).contains(&"broken_parent_chain"));
+    }
+
+    #[test]
+    fn t_read_verified_bundle_rejects_tampered_bundle() {
+        let mut contents = valid_bundle();
+        contents.manifest.event_count = 99;
+        let mut out = Vec::new();
+        write_bundle(
+            &mut out,
+            &contents.manifest,
+            &contents.events,
+            &contents.objects,
+            &WriteBundleOptions::default(),
+        )
+        .expect("write");
+
+        let err = read_verified_bundle(Cursor::new(out), &ReadBundleOptions::default())
+            .expect_err("tampered bundle must fail the safe-by-default reader");
+        assert!(matches!(err, BundleError::InvalidManifest(_)));
+    }
+
+    #[test]
     fn t_read_verified_bundle_round_trip_ok() {
         let contents = valid_bundle();
         let mut out = Vec::new();
