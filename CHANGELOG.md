@@ -19,6 +19,22 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Decompression-bomb guard on bundle reads.** `read_bundle` now caps total decompressed bytes pulled from the `tar.zst` stream (`DEFAULT_MAX_BUNDLE_DECODED_BYTES`, 1 GiB), so a small malicious `.akmon` archive can no longer expand without bound and exhaust memory on the machine verifying it (`akmon bundle verify`, `agef-verify`). The cap fails closed with a new `BundleError::BundleTooLarge`.
+- **Unbounded stream-reassembly buffers on provider responses.** The Anthropic, OpenAI-compatible, and Ollama SSE/NDJSON readers, and the Bedrock event-stream frame reader, now cap how much they will buffer while waiting for a delimiter (64 MiB), instead of growing without bound against a broken or hostile endpoint. The Bedrock reader additionally rejects an out-of-range claimed frame length as soon as the 4-byte header is read.
+- **Crash on non-ASCII provider error bodies.** Provider HTTP error-body truncation (Anthropic, OpenAI-compatible, Bedrock) and the config key masker sliced at a fixed byte offset, which panicked when the offset landed inside a multi-byte UTF-8 codepoint. Truncation is now always char-boundary-safe.
+- **Git tool subprocess reliability.** Several git subcommands (including the whole auto-commit-after-write path) ran with no timeout at all; the one path that did have a timeout never killed the child process when it fired, leaking both the process and a runtime thread. All git invocations now share a single async, timeout-guarded runner that kills the child on timeout.
+
+### Changed
+
+- **`akmon bundle verify` and `agef-verify` now share one implementation of the report shape and pass/fail policy** (`akmon_bundle::report`), eliminating ~720 lines of duplicated trust-decision logic that could previously drift between the two binaries. Output is unchanged; behavior is now guaranteed identical by construction rather than by convention.
+- Removed unused TUI scaffolding and stale `#[allow(dead_code)]` suppressions that were masking live code.
+
+### Notes
+
+- Trust-critical rejection paths (invalid signature against a trusted key, tampered operator attestation, `--require-operator-key`, signature stripping) are now exercised end to end through both verifier binaries, not only as library unit tests.
+
 ## [2.2.0] - 2026-06-06
 
 ### Added
