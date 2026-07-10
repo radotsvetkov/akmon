@@ -30,15 +30,6 @@ pub fn terminal_too_small(area: Rect) -> bool {
     area.width < MIN_TERM_WIDTH || area.height < MIN_TERM_HEIGHT
 }
 
-/// Inner height from newline count only (clamped 3–8). The live TUI uses wrap-aware sizing in `runner`.
-#[must_use]
-#[allow(dead_code)]
-pub fn input_inner_height(buffer: &str) -> u16 {
-    let logical_lines = buffer.matches('\n').count().saturating_add(1);
-    let with_pad = logical_lines.saturating_add(2);
-    (with_pad.clamp(3, 8)) as u16
-}
-
 /// Total outer height of the input block including top and bottom borders.
 #[must_use]
 pub fn input_block_outer_height(inner_lines: u16) -> u16 {
@@ -170,13 +161,6 @@ mod tests {
             "expected autocomplete stack to reduce viewport height"
         );
         assert!(with_ac.slash_autocomplete.is_some());
-    }
-
-    #[test]
-    fn input_inner_clamped() {
-        assert_eq!(input_inner_height(""), 3);
-        let many = "\n".repeat(20);
-        assert_eq!(input_inner_height(&many), 8);
     }
 
     #[test]

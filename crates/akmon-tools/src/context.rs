@@ -21,8 +21,6 @@ pub fn project_hash_for_root(root: &Path) -> String {
 /// Tools interact only through methods on this type; internals are not exposed.
 pub struct ToolContext {
     sandbox: Sandbox,
-    /// Held for upcoming policy pre-checks; not read in the file-tools slice.
-    #[allow(dead_code)]
     policy: Arc<PolicyEngine>,
     session_id: Uuid,
     interactive: bool,

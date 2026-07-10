@@ -68,7 +68,6 @@ pub trait AttemptObserver: Send + Sync {
 /// A mutex is required around the graph because [`LlmProvider::complete`] takes `&self` while
 /// [`SessionGraph::append`] requires `&mut self`. The graph lock is held briefly per append and
 /// never across awaits while consuming the inner provider stream.
-#[allow(dead_code)]
 pub struct JournalingProvider<P, S, G>
 where
     P: LlmProvider,
@@ -612,13 +611,11 @@ fn append_provider_call<G: SessionGraph>(
 ///
 /// Implements [`AttemptObserver`], buffering attempts in an internal mutex-protected
 /// vector. The wrapper drains this buffer after the inner stream terminates.
-#[allow(dead_code)]
 struct AttemptCollector<S: ObjectStore> {
     store: Arc<S>,
     attempts: Mutex<Vec<AttemptRecord>>,
 }
 
-#[allow(dead_code)]
 impl<S: ObjectStore> AttemptCollector<S> {
     fn new(store: Arc<S>) -> Self {
         Self {
@@ -637,6 +634,7 @@ impl<S: ObjectStore> AttemptCollector<S> {
     }
 
     /// Returns the current buffered attempt count.
+    #[cfg(test)]
     fn len(&self) -> usize {
         let guard = self.attempts.lock().unwrap_or_else(|poisoned| {
             // Recover from poisoning so callers can still inspect state.

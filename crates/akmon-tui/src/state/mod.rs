@@ -1,15 +1,12 @@
-//! Sub-state for viewport scrolling, input, spinner, and overlays.
+//! Sub-state for compose overlays, dialogs, and provider runtime.
 
 pub mod agent_display;
 pub mod composer;
 pub mod config_overlay;
 pub mod dialog;
-pub mod input;
 pub mod overlay_state;
 pub mod provider_runtime;
 pub mod session_telemetry;
-pub mod spinner;
-pub mod viewport;
 
 pub use agent_display::AgentDisplayState;
 pub use composer::ComposerState;
