@@ -1,7 +1,7 @@
 //! Native `git` tool: structured status, diff, log, and safe mutating commands inside the sandbox.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use akmon_core::{AuditEvent, Sandbox};
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use regex::Regex;
 use serde_json::{Value as JsonValue, json};
-use tokio::task::JoinHandle;
+use tokio::process::Command as TokioCommand;
 
 use crate::Tool;
 use crate::context::ToolContext;
@@ -34,29 +34,40 @@ const DISALLOWED: &[&str] = &[
     "filter-branch",
 ];
 
-/// Runs git in `root` with non-interactive env; returns stdout as UTF-8 lossy string.
-fn run_git_output(root: &Path, args: &[&str]) -> Result<std::process::Output, std::io::Error> {
-    let mut cmd = Command::new("git");
-    cmd.args(args)
+/// Runs git in `root` with non-interactive env and a wall-clock timeout.
+async fn run_git(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    run_command_with_timeout("git", root, args, Duration::from_secs(GIT_TIMEOUT_SECS)).await
+}
+
+/// Runs `program` in `root` with non-interactive env and `timeout`.
+///
+/// Drives the child through `tokio::process` with `kill_on_drop(true)`: when the timeout
+/// elapses, `tokio::time::timeout` drops the in-flight output future, which drops the child
+/// handle and kills it. Without this a stuck git process (a stale lock file, a stalled network
+/// mount) would leak both the process and a blocking-pool thread indefinitely.
+///
+/// Takes `program` and `timeout` as parameters (rather than hardcoding `"git"` and
+/// [`GIT_TIMEOUT_SECS`]) so the timeout/kill behavior itself can be exercised deterministically
+/// in tests without waiting out a real multi-second hang.
+async fn run_command_with_timeout(
+    program: &str,
+    root: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let output = TokioCommand::new(program)
+        .args(args)
         .current_dir(root)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "echo")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    cmd.output()
-}
-
-async fn run_git_timeout(root: PathBuf, args: Vec<String>) -> Result<std::process::Output, String> {
-    let join: JoinHandle<std::io::Result<std::process::Output>> =
-        tokio::task::spawn_blocking(move || {
-            let argv_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            run_git_output(&root, &argv_refs)
-        });
-    match tokio::time::timeout(Duration::from_secs(GIT_TIMEOUT_SECS), join).await {
-        Ok(Ok(Ok(o))) => Ok(o),
-        Ok(Ok(Err(e))) => Err(format!("git I/O error: {e}")),
-        Ok(Err(e)) => Err(format!("git task join: {e}")),
-        Err(_) => Err(format!("git timed out after {GIT_TIMEOUT_SECS}s")),
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(timeout, output).await {
+        Ok(Ok(o)) => Ok(o),
+        Ok(Err(e)) => Err(format!("git I/O error: {e}")),
+        Err(_) => Err(format!("git timed out after {timeout:?}")),
     }
 }
 
@@ -152,7 +163,7 @@ fn validate_git_argv(ctx: &ToolContext, argv: &[String]) -> Result<(), ToolOutpu
 /// After a successful `edit` or `write_file`, stage and commit the touched file (best-effort).
 ///
 /// Returns an [`AuditEvent::AgentStep`] when a commit was created or when a failure should be recorded.
-pub fn try_auto_commit_after_file_tool(
+pub async fn try_auto_commit_after_file_tool(
     sandbox: &Sandbox,
     session_id: &str,
     tool_name: &str,
@@ -193,7 +204,7 @@ pub fn try_auto_commit_after_file_tool(
     };
     let message = format!("akmon: {tool_name} {msg_tail}");
 
-    let add_out = match run_git_output(root, &["add", "--", path]) {
+    let add_out = match run_git(root, &["add", "--", path]).await {
         Ok(o) => o,
         Err(e) => {
             return Some(AuditEvent::AgentStep {
@@ -212,7 +223,7 @@ pub fn try_auto_commit_after_file_tool(
         });
     }
 
-    let commit_out = match run_git_output(root, &["commit", "-m", &message]) {
+    let commit_out = match run_git(root, &["commit", "-m", &message]).await {
         Ok(o) => o,
         Err(e) => {
             return Some(AuditEvent::AgentStep {
@@ -231,7 +242,9 @@ pub fn try_auto_commit_after_file_tool(
         });
     }
 
-    let hash_out = run_git_output(root, &["rev-parse", "--short", "HEAD"]).ok()?;
+    let hash_out = run_git(root, &["rev-parse", "--short", "HEAD"])
+        .await
+        .ok()?;
     let hash = String::from_utf8_lossy(&hash_out.stdout).trim().to_string();
     Some(AuditEvent::AgentStep {
         session_id: session_id.to_string(),
@@ -246,11 +259,11 @@ fn collapse_for_message(s: &str) -> String {
     t.chars().take(60).collect()
 }
 
-fn parse_diff_stat(root: &Path, diff_args: &[String]) -> (u32, u32, u32) {
+async fn parse_diff_stat(root: &Path, diff_args: &[String]) -> (u32, u32, u32) {
     let mut cmd_args = vec!["diff".to_string(), "--stat".to_string()];
     cmd_args.extend(diff_args.iter().cloned());
     let argv_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
-    let Ok(out) = run_git_output(root, &argv_refs) else {
+    let Ok(out) = run_git(root, &argv_refs).await else {
         return (0, 0, 0);
     };
     let text = String::from_utf8_lossy(&out.stdout);
@@ -337,10 +350,10 @@ impl Tool for GitTool {
         let argv = json_string_array(args.get("args").unwrap_or(&JsonValue::Null));
 
         match sub {
-            "status" => match run_git_output(&root, &["status", "--porcelain=v1"]) {
+            "status" => match run_git(&root, &["status", "--porcelain=v1"]).await {
                 Ok(out) => {
                     let porcelain = String::from_utf8_lossy(&out.stdout);
-                    let branch_out = run_git_output(&root, &["branch", "--show-current"]).ok();
+                    let branch_out = run_git(&root, &["branch", "--show-current"]).await.ok();
                     let branch = branch_out
                         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                         .filter(|s| !s.is_empty())
@@ -393,8 +406,9 @@ impl Tool for GitTool {
                 }
                 let mut gargs = vec!["diff".to_string()];
                 gargs.extend(argv.clone());
-                let stat = parse_diff_stat(&root, &argv);
-                let out = match run_git_timeout(root.clone(), gargs.clone()).await {
+                let stat = parse_diff_stat(&root, &argv).await;
+                let gargs_refs: Vec<&str> = gargs.iter().map(String::as_str).collect();
+                let out = match run_git(&root, &gargs_refs).await {
                     Ok(o) => o,
                     Err(e) => {
                         return ToolOutput::Error {
@@ -441,7 +455,8 @@ impl Tool for GitTool {
                 } else {
                     gargs.extend(argv.clone());
                 }
-                let out = match run_git_timeout(root.clone(), gargs.clone()).await {
+                let gargs_refs: Vec<&str> = gargs.iter().map(String::as_str).collect();
+                let out = match run_git(&root, &gargs_refs).await {
                     Ok(o) => o,
                     Err(e) => {
                         return ToolOutput::Error {
@@ -493,7 +508,8 @@ impl Tool for GitTool {
                 }
                 let mut gargs = vec!["add".to_string()];
                 gargs.extend(argv.clone());
-                let out = match run_git_timeout(root.clone(), gargs).await {
+                let gargs_refs: Vec<&str> = gargs.iter().map(String::as_str).collect();
+                let out = match run_git(&root, &gargs_refs).await {
                     Ok(o) => o,
                     Err(e) => {
                         return ToolOutput::Error {
@@ -526,7 +542,7 @@ impl Tool for GitTool {
                         };
                     }
                 };
-                let st = match run_git_output(&root, &["status", "--porcelain"]) {
+                let st = match run_git(&root, &["status", "--porcelain"]).await {
                     Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
                     Err(e) => {
                         return ToolOutput::Error {
@@ -552,12 +568,7 @@ impl Tool for GitTool {
                         ),
                     };
                 }
-                let out = match run_git_timeout(
-                    root.clone(),
-                    vec!["commit".into(), "-m".into(), msg.clone()],
-                )
-                .await
-                {
+                let out = match run_git(&root, &["commit", "-m", &msg]).await {
                     Ok(o) => o,
                     Err(e) => {
                         return ToolOutput::Error {
@@ -572,15 +583,15 @@ impl Tool for GitTool {
                         message: e,
                     };
                 }
-                let hash_out = run_git_output(&root, &["rev-parse", "--short", "HEAD"]).ok();
+                let hash_out = run_git(&root, &["rev-parse", "--short", "HEAD"]).await.ok();
                 let hash = hash_out
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .unwrap_or_default();
-                let br = run_git_output(&root, &["branch", "--show-current"]).ok();
+                let br = run_git(&root, &["branch", "--show-current"]).await.ok();
                 let branch = br
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .unwrap_or_default();
-                let stat = parse_diff_stat(&root, &["HEAD~1".into(), "HEAD".into()]);
+                let stat = parse_diff_stat(&root, &["HEAD~1".into(), "HEAD".into()]).await;
                 let (fc, ins, del) = stat;
                 ToolOutput::Success {
                     content: serde_json::to_string_pretty(&json!({
@@ -597,7 +608,8 @@ impl Tool for GitTool {
             "branch" => {
                 let mut gargs = vec!["branch".to_string()];
                 gargs.extend(argv.clone());
-                let out = match run_git_timeout(root.clone(), gargs).await {
+                let gargs_refs: Vec<&str> = gargs.iter().map(String::as_str).collect();
+                let out = match run_git(&root, &gargs_refs).await {
                     Ok(o) => o,
                     Err(e) => {
                         return ToolOutput::Error {
@@ -616,7 +628,7 @@ impl Tool for GitTool {
                     }
                 };
                 if argv.is_empty() {
-                    let cur_out = run_git_output(&root, &["branch", "--show-current"]).ok();
+                    let cur_out = run_git(&root, &["branch", "--show-current"]).await.ok();
                     let current = cur_out
                         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                         .unwrap_or_default();
@@ -664,7 +676,8 @@ impl Tool for GitTool {
             "stash" => {
                 let mut gargs = vec!["stash".to_string()];
                 gargs.extend(argv.clone());
-                let out = match run_git_timeout(root.clone(), gargs).await {
+                let gargs_refs: Vec<&str> = gargs.iter().map(String::as_str).collect();
+                let out = match run_git(&root, &gargs_refs).await {
                     Ok(o) => o,
                     Err(e) => {
                         return ToolOutput::Error {
@@ -702,7 +715,8 @@ impl Tool for GitTool {
                 } else {
                     gargs.extend(argv.clone());
                 }
-                let out = match run_git_timeout(root.clone(), gargs.clone()).await {
+                let gargs_refs: Vec<&str> = gargs.iter().map(String::as_str).collect();
+                let out = match run_git(&root, &gargs_refs).await {
                     Ok(o) => o,
                     Err(e) => {
                         return ToolOutput::Error {
@@ -755,7 +769,8 @@ impl Tool for GitTool {
                 }
                 let mut gargs = vec!["restore".to_string()];
                 gargs.extend(argv.clone());
-                let out = match run_git_timeout(root.clone(), gargs).await {
+                let gargs_refs: Vec<&str> = gargs.iter().map(String::as_str).collect();
+                let out = match run_git(&root, &gargs_refs).await {
                     Ok(o) => o,
                     Err(e) => {
                         return ToolOutput::Error {
@@ -792,15 +807,21 @@ mod tests {
     use akmon_core::PolicyEngine;
     use serde_json::json;
 
-    fn repo_with_commit() -> tempfile::TempDir {
+    async fn repo_with_commit() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tmp");
         let root = dir.path();
-        let _ = run_git_output(root, &["init"]).expect("init");
-        let _ = run_git_output(root, &["config", "user.email", "t@t"]).expect("cfg");
-        let _ = run_git_output(root, &["config", "user.name", "t"]).expect("cfg");
+        let _ = run_git(root, &["init"]).await.expect("init");
+        let _ = run_git(root, &["config", "user.email", "t@t"])
+            .await
+            .expect("cfg");
+        let _ = run_git(root, &["config", "user.name", "t"])
+            .await
+            .expect("cfg");
         std::fs::write(root.join("f.txt"), "a\n").expect("w");
-        let _ = run_git_output(root, &["add", "f.txt"]).expect("add");
-        let _ = run_git_output(root, &["commit", "-m", "init"]).expect("commit");
+        let _ = run_git(root, &["add", "f.txt"]).await.expect("add");
+        let _ = run_git(root, &["commit", "-m", "init"])
+            .await
+            .expect("commit");
         dir
     }
 
@@ -813,7 +834,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_status_structured_json() {
-        let dir = repo_with_commit();
+        let dir = repo_with_commit().await;
         let t = GitTool::new();
         let out = t
             .execute(json!({"subcommand": "status"}), &ctx(dir.path()))
@@ -827,7 +848,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_diff_returns_text() {
-        let dir = repo_with_commit();
+        let dir = repo_with_commit().await;
         std::fs::write(dir.path().join("f.txt"), "b\n").expect("w");
         let t = GitTool::new();
         let out = t
@@ -841,7 +862,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_log_defaults_to_ten_lines() {
-        let dir = repo_with_commit();
+        let dir = repo_with_commit().await;
         let t = GitTool::new();
         let out = t
             .execute(json!({"subcommand": "log"}), &ctx(dir.path()))
@@ -854,7 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_add_rejects_patch_mode() {
-        let dir = repo_with_commit();
+        let dir = repo_with_commit().await;
         let t = GitTool::new();
         let out = t
             .execute(
@@ -870,7 +891,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_commit_requires_message() {
-        let dir = repo_with_commit();
+        let dir = repo_with_commit().await;
         let t = GitTool::new();
         let out = t
             .execute(json!({"subcommand": "commit"}), &ctx(dir.path()))
@@ -883,7 +904,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_commit_nothing_staged_errors() {
-        let dir = repo_with_commit();
+        let dir = repo_with_commit().await;
         let t = GitTool::new();
         let out = t
             .execute(
@@ -899,7 +920,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_push_disallowed() {
-        let dir = repo_with_commit();
+        let dir = repo_with_commit().await;
         let t = GitTool::new();
         let out = t
             .execute(json!({"subcommand": "push"}), &ctx(dir.path()))
@@ -912,7 +933,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_add_validates_sandbox_path() {
-        let dir = repo_with_commit();
+        let dir = repo_with_commit().await;
         let t = GitTool::new();
         let out = t
             .execute(
@@ -923,13 +944,17 @@ mod tests {
         assert!(matches!(out, ToolOutput::Error { .. }));
     }
 
-    #[test]
-    fn auto_commit_creates_commit_after_write() {
+    #[tokio::test]
+    async fn auto_commit_creates_commit_after_write() {
         let dir = tempfile::tempdir().expect("tmp");
         let root = dir.path();
-        let _ = run_git_output(root, &["init"]).expect("init");
-        let _ = run_git_output(root, &["config", "user.email", "t@t"]).expect("cfg");
-        let _ = run_git_output(root, &["config", "user.name", "t"]).expect("cfg");
+        let _ = run_git(root, &["init"]).await.expect("init");
+        let _ = run_git(root, &["config", "user.email", "t@t"])
+            .await
+            .expect("cfg");
+        let _ = run_git(root, &["config", "user.name", "t"])
+            .await
+            .expect("cfg");
         std::fs::write(root.join("a.rs"), "//x\n").expect("w");
         let sandbox = akmon_core::Sandbox::with_git_root(root.to_path_buf(), true);
         let ev = try_auto_commit_after_file_tool(
@@ -937,10 +962,87 @@ mod tests {
             "sid",
             "write_file",
             &json!({"path": "a.rs"}),
-        );
+        )
+        .await;
         assert!(ev.is_some());
-        let log = run_git_output(root, &["log", "--oneline", "-1"]).expect("log");
+        let log = run_git(root, &["log", "--oneline", "-1"])
+            .await
+            .expect("log");
         let s = String::from_utf8_lossy(&log.stdout);
         assert!(s.contains("akmon:"));
+    }
+
+    /// A child that outlives the timeout is actually killed, not merely abandoned: a stuck git
+    /// process must not leak a process or a runtime worker. Uses a fake "git" binary (a shell
+    /// script that records its own pid, then sleeps far longer than the test's timeout) so this
+    /// is deterministic and fast instead of waiting out a real multi-second hang.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_child_is_killed_not_leaked() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let script = dir.path().join("slow-git");
+        let pid_file = dir.path().join("pid");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho $$ > {}\nsleep 30\n", pid_file.display()),
+        )
+        .expect("write script");
+        let mut perms = std::fs::metadata(&script).expect("meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+
+        // 2s is generous relative to `sh` fork/exec latency even under a fully parallel test
+        // run, while staying far shorter than the script's 30s sleep, so the timeout branch
+        // fires deterministically rather than racing process-startup scheduling delays.
+        let script_path = script.to_string_lossy().to_string();
+        let result =
+            run_command_with_timeout(&script_path, dir.path(), &[], Duration::from_secs(2)).await;
+        assert!(
+            matches!(&result, Err(e) if e.contains("timed out")),
+            "expected a timeout error, got {result:?}"
+        );
+
+        let pid = poll_until_ok(Duration::from_secs(5), || {
+            std::fs::read_to_string(&pid_file)
+        })
+        .await
+        .expect("script must have written its pid before being killed");
+        let pid = pid.trim().to_string();
+
+        // Poll rather than a fixed sleep: robust to a slow reaper under load without wasting
+        // time in the common fast case. Signal 0 only checks existence (no signal delivered).
+        let gone = poll_until_ok(Duration::from_secs(5), || {
+            let still_alive = std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if still_alive { Err(()) } else { Ok(()) }
+        })
+        .await;
+        assert!(
+            gone.is_some(),
+            "child pid {pid} should have been killed on timeout"
+        );
+    }
+
+    /// Polls `f` every 50ms until it returns `Ok`, or gives up after `budget` and returns `None`.
+    #[cfg(unix)]
+    async fn poll_until_ok<T, E>(
+        budget: Duration,
+        mut f: impl FnMut() -> Result<T, E>,
+    ) -> Option<T> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            if let Ok(v) = f() {
+                return Some(v);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }

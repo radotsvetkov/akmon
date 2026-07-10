@@ -2317,6 +2317,7 @@ Complete and verify the current file(s), then continue in the next turn.";
                         &tool_result.tool_name,
                         &tool_result.arguments,
                     )
+                    .await
                 {
                     self.audit_log.push(ev);
                 }
