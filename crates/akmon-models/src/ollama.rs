@@ -100,6 +100,13 @@ struct OllamaApiMessage<'a> {
     content: &'a str,
 }
 
+/// Cap on the line-reassembly buffer while waiting for a newline delimiter.
+///
+/// A legitimate NDJSON chat line stays far under this; a broken or hostile endpoint that never
+/// sends a newline would otherwise grow the buffer without bound (a streaming
+/// decompression-bomb: memory exhaustion instead of a hang).
+const MAX_LINE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+
 pin_project! {
     /// Incrementally splits a byte stream into newline-terminated UTF-8 lines.
     ///
@@ -109,6 +116,7 @@ pin_project! {
         #[pin]
         source: S,
         buffer: String,
+        max_buffer_bytes: usize,
     }
 }
 
@@ -118,12 +126,28 @@ impl<S> OllamaLineDemux<S> {
         Self {
             source,
             buffer: String::new(),
+            max_buffer_bytes: MAX_LINE_BUFFER_BYTES,
         }
     }
 
     /// Same as [`OllamaLineDemux::new`] but seeds `buffer` (e.g. after a partial read).
     pub(crate) fn with_buffer(source: S, buffer: String) -> Self {
-        Self { source, buffer }
+        Self {
+            source,
+            buffer,
+            max_buffer_bytes: MAX_LINE_BUFFER_BYTES,
+        }
+    }
+
+    /// Same as [`OllamaLineDemux::new`] but with an explicit buffer cap, so the decompression-
+    /// bomb guard can be tested with a tiny limit instead of a real 64MiB buffer.
+    #[cfg(test)]
+    pub(crate) fn with_capacity_cap(source: S, max_buffer_bytes: usize) -> Self {
+        Self {
+            source,
+            buffer: String::new(),
+            max_buffer_bytes,
+        }
     }
 }
 
@@ -159,6 +183,14 @@ where
                 }
                 Some(Ok(bytes)) => {
                     this.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    if this.buffer.len() > *this.max_buffer_bytes {
+                        return Poll::Ready(Some(Err(ModelError::StreamInterrupted {
+                            message: format!(
+                                "line buffer exceeded {}MiB without a newline (malformed or hostile stream)",
+                                *this.max_buffer_bytes / (1024 * 1024)
+                            ),
+                        })));
+                    }
                 }
             }
         }
@@ -1629,6 +1661,20 @@ mod tests {
         let b = OllamaBackend::new("http://127.0.0.1:11434///", "llama3.2");
         assert_eq!(b.base_url(), "http://127.0.0.1:11434");
         assert_eq!(b.model(), "llama3.2");
+    }
+
+    /// A stream that never sends a newline is rejected once the buffer crosses the cap, instead
+    /// of growing without bound: the decompression-bomb guard for NDJSON line reassembly.
+    #[tokio::test]
+    async fn line_buffer_exceeding_cap_is_rejected() {
+        let chunks: Vec<Result<Bytes, reqwest::Error>> =
+            (0..4).map(|_| Ok(Bytes::from(vec![b'x'; 32]))).collect();
+        let mut demux = OllamaLineDemux::with_capacity_cap(stream::iter(chunks), 64);
+        let result = demux.next().await;
+        assert!(
+            matches!(&result, Some(Err(ModelError::StreamInterrupted { message })) if message.contains("exceeded")),
+            "expected a cap-exceeded error, got {result:?}"
+        );
     }
 
     #[test]

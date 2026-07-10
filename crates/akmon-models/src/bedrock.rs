@@ -437,6 +437,14 @@ fn accumulate_response(event: &StreamEvent, response: &mut BedrockSynthesizedRes
     }
 }
 
+/// Cap on a single Bedrock event-stream frame's claimed length.
+///
+/// The 4-byte length prefix is read directly off the wire with no other bound; without a cap, a
+/// malicious or broken endpoint could claim a length near `u32::MAX` and have the client wait
+/// indefinitely while accumulating whatever bytes actually arrive. A real Bedrock frame (even a
+/// large tool-call payload) stays far under this.
+const MAX_BEDROCK_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
 async fn read_next_frame<S>(
     acc: &mut Vec<u8>,
     stream: &mut S,
@@ -444,9 +452,30 @@ async fn read_next_frame<S>(
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
 {
+    read_next_frame_capped(acc, stream, MAX_BEDROCK_FRAME_BYTES).await
+}
+
+/// Like [`read_next_frame`], but with an explicit frame-length cap so the guard can be tested
+/// with a tiny limit instead of a real 64MiB frame.
+async fn read_next_frame_capped<S>(
+    acc: &mut Vec<u8>,
+    stream: &mut S,
+    max_frame_bytes: usize,
+) -> Result<Option<Vec<u8>>, ModelError>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+{
     loop {
         if acc.len() >= 4 {
             let total = u32::from_be_bytes([acc[0], acc[1], acc[2], acc[3]]) as usize;
+            if total > max_frame_bytes {
+                return Err(ModelError::StreamInterrupted {
+                    message: format!(
+                        "Bedrock frame claims {total} bytes, exceeding the {}MiB cap (malformed or hostile stream)",
+                        max_frame_bytes / (1024 * 1024)
+                    ),
+                });
+            }
             let need = 4 + total;
             if acc.len() >= need {
                 let frame = acc[..need].to_vec();
@@ -1020,6 +1049,23 @@ mod tests {
         frame.extend_from_slice(&(body_len as u32).to_be_bytes());
         frame.extend_from_slice(&body);
         frame
+    }
+
+    /// A claimed frame length past the cap is rejected as soon as the 4-byte header is read,
+    /// without waiting for any body bytes to arrive: this is the decompression-bomb guard for
+    /// the Bedrock event stream (a malicious length prefix, not just a slow/broken server).
+    #[tokio::test]
+    async fn frame_length_exceeding_cap_is_rejected_immediately() {
+        let claimed_len: u32 = 1_000_000;
+        let header: Vec<Result<Bytes, reqwest::Error>> =
+            vec![Ok(Bytes::from(claimed_len.to_be_bytes().to_vec()))];
+        let mut stream = futures::stream::iter(header);
+        let mut acc: Vec<u8> = Vec::new();
+        let result = read_next_frame_capped(&mut acc, &mut stream, 16).await;
+        assert!(
+            matches!(&result, Err(ModelError::StreamInterrupted { message }) if message.contains("exceeding")),
+            "expected a cap-exceeded error, got {result:?}"
+        );
     }
 
     #[test]

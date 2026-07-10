@@ -648,9 +648,29 @@ fn sse_block_to_json(block: &str) -> Result<Option<Value>, ModelError> {
         })
 }
 
+/// Cap on the SSE reassembly buffer while waiting for a `\n\n` event delimiter.
+///
+/// A legitimate provider response, even a large tool-call payload, stays far under this; a
+/// broken or hostile endpoint that never sends a delimiter would otherwise grow `buf` without
+/// bound (a streaming decompression-bomb: memory exhaustion instead of a hang).
+const MAX_SSE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+
 async fn read_next_sse_event<S>(
     buf: &mut String,
     stream: &mut S,
+) -> Result<Option<String>, ModelError>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+{
+    read_next_sse_event_capped(buf, stream, MAX_SSE_BUFFER_BYTES).await
+}
+
+/// Like [`read_next_sse_event`], but with an explicit buffer cap so the guard can be tested with
+/// a tiny limit instead of a real 64MiB buffer.
+async fn read_next_sse_event_capped<S>(
+    buf: &mut String,
+    stream: &mut S,
+    max_buffer_bytes: usize,
 ) -> Result<Option<String>, ModelError>
 where
     S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
@@ -674,7 +694,17 @@ where
                 return Ok(Some(trimmed.to_string()));
             }
             Some(Err(e)) => return Err(map_stream_err(e)),
-            Some(Ok(bytes)) => buf.push_str(&String::from_utf8_lossy(&bytes)),
+            Some(Ok(bytes)) => {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                if buf.len() > max_buffer_bytes {
+                    return Err(ModelError::StreamInterrupted {
+                        message: format!(
+                            "SSE buffer exceeded {}MiB without a complete event (malformed or hostile stream)",
+                            max_buffer_bytes / (1024 * 1024)
+                        ),
+                    });
+                }
+            }
         }
     }
 }
@@ -1449,6 +1479,21 @@ mod tests {
              data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":1,\"completion_tokens\":1,\"prompt_tokens_details\":{{\"cached_tokens\":0}}}}}}\n\n\
              data: [DONE]\n\n"
         )
+    }
+
+    /// A stream that never sends the `\n\n` delimiter is rejected once the buffer crosses the
+    /// cap, instead of growing without bound: the decompression-bomb guard for SSE reassembly.
+    #[tokio::test]
+    async fn sse_buffer_exceeding_cap_is_rejected() {
+        let chunks: Vec<Result<Bytes, reqwest::Error>> =
+            (0..4).map(|_| Ok(Bytes::from(vec![b'x'; 32]))).collect();
+        let mut stream = futures::stream::iter(chunks);
+        let mut buf = String::new();
+        let result = read_next_sse_event_capped(&mut buf, &mut stream, 64).await;
+        assert!(
+            matches!(&result, Err(ModelError::StreamInterrupted { message }) if message.contains("exceeded")),
+            "expected a cap-exceeded error, got {result:?}"
+        );
     }
 
     #[test]
