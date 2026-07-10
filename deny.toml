@@ -20,7 +20,6 @@ version = 2
 ignore = [
     "RUSTSEC-2023-0089", # atomic-polyfill: unmaintained (transitive; no replacement wired)
     "RUSTSEC-2025-0141", # bincode 1.x: unmaintained (transitive; Akmon hashes via postcard/CBOR, not bincode)
-    "RUSTSEC-2026-0105", # core2: unmaintained + yanked (transitive; no maintained version exists)
     "RUSTSEC-2025-0119", # number_prefix: unmaintained (transitive via indicatif progress bars)
     "RUSTSEC-2024-0436", # paste: unmaintained (transitive proc-macro helper; no drop-in replacement)
 ]
