@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use akmon_bundle::report::{bundle_read_error_category, bundle_read_exit_code};
 use akmon_bundle::{
     DEFAULT_MAX_EVENT_FRAME_LEN, OPERATOR_STATEMENT_VERSION, ReadBundleOptions, SCHEME_ED25519,
     SIG_STATEMENT_VERSION, ed25519_spki_pem, key_id, operator_statement, parse_public_key_hex,
@@ -18,10 +19,7 @@ use akmon_bundle::{
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-use crate::bundle_cmd::{
-    BundleImportFormat, bundle_export_output_display, bundle_read_bundle_error_category,
-    bundle_read_bundle_exit_code,
-};
+use crate::bundle_cmd::{BundleImportFormat, bundle_export_output_display};
 
 /// File names of the three head-signature artifacts written into `--out-dir`.
 const STATEMENT_FILE: &str = "statement.bin";
@@ -140,8 +138,8 @@ pub fn run_bundle_prove_openssl(args: &BundleProveArgs) -> ExitCode {
     let contents = match read_bundle(&mut file, &options) {
         Ok(c) => c,
         Err(err) => {
-            let category = bundle_read_bundle_error_category(&err);
-            let code = bundle_read_bundle_exit_code(&err);
+            let category = bundle_read_error_category(&err);
+            let code = bundle_read_exit_code(&err);
             return fail(category, err.to_string(), code);
         }
     };

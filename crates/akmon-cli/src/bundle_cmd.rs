@@ -5,13 +5,18 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use akmon_bundle::report::{
+    BundleVerifyReportV1, ReportViolation, build_verify_report, bundle_read_error_category,
+    bundle_read_exit_code, capture_human_line, capture_human_suffix, compute_passed_and_violations,
+    load_operator_key, operator_reports, operator_requirements_ok, print_operator_human_block,
+    report_violations, signature_reports,
+};
 use akmon_bundle::{
     BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest, ManifestSignature,
-    OperatorOutcome, OperatorVerificationReport, OtelCaptureInfo, Producer, ReadBundleOptions,
-    SCHEME_ED25519, SIG_STATEMENT_VERSION, SessionMetadata, SignatureOutcome,
-    SignatureVerificationReport, WriteBundleOptions, key_id, otel_capture_info,
-    parse_public_key_hex, public_key_from_pkcs8, read_bundle, sign_statement, signing_statement,
-    verify_bundle, verify_manifest_signatures, verify_operator_attestations, write_bundle,
+    Producer, ReadBundleOptions, SCHEME_ED25519, SIG_STATEMENT_VERSION, SessionMetadata,
+    WriteBundleOptions, key_id, otel_capture_info, parse_public_key_hex, public_key_from_pkcs8,
+    read_bundle, sign_statement, signing_statement, verify_bundle, verify_manifest_signatures,
+    verify_operator_attestations, write_bundle,
 };
 use akmon_journal::{
     AGEF_SPEC_VERSION, Event, EventKind, Hash, HashAlgorithm, ObjectStore, RedbObjectStore,
@@ -78,161 +83,6 @@ pub struct BundleExportError {
     category: String,
 }
 
-/// Machine-readable bundle verification result (`akmon bundle verify` / `import --verify-only`).
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BundleVerifyReportV1 {
-    /// CLI crate version that produced this report.
-    akmon_version: String,
-    /// AGEF specification version declared by the bundle manifest.
-    agef_version: String,
-    /// Path to the bundle file that was verified.
-    bundle_path: String,
-    /// Session UUID from the bundle manifest.
-    session_id: String,
-    /// Number of events decoded from `events.bin`.
-    events_in_bundle: u64,
-    /// Number of objects decoded from `objects/`.
-    objects_in_bundle: u64,
-    /// Holistic verdict: integrity clean, no invalid signatures, and (with `--require-signature`)
-    /// at least one signature verified.
-    passed: bool,
-    /// Collected integrity violations (empty when structurally clean).
-    violations: Vec<BundleViolation>,
-    /// Per-signature verification results (empty when the bundle is unsigned).
-    #[serde(default)]
-    signatures: Vec<CliSignatureReport>,
-    /// Per-operator-attestation verification results (empty when the bundle is unattributed). NOT
-    /// skipped when empty, so an absent operator attestation is observable as `[]`.
-    #[serde(default)]
-    operators: Vec<CliOperatorReport>,
-    /// OTEL-import capture level, or `null` for native (non-OTEL) bundles. A native bundle is
-    /// full-fidelity by construction; an OTEL import with `level == "structural"` carries metadata
-    /// only (the source telemetry did not capture message content).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    capture: Option<CliCaptureField>,
-}
-
-/// OTEL-import capture metadata for `akmon bundle verify --format json` (F1).
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CliCaptureField {
-    /// Capture level: `full` (message content captured) or `structural` (metadata only).
-    level: String,
-    /// Source OpenTelemetry semantic-conventions version (for example `1.37.0`).
-    source_semconv: String,
-}
-
-/// One signature-verification result for `akmon bundle verify --format json`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CliSignatureReport {
-    /// `key_id` from the manifest entry (hex SHA-256 of the signer public key).
-    key_id: String,
-    /// Signature scheme (`ed25519`).
-    scheme: String,
-    /// Outcome: `verified`, `invalid`, `unverified_no_key`, `unsupported_scheme`, or `malformed`.
-    outcome: String,
-}
-
-/// Stable lowercase outcome string for [`CliSignatureReport::outcome`].
-fn signature_outcome_str(outcome: &SignatureOutcome) -> &'static str {
-    match outcome {
-        SignatureOutcome::Verified => "verified",
-        SignatureOutcome::Invalid => "invalid",
-        SignatureOutcome::UnverifiedNoKey => "unverified_no_key",
-        SignatureOutcome::UnsupportedScheme => "unsupported_scheme",
-        SignatureOutcome::Malformed => "malformed",
-    }
-}
-
-/// Maps the library signature report into CLI-compatible JSON entries.
-fn cli_signature_reports(report: &SignatureVerificationReport) -> Vec<CliSignatureReport> {
-    report
-        .checks
-        .iter()
-        .map(|c| CliSignatureReport {
-            key_id: c.key_id.clone(),
-            scheme: c.scheme.clone(),
-            outcome: signature_outcome_str(&c.outcome).to_owned(),
-        })
-        .collect()
-}
-
-/// One operator-attestation verification result for `akmon bundle verify --format json` (D-20).
-///
-/// The honesty contract (O8): `operator_key_verified` is the only field that attests trust — it is
-/// `true` ONLY when a trusted operator key validated the signed `AGEF-OPERATOR-v1` statement. The
-/// identity fields (`operator_id`, `display_name`, `role`, `org`) are self-asserted and
-/// attacker-controlled; they are reported verbatim but their truth is gated entirely by
-/// `operator_key_verified`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CliOperatorReport {
-    /// `key_id` from the manifest entry (hex SHA-256 of the attester public key).
-    key_id: String,
-    /// Signature scheme (`ed25519`).
-    scheme: String,
-    /// Self-asserted operator identifier (signed but attacker-controlled until verified).
-    operator_id: String,
-    /// Self-asserted operator display name.
-    display_name: String,
-    /// Self-asserted operator role.
-    role: String,
-    /// Self-asserted operator organization.
-    org: String,
-    /// RFC3339 timestamp the attestation was produced (unsigned metadata).
-    created_at: String,
-    /// Outcome: `verified`, `invalid`, `unverified_no_key`, `unsupported_scheme`, or `malformed`.
-    outcome: String,
-    /// `true` ONLY when `outcome == verified` (a trusted operator key validated the attestation).
-    /// This is the one field a verifier may trust; the identity strings above are self-asserted.
-    operator_key_verified: bool,
-}
-
-/// Stable lowercase outcome string for [`CliOperatorReport::outcome`].
-fn operator_outcome_str(outcome: &OperatorOutcome) -> &'static str {
-    match outcome {
-        OperatorOutcome::Verified => "verified",
-        OperatorOutcome::Invalid => "invalid",
-        OperatorOutcome::UnverifiedNoKey => "unverified_no_key",
-        OperatorOutcome::UnsupportedScheme => "unsupported_scheme",
-        OperatorOutcome::Malformed => "malformed",
-    }
-}
-
-/// Maps the library operator report into CLI-compatible JSON entries (parallels
-/// [`cli_signature_reports`]).
-fn cli_operator_reports(report: &OperatorVerificationReport) -> Vec<CliOperatorReport> {
-    report
-        .checks
-        .iter()
-        .map(|c| CliOperatorReport {
-            key_id: c.key_id.clone(),
-            scheme: c.scheme.clone(),
-            operator_id: c.operator_id.clone(),
-            display_name: c.display_name.clone(),
-            role: c.role.clone(),
-            org: c.org.clone(),
-            created_at: c.created_at.clone(),
-            outcome: operator_outcome_str(&c.outcome).to_owned(),
-            operator_key_verified: c.outcome == OperatorOutcome::Verified,
-        })
-        .collect()
-}
-
-/// Escapes control characters (anything below `0x20`, plus `0x7f`) in a self-asserted, attacker-
-/// controlled operator identity field before printing it in the human report (O8). Without this a
-/// crafted `operator_id` containing a newline or terminal escape could spoof the surrounding report
-/// lines. Renders such bytes as `\xNN` so the value stays on one visible line.
-fn sanitize_operator_field(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if (ch as u32) < 0x20 || ch == '\u{7f}' {
-            out.push_str(&format!("\\x{:02x}", ch as u32));
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 /// Machine-readable bundle import result (`akmon bundle import --format json`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BundleImportReportV1 {
@@ -256,19 +106,6 @@ pub struct BundleImportReportV1 {
     objects_existing: u64,
     /// Resolved journal directory where import was written.
     journal_path: String,
-}
-
-/// One bundle verification violation for JSON output.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BundleViolation {
-    /// Stable category identifier.
-    category: String,
-    /// Event content hash in hex when applicable.
-    event_hash: Option<String>,
-    /// Object hash in hex when applicable.
-    object_hash: Option<String>,
-    /// Human-readable explanation.
-    message: String,
 }
 
 /// JSON shape emitted when `akmon bundle import` cannot complete (I/O, manifest, collision, or verification failure).
@@ -868,34 +705,6 @@ fn run_bundle_export(
 
     ExitCode::SUCCESS
 }
-pub(crate) fn bundle_read_bundle_error_category(err: &BundleError) -> &'static str {
-    match err {
-        BundleError::Io(_) => "io_error",
-        BundleError::InvalidArchive(_) => "invalid_archive",
-        BundleError::InvalidCompression(_) => "invalid_compression",
-        BundleError::InvalidManifest(_) => "invalid_manifest",
-        BundleError::UnsupportedAgefVersion(_) => "unsupported_agef_version",
-        BundleError::UnsupportedHashAlgorithm(_) => "unsupported_hash_algorithm",
-        BundleError::MalformedFraming(_) => "malformed_framing",
-        BundleError::FrameTooLarge(_) => "frame_too_large",
-        BundleError::NonCanonicalCbor => "non_canonical_cbor",
-        BundleError::UnknownEventKind(_) => "unknown_event_kind",
-        BundleError::UnknownAttemptStatus(_) => "unknown_attempt_status",
-        BundleError::MissingObject(_) => "missing_object",
-        BundleError::ObjectHashMismatch(_) => "object_hash_mismatch",
-        BundleError::HeadMismatch { .. } => "head_mismatch",
-        BundleError::UnknownBundleFile(_) => "unknown_bundle_file",
-        BundleError::BundleTooLarge(_) => "bundle_too_large",
-    }
-}
-
-pub(crate) fn bundle_read_bundle_exit_code(err: &BundleError) -> u8 {
-    match err {
-        BundleError::Io(_) => 3,
-        _ => 1,
-    }
-}
-
 fn print_bundle_import_infra_json_error(
     category: &str,
     error: String,
@@ -927,21 +736,6 @@ fn print_bundle_import_json_report(report: &BundleImportReportV1) -> std::io::Re
     Ok(())
 }
 
-fn cli_violations_from_bundle_verify(
-    report: &akmon_bundle::BundleVerificationReport,
-) -> Vec<BundleViolation> {
-    report
-        .violations
-        .iter()
-        .map(|v| BundleViolation {
-            category: v.category().to_owned(),
-            event_hash: v.event_hash_hex(),
-            object_hash: v.object_hash_hex(),
-            message: v.message(),
-        })
-        .collect()
-}
-
 fn manifest_hash_algorithm(manifest: &Manifest) -> Option<HashAlgorithm> {
     match manifest.hash_algorithm.as_str() {
         "sha256" => Some(HashAlgorithm::Sha256),
@@ -968,10 +762,10 @@ fn exit_bundle_verify_failed(
     bundle: &Path,
     contents: &BundleContents,
     format: BundleImportFormat,
-    violations: Vec<BundleViolation>,
+    violations: Vec<ReportViolation>,
 ) -> ExitCode {
-    let report = build_bundle_verify_report_v1(
-        bundle,
+    let report = build_verify_report(
+        bundle_export_output_display(bundle),
         contents,
         false,
         violations,
@@ -1000,157 +794,6 @@ fn exit_bundle_verify_failed(
         }
     }
     ExitCode::from(1)
-}
-
-/// Category string used for the synthetic violation emitted when `--require-capture full` fails.
-const CAPTURE_REQUIREMENT_CATEGORY: &str = "capture_requirement_unmet";
-
-/// Whether an OTEL import satisfies `--require-capture full`.
-///
-/// Native bundles (`capture == None`) are full-fidelity and always pass. An OTEL import passes only
-/// when its `capture_level` is exactly `"full"`. Returns `None` (no requirement) when
-/// `require_capture` is unset.
-fn capture_requirement_unmet(
-    require_capture: Option<RequireCapture>,
-    capture: Option<&OtelCaptureInfo>,
-) -> Option<String> {
-    match require_capture {
-        None => None,
-        Some(RequireCapture::Full) => match capture {
-            None => None,
-            Some(info) if info.capture_level == "full" => None,
-            Some(info) => Some(format!(
-                "--require-capture full: session capture level is '{}', not 'full' (metadata-only OTEL import; source telemetry did not capture message content)",
-                info.capture_level
-            )),
-        },
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_bundle_verify_report_v1(
-    bundle_path: &Path,
-    contents: &BundleContents,
-    passed: bool,
-    violations: Vec<BundleViolation>,
-    signatures: Vec<CliSignatureReport>,
-    operators: Vec<CliOperatorReport>,
-    capture: Option<&OtelCaptureInfo>,
-) -> BundleVerifyReportV1 {
-    BundleVerifyReportV1 {
-        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        agef_version: contents.manifest.agef_version.clone(),
-        bundle_path: bundle_export_output_display(bundle_path),
-        session_id: contents.manifest.session.id.clone(),
-        events_in_bundle: contents.events.len() as u64,
-        objects_in_bundle: contents.objects.len() as u64,
-        passed,
-        violations,
-        signatures,
-        operators,
-        capture: capture.map(|info| CliCaptureField {
-            level: info.capture_level.clone(),
-            source_semconv: info.source_semconv.clone(),
-        }),
-    }
-}
-
-/// Short suffix appended to the success headline so a structural import never reads as a bare
-/// "verified bundle". Native bundles (`None`) and full OTEL imports add nothing.
-fn capture_human_suffix(capture: Option<&CliCaptureField>) -> String {
-    match capture {
-        Some(c) if c.level == "structural" => " — capture: STRUCTURAL (metadata only)".to_owned(),
-        _ => String::new(),
-    }
-}
-
-/// Prominent capture line for the human report body, or `None` for native (non-OTEL) bundles.
-fn capture_human_line(capture: Option<&CliCaptureField>) -> Option<String> {
-    let c = capture?;
-    match c.level.as_str() {
-        "structural" => Some(format!(
-            "capture: STRUCTURAL (metadata only — message content was NOT captured by the source telemetry; source semconv {})",
-            c.source_semconv
-        )),
-        "full" => Some("capture: FULL (OTEL import; message content captured)".to_owned()),
-        other => Some(format!(
-            "capture: {} (OTEL import; source semconv {})",
-            other.to_uppercase(),
-            c.source_semconv
-        )),
-    }
-}
-
-/// Loads a trusted operator public key (hex file -> raw 32 bytes) for `--operator-key` /
-/// `--require-operator-key`. Mirrors the `--verify-key` loader's error contract.
-fn load_operator_key(key_path: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read_to_string(key_path)
-        .map_err(|err| format!("cannot read --operator-key {}: {err}", key_path.display()))
-        .and_then(|hex_str| {
-            parse_public_key_hex(&hex_str)
-                .map_err(|err| format!("--operator-key {}: {err}", key_path.display()))
-        })
-}
-
-/// Computes whether the operator-attestation requirements are satisfied (decision D-20).
-///
-/// An invalid attestation against a trusted key is ALWAYS a hard failure (via `any_invalid()`),
-/// mirroring head signatures, even without `--require-operator`. `--require-operator` additionally
-/// demands at least one verified attestation, and each `--require-operator-key` demands that THAT
-/// specific key (`key_id`) has a verified attestation.
-fn operator_requirements_ok(
-    op_report: &OperatorVerificationReport,
-    require_operator: bool,
-    required_operator_key_ids: &[String],
-) -> bool {
-    if op_report.any_invalid() {
-        return false;
-    }
-    if require_operator && !op_report.any_verified() {
-        return false;
-    }
-    required_operator_key_ids.iter().all(|required_kid| {
-        op_report
-            .checks
-            .iter()
-            .any(|c| c.outcome == OperatorOutcome::Verified && &c.key_id == required_kid)
-    })
-}
-
-/// Emits the human-readable operator-attestation block (decision D-20, honesty contract O8).
-///
-/// "verified" attaches to the KEY, never the self-asserted identity string. Self-asserted fields are
-/// attacker-controlled and are sanitized ([`sanitize_operator_field`]) before printing so they
-/// cannot spoof the surrounding report. Each line is written via `emit` (so both `akmon` and
-/// `agef-verify` can share the same wording).
-fn print_operator_human_block(operators: &[CliOperatorReport], mut emit: impl FnMut(String)) {
-    if operators.is_empty() {
-        emit("operator: none (unattributed)".to_owned());
-        return;
-    }
-    emit("operators:".to_owned());
-    for op in operators {
-        let oid = sanitize_operator_field(&op.operator_id);
-        let role = sanitize_operator_field(&op.role);
-        let org = sanitize_operator_field(&op.org);
-        let key_id = &op.key_id;
-        let scheme = &op.scheme;
-        let line = match op.outcome.as_str() {
-            "verified" => format!(
-                "  - verified by operator key key_id={key_id} -- self-asserted operator_id=\"{oid}\" role=\"{role}\" org=\"{org}\""
-            ),
-            "unverified_no_key" => format!(
-                "  - present but UNVERIFIED (no trusted operator key) -- self-asserted operator_id=\"{oid}\" (do not trust this name)"
-            ),
-            "invalid" => format!(
-                "  - INVALID signature for trusted operator key key_id={key_id} (tampered identity/head or corrupt signature; HARD FAIL)"
-            ),
-            other => format!(
-                "  - {other} [{scheme}] key_id={key_id} -- self-asserted operator_id=\"{oid}\" (do not trust this name)"
-            ),
-        };
-        emit(line);
-    }
 }
 
 /// Verifies a bundle file without journal access (Item 4.3 / F4).
@@ -1190,8 +833,8 @@ fn run_bundle_verify(
         Ok(c) => c,
         Err(err) => {
             let msg = err.to_string();
-            let category = bundle_read_bundle_error_category(&err);
-            let code = bundle_read_bundle_exit_code(&err);
+            let category = bundle_read_error_category(&err);
+            let code = bundle_read_exit_code(&err);
             if json {
                 let _ = print_bundle_import_infra_json_error(category, msg.clone(), None);
             } else {
@@ -1264,26 +907,22 @@ fn run_bundle_verify(
 
     let verification = verify_bundle(&contents);
     let capture = otel_capture_info(&contents);
-    let signatures_ok =
-        !sig_report.any_invalid() && (!require_signature || sig_report.any_verified());
-    let capture_unmet = capture_requirement_unmet(require_capture, capture.as_ref());
-    let passed = verification.is_clean() && signatures_ok && operator_ok && capture_unmet.is_none();
-    let mut violations = cli_violations_from_bundle_verify(&verification);
-    if let Some(reason) = &capture_unmet {
-        violations.push(BundleViolation {
-            category: CAPTURE_REQUIREMENT_CATEGORY.to_owned(),
-            event_hash: None,
-            object_hash: None,
-            message: reason.clone(),
-        });
-    }
-    let report = build_bundle_verify_report_v1(
-        &bundle,
+    let require_capture_full = matches!(require_capture, Some(RequireCapture::Full));
+    let (passed, violations) = compute_passed_and_violations(
+        &verification,
+        &sig_report,
+        require_signature,
+        operator_ok,
+        capture.as_ref(),
+        require_capture_full,
+    );
+    let report = build_verify_report(
+        bundle_export_output_display(bundle.as_path()),
         &contents,
         passed,
         violations,
-        cli_signature_reports(&sig_report),
-        cli_operator_reports(&op_report),
+        signature_reports(&sig_report),
+        operator_reports(&op_report),
         capture.as_ref(),
     );
 
@@ -1398,8 +1037,8 @@ fn run_bundle_import(
         Ok(c) => c,
         Err(err) => {
             let msg = err.to_string();
-            let category = bundle_read_bundle_error_category(&err);
-            let code = bundle_read_bundle_exit_code(&err);
+            let category = bundle_read_error_category(&err);
+            let code = bundle_read_exit_code(&err);
             if matches!(format, BundleImportFormat::Json) {
                 let _ = print_bundle_import_infra_json_error(category, msg.clone(), None);
             } else {
@@ -1469,7 +1108,7 @@ fn run_bundle_import(
             bundle.as_path(),
             &contents,
             format,
-            cli_violations_from_bundle_verify(&verification),
+            report_violations(&verification),
         );
     }
 
@@ -1790,8 +1429,8 @@ fn run_bundle_sign(
     let mut contents = match read_bundle(&mut file, &options) {
         Ok(c) => c,
         Err(err) => {
-            let category = bundle_read_bundle_error_category(&err);
-            let code = bundle_read_bundle_exit_code(&err);
+            let category = bundle_read_error_category(&err);
+            let code = bundle_read_exit_code(&err);
             return fail(category, err.to_string(), code);
         }
     };

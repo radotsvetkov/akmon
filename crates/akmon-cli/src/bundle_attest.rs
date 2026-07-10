@@ -16,6 +16,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use akmon_bundle::report::{bundle_read_error_category, bundle_read_exit_code};
 use akmon_bundle::{
     DEFAULT_MAX_EVENT_FRAME_LEN, OperatorIdentity, ReadBundleOptions, SigningError,
     WriteBundleOptions, build_operator_attestation, key_id, public_key_from_pkcs8, read_bundle,
@@ -25,10 +26,7 @@ use akmon_journal::AGEF_SPEC_VERSION;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-use crate::bundle_cmd::{
-    BundleImportFormat, bundle_export_output_display, bundle_read_bundle_error_category,
-    bundle_read_bundle_exit_code,
-};
+use crate::bundle_cmd::{BundleImportFormat, bundle_export_output_display};
 
 /// Arguments for `akmon bundle attest`.
 #[derive(Args, Debug, Clone)]
@@ -113,8 +111,8 @@ pub fn run_bundle_attest(args: &BundleAttestArgs) -> ExitCode {
     let mut contents = match read_bundle(&mut file, &options) {
         Ok(c) => c,
         Err(err) => {
-            let category = bundle_read_bundle_error_category(&err);
-            let code = bundle_read_bundle_exit_code(&err);
+            let category = bundle_read_error_category(&err);
+            let code = bundle_read_exit_code(&err);
             return fail(category, err.to_string(), code);
         }
     };

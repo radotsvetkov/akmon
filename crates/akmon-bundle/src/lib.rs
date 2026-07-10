@@ -14,6 +14,7 @@ pub mod error;
 pub mod events;
 pub mod manifest;
 pub mod objects;
+pub mod report;
 pub mod sentinel;
 pub mod signing;
 pub mod spki;
@@ -28,6 +29,14 @@ pub use error::BundleError;
 pub use events::{DEFAULT_MAX_EVENT_FRAME_LEN, EventsReader, EventsWriter};
 pub use manifest::{Manifest, ManifestSignature, OperatorAttestation, Producer, SessionMetadata};
 pub use objects::{object_filename, object_path, read_object_file, write_object_file};
+pub use report::{
+    BundleVerifyReportV1, CAPTURE_REQUIREMENT_CATEGORY, CaptureField, OperatorReport,
+    ReportViolation, SignatureReport, build_verify_report, bundle_read_error_category,
+    bundle_read_exit_code, capture_human_line, capture_human_suffix, capture_requirement_unmet,
+    compute_passed_and_violations, load_operator_key, operator_outcome_str, operator_reports,
+    operator_requirements_ok, print_operator_human_block, report_violations,
+    sanitize_operator_field, signature_outcome_str, signature_reports,
+};
 pub use sentinel::{
     SentinelMarker, SentinelParseError, is_sentinel, sentinel_from_original,
     sentinel_to_canonical_cbor, try_parse_sentinel,
