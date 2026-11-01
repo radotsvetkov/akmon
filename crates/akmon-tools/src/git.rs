@@ -989,26 +989,29 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timed_out_child_is_killed_not_leaked() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().expect("tmp");
         let script = dir.path().join("slow-git");
         let pid_file = dir.path().join("pid");
         std::fs::write(
             &script,
-            format!("#!/bin/sh\necho $$ > {}\nsleep 30\n", pid_file.display()),
+            format!("echo $$ > {}\nsleep 30\n", pid_file.display()),
         )
         .expect("write script");
-        let mut perms = std::fs::metadata(&script).expect("meta").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).expect("chmod");
 
+        // Run the script through /bin/sh rather than exec'ing the freshly written file. On Linux,
+        // exec'ing a file that was just written can fail with ETXTBSY ("Text file busy") when a
+        // test running in parallel forks while still holding an inherited write descriptor to it.
         // 2s is generous relative to `sh` fork/exec latency even under a fully parallel test
         // run, while staying far shorter than the script's 30s sleep, so the timeout branch
         // fires deterministically rather than racing process-startup scheduling delays.
         let script_path = script.to_string_lossy().to_string();
-        let result =
-            run_command_with_timeout(&script_path, dir.path(), &[], Duration::from_secs(2)).await;
+        let result = run_command_with_timeout(
+            "/bin/sh",
+            dir.path(),
+            &[script_path.as_str()],
+            Duration::from_secs(2),
+        )
+        .await;
         assert!(
             matches!(&result, Err(e) if e.contains("timed out")),
             "expected a timeout error, got {result:?}"
