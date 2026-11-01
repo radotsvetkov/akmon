@@ -1,5 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use akmon_core::{
@@ -7,10 +7,11 @@ use akmon_core::{
 };
 use akmon_journal::{
     AttemptRecord, Event, EventKind, Hash, HashAlgorithm, ObjectStore, RedbObjectStore,
-    RedbSessionGraph, SessionGraph, digest_bytes, referenced_object_hashes_for_kind,
+    RedbSessionGraph, SessionGraph, digest_bytes, journal_db_path, open_journal_read_only,
+    referenced_object_hashes_for_kind, same_journal_dir,
 };
 use akmon_models::LlmProvider;
-use akmon_query::{AgentSession, JournalHandle, journal_db_path, open_journal_read_only};
+use akmon_query::{AgentSession, JournalHandle};
 use akmon_tools::Tool;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
@@ -60,6 +61,7 @@ where
     store: Arc<S>,
     graph: Arc<Mutex<G>>,
     history: Vec<(Hash, Event)>,
+    journal_dir: Option<PathBuf>,
 }
 
 impl<S, G> SourceSession<S, G>
@@ -79,7 +81,23 @@ where
             store,
             graph,
             history,
+            journal_dir: None,
         }
+    }
+
+    /// Records the on-disk journal directory this session was loaded from.
+    ///
+    /// [`ReplayEngine::new`] uses it to reject a persist target that is the source journal
+    /// (the source store keeps that database open, so a second handle cannot be opened).
+    #[must_use]
+    pub fn with_journal_dir(mut self, journal_dir: PathBuf) -> Self {
+        self.journal_dir = Some(journal_dir);
+        self
+    }
+
+    /// On-disk journal directory the session was loaded from, when known.
+    pub fn journal_dir(&self) -> Option<&Path> {
+        self.journal_dir.as_deref()
     }
 
     /// Source session UUID.
@@ -817,27 +835,22 @@ pub fn load_source_session_from_journal(
     journal_dir: &Path,
     session_id: Uuid,
 ) -> Result<SourceSession<RedbObjectStore, RedbSessionGraph>, ReplayError> {
-    let handle = open_journal_read_only(journal_dir, session_id).map_err(|err| {
+    let (store, graph) = open_journal_read_only(journal_dir, session_id).map_err(|err| {
         ReplayError::MalformedSourceEvent {
             event_seq: 0,
             reason: err.to_string(),
         }
     })?;
-    let history = {
-        let guard = handle.graph.lock().unwrap_or_else(|p| p.into_inner());
-        guard
-            .history()
-            .map_err(|err| ReplayError::MalformedSourceEvent {
-                event_seq: 0,
-                reason: err.to_string(),
-            })?
-    };
-    Ok(SourceSession::new(
-        session_id,
-        Arc::clone(&handle.store),
-        Arc::clone(&handle.graph),
-        history,
-    ))
+    let history = graph
+        .history()
+        .map_err(|err| ReplayError::MalformedSourceEvent {
+            event_seq: 0,
+            reason: err.to_string(),
+        })?;
+    Ok(
+        SourceSession::new(session_id, store, Arc::new(Mutex::new(graph)), history)
+            .with_journal_dir(journal_dir.to_path_buf()),
+    )
 }
 
 impl<S, G> ReplayEngine<S, G>
@@ -850,6 +863,7 @@ where
         source: SourceSession<S, G>,
         config: ReplayEngineConfig,
     ) -> Result<Self, ReplayError> {
+        Self::validate_persist_target(&source, &config)?;
         Self::validate_source_preconditions(source.history(), source.store.as_ref())?;
         let divergences: ReplayDivergenceCollector = Arc::new(Mutex::new(Vec::new()));
         let (provider_playbacks, tool_playbacks, index) = build_playback_maps(
@@ -869,6 +883,31 @@ where
             replay_agent_config,
             source_index: index,
         })
+    }
+
+    /// Rejects persisting into the journal the source session is read from.
+    ///
+    /// The source store holds that redb database open for the whole replay, and redb allows one
+    /// handle per file per process, so opening it again would fail with an opaque lock error.
+    fn validate_persist_target(
+        source: &SourceSession<S, G>,
+        config: &ReplayEngineConfig,
+    ) -> Result<(), ReplayError> {
+        if !config.persist {
+            return Ok(());
+        }
+        if let (Some(persist_dir), Some(source_dir)) =
+            (config.persist_journal_dir.as_deref(), source.journal_dir())
+            && same_journal_dir(persist_dir, source_dir)
+        {
+            return Err(ReplayError::PersistConfigInvalid {
+                reason: format!(
+                    "persist target {} is the source journal; choose a different --persist-to directory",
+                    persist_dir.display()
+                ),
+            });
+        }
+        Ok(())
     }
 
     fn validate_source_preconditions(
@@ -977,9 +1016,9 @@ where
         };
         let tools = self.replay_tools();
         let mut replay_config = self.replay_agent_config.clone();
-        if self.config.persist {
-            replay_config.session_id = Uuid::new_v4();
-        }
+        // Always a fresh id: the replay is a new session even when it is not persisted, and reusing
+        // the source id would collide with any earlier (or concurrent) replay of the same source.
+        replay_config.session_id = Uuid::new_v4();
         let replay_session_id = replay_config.session_id;
 
         let replay_history = if self.config.persist {
@@ -999,21 +1038,18 @@ where
             )
             .await?
         } else {
-            let ephemeral_dir =
-                std::env::temp_dir().join(format!("akmon-replay-run-{replay_session_id}"));
-            let journal = open_persist_journal_handle(ephemeral_dir.as_path(), replay_session_id)?;
-            let history = self
-                .drive_with_journal(
-                    replay_config,
-                    provider,
-                    tools,
-                    journal,
-                    replay_session_id,
-                    Arc::new(Sandbox::new(&self.source_index.source_cwd)),
-                )
-                .await?;
-            let _ = std::fs::remove_dir_all(ephemeral_dir);
-            history
+            // Removed when `scratch` drops: on success and on every early `?` return.
+            let scratch = EphemeralJournalDir::create_in(&std::env::temp_dir())?;
+            let journal = open_persist_journal_handle(scratch.path(), replay_session_id)?;
+            self.drive_with_journal(
+                replay_config,
+                provider,
+                tools,
+                journal,
+                replay_session_id,
+                Arc::new(Sandbox::new(&self.source_index.source_cwd)),
+            )
+            .await?
         };
 
         let divergences = self
@@ -1136,6 +1172,44 @@ where
             });
         }
         Ok(history)
+    }
+}
+
+/// Private scratch directory holding the journal of a non-persisted replay.
+///
+/// The name is random (`akmon-replay-run-<uuid v4>`) and the directory is created exclusively
+/// (owner-only on Unix), so concurrent replays never share it and a pre-created path is rejected
+/// rather than reused. The directory is removed when the guard drops.
+struct EphemeralJournalDir {
+    path: PathBuf,
+}
+
+impl EphemeralJournalDir {
+    fn create_in(root: &Path) -> Result<Self, ReplayError> {
+        let path = root.join(format!("akmon-replay-run-{}", Uuid::new_v4()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(&path)
+            .map_err(|err| ReplayError::PersistJournalNotWritable {
+                path: path.clone(),
+                reason: format!("create ephemeral replay journal: {err}"),
+            })?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for EphemeralJournalDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -1320,8 +1394,8 @@ fn reconstruct_agent_config_from_source<S: ObjectStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use akmon_journal::journal_contains_session;
     use akmon_journal::{AttemptRecord, AttemptStatus, HashAlgorithm, MemoryObjectStore};
-    use akmon_query::journal_contains_session;
     use time::OffsetDateTime;
 
     fn put_bytes(store: &MemoryObjectStore, bytes: &[u8]) -> Hash {
@@ -1929,10 +2003,9 @@ mod tests {
         )
         .expect("engine");
         let out = engine.drive_replay().await.expect("drive");
-        let handle =
+        let (_store, graph) =
             open_journal_read_only(&journal_dir, out.replay_session_id).expect("open replay");
-        let guard = handle.graph.lock().unwrap_or_else(|p| p.into_inner());
-        let verification = guard.verify().expect("verify");
+        let verification = graph.verify().expect("verify");
         assert!(verification.is_clean());
     }
 
@@ -2789,5 +2862,133 @@ mod tests {
         }
         let h_b2 = projection_hash(&b, HashAlgorithm::Sha256);
         assert_ne!(h_a, h_b2);
+    }
+
+    #[test]
+    fn t_ephemeral_journal_dir_is_unique_and_removed_on_drop() {
+        let root = temp_journal_dir("ephemeral-root");
+        let a = EphemeralJournalDir::create_in(&root).expect("a");
+        let b = EphemeralJournalDir::create_in(&root).expect("b");
+        assert_ne!(a.path(), b.path(), "each replay gets its own scratch dir");
+        assert!(a.path().is_dir() && b.path().is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(a.path())
+                .expect("meta")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700, "scratch journal must be owner-only");
+        }
+        let (pa, pb) = (a.path().to_path_buf(), b.path().to_path_buf());
+        drop(a);
+        assert!(!pa.exists(), "dropped scratch dir must be removed");
+        assert!(pb.exists());
+        drop(b);
+        assert!(!pb.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn t_ephemeral_journal_dir_removed_on_error_path() {
+        let root = temp_journal_dir("ephemeral-error");
+        let seen = std::cell::RefCell::new(None);
+        let run = || -> Result<(), ReplayError> {
+            let scratch = EphemeralJournalDir::create_in(&root)?;
+            let _journal = open_persist_journal_handle(scratch.path(), Uuid::new_v4())?;
+            *seen.borrow_mut() = Some(scratch.path().to_path_buf());
+            Err(ReplayError::SessionRunFailed {
+                reason: "simulated replay failure".to_owned(),
+            })
+        };
+        assert!(run().is_err());
+        let path = seen.borrow().clone().expect("scratch created");
+        assert!(
+            !path.exists(),
+            "failed replay must not leak its scratch journal"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn t_no_persist_replay_gets_fresh_session_id() {
+        let source = source_session();
+        let source_id = source.session_id();
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+                persist_journal_dir: None,
+            },
+        )
+        .expect("engine");
+        let out = engine.drive_replay().await.expect("drive");
+        assert_ne!(out.replay_session_id, source_id);
+    }
+
+    #[tokio::test]
+    async fn t_no_persist_replay_ignores_stale_fixed_scratch_dir() {
+        // Before the fix a leaked `akmon-replay-run-<source id>` journal (from a failed or
+        // concurrent run) made every later replay of that session fail with "session already exists".
+        let source = source_session();
+        let stale = std::env::temp_dir().join(format!("akmon-replay-run-{}", source.session_id()));
+        drop(open_persist_journal_handle(&stale, source.session_id()).expect("stale journal"));
+        let engine = ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: false,
+                persist_journal_dir: None,
+            },
+        )
+        .expect("engine");
+        let result = engine.drive_replay().await;
+        let _ = std::fs::remove_dir_all(&stale);
+        result.expect("replay must not reuse a fixed scratch path");
+    }
+
+    #[test]
+    fn t_persist_into_source_journal_dir_rejected_at_setup() {
+        let journal_dir = temp_journal_dir("persist-same");
+        let source = source_session().with_journal_dir(journal_dir.clone());
+        let err = match ReplayEngine::new(
+            source,
+            ReplayEngineConfig {
+                mode: ReplayMode::Default,
+                persist: true,
+                persist_journal_dir: Some(journal_dir.join(".")),
+            },
+        ) {
+            Ok(_) => panic!("persisting into the source journal must be rejected"),
+            Err(err) => err,
+        };
+        match err {
+            ReplayError::PersistConfigInvalid { reason } => {
+                assert!(reason.contains("is the source journal"), "{reason}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(journal_dir);
+    }
+
+    #[test]
+    fn t_persist_into_other_dir_allowed_with_known_source_dir() {
+        let source_dir = temp_journal_dir("persist-src");
+        let target_dir = temp_journal_dir("persist-dst");
+        let source = source_session().with_journal_dir(source_dir.clone());
+        assert!(
+            ReplayEngine::new(
+                source,
+                ReplayEngineConfig {
+                    mode: ReplayMode::Default,
+                    persist: true,
+                    persist_journal_dir: Some(target_dir.clone()),
+                },
+            )
+            .is_ok()
+        );
+        let _ = std::fs::remove_dir_all(source_dir);
+        let _ = std::fs::remove_dir_all(target_dir);
     }
 }

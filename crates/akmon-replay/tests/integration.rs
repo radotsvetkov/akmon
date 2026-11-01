@@ -414,3 +414,33 @@ async fn t_replay_completes_with_more_than_32_events() {
     assert_eq!(report.source_event_count, report.replay_event_count);
     assert!(report.divergences.is_empty(), "{report:?}");
 }
+
+#[tokio::test]
+async fn t_replay_persist_into_source_journal_is_rejected_clearly() {
+    let tmp = tempdir().expect("tempdir");
+    let sid = Uuid::new_v4();
+    write_source_session(
+        tmp.path(),
+        sid,
+        &["run one turn with tool"],
+        one_turn_with_tool_sequences(),
+    )
+    .await;
+    let source = load_source_session_from_journal(tmp.path(), sid).expect("source");
+    assert_eq!(source.journal_dir(), Some(tmp.path()));
+    let err = match ReplayEngine::new(
+        source,
+        ReplayEngineConfig {
+            mode: ReplayMode::Default,
+            persist: true,
+            persist_journal_dir: Some(tmp.path().to_path_buf()),
+        },
+    ) {
+        Ok(_) => panic!("must reject persist into source journal"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(&err, akmon_replay::ReplayError::PersistConfigInvalid { reason } if reason.contains("is the source journal")),
+        "{err:?}"
+    );
+}

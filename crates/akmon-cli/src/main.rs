@@ -1680,10 +1680,17 @@ fn resolve_replay_persist_journal_dir(
     if !persist {
         return Ok(None);
     }
-    let _ = source_journal_dir;
-    persist_to
-        .ok_or_else(|| "--persist requires --persist-to <path> (enforced at parse time)".into())
-        .map(Some)
+    let persist_to =
+        persist_to.ok_or("--persist requires --persist-to <path> (enforced at parse time)")?;
+    // The source journal stays open for the whole replay and redb allows one handle per file,
+    // so persisting into it would fail with an opaque lock error. Reject it as a usage error.
+    if akmon_journal::same_journal_dir(&persist_to, source_journal_dir) {
+        return Err(format!(
+            "--persist-to {} is the source journal; persist the replay into a different directory",
+            persist_to.display()
+        ));
+    }
+    Ok(Some(persist_to))
 }
 
 const REPLAY_HUMAN_DIVERGENCE_CAP: usize = 10;

@@ -307,3 +307,32 @@ async fn t_replay_multi_turn_session_exit_zero() {
     assert!(report.passed);
     assert!(report.divergences.is_empty(), "{report:?}");
 }
+
+#[tokio::test]
+async fn t_replay_persist_to_source_journal_is_usage_error() {
+    let source = tempdir().expect("source");
+    let sid = Uuid::new_v4();
+    create_replayable_session(source.path(), sid, 1).await;
+    // Same directory spelled differently must still be detected.
+    let alias = source.path().join(".").display().to_string();
+    let out = run_replay_with(
+        source.path(),
+        sid,
+        &["--persist", "--persist-to", &alias, "--format", "json"],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err: ReplayInfraError = serde_json::from_slice(&out.stdout).expect("json error");
+    assert_eq!(err.category, "usage");
+    assert!(err.error.contains("is the source journal"), "{}", err.error);
+
+    let human = run_replay_with(source.path(), sid, &["--persist", "--persist-to", &alias]);
+    assert_eq!(human.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(stderr.contains("is the source journal"), "{stderr}");
+}
