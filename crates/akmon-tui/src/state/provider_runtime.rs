@@ -23,8 +23,6 @@ pub struct ProviderRuntimeState {
     pub max_iterations: u32,
     /// Streaming cursor visibility bit.
     pub stream_cursor_visible: bool,
-    /// Index mode flag.
-    pub index_enabled: bool,
     /// Latest Ollama probe.
     pub ollama_probe: OllamaProbe,
 }
@@ -38,7 +36,6 @@ impl ProviderRuntimeState {
         free_local_inference: bool,
         light_body_text: bool,
         max_iterations: u32,
-        index_enabled: bool,
     ) -> Self {
         Self {
             provider_display_name,
@@ -50,7 +47,6 @@ impl ProviderRuntimeState {
             current_iteration: 0,
             max_iterations,
             stream_cursor_visible: true,
-            index_enabled,
             ollama_probe: OllamaProbe {
                 reachable: false,
                 models: vec![],

@@ -10,7 +10,6 @@ mod journal;
 mod microcompact;
 mod session;
 mod specs_and_handoff;
-mod subagent_tool;
 mod tools_filter;
 
 pub use akmon_md_gen::{AKMON_MD_SYSTEM_PROMPT, generate_akmon_md_markdown};
@@ -37,7 +36,6 @@ pub use specs_and_handoff::{
     MIN_USER_TURNS_FOR_HANDOFF, clear_specs_dir, handoff_path, load_handoff_block_for_prompt,
     load_specs_block_for_prompt, should_write_handoff, write_handoff_file,
 };
-pub use subagent_tool::{SpawnSubagentTool, SubagentRuntime, SubagentToolFactory};
 
 #[cfg(test)]
 mod tests {

@@ -137,7 +137,7 @@ const FIRST_SESSION_HINTS: &[&str] = &[
 ///
 /// `first_session_ever` / `has_sent_first_message` gate the long getting-started block; when
 /// `AKMON.md` is missing and this is not the first session, a short `/init` nudge is shown (plus
-/// `/import` when [`ContextScan::files`] is non-empty).
+/// a hint that `akmon init` can reuse other tools' context when [`ContextScan::files`] is non-empty).
 #[allow(clippy::too_many_arguments)]
 pub fn render_welcome(
     area: Rect,
@@ -165,7 +165,7 @@ pub fn render_welcome(
     let divider: String = "─".repeat(area.width as usize);
     let hint1 = " ollama   akmon chat --model llama3.2";
     let hint2 = " claude   --model claude-haiku-4-5-20251001";
-    let hint3 = " index    add --index for code search";
+    let hint3 = " verify   akmon bundle verify <bundle>";
     let bottom = "type a message or / for commands";
     let proj = format!("· {project_name} ·");
 
@@ -258,7 +258,7 @@ pub fn render_welcome(
                 buf,
                 area,
                 y,
-                "  Other tool context detected — try /import",
+                "  Other tool context detected — `akmon init` can reuse it",
                 nudge_style,
             );
         }

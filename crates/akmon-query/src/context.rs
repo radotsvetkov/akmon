@@ -123,17 +123,15 @@ AUTONOMOUS TASK COMPLETION:\n\
 /// Three-phase workflow for large or cross-cutting work (injected with implementation-mode project context).
 pub const RESEARCH_PLAN_IMPLEMENT_WORKFLOW: &str = "\
 LARGE-TASK WORKFLOW:\n\
-Research key files, produce a short plan, then implement incrementally.\n\
-Persist durable decisions in `.akmon/specs/` with write_spec/read_spec.\n";
+Research key files, produce a short plan, then implement incrementally.\n";
 
-/// Compact system instructions for nested `spawn_subagent` runs (short; full TOOL_REFERENCE omitted).
+/// Compact system instructions for nested (subagent-style) runs (short; full TOOL_REFERENCE omitted).
 pub const SUBAGENT_SYSTEM_PROMPT: &str = "\
 You are Akmon’s nested research agent. You share the project sandbox and tools with the parent session,\n\
 but start with a fresh transcript. Your job: answer the given research task concisely using tools.\n\
 \n\
 Rules:\n\
-- Prefer read_file, search, list_directory, semantic_search when present.\n\
-- Do not call spawn_subagent (you are already nested).\n\
+- Prefer read_file, search, list_directory.\n\
 - Return a dense factual summary the parent agent can act on; no filler.\n\
 - If you change specs under `.akmon/specs/`, keep them accurate and minimal.\n";
 
@@ -187,32 +185,12 @@ fn language_rules_system_block(project_root: &str) -> Option<String> {
 fn format_project_context_plan_mode(
     project_root: &str,
     tool_names: &[&str],
-    has_semantic: bool,
     has_web_fetch: bool,
     include_project_intelligence: bool,
 ) -> String {
     let tools_line = tool_names.join(", ");
-    let step1 = if has_semantic {
-        "  STEP 1 — Understand the codebase:\n\
-    Start with semantic_search for conceptual queries before search or list_directory.\n"
-    } else {
-        "  STEP 1 — Explore:\n\
-    Use search with focused patterns; avoid list_directory-only loops.\n"
-    };
-
-    let semantic_block = if has_semantic {
-        "\n\
-SEMANTIC SEARCH IS AVAILABLE.\n\
-Use it as your primary exploration tool.\n\
-Examples of good semantic_search queries:\n\
-  \"policy permission evaluation\"\n\
-  \"error handling for file operations\"\n\
-Examples of bad semantic_search queries (use search instead):\n\
-  \"fn validate_url\" ← use search\n\
-  \"TODO\" ← use search\n\n"
-    } else {
-        ""
-    };
+    let step1 = "  STEP 1 — Explore:\n\
+    Use search with focused patterns; avoid list_directory-only loops.\n";
 
     let step_web = if has_web_fetch {
         "\n\
@@ -228,13 +206,6 @@ Examples of bad semantic_search queries (use search instead):\n\
         format!("{pi}\n")
     } else {
         String::new()
-    };
-
-    // spawn_subagent is experimental and off by default; reference it only when registered.
-    let subagent_rule = if tool_names.contains(&"spawn_subagent") {
-        "  - read_spec / spawn_subagent are read-oriented: use them to inspect `.akmon/specs/` or run a nested exploration pass.\n"
-    } else {
-        "  - read_spec is read-oriented: use it to inspect `.akmon/specs/`.\n"
     };
 
     format!(
@@ -258,10 +229,8 @@ To work on this project in PLAN MODE:\n\
 {step_web}\
 RULES:\n\
   - Produce a written plan only; do not propose tool calls that modify the repository.\n\
-{subagent_rule}\
-  - read_file only after locating paths via semantic_search or search.\n\
+  - read_file only after locating paths via search.\n\
   - NEVER guess file paths.\n\
-{semantic_block}\
 All paths must be relative to the working directory shown above.\n\
 \n\
 {intel_block}\
@@ -278,13 +247,11 @@ fn format_project_context(
     plan_mode: bool,
     include_project_intelligence: bool,
 ) -> String {
-    let has_semantic = tool_names.contains(&"semantic_search");
     let has_web_fetch = tool_names.contains(&"web_fetch");
     if plan_mode {
         return format_project_context_plan_mode(
             project_root,
             tool_names,
-            has_semantic,
             has_web_fetch,
             include_project_intelligence,
         );
@@ -292,29 +259,10 @@ fn format_project_context(
     let tools_line = tool_names.join(", ");
     let has_git = tool_names.contains(&"git");
     let has_shell = tool_names.contains(&"shell");
-    let has_subagent = tool_names.contains(&"spawn_subagent");
 
-    let step1 = if has_semantic {
-        "  STEP 1 — Understand the codebase:\n\
-    If --index is available, ALWAYS\n\
-    start with semantic_search for \n\
-    any conceptual or exploratory query:\n\
-      semantic_search query=\"error handling\"\n\
-      semantic_search query=\"authentication\"\n\
-      semantic_search query=\"policy evaluation\"\n\
-    semantic_search finds relevant code\n\
-    across the entire project by meaning,\n\
-    not just by string matching.\n\
-    Use it BEFORE search or list_directory\n\
-    for any task involving understanding\n\
-    or finding code.\n"
-    } else {
-        "  STEP 1 — Understand the codebase:\n\
-    The semantic_search tool is NOT available\n\
-    (enable with CLI --index). For exploration,\n\
-    use search with focused patterns and read_file\n\
-    on likely files; avoid list_directory-only loops.\n"
-    };
+    let step1 = "  STEP 1 — Understand the codebase:\n\
+    Use search with focused patterns and read_file\n\
+    on likely files; avoid list_directory-only loops.\n";
 
     let step4b = if has_git {
         "\n\
@@ -354,60 +302,19 @@ fn format_project_context(
         ""
     };
 
-    let rule_semantic_priority = if has_semantic {
-        "  - semantic_search before search \n\
-    for ANY conceptual query\n"
-    } else {
-        "  - Without --index, use search plus \n\
-    read_file for exploration\n"
-    };
+    let rule_explore = "  - Use search plus read_file \n\
+    for exploration\n";
 
-    let step4_discover_tools = if has_semantic {
-        "semantic_search or list_directory.\n"
-    } else {
-        "search or list_directory.\n"
-    };
+    let step4_discover_tools = "search or list_directory.\n";
 
-    let step3_tail = if has_semantic {
-        "    Do NOT use search for conceptual \n\
-    queries — use semantic_search instead.\n"
-    } else {
-        "    Without semantic_search, combine \n\
-    search hits with read_file; avoid \n\
-    list_directory-only discovery.\n"
-    };
-
-    let semantic_block = if has_semantic {
-        "\n\
-SEMANTIC SEARCH IS AVAILABLE.\n\
-Use it as your primary exploration tool.\n\
-Examples of good semantic_search queries:\n\
-  \"policy permission evaluation\"\n\
-  \"error handling for file operations\"\n\
-  \"agent FSM state transitions\"\n\
-  \"MCP tool discovery\"\n\
-Examples of bad semantic_search queries\n\
-(use search instead):\n\
-  \"fn validate_url\" ← use search\n\
-  \"TODO\" ← use search\n\
-  \"use akmon_core\" ← use search\n\n"
-    } else {
-        ""
-    };
+    let step3_tail = "    Combine search hits with read_file; \n\
+    avoid list_directory-only discovery.\n";
 
     let intel_block = if include_project_intelligence {
         let pi = project_intelligence_for_prompt(project_root);
         format!("{pi}\n")
     } else {
         String::new()
-    };
-
-    // spawn_subagent is experimental and off by default (decision doc §1.2/§3.4); only hint at
-    // it when the tool is actually registered for this session.
-    let subagent_hint = if has_subagent {
-        "For multi-file exploration, spawn_subagent runs a nested read-only research pass.\n"
-    } else {
-        ""
     };
 
     format!(
@@ -423,7 +330,6 @@ Available tools: {tools_line}\n\
 {AUTONOMOUS_TASK_COMPLETION}\n\
 \n\
 {RESEARCH_PLAN_IMPLEMENT_WORKFLOW}\
-{subagent_hint}\
 \n\
 To work on this project:\n\
 {step1}\
@@ -466,17 +372,15 @@ To work on this project:\n\
 {step8_shell}\
 {step9_web}\
 RULES:\n\
-{rule_semantic_priority}\
+{rule_explore}\
   - read_file only after locating \n\
-    the file via semantic_search \n\
-    or search\n\
+    the file via search\n\
   - NEVER list_directory to find \n\
     relevant code\n\
   - NEVER guess file paths\n\
   - NEVER rewrite entire existing files\n\
   - Before each write_file, edit, patch, apply_patch, shell, git, or web_fetch tool call, write one short plain sentence stating what you are about to do and why. The user sees tool cards and approval prompts in the UI.\n\
 \n\
-{semantic_block}\
 All paths must be relative to the \n\
 working directory shown above.\n\
 Absolute paths and paths with ../ \n\
@@ -976,68 +880,40 @@ mod tests {
     }
 
     #[test]
-    fn project_context_mentions_semantic_search_when_tool_enabled() {
-        let msgs = build_messages(
-            None,
-            &[],
-            "t",
-            "/repo",
-            &["read_file", "semantic_search"],
-            false,
-            CLOUD_MODEL,
-            None,
-            None,
-            &[],
-        );
-        let ctx = msgs
-            .iter()
-            .find(|m| m.role == MessageRole::System && m.content.contains("semantic_search query="))
-            .expect("project context should document semantic_search when listed");
-        assert!(ctx.content.contains("STEP 1 — Understand the codebase"));
-        assert!(
-            ctx.content
-                .contains("semantic_search query=\"error handling\"")
-        );
-        assert!(ctx.content.contains("SEMANTIC SEARCH IS AVAILABLE."));
-        assert!(
-            ctx.content
-                .contains("Examples of good semantic_search queries")
-        );
-        assert!(
-            ctx.content
-                .contains("Examples of bad semantic_search queries")
-        );
-    }
-
-    #[test]
-    fn semantic_search_listed_before_search_in_context() {
-        let msgs = build_messages(
-            None,
-            &[],
-            "t",
-            "/repo",
-            &["read_file", "search", "semantic_search"],
-            false,
-            CLOUD_MODEL,
-            None,
-            None,
-            &[],
-        );
-        let ctx = msgs
-            .iter()
-            .find(|m| m.role == MessageRole::System)
-            .expect("system");
-        let body = &ctx.content;
-        let i_sem = body
-            .find("semantic_search query=\"error handling\"")
-            .expect("semantic_search examples");
-        let i_search = body
-            .find("search pattern=\"exact_string\"")
-            .expect("search step");
-        assert!(
-            i_sem < i_search,
-            "semantic_search guidance must appear before exact-string search step"
-        );
+    fn project_context_never_mentions_archived_tools() {
+        for (plan_mode, model) in [
+            (false, "claude-sonnet-4-5"),
+            (true, "claude-sonnet-4-5"),
+            (false, "llama3.2"),
+            (true, "llama3.2"),
+        ] {
+            let msgs = build_messages(
+                None,
+                &[],
+                "task",
+                "/tmp/akmon-ctx-archived",
+                &["read_file", "search"],
+                plan_mode,
+                model,
+                None,
+                None,
+                &[],
+            );
+            for m in msgs.iter().filter(|m| m.role == MessageRole::System) {
+                for archived in [
+                    "semantic_search",
+                    "--index",
+                    "spawn_subagent",
+                    "write_spec",
+                    "read_spec",
+                ] {
+                    assert!(
+                        !m.content.contains(archived),
+                        "plan_mode={plan_mode}: prompt still mentions archived `{archived}`"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

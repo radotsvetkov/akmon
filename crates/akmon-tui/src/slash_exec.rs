@@ -70,10 +70,6 @@ pub struct SlashEnv {
     pub shared_config: Arc<Mutex<TuiLaunchConfig>>,
     /// Wakes the agent loop to rebuild [`AgentSession`] after `/reset`, `/model`, or `/resume`.
     pub reload_notify: Arc<Notify>,
-    /// When `true`, `semantic_search` was enabled at startup (`--index`).
-    pub index_enabled_flag: bool,
-    /// Path to `.akmon/index.bin` under the active project root.
-    pub index_bin_path: PathBuf,
     /// Queues `/init` and `/new` work on the async runtime.
     pub project_job_tx: mpsc::UnboundedSender<ProjectUiJob>,
     /// Queues `/implement` runs on the agent task.
@@ -250,36 +246,6 @@ fn dispatch(
             app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
-        "import" => {
-            if app.runtime.agent_running {
-                app.push_system_info(
-                    "Finish or interrupt the current turn before running /import.".into(),
-                );
-                return SlashHandled::Continue;
-            }
-            if env.project_job_tx.send(ProjectUiJob::Import).is_err() {
-                app.push_system_info("Project job channel closed.".into());
-            } else {
-                app.push_system_info("Running akmon import…".into());
-            }
-            app.overlays.overlay = Overlay::None;
-            SlashHandled::Continue
-        }
-        "export" => {
-            if app.runtime.agent_running {
-                app.push_system_info(
-                    "Finish or interrupt the current turn before running /export.".into(),
-                );
-                return SlashHandled::Continue;
-            }
-            if env.project_job_tx.send(ProjectUiJob::Export).is_err() {
-                app.push_system_info("Project job channel closed.".into());
-            } else {
-                app.push_system_info("Running akmon export --all…".into());
-            }
-            app.overlays.overlay = Overlay::None;
-            SlashHandled::Continue
-        }
         "new" => {
             if app.runtime.agent_running {
                 app.push_system_info(
@@ -450,40 +416,6 @@ fn dispatch(
                 }
             }
             app.push_system_info(akmon_md_efficiency_line(&app.project_root));
-            app.overlays.overlay = Overlay::None;
-            SlashHandled::Continue
-        }
-        "index" => {
-            #[cfg(feature = "semantic-index")]
-            {
-                if !env.index_enabled_flag {
-                    app.push_system_info(
-                        "Semantic index not loaded. Restart with --index to enable.".into(),
-                    );
-                } else {
-                    match akmon_index::load_index(&env.index_bin_path) {
-                        Ok(idx) => {
-                            let ago = format_index_age(idx.indexed_at);
-                            app.push_system_info(format!(
-                                "Semantic index: {} files, {} chunks, built {ago}",
-                                idx.file_count, idx.chunk_count
-                            ));
-                        }
-                        Err(_) => {
-                            app.push_system_info(
-                                "Semantic index not loaded. Restart with --index to enable.".into(),
-                            );
-                        }
-                    }
-                }
-            }
-            #[cfg(not(feature = "semantic-index"))]
-            {
-                app.push_system_info(
-                    "Semantic index is not available in this build (no `semantic-index` feature)."
-                        .into(),
-                );
-            }
             app.overlays.overlay = Overlay::None;
             SlashHandled::Continue
         }
@@ -720,9 +652,7 @@ Tune in the TUI: /config (Estimates tab) or edit [[model_estimates]] in ~/.akmon
         "spec" => {
             let root = app.project_root.join(".akmon").join("specs");
             let Ok(rd) = std::fs::read_dir(&root) else {
-                app.push_system_info(
-                    "No .akmon/specs yet. CLI: akmon spec <name> \"description\"".into(),
-                );
+                app.push_system_info("No .akmon/specs yet.".into());
                 app.overlays.overlay = Overlay::None;
                 return SlashHandled::Continue;
             };
@@ -933,24 +863,6 @@ fn apply_loaded_session(
     env.reload_notify.notify_one();
     let short: String = app.session_id.to_string().chars().take(8).collect();
     app.push_system_info(format!("Resumed session {short}"));
-}
-
-#[cfg(feature = "semantic-index")]
-fn format_index_age(dt: DateTime<Utc>) -> String {
-    let d = Utc::now().signed_duration_since(dt);
-    if d.num_seconds() < 60 {
-        let s = d.num_seconds().max(0);
-        format!("{s}s ago")
-    } else if d.num_minutes() < 60 {
-        let m = d.num_minutes();
-        format!("{m}m ago")
-    } else if d.num_hours() < 48 {
-        let h = d.num_hours();
-        format!("{h}h ago")
-    } else {
-        let days = d.num_days();
-        format!("{days}d ago")
-    }
 }
 
 fn read_audit_overlay_lines(path: &std::path::Path) -> Vec<String> {

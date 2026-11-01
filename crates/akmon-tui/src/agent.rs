@@ -9,15 +9,12 @@ use akmon_core::{
 };
 use akmon_models::{LlmProvider, Message, MessageRole, OllamaProbe};
 use akmon_query::{
-    AgentSession, DefaultAgentSession, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
-    open_or_resume_default_journal_handle, write_handoff_file,
+    AgentSession, DefaultAgentSession, open_or_resume_default_journal_handle, write_handoff_file,
 };
-#[cfg(feature = "semantic-index")]
-use akmon_tools::SemanticSearchTool;
 use akmon_tools::{
     ApplyPatchTool, AskFollowupTool, EditTool, GitTool, ListDirectoryTool, MemoryWriteTool,
-    PatchTool, ReadFileTool, ReadSpecTool, SearchTool, ShellTool, TodoWriteTool, WebFetchTool,
-    WriteFileTool, WriteSpecTool, discover_mcp_tools,
+    PatchTool, ReadFileTool, SearchTool, ShellTool, TodoWriteTool, WebFetchTool, WriteFileTool,
+    discover_mcp_tools,
 };
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -88,7 +85,6 @@ type QuestionAnswerSenderSlot = Arc<tokio::sync::Mutex<Option<mpsc::Sender<Strin
 fn build_tool_registry(
     shell_allow: &[String],
     web_fetch: bool,
-    #[cfg(feature = "semantic-index")] semantic: Option<crate::config::SemanticIndexSlot>,
     has_git_root: bool,
     plan_mode: bool,
 ) -> Vec<Box<dyn akmon_tools::Tool>> {
@@ -103,10 +99,6 @@ fn build_tool_registry(
         ];
         if web_fetch {
             tools.push(Box::new(WebFetchTool::new()));
-        }
-        #[cfg(feature = "semantic-index")]
-        if let Some((slot, emb)) = semantic {
-            tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
         }
         return tools;
     }
@@ -128,64 +120,10 @@ fn build_tool_registry(
     if !shell_allow.is_empty() {
         tools.push(Box::new(ShellTool::new(shell_allow.to_vec())));
     }
-    #[cfg(feature = "semantic-index")]
-    if let Some((slot, emb)) = semantic {
-        tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
-    }
     if has_git_root {
         tools.push(Box::new(GitTool::new()));
     }
     tools
-}
-
-fn attach_specs_subagent_tools(
-    tools: &mut Vec<Box<dyn akmon_tools::Tool>>,
-    cfg: &TuiLaunchConfig,
-    provider: &Arc<dyn LlmProvider>,
-    sandbox: &Arc<Sandbox>,
-    akmon_md: &Option<String>,
-    plan_mode: bool,
-) {
-    tools.push(Box::new(ReadSpecTool::new()));
-    if !plan_mode {
-        tools.push(Box::new(WriteSpecTool::new()));
-    }
-    // Multi-agent orchestration is an explicit non-goal (decision doc §1.2/§3.4: "one agent,
-    // one session, one artifact"). spawn_subagent is registered only behind the experimental
-    // opt-in; default sessions never expose it.
-    if akmon_config::experimental_subagents_enabled() {
-        let shell_allow = cfg.shell_allow.clone();
-        let web_fetch = cfg.web_fetch;
-        let has_git = cfg.sandbox_has_git_root;
-        #[cfg(feature = "semantic-index")]
-        let semantic = cfg.semantic_index.clone();
-        let plan_for_sub = plan_mode;
-        let factory: SubagentToolFactory = Arc::new(move || {
-            #[cfg(feature = "semantic-index")]
-            {
-                build_tool_registry(
-                    &shell_allow,
-                    web_fetch,
-                    semantic.clone(),
-                    has_git,
-                    plan_for_sub,
-                )
-            }
-            #[cfg(not(feature = "semantic-index"))]
-            {
-                build_tool_registry(&shell_allow, web_fetch, has_git, plan_for_sub)
-            }
-        });
-        let rt = Arc::new(SubagentRuntime {
-            provider: Arc::clone(provider),
-            sandbox: Arc::clone(sandbox),
-            akmon_md: akmon_md.clone(),
-            plan_mode,
-            confirmation_timeout_secs: 30,
-            tool_factory: factory,
-        });
-        tools.push(Box::new(SpawnSubagentTool::new(rt)));
-    }
 }
 
 async fn build_agent_session(
@@ -230,8 +168,6 @@ async fn build_agent_session(
     let mut tools = build_tool_registry(
         &config.shell_allow,
         config.web_fetch,
-        #[cfg(feature = "semantic-index")]
-        config.semantic_index.clone(),
         config.sandbox_has_git_root,
         plan_mode,
     );
@@ -249,14 +185,6 @@ async fn build_agent_session(
             }
         }
     }
-    attach_specs_subagent_tools(
-        &mut tools,
-        config,
-        &provider,
-        &sandbox,
-        &config.akmon_md,
-        plan_mode,
-    );
 
     let agent_config = AgentConfig {
         max_iterations: config.max_iterations,
@@ -296,22 +224,13 @@ async fn build_agent_session(
     Ok((session, policy_rx))
 }
 
-fn apply_plan_tool_state(
-    session: &mut DefaultAgentSession,
-    cfg: &TuiLaunchConfig,
-    provider: &Arc<dyn LlmProvider>,
-    sandbox: &Arc<Sandbox>,
-    akmon_md: &Option<String>,
-) {
-    let mut tools = build_tool_registry(
+fn apply_plan_tool_state(session: &mut DefaultAgentSession, cfg: &TuiLaunchConfig) {
+    let tools = build_tool_registry(
         &cfg.shell_allow,
         cfg.web_fetch,
-        #[cfg(feature = "semantic-index")]
-        cfg.semantic_index.clone(),
         cfg.sandbox_has_git_root,
         true,
     );
-    attach_specs_subagent_tools(&mut tools, cfg, provider, sandbox, akmon_md, true);
     session.replace_tools(tools);
     session.set_plan_mode(true);
 }
@@ -323,8 +242,6 @@ async fn apply_full_tools_with_mcp(
     let mut tools = build_tool_registry(
         &cfg.shell_allow,
         cfg.web_fetch,
-        #[cfg(feature = "semantic-index")]
-        cfg.semantic_index.clone(),
         cfg.sandbox_has_git_root,
         false,
     );
@@ -340,10 +257,6 @@ async fn apply_full_tools_with_mcp(
             }
         }
     }
-    let prov = session.provider_arc();
-    let sand = session.sandbox_arc();
-    let md = session.akmon_md_cloned();
-    attach_specs_subagent_tools(&mut tools, cfg, &prov, &sand, &md, false);
     session.replace_tools(tools);
     session.set_plan_mode(false);
     Ok(())
@@ -581,10 +494,7 @@ pub async fn run_agent_loop(
                     }
                 } else {
                     if turn.plan_only {
-                        let prov = session.provider_arc();
-                        let sand = session.sandbox_arc();
-                        let md = session.akmon_md_cloned();
-                        apply_plan_tool_state(&mut session, &cfg, &prov, &sand, &md);
+                        apply_plan_tool_state(&mut session, &cfg);
                     } else if let Err(e) = apply_full_tools_with_mcp(&mut session, &cfg).await {
                         let _ = bridge_tx.send(BridgeMsg::Agent(AgentEvent::Error {
                             error: akmon_core::AgentError::SessionFailed { message: e },

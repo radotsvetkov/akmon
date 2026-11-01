@@ -1,6 +1,6 @@
 //! `akmon config` subcommands for `~/.akmon/config.toml`.
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
@@ -72,9 +72,13 @@ pub enum OllamaUrlCmd {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum KeyCmd {
+    /// Store an API key. Omit KEY to read it from piped stdin, the provider's environment
+    /// variable (e.g. `ANTHROPIC_API_KEY`), or an interactive prompt — a key passed on the
+    /// command line lands in shell history and is visible to other local users via `ps`.
     Set {
         provider: KeyProvider,
-        key: String,
+        /// The key itself (discouraged: prefer stdin or the environment variable).
+        key: Option<String>,
     },
     Unset {
         provider: KeyProvider,
@@ -86,6 +90,93 @@ pub enum KeyCmd {
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum KeyProvider {
     Anthropic,
+}
+
+impl KeyProvider {
+    /// Environment variable that already carries this provider's key for agent runs.
+    fn env_var(self) -> &'static str {
+        match self {
+            KeyProvider::Anthropic => "ANTHROPIC_API_KEY",
+        }
+    }
+}
+
+/// Where `config key set` obtained the key (reported so the user knows what was stored).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeySource {
+    Argv,
+    Stdin,
+    Env,
+    Prompt,
+}
+
+impl KeySource {
+    fn label(self) -> &'static str {
+        match self {
+            KeySource::Argv => "argv",
+            KeySource::Stdin => "stdin",
+            KeySource::Env => "env",
+            KeySource::Prompt => "prompt",
+        }
+    }
+}
+
+/// Warning printed when the key was passed as a positional argument.
+const ARGV_KEY_WARNING: &str = "Warning: an API key passed on the command line is saved in shell \
+history and visible to other users via `ps`; prefer `printf %s \"$KEY\" | akmon config key set \
+<provider>` or the provider's environment variable.";
+
+/// Resolves the key for `config key set` (F-10): argv (warned) → piped stdin → environment
+/// variable → interactive prompt. Blank input is rejected.
+fn resolve_key_input(
+    provider: KeyProvider,
+    argv_key: Option<&str>,
+    stdin_is_terminal: bool,
+    env_lookup: impl Fn(&str) -> Option<String>,
+    mut read_line: impl FnMut(Option<&str>) -> io::Result<String>,
+) -> Result<(String, KeySource), String> {
+    let (raw, source) = if let Some(k) = argv_key {
+        (k.to_owned(), KeySource::Argv)
+    } else if !stdin_is_terminal {
+        (
+            read_line(None).map_err(|e| format!("cannot read key from stdin: {e}"))?,
+            KeySource::Stdin,
+        )
+    } else if let Some(k) = env_lookup(provider.env_var()).filter(|k| !k.trim().is_empty()) {
+        (k, KeySource::Env)
+    } else {
+        let prompt = format!(
+            "Paste the {} API key and press Enter (input is shown; set {} or pipe it via stdin to avoid this): ",
+            provider
+                .env_var()
+                .trim_end_matches("_API_KEY")
+                .to_ascii_lowercase(),
+            provider.env_var()
+        );
+        (
+            read_line(Some(&prompt)).map_err(|e| format!("cannot read key: {e}"))?,
+            KeySource::Prompt,
+        )
+    };
+    let key = raw.trim().to_owned();
+    if key.is_empty() {
+        return Err(format!(
+            "no API key provided (pipe it on stdin or set {})",
+            provider.env_var()
+        ));
+    }
+    Ok((key, source))
+}
+
+/// Reads one line from stdin, printing `prompt` to stderr first when given.
+fn read_key_line(prompt: Option<&str>) -> io::Result<String> {
+    if let Some(p) = prompt {
+        eprint!("{p}");
+        io::stderr().flush()?;
+    }
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    Ok(line)
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -188,7 +279,6 @@ async fn run_config_inner(args: ConfigArgs, cli: &crate::Cli) -> Result<(), Stri
                     "openai_compatible_api_key": cfg.openai_compatible_api_key.as_ref().map(|k| mask_key(k)),
                     "architect": cfg.architect,
                     "policy": cfg.policy,
-                    "slo": cfg.slo,
                     "mcp": cfg.mcp,
                 });
                 let pretty = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
@@ -281,12 +371,21 @@ async fn run_config_inner(args: ConfigArgs, cli: &crate::Cli) -> Result<(), Stri
             Ok(())
         }
         ConfigSubcommand::Key(k) => match k {
-            KeyCmd::Set {
-                provider: KeyProvider::Anthropic,
-                key,
-            } => {
+            KeyCmd::Set { provider, key } => {
+                let (key, source) = resolve_key_input(
+                    *provider,
+                    key.as_deref(),
+                    io::stdin().is_terminal(),
+                    |name| std::env::var(name).ok(),
+                    read_key_line,
+                )?;
+                if source == KeySource::Argv {
+                    eprintln!("{ARGV_KEY_WARNING}");
+                }
                 let (_, mut cfg) = load_user_config().map_err(|e| e.to_string())?;
-                cfg.anthropic_api_key = Some(key.clone());
+                match provider {
+                    KeyProvider::Anthropic => cfg.anthropic_api_key = Some(key),
+                }
                 save_user_config(&cfg).map_err(|e| e.to_string())?;
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 if append_akmon_gitignore_line(&cwd).unwrap_or(false) && !args.json {
@@ -299,10 +398,10 @@ async fn run_config_inner(args: ConfigArgs, cli: &crate::Cli) -> Result<(), Stri
                     );
                 }
                 if args.json {
-                    let j = json!({ "ok": true });
+                    let j = json!({ "ok": true, "source": source.label() });
                     println!("{j}");
                 } else {
-                    println!("✓ anthropic key stored");
+                    println!("✓ anthropic key stored (from {})", source.label());
                 }
                 Ok(())
             }
@@ -1090,6 +1189,84 @@ mod tests {
         assert!(toml.contains("sk-ant-a"));
     }
 
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn key_input_prefers_argv_then_stdin_then_env_then_prompt() {
+        let never = |_: Option<&str>| -> io::Result<String> { panic!("must not read") };
+        let (k, src) =
+            resolve_key_input(KeyProvider::Anthropic, Some(" sk-a "), true, no_env, never)
+                .expect("argv");
+        assert_eq!((k.as_str(), src), ("sk-a", KeySource::Argv));
+
+        let (k, src) = resolve_key_input(KeyProvider::Anthropic, None, false, no_env, |p| {
+            assert!(p.is_none(), "piped stdin must not prompt");
+            Ok("sk-piped\n".into())
+        })
+        .expect("stdin");
+        assert_eq!((k.as_str(), src), ("sk-piped", KeySource::Stdin));
+
+        let env = |name: &str| (name == "ANTHROPIC_API_KEY").then(|| "sk-env".to_owned());
+        let (k, src) =
+            resolve_key_input(KeyProvider::Anthropic, None, true, env, never).expect("env");
+        assert_eq!((k.as_str(), src), ("sk-env", KeySource::Env));
+
+        let (k, src) = resolve_key_input(KeyProvider::Anthropic, None, true, no_env, |p| {
+            assert!(p.is_some_and(|p| p.contains("ANTHROPIC_API_KEY")));
+            Ok("sk-typed\n".into())
+        })
+        .expect("prompt");
+        assert_eq!((k.as_str(), src), ("sk-typed", KeySource::Prompt));
+    }
+
+    #[test]
+    fn key_input_rejects_blank_key() {
+        let err = resolve_key_input(KeyProvider::Anthropic, None, false, no_env, |_| {
+            Ok("   \n".into())
+        })
+        .expect_err("blank must fail");
+        assert!(err.contains("no API key provided"));
+    }
+
+    #[test]
+    fn key_set_positional_key_is_optional_on_the_cli() {
+        let cli = crate::Cli::try_parse_from(["akmon", "config", "key", "set", "anthropic"])
+            .expect("KEY must be optional");
+        match cli.command {
+            Some(crate::Commands::Config(ConfigArgs {
+                cmd: Some(ConfigSubcommand::Key(KeyCmd::Set { key, .. })),
+                ..
+            })) => assert!(key.is_none()),
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn key_set_stores_config_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _lock = FAKE_HOME_LOCK.lock().expect("lock");
+        let tmp = tempfile::tempdir().expect("tmp");
+        let _home = TempHome::new(tmp.path());
+        let code = run_config(
+            ConfigArgs {
+                json: true,
+                cmd: Some(ConfigSubcommand::Key(KeyCmd::Set {
+                    provider: KeyProvider::Anthropic,
+                    key: Some("sk-ant-perm".into()),
+                })),
+            },
+            &sample_cli(),
+        )
+        .await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        let path = tmp.path().join(".akmon").join("config.toml");
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
     #[tokio::test]
     async fn key_set_appends_akmon_to_gitignore_when_present() {
         let _lock = FAKE_HOME_LOCK.lock().expect("lock");
@@ -1104,7 +1281,7 @@ mod tests {
                 json: true,
                 cmd: Some(ConfigSubcommand::Key(KeyCmd::Set {
                     provider: KeyProvider::Anthropic,
-                    key: "sk-ant-test".into(),
+                    key: Some("sk-ant-test".into()),
                 })),
             },
             &sample_cli(),

@@ -1,4 +1,7 @@
-//! User-level configuration at `~/.akmon/config.toml` (models, API keys, MCP servers, SLO defaults).
+//! User-level configuration at `~/.akmon/config.toml` (models, API keys, MCP servers, policy).
+//!
+//! The file holds API keys, so every write creates it with mode `0600` on unix.
+//! Sections removed in v3.0 (`[slo]`, `[signing]`) are ignored when present.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,17 +67,6 @@ pub struct DisplayConfig {
     pub theme: TerminalTheme,
 }
 
-/// SLO defaults under `[slo]` and `[slo.trend]`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SloConfig {
-    /// Single-run threshold checks (`akmon slo verify`).
-    #[serde(flatten)]
-    pub thresholds: akmon_core::ReliabilitySloThresholds,
-    /// Trend/regression guardrail checks (`akmon slo trend`).
-    #[serde(default)]
-    pub trend: akmon_core::RegressionGuardConfig,
-}
-
 /// Policy profile/pack defaults under `[policy]`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -83,49 +75,6 @@ pub struct PolicyGovernanceConfig {
     pub profile: Option<akmon_core::PolicyProfileName>,
     /// Additional policy pack paths loaded in listed order.
     pub packs: Vec<String>,
-}
-
-/// Session signing hook configuration under `[signing]` (Decision D-05).
-///
-/// Akmon does not embed a signer. It invokes a user-configured command with a
-/// completed session's head hash so the operator can wire cosign, GPG, or any
-/// signing tool, producing an independent, detached attestation over the
-/// tamper-evident session head.
-///
-/// Security: this command is read ONLY from the trusted per-user config
-/// (`~/.akmon/config.toml`), never from repo-local or project files, so cloning
-/// a malicious repository cannot inject a command to execute. The command runs
-/// via argv (no shell), so configured values are not word-split or interpreted
-/// by a shell.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SigningConfig {
-    /// Program and arguments to run. The first element is the executable. In the
-    /// arguments, every `{head}` / `{session_id}` token is substituted with the
-    /// session head hash (hex) and session UUID; the same values are also
-    /// exported as `AKMON_SESSION_HEAD` / `AKMON_SESSION_ID`. An empty list
-    /// disables signing.
-    pub command: Vec<String>,
-    /// Maximum seconds the signing command may run before it is terminated.
-    /// Defaults to [`SigningConfig::DEFAULT_TIMEOUT_SECS`] when unset.
-    pub timeout_secs: Option<u64>,
-}
-
-impl SigningConfig {
-    /// Default signing-command timeout when `timeout_secs` is unset.
-    pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
-
-    /// Returns whether a signing command is configured.
-    #[must_use]
-    pub fn is_enabled(&self) -> bool {
-        !self.command.is_empty()
-    }
-
-    /// Returns the effective timeout, applying [`Self::DEFAULT_TIMEOUT_SECS`].
-    #[must_use]
-    pub fn effective_timeout_secs(&self) -> u64 {
-        self.timeout_secs.unwrap_or(Self::DEFAULT_TIMEOUT_SECS)
-    }
 }
 
 /// Serializable contents of `~/.akmon/config.toml`.
@@ -184,15 +133,9 @@ pub struct AkmonGlobalConfig {
     /// Optional per-model context-window and USD hints for status bars, `/context`, and headless budget math.
     #[serde(default)]
     pub model_estimates: Vec<akmon_core::ModelCostEstimateRow>,
-    /// Default reliability SLO settings (`[slo]`) for verify + trend checks.
-    #[serde(default)]
-    pub slo: SloConfig,
     /// Enterprise policy profile/pack defaults.
     #[serde(default)]
     pub policy: PolicyGovernanceConfig,
-    /// Post-session signing hook (`[signing]`), per Decision D-05.
-    #[serde(default)]
-    pub signing: SigningConfig,
 }
 
 impl AkmonGlobalConfig {
@@ -248,29 +191,6 @@ impl AkmonGlobalConfig {
 # [policy]
 # profile = "dev"
 # packs = [".akmon/policy-packs/team.toml"]
-
-# Post-session signing hook (Decision D-05): invokes a command against a session
-# head. In the args, {head}/{session_id} are substituted, and AKMON_SESSION_HEAD
-# / AKMON_SESSION_ID are exported. Read ONLY from this trusted user config.
-# [signing]
-# command = ["/usr/local/bin/akmon-sign.sh"]   # script reads $AKMON_SESSION_HEAD
-# timeout_secs = 60
-
-# [slo]
-# min_tool_success_rate = 0.95
-# max_timeout_rate = 0.02
-# max_tool_failure_rate = 0.05
-# max_retries_total = 3
-# max_timeouts_total = 2
-# min_tool_calls_total = 5
-#
-# [slo.trend]
-# max_success_rate_drop_abs = 0.05
-# max_timeout_rate_increase_abs = 0.02
-# max_failure_rate_increase_abs = 0.03
-# max_retries_increase_ratio = 1.0
-# max_latency_avg_increase_ratio = 0.50
-# min_baseline_samples = 5
 "#
     }
 }
@@ -313,12 +233,56 @@ pub fn load_config_from(path: &Path) -> Result<AkmonGlobalConfig, ConfigError> {
     toml::from_str(&raw).map_err(|e| ConfigError::Toml(e.to_string()))
 }
 
+/// Top-level config sections that earlier releases understood and v3.0 ignores.
+///
+/// `[slo]` belonged to the archived `akmon slo` command; `[signing]` configured the archived
+/// external signing hook (Decision D-05), superseded by `akmon bundle sign`.
+pub const LEGACY_IGNORED_SECTIONS: &[&str] = &["slo", "signing"];
+
+/// Returns the [`LEGACY_IGNORED_SECTIONS`] present in raw config TOML (empty when unparsable).
+#[must_use]
+pub fn legacy_sections_in(raw: &str) -> Vec<&'static str> {
+    let Ok(table) = raw.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    LEGACY_IGNORED_SECTIONS
+        .iter()
+        .copied()
+        .filter(|k| table.contains_key(*k))
+        .collect()
+}
+
 /// Writes config atomically to `path` (parent dirs must exist).
+///
+/// The file can hold API keys: on unix the temporary file is created with mode `0600` (and
+/// forced to `0600` if a stale temporary file already existed) before it is renamed over
+/// `path`, so a write never widens permissions.
 pub fn save_config_to(path: &Path, cfg: &AkmonGlobalConfig) -> Result<(), ConfigError> {
     let raw = toml::to_string_pretty(cfg).map_err(|e| ConfigError::Toml(e.to_string()))?;
     let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, raw)?;
+    write_private_file(&tmp, raw.as_bytes())?;
     fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Writes `bytes` to `path`, truncating it, with owner-only permissions on unix.
+fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    f.write_all(bytes)?;
+    f.sync_all()?;
     Ok(())
 }
 
@@ -362,48 +326,10 @@ pub fn append_akmon_gitignore_line(cwd: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Name of the environment variable that opts a session into the experimental
-/// `spawn_subagent` capability.
-pub const EXPERIMENTAL_SUBAGENTS_ENV: &str = "AKMON_EXPERIMENTAL_SUBAGENTS";
-
-/// Returns whether the experimental, off-by-default `spawn_subagent` capability is enabled.
-///
-/// Multi-agent orchestration is an explicit non-goal of Akmon's thesis (decision document
-/// §1.2 / §3.4: "one agent, one session, one artifact"). The `spawn_subagent` tool is therefore
-/// not registered in default builds. Setting [`EXPERIMENTAL_SUBAGENTS_ENV`] to a truthy value
-/// (`1`, `true`, `yes`, or `on`, case-insensitive) opts the current process into the unsupported,
-/// out-of-thesis capability for experimentation. The flag is intentionally an environment
-/// variable rather than a `config.toml` field to keep it out of the supported configuration
-/// surface.
-pub fn experimental_subagents_enabled() -> bool {
-    std::env::var(EXPERIMENTAL_SUBAGENTS_ENV)
-        .ok()
-        .is_some_and(|v| is_truthy_flag(&v))
-}
-
-/// Parses a boolean opt-in flag: truthy for `1` / `true` / `yes` / `on` (case-insensitive,
-/// surrounding whitespace ignored); everything else is false.
-fn is_truthy_flag(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[test]
-    fn experimental_subagents_flag_parsing() {
-        for v in ["1", "true", "TRUE", " Yes ", "on", "On"] {
-            assert!(is_truthy_flag(v), "{v:?} should be truthy");
-        }
-        for v in ["", "0", "false", "no", "off", "maybe", "2"] {
-            assert!(!is_truthy_flag(v), "{v:?} should be falsy");
-        }
-    }
 
     #[test]
     fn first_token_deadline_ms_roundtrip_in_toml() {
@@ -498,57 +424,53 @@ mod tests {
     }
 
     #[test]
-    fn slo_thresholds_roundtrip_in_toml() {
+    fn legacy_slo_and_signing_sections_are_ignored_not_errors() {
         let dir = tempdir().expect("tmp");
         let path = dir.path().join("config.toml");
+        let raw = r#"default_model = "llama3.2"
+
+[signing]
+command = ["/usr/local/bin/akmon-sign.sh"]
+timeout_secs = 60
+
+[slo]
+min_tool_success_rate = 0.95
+
+[slo.trend]
+min_baseline_samples = 5
+"#;
+        fs::write(&path, raw).expect("write");
+        let l = load_config_from(&path).expect("legacy sections must not fail parsing");
+        assert_eq!(l.default_model.as_deref(), Some("llama3.2"));
+        assert_eq!(legacy_sections_in(raw), vec!["slo", "signing"]);
+        assert!(legacy_sections_in("default_model = \"x\"\n").is_empty());
+        assert!(legacy_sections_in("not [valid toml").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_config_writes_owner_only_and_tightens_existing_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempdir().expect("tmp");
+        let path = dir.path().join("config.toml");
+        // Pre-existing world-readable config and a stale, world-writable tmp file.
+        fs::write(&path, "").expect("seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("perm");
+        let tmp = path.with_extension("toml.tmp");
+        fs::write(&tmp, "stale").expect("stale tmp");
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o666)).expect("perm tmp");
         let c = AkmonGlobalConfig {
-            slo: SloConfig {
-                thresholds: akmon_core::ReliabilitySloThresholds {
-                    min_tool_success_rate: Some(0.95),
-                    max_timeouts_total: Some(2),
-                    ..Default::default()
-                },
-                trend: akmon_core::RegressionGuardConfig {
-                    max_success_rate_drop_abs: Some(0.1),
-                    min_baseline_samples: Some(5),
-                    ..Default::default()
-                },
-            },
+            anthropic_api_key: Some("sk-ant-secret".into()),
             ..Default::default()
         };
         save_config_to(&path, &c).expect("save");
-        let l = load_config_from(&path).expect("load");
-        assert_eq!(l.slo.thresholds.min_tool_success_rate, Some(0.95));
-        assert_eq!(l.slo.thresholds.max_timeouts_total, Some(2));
-        assert_eq!(l.slo.trend.max_success_rate_drop_abs, Some(0.1));
-    }
-
-    #[test]
-    fn signing_config_roundtrip_in_toml() {
-        let dir = tempdir().expect("tmp");
-        let path = dir.path().join("config.toml");
-        let c = AkmonGlobalConfig {
-            signing: SigningConfig {
-                command: vec!["cosign".into(), "sign-blob".into(), "--yes".into()],
-                timeout_secs: Some(120),
-            },
-            ..Default::default()
-        };
-        save_config_to(&path, &c).expect("save");
-        let l = load_config_from(&path).expect("load");
-        assert!(l.signing.is_enabled());
-        assert_eq!(l.signing.command.len(), 3);
-        assert_eq!(l.signing.effective_timeout_secs(), 120);
-    }
-
-    #[test]
-    fn signing_config_defaults_disabled() {
-        let c = AkmonGlobalConfig::default();
-        assert!(!c.signing.is_enabled());
+        let mode = fs::metadata(&path).expect("meta").permissions().mode() & 0o777;
         assert_eq!(
-            c.signing.effective_timeout_secs(),
-            SigningConfig::DEFAULT_TIMEOUT_SECS
+            mode, 0o600,
+            "config with API keys must be 0600, got {mode:o}"
         );
+        let l = load_config_from(&path).expect("load");
+        assert_eq!(l.anthropic_api_key.as_deref(), Some("sk-ant-secret"));
     }
 
     #[test]

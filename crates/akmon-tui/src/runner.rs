@@ -514,8 +514,6 @@ fn slash_env_for(
             .reload_notify
             .clone()
             .unwrap_or_else(|| Arc::new(Notify::new())),
-        index_enabled_flag: app.runtime.index_enabled,
-        index_bin_path: app.project_root.join(".akmon").join("index.bin"),
         project_job_tx: project_tx,
         agent_task_tx,
     }
@@ -1038,8 +1036,6 @@ fn handle_key(
                             .reload_notify
                             .clone()
                             .unwrap_or_else(|| Arc::new(Notify::new())),
-                        index_enabled_flag: app.runtime.index_enabled,
-                        index_bin_path: app.project_root.join(".akmon").join("index.bin"),
                         project_job_tx: project_tx.clone(),
                         agent_task_tx: task_tx.clone(),
                     };
@@ -1902,7 +1898,6 @@ mod input_mouse_tests {
             mode_label: "INTERACTIVE".into(),
             session_id: Uuid::nil(),
             max_iterations: 5,
-            index_enabled: false,
             anthropic_key: None,
             openrouter_key: None,
             openai_key: None,
@@ -1924,7 +1919,6 @@ mod input_mouse_tests {
             akmon_md: None,
             has_akmon_md: false,
             sandbox_has_git_root: true,
-            semantic_index: None,
             auto_commit: false,
             planner_model: "llama3.2".into(),
             display_theme: akmon_config::TerminalTheme::default(),

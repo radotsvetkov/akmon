@@ -13,9 +13,7 @@
 //! - [`policy`] — [`PolicyEngine`] enforcement
 //! - [`replay`] — deterministic replay metadata hashes
 //! - [`evidence`] — deterministic CI/PR run artifacts
-//! - [`reliability`] — run reliability/SLO counters
-//! - [`slo`] — enforceable reliability guardrails
-//! - [`slo_trend`] — historical trend/regression guardrails
+//! - [`reliability`] — run reliability counters
 //! - [`fsm`] — agent state machine types and transition validation
 //! - [`mcp`] — MCP server configuration
 
@@ -37,8 +35,6 @@ pub mod reliability;
 pub mod replay;
 pub mod sandbox;
 pub mod secret;
-pub mod slo;
-pub mod slo_trend;
 
 pub use audit::{
     AUDIT_CHAIN_SCHEMA_VERSION, AuditChainError, AuditChainRecord, AuditChainSummary, AuditEvent,
@@ -90,16 +86,4 @@ pub use replay::{
     REPLAY_HASH_ALGORITHM, ReplayHashInputs, ReplayMetadata, ReplayMetadataError,
     build_replay_metadata, canonical_json_sha256, validate_replay_metadata,
     validate_replay_metadata_integrity,
-};
-pub use slo::{
-    ReliabilitySloEvaluation, ReliabilitySloThresholds, SloCheckResult, SloCheckStatus, SloError,
-    SloInputKind, SloInputMetrics, evaluate_reliability_slos, extract_slo_input_metrics,
-    parse_slo_thresholds_json, parse_slo_thresholds_toml, validate_reliability_slo_thresholds,
-};
-pub use slo_trend::{
-    BaselineMetricStats, BaselineReliabilitySummary, NormalizedReliabilityMetrics,
-    RegressionGuardConfig, ReliabilityTrendEvaluation, TrendError, TrendSampleCounts,
-    TrendSkippedCheck, TrendStatus, TrendViolation, aggregate_baseline_metrics,
-    evaluate_reliability_trend, normalize_reliability_metrics, parse_regression_guard_config_json,
-    parse_regression_guard_config_toml, validate_regression_guard_config,
 };

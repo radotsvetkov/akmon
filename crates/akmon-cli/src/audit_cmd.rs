@@ -25,8 +25,16 @@ pub enum AuditSubcommand {
     },
 }
 
+/// One-line stderr notice printed by the deprecated, hidden `akmon audit verify`.
+pub(crate) const DEPRECATION_NOTICE: &str = "akmon: warning: `akmon audit verify` is deprecated and \
+hidden; verify sessions with `akmon bundle verify` (after `akmon bundle export <session-id>`)";
+
 /// Runs one `akmon audit` invocation.
+///
+/// Deprecated: kept working for existing pipelines but hidden from `--help`; the legacy
+/// writers stay until a compatibility renderer exists.
 pub fn run_audit(args: AuditArgs, json_output: bool) -> ExitCode {
+    eprintln!("{DEPRECATION_NOTICE}");
     match args.cmd {
         AuditSubcommand::Verify { path } => match verify_audit_path(&path) {
             Ok(summary) => {
@@ -76,6 +84,13 @@ pub fn verify_audit_path(path: &Path) -> Result<akmon_core::AuditChainSummary, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deprecation_notice_points_to_bundle_verify() {
+        assert!(DEPRECATION_NOTICE.contains("deprecated"));
+        assert!(DEPRECATION_NOTICE.contains("akmon bundle verify"));
+        assert!(!DEPRECATION_NOTICE.contains('\n'));
+    }
     use akmon_core::{AuditEvent, build_audit_chain, write_audit_jsonl};
     use chrono::Utc;
 

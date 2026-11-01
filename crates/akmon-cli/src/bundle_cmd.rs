@@ -426,8 +426,8 @@ fn bundle_export_error_category(msg: &str) -> &'static str {
         "malformed_journal"
     } else if lower.contains("session not found") {
         "session_not_found"
-    } else if lower.contains("redb open failed") || lower.contains("no such file or directory") {
-        "journal_not_found"
+    } else if let Some(category) = crate::journal_errors::journal_open_category(msg) {
+        category
     } else if lower.contains("bundle") || lower.contains("invalid manifest") {
         "bundle_error"
     } else {

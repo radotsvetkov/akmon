@@ -582,12 +582,6 @@ where
                 .get("path")
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from),
-            "write_spec" => r
-                .arguments
-                .get("name")
-                .and_then(|v| v.as_str())
-                .and_then(akmon_tools::relative_markdown_path_for_spec_name)
-                .map(PathBuf::from),
             "apply_patch" => r
                 .arguments
                 .get("file_path")
@@ -3107,14 +3101,6 @@ async fn file_change_diff_preview(
     args: &Value,
 ) -> Option<String> {
     match tool_name {
-        "write_spec" => {
-            let name = args.get("name").and_then(|v| v.as_str())?;
-            let new_c = args.get("content").and_then(|v| v.as_str())?;
-            let path = akmon_tools::relative_markdown_path_for_spec_name(name)?;
-            let full = sandbox.resolve(&path).ok()?;
-            let old = tokio::fs::read_to_string(&full).await.unwrap_or_default();
-            Some(unified_diff_text(&old, new_c, &path))
-        }
         "write_file" => {
             let path = args.get("path").and_then(|v| v.as_str())?;
             let new_c = args.get("content").and_then(|v| v.as_str())?;
@@ -3268,41 +3254,6 @@ fn concrete_permissions(
                 tool.required_permissions().to_vec()
             }
         }
-        "semantic_search" => {
-            vec![Permission::ReadFile {
-                path: PathBuf::from("."),
-            }]
-        }
-        "write_spec" => {
-            if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
-                if let Some(rel) = akmon_tools::relative_markdown_path_for_spec_name(name) {
-                    vec![Permission::WriteFile {
-                        path: PathBuf::from(rel),
-                    }]
-                } else {
-                    tool.required_permissions().to_vec()
-                }
-            } else {
-                tool.required_permissions().to_vec()
-            }
-        }
-        "read_spec" => {
-            if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
-                let t = name.trim().trim_end_matches(".md");
-                if !t.is_empty() && !t.contains('/') && !t.contains('\\') {
-                    vec![Permission::ReadFile {
-                        path: PathBuf::from(format!(".akmon/specs/{t}.md")),
-                    }]
-                } else {
-                    tool.required_permissions().to_vec()
-                }
-            } else {
-                vec![Permission::ListDirectory {
-                    path: PathBuf::from(".akmon/specs"),
-                }]
-            }
-        }
-        "spawn_subagent" => vec![],
         "git" => git_concrete_permissions(args),
         _ => tool.required_permissions().to_vec(),
     }
@@ -5545,34 +5496,21 @@ mod tests {
     }
 
     #[test]
-    fn concrete_permissions_write_spec_matches_sanitized_file() {
-        let tool = akmon_tools::WriteSpecTool::new();
+    fn concrete_permissions_archived_tool_names_use_declared_permissions() {
+        // `semantic_search`, `read_spec`, `write_spec` and `spawn_subagent` were archived in
+        // v3.0. A tool that reuses one of those names (e.g. an MCP proxy) must be gated by its
+        // own declared permissions, never by the old narrowed special cases.
+        let tool = akmon_tools::WriteFileTool::new();
         let root = std::path::Path::new("/tmp");
-        let p = concrete_permissions(
-            &tool,
+        for name in [
+            "semantic_search",
+            "read_spec",
             "write_spec",
-            &json!({ "name": "My Spec", "content": "x" }),
-            root,
-        );
-        assert_eq!(
-            p,
-            vec![Permission::WriteFile {
-                path: PathBuf::from(".akmon/specs/My-Spec.md"),
-            }]
-        );
-    }
-
-    #[test]
-    fn concrete_permissions_write_spec_unsafe_name_falls_back() {
-        let tool = akmon_tools::WriteSpecTool::new();
-        let root = std::path::Path::new("/tmp");
-        let p = concrete_permissions(
-            &tool,
-            "write_spec",
-            &json!({ "name": "../../etc", "content": "x" }),
-            root,
-        );
-        assert_eq!(p, tool.required_permissions().to_vec());
+            "spawn_subagent",
+        ] {
+            let p = concrete_permissions(&tool, name, &json!({ "name": "x" }), root);
+            assert_eq!(p, tool.required_permissions().to_vec(), "{name}");
+        }
     }
 
     #[test]

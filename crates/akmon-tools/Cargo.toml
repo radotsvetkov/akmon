@@ -8,9 +8,6 @@ authors.workspace = true
 repository.workspace = true
 description = "Akmon tool trait and built-in tools (filesystem, …)."
 
-[features]
-default = []
-semantic-index = ["dep:akmon-index", "dep:fastembed", "akmon-index/semantic-index"]
 
 [dependencies]
 akmon-core = { path = "../akmon-core" }
@@ -19,8 +16,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 ciborium = "0.2"
 dirs = "5"
 sha2 = "0.10"
-akmon-index = { path = "../akmon-index", optional = true }
-fastembed = { version = "5", default-features = true, optional = true }
 async-trait = "0.1"
 bytes = "1"
 diffy = "0.4.2"

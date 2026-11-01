@@ -16,9 +16,6 @@ pub const LOCAL_MODEL_CORE_TOOLS: &[&str] = &[
     "shell",
     "search",
     "list_directory",
-    "read_spec",
-    "write_spec",
-    "spawn_subagent",
 ];
 
 /// Filters [`ToolDefinition`]s right before they are placed on the wire (API request).

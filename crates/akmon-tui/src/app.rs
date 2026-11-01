@@ -186,7 +186,6 @@ impl TuiApp {
                 free_local_inference,
                 light_body_text,
                 config.max_iterations,
-                config.index_enabled,
             ),
             overlays: OverlayState::new(),
             ui_command_tx: None,
@@ -686,7 +685,6 @@ mod tests {
             mode_label: "INTERACTIVE".into(),
             session_id: Uuid::nil(),
             max_iterations: 25,
-            index_enabled: false,
             anthropic_key: None,
             openrouter_key: None,
             openai_key: None,
@@ -708,7 +706,6 @@ mod tests {
             akmon_md: None,
             has_akmon_md: false,
             sandbox_has_git_root: true,
-            semantic_index: None,
             auto_commit: false,
             planner_model: "llama3.2".into(),
             display_theme: akmon_config::TerminalTheme::default(),
@@ -750,8 +747,6 @@ mod tests {
         let env = SlashEnv {
             shared_config: Arc::clone(&shared),
             reload_notify: app.reload_notify.clone().expect("notify"),
-            index_enabled_flag: false,
-            index_bin_path: app.project_root.join(".akmon").join("index.bin"),
             project_job_tx: project_tx,
             agent_task_tx: agent_tx,
         };
@@ -783,8 +778,6 @@ mod tests {
         let env = SlashEnv {
             shared_config: shared.clone(),
             reload_notify: app.reload_notify.clone().expect("notify"),
-            index_enabled_flag: false,
-            index_bin_path: app.project_root.join(".akmon").join("index.bin"),
             project_job_tx: project_tx,
             agent_task_tx: agent_tx,
         };
@@ -818,8 +811,6 @@ mod tests {
         let env = SlashEnv {
             shared_config: shared,
             reload_notify: app.reload_notify.clone().expect("notify"),
-            index_enabled_flag: false,
-            index_bin_path: app.project_root.join(".akmon").join("index.bin"),
             project_job_tx: project_tx,
             agent_task_tx: agent_tx,
         };

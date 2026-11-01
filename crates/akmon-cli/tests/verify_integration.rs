@@ -312,8 +312,7 @@ fn t_verify_report_lists_all_checks_performed() {
     for check in expected {
         assert!(
             checks.iter().any(|c| c == check),
-            "missing check {check} in {:?}",
-            checks
+            "missing check {check} in {checks:?}"
         );
     }
 }

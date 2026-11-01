@@ -13,15 +13,12 @@ version = 2
 #
 # The entries below are unmaintained-only advisories (error[unmaintained]) for
 # transitive dependencies with no currently-available maintained replacement.
-# They are pulled almost entirely through the optional `fastembed`/`ort` ML stack
-# and the TUI/progress dependencies, none of which are in the default build
-# (CI builds with --no-default-features). Each is accepted deliberately; revisit
-# when an upstream fix lands.
+# The optional `fastembed`/`ort` ML stack (semantic index) was archived in v3.0,
+# which removed the bincode and number_prefix advisories from the tree. Each
+# remaining entry is accepted deliberately; revisit when an upstream fix lands.
 ignore = [
-    "RUSTSEC-2023-0089", # atomic-polyfill: unmaintained (transitive; no replacement wired)
-    "RUSTSEC-2025-0141", # bincode 1.x: unmaintained (transitive; Akmon hashes via postcard/CBOR, not bincode)
-    "RUSTSEC-2025-0119", # number_prefix: unmaintained (transitive via indicatif progress bars)
-    "RUSTSEC-2024-0436", # paste: unmaintained (transitive proc-macro helper; no drop-in replacement)
+    "RUSTSEC-2023-0089", # atomic-polyfill: unmaintained (transitive via postcard -> heapless; no replacement wired)
+    "RUSTSEC-2024-0436", # paste: unmaintained (transitive proc-macro helper via ratatui; no drop-in replacement)
 ]
 
 [licenses]

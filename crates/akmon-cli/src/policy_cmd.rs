@@ -78,12 +78,70 @@ pub struct ResolvedPolicy {
     pub sources: Vec<String>,
 }
 
+impl PolicyResolutionOptions {
+    /// Resolves relative CLI-supplied pack/override paths against `cwd` (the directory the user
+    /// typed them in). Config-file entries stay relative to the project root.
+    #[must_use]
+    pub fn with_cli_paths_relative_to(mut self, cwd: &Path) -> Self {
+        self.pack_paths = self.pack_paths.iter().map(|p| to_abs(cwd, p)).collect();
+        self.override_path = self.override_path.as_ref().map(|p| to_abs(cwd, p));
+        self
+    }
+}
+
+/// Merges `policy show-effective`'s own flags with the global `--policy-*` flags (F-9).
+///
+/// The subcommand flags shadow the global ones of the same name, so both are honoured: packs are
+/// concatenated (global first), and a profile or override given in both places must agree.
+fn merge_show_effective_options(
+    global_flags: &PolicyResolutionOptions,
+    profile: Option<PolicyProfileArg>,
+    policy_pack: Vec<PathBuf>,
+    policy_override: Option<PathBuf>,
+) -> Result<PolicyResolutionOptions, String> {
+    let profile: Option<PolicyProfileName> = profile.map(Into::into);
+    let profile = match (global_flags.profile, profile) {
+        (Some(g), Some(l)) if g != l => {
+            return Err(format!(
+                "conflicting policy profiles: --policy-profile {g:?} and --profile {l:?}"
+            ));
+        }
+        (g, l) => l.or(g),
+    };
+    let override_path = match (&global_flags.override_path, policy_override) {
+        (Some(g), Some(l)) if *g != l => {
+            return Err(format!(
+                "conflicting policy overrides: {} and {}",
+                g.display(),
+                l.display()
+            ));
+        }
+        (g, l) => l.or_else(|| g.clone()),
+    };
+    let mut pack_paths = global_flags.pack_paths.clone();
+    for p in policy_pack {
+        if !pack_paths.contains(&p) {
+            pack_paths.push(p);
+        }
+    }
+    Ok(PolicyResolutionOptions {
+        profile,
+        pack_paths,
+        override_path,
+    })
+}
+
 /// Runs one `akmon policy` invocation.
+///
+/// `global_flags` carries the global `--policy-profile`/`--policy-pack`/`--policy-override`
+/// values so `show-effective` reports exactly what an agent run with the same flags would use.
 pub fn run_policy(
     args: PolicyArgs,
     json_output: bool,
     project_root: &Path,
+    cwd: &Path,
     global: &AkmonGlobalConfig,
+    global_flags: &PolicyResolutionOptions,
 ) -> ExitCode {
     match args.cmd {
         PolicySubcommand::ShowEffective {
@@ -91,10 +149,21 @@ pub fn run_policy(
             policy_pack,
             policy_override,
         } => {
-            let opts = PolicyResolutionOptions {
-                profile: profile.map(Into::into),
-                pack_paths: policy_pack,
-                override_path: policy_override,
+            let opts = match merge_show_effective_options(
+                global_flags,
+                profile,
+                policy_pack,
+                policy_override,
+            ) {
+                Ok(o) => o.with_cli_paths_relative_to(cwd),
+                Err(message) => {
+                    if json_output {
+                        println!("{}", json!({ "ok": false, "error": message }));
+                    } else {
+                        eprintln!("policy show-effective: {message}");
+                    }
+                    return ExitCode::from(2);
+                }
             };
             match resolve_effective_policy(project_root, global, &opts) {
                 Ok(Some(resolved)) => {
@@ -410,6 +479,67 @@ deny = ["shell"]
                 .expect("ok")
                 .expect("some");
         assert!(resolved.sources.iter().any(|s| s.starts_with("profile:")));
+    }
+
+    #[test]
+    fn show_effective_honours_global_policy_flags() {
+        let global = PolicyResolutionOptions {
+            profile: Some(PolicyProfileName::Prod),
+            pack_paths: vec![PathBuf::from("g.toml")],
+            override_path: None,
+        };
+        let merged = merge_show_effective_options(&global, None, Vec::new(), None).expect("ok");
+        assert_eq!(merged.profile, Some(PolicyProfileName::Prod));
+        assert_eq!(merged.pack_paths, vec![PathBuf::from("g.toml")]);
+
+        let merged = merge_show_effective_options(
+            &global,
+            Some(PolicyProfileArg::Prod),
+            vec![PathBuf::from("l.toml"), PathBuf::from("g.toml")],
+            Some(PathBuf::from("o.toml")),
+        )
+        .expect("ok");
+        assert_eq!(
+            merged.pack_paths,
+            vec![PathBuf::from("g.toml"), PathBuf::from("l.toml")]
+        );
+        assert_eq!(merged.override_path, Some(PathBuf::from("o.toml")));
+    }
+
+    #[test]
+    fn show_effective_rejects_conflicting_profiles_and_overrides() {
+        let global = PolicyResolutionOptions {
+            profile: Some(PolicyProfileName::Prod),
+            pack_paths: Vec::new(),
+            override_path: Some(PathBuf::from("a.toml")),
+        };
+        let err =
+            merge_show_effective_options(&global, Some(PolicyProfileArg::Dev), Vec::new(), None)
+                .expect_err("profile conflict");
+        assert!(err.contains("conflicting policy profiles"));
+        let err =
+            merge_show_effective_options(&global, None, Vec::new(), Some(PathBuf::from("b.toml")))
+                .expect_err("override conflict");
+        assert!(err.contains("conflicting policy overrides"));
+    }
+
+    #[test]
+    fn cli_policy_paths_resolve_against_cwd_not_project_root() {
+        let root = tempfile::tempdir().expect("root");
+        let sub = root.path().join("sub");
+        std::fs::create_dir_all(&sub).expect("mkdir");
+        std::fs::write(sub.join("p.toml"), "[tools]\nallow=[\"read_*\"]\n").expect("write");
+        let cfg = AkmonGlobalConfig::default();
+        let opts = PolicyResolutionOptions {
+            profile: None,
+            pack_paths: vec![PathBuf::from("p.toml")],
+            override_path: None,
+        }
+        .with_cli_paths_relative_to(&sub);
+        let resolved = resolve_effective_policy(root.path(), &cfg, &opts)
+            .expect("pack typed in a subdirectory must resolve against that directory")
+            .expect("some");
+        assert!(resolved.sources.iter().any(|s| s.contains("sub")));
     }
 
     #[test]

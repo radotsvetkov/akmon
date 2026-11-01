@@ -17,16 +17,12 @@ mod memory_write;
 mod output;
 mod patch;
 mod read_file;
-mod read_spec;
 mod schema_validate;
 mod search;
-#[cfg(feature = "semantic-index")]
-mod semantic_search;
 mod shell;
 mod todo_write;
 mod web_fetch;
 mod write_file;
-mod write_spec;
 
 pub use apply_patch::ApplyPatchTool;
 pub use ask_followup::AskFollowupTool;
@@ -41,18 +37,14 @@ pub use memory_write::{MemoryWriteTool, format_relevant_memories_block, load_rel
 pub use output::{ToolErrorCode, ToolOutput};
 pub use patch::{PatchTool, patch_write_relative_paths};
 pub use read_file::{DEFAULT_MAX_READ_BYTES, ReadFileTool};
-pub use read_spec::ReadSpecTool;
 pub use schema_validate::validate_tool_arguments;
 pub use search::{DEFAULT_MAX_SEARCH_FILE_BYTES, DEFAULT_MAX_SEARCH_RESULTS, SearchTool};
-#[cfg(feature = "semantic-index")]
-pub use semantic_search::SemanticSearchTool;
 pub use shell::ShellTool;
 pub use todo_write::{
     TodoItem, TodoStatus, TodoWriteTool, format_active_tasks_block, load_current_todos,
 };
 pub use web_fetch::{WebFetchTool, validate_url};
 pub use write_file::WriteFileTool;
-pub use write_spec::{WriteSpecTool, relative_markdown_path_for_spec_name};
 
 use std::sync::Arc;
 

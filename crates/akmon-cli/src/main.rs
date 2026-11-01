@@ -5,35 +5,24 @@ mod bundle_attest;
 mod bundle_cmd;
 mod bundle_keygen;
 mod bundle_prove;
-mod cli_forward;
 mod cli_project;
 mod config_cmd;
 mod diff_cmd;
 mod doctor_cmd;
 mod evidence_cmd;
-mod export_cmd;
-mod import_cmd;
+mod journal_errors;
 mod otel_cmd;
 mod policy_cmd;
-mod scout_cmd;
+mod redact_cmd;
 mod session_index;
 mod session_transcript;
-mod signing;
-mod slo_cmd;
-mod spec_cmd;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-#[cfg(feature = "semantic-index")]
-use std::time::Duration;
 
-use akmon_bundle::{
-    Manifest, Producer, SentinelMarker, SessionMetadata, WriteBundleOptions, is_sentinel,
-    sentinel_from_original, sentinel_to_canonical_cbor, try_parse_sentinel, write_bundle,
-};
+use akmon_bundle::{SentinelMarker, is_sentinel, try_parse_sentinel};
 use akmon_config::AkmonGlobalConfig;
 use akmon_core::{
     AgentConfig, AgentError, AgentEvent, AuditEvent, EvidenceArtifact, EvidenceAudit,
@@ -42,131 +31,25 @@ use akmon_core::{
     ReplayMetadata, RunReliabilityMetrics, Sandbox, verify_audit_jsonl, write_audit_jsonl,
     write_evidence_json,
 };
-use akmon_journal::{
-    AGEF_SPEC_VERSION, Event, EventKind, Hash, HashAlgorithm, ObjectStore, SessionGraph,
-    digest_bytes, referenced_object_hashes_for_kind,
-};
+use akmon_journal::{EventKind, ObjectStore, SessionGraph};
 use akmon_models::{
     LlmConnectConfig, LlmProvider, Message, MessageRole, ProviderError, ProviderResolutionTrace,
 };
 use akmon_query::{
-    AgentSession, SessionRunExit, SpawnSubagentTool, SubagentRuntime, SubagentToolFactory,
-    ToolCallSummary, default_journal_dir, open_journal_read_only,
+    AgentSession, SessionRunExit, ToolCallSummary, default_journal_dir, open_journal_read_only,
     open_or_resume_default_journal_handle, write_handoff_file,
 };
-#[cfg(feature = "semantic-index")]
-use akmon_tools::SemanticSearchTool;
 use akmon_tools::{
     ApplyPatchTool, AskFollowupTool, EditTool, GitTool, ListDirectoryTool, MemoryWriteTool,
-    PatchTool, ReadFileTool, ReadSpecTool, SearchTool, ShellTool, TodoWriteTool, WebFetchTool,
-    WriteFileTool, WriteSpecTool, discover_mcp_tools,
+    PatchTool, ReadFileTool, SearchTool, ShellTool, TodoWriteTool, WebFetchTool, WriteFileTool,
+    discover_mcp_tools,
 };
 use akmon_tui::TuiLaunchConfig;
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-#[cfg(feature = "semantic-index")]
-use fastembed::{TextEmbedding, TextInitOptions};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
-#[cfg(feature = "semantic-index")]
-use tokio::sync::RwLock;
 use tokio::sync::mpsc;
-
-/// Builds a semantic index in the background and writes `index_path`, then fills `slot`.
-#[cfg(feature = "semantic-index")]
-async fn semantic_index_background_build(
-    project_root: PathBuf,
-    embedder: Arc<std::sync::Mutex<TextEmbedding>>,
-    sandbox: Arc<Sandbox>,
-    index_path: PathBuf,
-    slot: Arc<RwLock<Option<akmon_index::RepoIndex>>>,
-) {
-    let indexer = akmon_index::Indexer::default();
-    match indexer
-        .build_index(&project_root, embedder, sandbox.as_ref())
-        .await
-    {
-        Ok(idx) => {
-            match index_path.parent() {
-                Some(parent) => {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        eprintln!("akmon: failed to create .akmon dir: {e}");
-                    }
-                }
-                None => {
-                    eprintln!(
-                        "akmon: index save path has no parent (unexpected): {}",
-                        index_path.display()
-                    );
-                }
-            }
-            match akmon_index::save_index(&idx, &index_path) {
-                Ok(()) => {
-                    eprintln!(
-                        "akmon: index saved to .akmon/index.bin ({} files, {} chunks)",
-                        idx.file_count, idx.chunk_count
-                    );
-                }
-                Err(e) => eprintln!("akmon: index save FAILED: {e}"),
-            }
-            *slot.write().await = Some(idx);
-        }
-        Err(e) => {
-            eprintln!("akmon: warning: semantic index build failed: {e}");
-        }
-    }
-}
-
-/// Runs [`semantic_index_background_build`] on a dedicated OS thread with its own current-thread
-/// Tokio runtime so index work is not cancelled when `#[tokio::main]` shuts down.
-///
-/// The caller should [`std::thread::JoinHandle::join`] the handle before process exit so
-/// `index.bin` can be written reliably.
-#[cfg(feature = "semantic-index")]
-fn spawn_semantic_index_os_thread(
-    project_root: PathBuf,
-    embedder: Arc<std::sync::Mutex<TextEmbedding>>,
-    sandbox: Arc<Sandbox>,
-    index_path: PathBuf,
-    slot: Arc<RwLock<Option<akmon_index::RepoIndex>>>,
-) -> Option<std::thread::JoinHandle<()>> {
-    match std::thread::Builder::new()
-        .name("akmon-index-build".into())
-        .spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                eprintln!("akmon: failed to build index runtime");
-                return;
-            };
-            rt.block_on(async move {
-                semantic_index_background_build(project_root, embedder, sandbox, index_path, slot)
-                    .await;
-            });
-        }) {
-        Ok(h) => Some(h),
-        Err(e) => {
-            eprintln!("akmon: failed to spawn index thread: {e}");
-            None
-        }
-    }
-}
-
-/// Gives a short background build time to finish so the first model turn may see an index.
-#[cfg(feature = "semantic-index")]
-async fn poll_index_ready_up_to_3s(slot: &Arc<RwLock<Option<akmon_index::RepoIndex>>>) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    loop {
-        if slot.read().await.is_some() {
-            break;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
 
 /// Returns true if `path` is an existing `.git` directory or gitdir file (worktrees).
 fn git_working_tree_marker_present(git_path: &Path) -> bool {
@@ -270,26 +153,6 @@ fn load_akmon_md(project_root: &Path) -> std::io::Result<Option<String>> {
     }
 }
 
-fn load_dossier_system_block(path: &Path) -> Result<String, String> {
-    let dossier = scout_cmd::load_dossier(path)?;
-    Ok(scout_cmd::dossier_prompt_block(&dossier))
-}
-
-fn merge_akmon_with_dossier(
-    akmon_md: Option<String>,
-    dossier_block: Option<String>,
-) -> Option<String> {
-    match (akmon_md, dossier_block) {
-        (Some(mut md), Some(block)) => {
-            md.push_str("\n\n");
-            md.push_str(&block);
-            Some(md)
-        }
-        (None, Some(block)) => Some(block),
-        (md, None) => md,
-    }
-}
-
 /// How human-readable versus machine-readable the process should be on stdout.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum OutputFormat {
@@ -310,16 +173,6 @@ enum VerifyFormat {
     Json,
 }
 
-/// Output format for `akmon sign`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
-enum SignFormat {
-    /// Human-readable status output.
-    #[default]
-    Human,
-    /// Machine-readable JSON output for CI automation.
-    Json,
-}
-
 /// Output format for `akmon inspect`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum InspectFormat {
@@ -327,16 +180,6 @@ enum InspectFormat {
     #[default]
     Human,
     /// Machine-readable JSON output for automation.
-    Json,
-}
-
-/// Output format for `akmon redact` status messages.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
-enum RedactFormat {
-    /// Human-readable status messages.
-    #[default]
-    Human,
-    /// Machine-readable JSON status messages.
     Json,
 }
 
@@ -367,61 +210,6 @@ impl From<ReplayModeArg> for akmon_replay::ReplayMode {
             ReplayModeArg::Strict => Self::Strict,
         }
     }
-}
-
-/// Stable JSON shape for `akmon redact --format json`.
-#[derive(Debug, Serialize, Deserialize)]
-struct RedactReportV1 {
-    /// CLI crate version that produced this report.
-    akmon_version: String,
-    /// AGEF specification version written into the derivative bundle.
-    agef_version: String,
-    /// Source session UUID from the journal.
-    source_session_id: String,
-    /// Source terminal event hash before redaction rewrite.
-    source_head: String,
-    /// Derivative terminal event hash after rewrite.
-    derivative_head: String,
-    /// Event count in source session / derivative bundle.
-    events_in_session: u64,
-    /// Number of events whose content hash changed in derivative chain.
-    events_rewritten_count: u64,
-    /// Number of unique objects redacted.
-    objects_redacted_count: u64,
-    /// Per-redacted-object mapping to sentinel replacement.
-    redacted_objects: Vec<RedactedObjectEntry>,
-    /// Path to written derivative bundle.
-    output_path: String,
-    /// Written derivative bundle size in bytes.
-    bundle_size_bytes: u64,
-}
-
-/// One redacted object mapping entry in `RedactReportV1`.
-#[derive(Debug, Serialize, Deserialize)]
-struct RedactedObjectEntry {
-    /// Original object hash.
-    original_hash: String,
-    /// Replacement sentinel object hash.
-    sentinel_hash: String,
-    /// Original object byte length.
-    original_size: u64,
-}
-
-/// JSON shape emitted when `akmon redact` cannot complete.
-#[derive(Debug, Serialize, Deserialize)]
-struct RedactError {
-    /// CLI crate version that produced this error object.
-    akmon_version: String,
-    /// Human-readable error description.
-    error: String,
-    /// Stable error category for automation.
-    category: String,
-    /// Invalid `--object` hash text when `category == invalid_object_hash`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    invalid_object_hash: Option<String>,
-    /// Missing-in-session object hash when `category == object_not_in_session`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    missing_object_hash: Option<String>,
 }
 
 /// Display mode for resolved binary object content in `akmon inspect`.
@@ -478,38 +266,6 @@ struct VerifyError {
     /// CLI crate version that produced this error.
     akmon_version: String,
     /// Stable infrastructure error category.
-    category: String,
-    /// Human-readable error description.
-    error: String,
-}
-
-/// Stable JSON shape for `akmon sign --format json`.
-#[derive(Debug, Serialize, serde::Deserialize)]
-struct SignReportV1 {
-    /// CLI crate version that produced this report.
-    akmon_version: String,
-    /// Hyphenated session UUID that was signed.
-    session_id: String,
-    /// Session head hash (hex) passed to the signing command.
-    head: String,
-    /// Executable invoked (the first element of the configured command).
-    program: String,
-    /// Whether the signing command exited successfully.
-    success: bool,
-    /// Process exit code, when available.
-    exit_code: Option<i32>,
-    /// Whether the signing command was terminated for exceeding its timeout.
-    timed_out: bool,
-    /// Wall-clock duration of the signing command in milliseconds.
-    elapsed_ms: u64,
-}
-
-/// JSON shape emitted when signing cannot run (config/journal/spawn errors).
-#[derive(Debug, Serialize, serde::Deserialize)]
-struct SignError {
-    /// CLI crate version that produced this error.
-    akmon_version: String,
-    /// Stable error category.
     category: String,
     /// Human-readable error description.
     error: String,
@@ -1400,8 +1156,8 @@ fn inspect_error_category(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
     if lower.contains("session not found") {
         "session_not_found"
-    } else if lower.contains("redb open failed") || lower.contains("no such file or directory") {
-        "journal_not_found"
+    } else if let Some(category) = journal_errors::journal_open_category(error) {
+        category
     } else if lower.contains("history") {
         "history_read_error"
     } else {
@@ -1432,8 +1188,8 @@ fn verify_error_category(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
     if lower.contains("session not found") {
         "session_not_found"
-    } else if lower.contains("redb open failed") || lower.contains("no such file or directory") {
-        "journal_not_found"
+    } else if let Some(category) = journal_errors::journal_open_category(error) {
+        category
     } else if lower.contains("hash algorithm mismatch") {
         "hash_algorithm_mismatch"
     } else {
@@ -1538,18 +1294,8 @@ fn print_json_early_error_and_exit(error: String) -> ! {
 }
 
 /// Configuration / setup failure: stderr in text mode, JSON on stdout when `--output json`.
-fn exit_early_config_error(
-    cli: &Cli,
-    error: String,
-    index_thread: Option<&mut Option<std::thread::JoinHandle<()>>>,
-    text_exit_code: i32,
-) -> ! {
-    if let Some(slot) = index_thread
-        && let Some(h) = slot.take()
-    {
-        eprintln!("akmon: waiting for index to finish building...");
-        let _ = h.join();
-    }
+fn exit_early_config_error(cli: &Cli, error: String, text_exit_code: i32) -> ! {
+    let error = journal_errors::with_journal_lock_hint(error);
     if cli.output == OutputFormat::Json {
         print_json_early_error_and_exit(error);
     }
@@ -1567,25 +1313,42 @@ fn exit_resume_session_error(cli: &Cli, e: String) -> ! {
     std::process::exit(1);
 }
 
-/// Command-line interface for the Akmon agent binary.
+/// Help heading that groups the reference agent's flags away from the trust-path commands.
+const AGENT_OPTIONS: &str = "Agent options";
+
+/// Command-line interface for the Akmon binary.
 #[derive(Parser, Debug)]
 #[command(
     name = "akmon",
     version,
-    about = "Local-first AI coding agent. Runs with Ollama (local) or Anthropic API. All actions are audited."
+    about = "Seal AI agent sessions into signed, tamper-evident evidence anyone can verify offline",
+    long_about = "Seal AI agent sessions into signed, tamper-evident evidence anyone can verify \
+offline.\n\n\
+Akmon records an agent session as a hash-linked AGEF journal, exports it as a portable bundle, \
+signs it with Ed25519, and lets a third party verify it with `akmon bundle verify`, the standalone \
+`agef-verify` binary, or stock `openssl` (`akmon bundle prove-openssl`).\n\n\
+Typical flow:\n\
+  akmon otel import trace.json                 # any OTel GenAI trace -> AGEF session\n\
+  akmon bundle keygen --out signer.key --public-out signer.pub\n\
+  akmon bundle export <SESSION_ID> --output s.akmon\n\
+  akmon bundle sign s.akmon --key signer.key\n\
+  akmon bundle verify s.akmon --verify-key signer.pub --require-signature\n\n\
+The bundled coding agent (`akmon chat`, `akmon --task ...`) is the full-capture reference \
+producer; its flags are listed under \"Agent options\"."
 )]
 pub(crate) struct Cli {
     /// Optional subcommand (`chat` is equivalent to omitting `--task`).
     #[command(subcommand)]
     command: Option<Commands>,
     /// Task string for a headless agent run. When omitted, Akmon opens the interactive TUI.
-    #[arg(short = 't', long = "task", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, short = 't', long = "task", global = true)]
     task: Option<String>,
     /// Model name: Ollama tag (e.g. llama3.2), or a Claude id if `ANTHROPIC_API_KEY` / `--anthropic-key` is set.
-    #[arg(long = "model", default_value = "llama3.2", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "model", default_value = "llama3.2", global = true)]
     model: String,
     /// Anthropic API key; defaults to the `ANTHROPIC_API_KEY` environment variable when unset.
     #[arg(
+        help_heading = AGENT_OPTIONS,
         long = "anthropic-key",
         env = "ANTHROPIC_API_KEY",
         hide_env_values = true,
@@ -1595,6 +1358,7 @@ pub(crate) struct Cli {
     anthropic_key: Option<String>,
     /// OpenRouter API key (`OPENROUTER_API_KEY`).
     #[arg(
+        help_heading = AGENT_OPTIONS,
         long = "openrouter-key",
         env = "OPENROUTER_API_KEY",
         hide_env_values = true,
@@ -1603,6 +1367,7 @@ pub(crate) struct Cli {
     openrouter_key: Option<String>,
     /// OpenAI API key (`OPENAI_API_KEY`).
     #[arg(
+        help_heading = AGENT_OPTIONS,
         long = "openai-key",
         env = "OPENAI_API_KEY",
         hide_env_values = true,
@@ -1611,6 +1376,7 @@ pub(crate) struct Cli {
     openai_key: Option<String>,
     /// Groq API key (`GROQ_API_KEY`).
     #[arg(
+        help_heading = AGENT_OPTIONS,
         long = "groq-key",
         env = "GROQ_API_KEY",
         hide_env_values = true,
@@ -1618,9 +1384,10 @@ pub(crate) struct Cli {
     )]
     groq_key: Option<String>,
     /// Azure OpenAI deployment URL (…/deployments/NAME/chat/completions).
-    #[arg(long = "azure-endpoint", env = "AZURE_OPENAI_ENDPOINT", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "azure-endpoint", env = "AZURE_OPENAI_ENDPOINT", global = true)]
     azure_endpoint: Option<String>,
     #[arg(
+        help_heading = AGENT_OPTIONS,
         long = "azure-key",
         env = "AZURE_OPENAI_API_KEY",
         hide_env_values = true,
@@ -1629,16 +1396,18 @@ pub(crate) struct Cli {
     azure_key: Option<String>,
     /// Azure `api-version` query parameter (default `2024-02-01`).
     #[arg(
+        help_heading = AGENT_OPTIONS,
         long = "azure-api-version",
         default_value = "2024-02-01",
         global = true
     )]
     azure_api_version: String,
     /// Use Amazon Bedrock (reads `AWS_*` credentials from the environment).
-    #[arg(long = "bedrock", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "bedrock", global = true)]
     bedrock: bool,
     /// AWS region for Bedrock.
     #[arg(
+        help_heading = AGENT_OPTIONS,
         long = "aws-region",
         env = "AWS_DEFAULT_REGION",
         default_value = "us-east-1",
@@ -1646,21 +1415,25 @@ pub(crate) struct Cli {
     )]
     aws_region: String,
     /// Custom OpenAI-compatible API base (no `/chat/completions` suffix).
-    #[arg(long = "openai-compatible-url", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "openai-compatible-url", global = true)]
     openai_compatible_url: Option<String>,
-    #[arg(long = "openai-compatible-key", hide_env_values = true, global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "openai-compatible-key", hide_env_values = true, global = true)]
     openai_compatible_key: Option<String>,
     /// Base URL for the Ollama HTTP API (ignored when using Anthropic).
     #[arg(
+        help_heading = AGENT_OPTIONS,
         long = "ollama-url",
         default_value = "http://localhost:11434",
         global = true
     )]
     ollama_url: String,
     /// Auto-approve read-only tools only; writes and `shell` still require confirmation.
-    #[arg(short = 'y', long = "yes", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, short = 'y', long = "yes", global = true)]
     yes: bool,
     /// `text`: stream tokens to the terminal; `json`: print one session summary object at the end.
+    ///
+    /// Must come before the subcommand (`akmon --output json policy …`): it cannot be global
+    /// because `redact` and `bundle export` define their own `--output <PATH>`.
     #[arg(
         long = "output",
         value_name = "FORMAT",
@@ -1669,49 +1442,47 @@ pub(crate) struct Cli {
     )]
     output: OutputFormat,
     /// JSON Lines audit file path (default: `<project>/.akmon/audit/<session_id>.jsonl`).
-    #[arg(long = "audit-log", value_name = "PATH")]
+    #[arg(help_heading = AGENT_OPTIONS, long = "audit-log", value_name = "PATH", global = true)]
     audit_log: Option<PathBuf>,
     /// Evidence artifact output path (default: `<project>/.akmon/evidence/<session_id>.json`).
-    #[arg(long = "evidence-path", value_name = "PATH")]
+    #[arg(help_heading = AGENT_OPTIONS, long = "evidence-path", value_name = "PATH", global = true)]
     evidence_path: Option<PathBuf>,
     /// Select built-in policy profile (`dev`, `staging`, `prod`).
-    #[arg(long = "policy-profile", value_enum, global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "policy-profile", value_enum, global = true)]
     policy_profile: Option<policy_cmd::PolicyProfileArg>,
     /// Add a policy pack file (repeatable).
-    #[arg(long = "policy-pack", value_name = "PATH", action = clap::ArgAction::Append, global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "policy-pack", value_name = "PATH", action = clap::ArgAction::Append, global = true)]
     policy_pack: Vec<PathBuf>,
     /// Highest-precedence policy override file.
-    #[arg(long = "policy-override", value_name = "PATH", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "policy-override", value_name = "PATH", global = true)]
     policy_override: Option<PathBuf>,
     /// Glob pattern allowed for the `shell` tool (argv-style commands only). Repeat for multiple patterns.
-    #[arg(long = "shell-allow", value_name = "PATTERN")]
+    #[arg(help_heading = AGENT_OPTIONS, long = "shell-allow", value_name = "PATTERN", global = true)]
     shell_allow: Vec<String>,
     /// Enable the `web_fetch` tool. Disabled by default. When enabled, the agent can fetch public URLs. Internal and private network addresses are always blocked.
-    #[arg(long = "web-fetch")]
+    #[arg(help_heading = AGENT_OPTIONS, long = "web-fetch", global = true)]
     web_fetch: bool,
     /// Auto-approve `web_fetch` requests to public URLs (use with `--web-fetch` and `--yes`). SSRF protection still applies. `WriteFile` and `shell` still require confirmation.
-    #[arg(long = "yes-web")]
+    #[arg(help_heading = AGENT_OPTIONS, long = "yes-web", global = true)]
     yes_web: bool,
     /// Connect to an MCP server at this URL and register all tools it lists (repeatable for multiple servers).
-    #[arg(long = "mcp-server", value_name = "URL")]
+    #[arg(help_heading = AGENT_OPTIONS, long = "mcp-server", value_name = "URL", global = true)]
     mcp_server: Vec<String>,
-    /// Build or load a semantic index of the project; registers the `semantic_search` tool. Cache: `.akmon/index.bin`.
-    #[arg(long = "index", global = true)]
-    index: bool,
     /// After each successful `edit` or `write_file`, run `git add` and `git commit` with an auto-generated message (requires a git repo).
-    #[arg(long = "auto-commit", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "auto-commit", global = true)]
     auto_commit: bool,
     /// Analyze the codebase and produce a written plan. The agent uses read-only tools only; the plan is saved under `.akmon/plans/`. Run again without `--plan` to implement.
-    #[arg(long = "plan", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "plan", global = true)]
     plan: bool,
     /// Use architect mode: plan with `--planner-model` (or config), then implement with `--model`.
-    #[arg(long = "architect", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "architect", global = true)]
     architect: bool,
     /// Model id for the planning phase when using `--architect`. Overrides `[architect] planner_model` in `~/.akmon/config.toml`; default `llama3.2`.
-    #[arg(long = "planner-model", value_name = "MODEL", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "planner-model", value_name = "MODEL", global = true)]
     planner_model: Option<String>,
     /// Resume the last session for this project directory (uses `~/.akmon/last_session.json`).
     #[arg(
+        help_heading = AGENT_OPTIONS,
         short = 'c',
         long = "continue",
         global = true,
@@ -1720,6 +1491,7 @@ pub(crate) struct Cli {
     continue_last: bool,
     /// Resume a specific session id (full UUID or unique `*.json` prefix under `~/.akmon/sessions/`).
     #[arg(
+        help_heading = AGENT_OPTIONS,
         short = 's',
         long = "session",
         global = true,
@@ -1727,56 +1499,29 @@ pub(crate) struct Cli {
     )]
     resume_session: Option<String>,
     /// Display name for this session (status line / JSON tooling).
-    #[arg(short = 'n', long = "name", global = true)]
+    #[arg(help_heading = AGENT_OPTIONS, short = 'n', long = "name", global = true)]
     session_name: Option<String>,
     /// Stop after estimated spend reaches this USD amount (headless only; ignored for Ollama).
-    #[arg(long = "max-budget-usd", global = true, value_name = "USD")]
+    #[arg(help_heading = AGENT_OPTIONS, long = "max-budget-usd", global = true, value_name = "USD")]
     max_budget_usd: Option<f64>,
     /// Extra directories merged into the sandbox (in addition to the project root). Repeatable.
-    #[arg(long = "add-dir", global = true, value_name = "DIR", action = clap::ArgAction::Append)]
+    #[arg(help_heading = AGENT_OPTIONS, long = "add-dir", global = true, value_name = "DIR", action = clap::ArgAction::Append)]
     add_dirs: Vec<PathBuf>,
-    /// Optional scout dossier JSON to inject into prompt context.
-    #[arg(long = "dossier", global = true, value_name = "PATH")]
-    dossier: Option<PathBuf>,
     /// Model to try on repeated HTTP 429/529 before giving up (headless only).
-    #[arg(long = "fallback-model", global = true, value_name = "MODEL")]
+    #[arg(help_heading = AGENT_OPTIONS, long = "fallback-model", global = true, value_name = "MODEL")]
     fallback_model: Option<String>,
 }
 
 /// Top-level `akmon` subcommands.
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
-    /// Interactive full-screen terminal UI (same as `akmon` without `--task`).
-    Chat,
-    /// Analyze the current project and generate `AKMON.md` using the configured model.
-    Init,
-    /// Create a new project directory with starter files and `AKMON.md`.
-    New(cli_project::NewCmd),
-    /// Manage `~/.akmon/config.toml` (models, keys, MCP).
-    Config(config_cmd::ConfigArgs),
-    /// Provider operability diagnostics and remediation hints.
-    Doctor(doctor_cmd::DoctorArgs),
-    /// Verify audit JSONL chain integrity.
-    Audit(audit_cmd::AuditArgs),
-    /// Verify evidence artifact integrity.
-    Evidence(evidence_cmd::EvidenceArgs),
-    /// Verify reliability metrics against SLO thresholds.
-    Slo(slo_cmd::SloArgs),
-    /// Policy profile/pack management and effective view.
-    Policy(policy_cmd::PolicyArgs),
-    /// Generate a bounded, read-only project context dossier.
-    Scout(scout_cmd::ScoutArgs),
-    /// Structured spec workflow under `.akmon/specs/<feature>/`.
-    Spec(spec_cmd::SpecCmd),
-    /// Synthesize `AKMON.md` from other tools' context files (Claude, Cursor, …).
-    Import(import_cmd::ImportArgs),
-    /// Write `AKMON.md` into another tool's expected paths (`--all` or `--tool`).
-    Export(export_cmd::ExportArgs),
-    /// Bundle operations: export and import AGEF bundles.
-    #[command(long_about = "Bundle operations: export and import AGEF bundles.\n\n\
+    /// Seal, sign, attest, and verify AGEF evidence bundles.
+    #[command(
+        long_about = "Seal, sign, attest, and verify AGEF evidence bundles.\n\n\
 Bundles are portable artifacts containing a complete session graph plus all referenced objects. \
-They are produced by `akmon bundle export` and consumed by `akmon bundle import`. \
-The bundle format is AGEF-compliant (see github.com/radotsvetkov/agef).")]
+Operations: export, import, verify, sign, prove-openssl, keygen, attest. \
+The bundle format is AGEF-compliant (see github.com/radotsvetkov/agef)."
+    )]
     Bundle(bundle_cmd::BundleArgs),
     /// OpenTelemetry operations: import OTLP/JSON GenAI traces into AGEF sessions.
     #[command(
@@ -1812,36 +1557,6 @@ Exit codes:\n\
         /// Print per-violation detail.
         #[arg(long)]
         verbose: bool,
-    },
-    /// Sign a session head with the configured signing command (Decision D-05).
-    #[command(
-        long_about = "Run the signing command from ~/.akmon/config.toml [signing] against a \
-session's head hash, producing an independent detached attestation (e.g. via cosign or GPG).\n\n\
-Akmon does not embed a signer: it invokes your configured command, substituting {head} and \
-{session_id} tokens in the arguments and exporting AKMON_SESSION_HEAD / AKMON_SESSION_ID into the \
-environment. The command is read only from the trusted per-user config, runs via argv (no shell), \
-and is terminated if it exceeds its timeout.\n\n\
-Configure it in ~/.akmon/config.toml:\n\
-  [signing]\n\
-  command = [\"/usr/local/bin/akmon-sign.sh\"]   # script reads $AKMON_SESSION_HEAD\n\
-  timeout_secs = 60\n\n\
-Example:\n\
-  akmon sign 550e8400-e29b-41d4-a716-446655440000\n\n\
-Exit codes:\n\
-  0 — signing command completed successfully\n\
-  1 — signing command ran but failed (non-zero exit or timeout)\n\
-  2 — usage error (no signing command configured)\n\
-  3 — I/O or environment error (journal/session not found, command not spawnable)"
-    )]
-    Sign {
-        /// Session UUID assigned at AgentSession construction.
-        session_id: uuid::Uuid,
-        /// Path to the journal directory. Defaults to per-user journal location ($XDG_STATE_HOME/akmon/journal).
-        #[arg(long)]
-        journal: Option<PathBuf>,
-        /// Output format: human (default) or json.
-        #[arg(long, default_value = "human")]
-        format: SignFormat,
     },
     /// Inspect a session's events and contents.
     #[command(
@@ -1908,37 +1623,29 @@ Exit codes:\n\
   2 — Usage error (e.g., output path exists, --object hash does not exist in source session)\n\
   3 — I/O or environment error (journal/session not found, write failure)"
     )]
-    Redact(RedactArgs),
+    Redact(redact_cmd::RedactArgs),
     /// Compare two recorded sessions (structural and field-level differences).
     Diff(diff_cmd::DiffArgs),
     /// Replay a recorded session with deterministic playback substitutions.
     Replay(ReplayArgs),
-}
-
-/// Arguments for `akmon redact`.
-#[derive(Args, Debug, Clone)]
-struct RedactArgs {
-    /// Session UUID assigned at AgentSession construction.
-    session_id: uuid::Uuid,
-    /// Path where the sanitized derivative bundle file will be written.
-    ///
-    /// Required — no default to prevent accidental overwrite of source artifacts.
-    #[arg(long)]
-    output: PathBuf,
-    /// Object hash to redact (hex, lowercase). Repeat for multiple objects.
-    #[arg(long, required = true)]
-    object: Vec<String>,
-    /// Audit rationale recorded in each sentinel.
-    #[arg(long)]
-    reason: String,
-    /// Path to the source journal directory.
-    ///
-    /// Defaults to per-user journal location (`$XDG_STATE_HOME/akmon/journal`).
-    #[arg(long)]
-    journal: Option<PathBuf>,
-    /// Output format for status messages: human (default) or json.
-    #[arg(long, default_value = "human")]
-    format: RedactFormat,
+    /// Deprecated: verify a legacy audit JSONL chain (use `akmon bundle verify`).
+    #[command(hide = true)]
+    Audit(audit_cmd::AuditArgs),
+    /// Deprecated: verify a legacy evidence artifact (use `akmon bundle verify`).
+    #[command(hide = true)]
+    Evidence(evidence_cmd::EvidenceArgs),
+    /// Interactive full-screen terminal UI (same as `akmon` without `--task`).
+    Chat,
+    /// Analyze the current project and generate `AKMON.md` using the configured model.
+    Init,
+    /// Create a new project directory with starter files and `AKMON.md`.
+    New(cli_project::NewCmd),
+    /// Manage `~/.akmon/config.toml` (models, keys, MCP).
+    Config(config_cmd::ConfigArgs),
+    /// Provider operability diagnostics and remediation hints.
+    Doctor(doctor_cmd::DoctorArgs),
+    /// Policy profile/pack management and effective view.
+    Policy(policy_cmd::PolicyArgs),
 }
 
 /// Arguments for `akmon replay`.
@@ -1963,427 +1670,6 @@ struct ReplayArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = ReplayFormat::Human)]
     format: ReplayFormat,
-}
-
-fn run_redact(
-    session_id: uuid::Uuid,
-    output: PathBuf,
-    object: Vec<String>,
-    reason: String,
-    journal: Option<PathBuf>,
-    format: RedactFormat,
-) -> ExitCode {
-    let journal_dir = match journal {
-        Some(path) => path,
-        None => match default_journal_dir() {
-            Ok(path) => path,
-            Err(err) => {
-                let msg = format!("cannot resolve default journal directory: {err}");
-                emit_redact_error(format, "journal_not_found", msg, None, None);
-                return ExitCode::from(3);
-            }
-        },
-    };
-
-    if output.exists() {
-        emit_redact_error(
-            format,
-            "output_exists",
-            format!("output path already exists: {}", output.display()),
-            None,
-            None,
-        );
-        return ExitCode::from(2);
-    }
-
-    let handle = match open_journal_read_only(journal_dir.as_path(), session_id) {
-        Ok(h) => h,
-        Err(err) => {
-            let msg = format!(
-                "cannot open journal {} for session {}: {err}",
-                journal_dir.display(),
-                session_id
-            );
-            let category = if msg.contains("session not found") {
-                "session_not_found"
-            } else if msg.contains("redb open failed") || msg.contains("No such file") {
-                "journal_not_found"
-            } else {
-                "io_error"
-            };
-            emit_redact_error(format, category, msg, None, None);
-            return ExitCode::from(3);
-        }
-    };
-
-    let algorithm = handle.store.algorithm();
-    let requested_hashes = match parse_requested_redact_hashes(algorithm, &object) {
-        Ok(v) => v,
-        Err(bad) => {
-            emit_redact_error(
-                format,
-                "invalid_object_hash",
-                format!("invalid --object hash '{bad}'"),
-                Some(bad),
-                None,
-            );
-            return ExitCode::from(2);
-        }
-    };
-
-    let (history, source_head) = {
-        let graph = handle
-            .graph
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let history = match graph.history() {
-            Ok(h) => h,
-            Err(err) => {
-                emit_redact_error(
-                    format,
-                    "io_error",
-                    format!("cannot read session history: {err}"),
-                    None,
-                    None,
-                );
-                return ExitCode::from(3);
-            }
-        };
-        let source_head = match graph.head() {
-            Ok(Some(h)) => h,
-            Ok(None) => {
-                emit_redact_error(
-                    format,
-                    "malformed_journal",
-                    "malformed session: empty event graph (no head)".to_owned(),
-                    None,
-                    None,
-                );
-                return ExitCode::from(3);
-            }
-            Err(err) => {
-                emit_redact_error(
-                    format,
-                    "io_error",
-                    format!("cannot read session head: {err}"),
-                    None,
-                    None,
-                );
-                return ExitCode::from(3);
-            }
-        };
-        (history, source_head)
-    };
-
-    let referenced: HashSet<Hash> = history
-        .iter()
-        .flat_map(|(_, ev)| referenced_object_hashes_for_kind(&ev.kind).into_iter())
-        .collect();
-    for requested in &requested_hashes {
-        if !referenced.contains(requested) {
-            emit_redact_error(
-                format,
-                "object_not_in_session",
-                format!(
-                    "requested --object hash is not referenced by source session: {}",
-                    requested.to_hex()
-                ),
-                None,
-                Some(requested.to_hex()),
-            );
-            return ExitCode::from(2);
-        }
-    }
-
-    let mut replacement_map: HashMap<Hash, Hash> = HashMap::new();
-    let mut sentinel_by_hash: HashMap<Hash, Vec<u8>> = HashMap::new();
-    let mut redacted_entries: Vec<RedactedObjectEntry> = Vec::new();
-    let now = time::OffsetDateTime::now_utc();
-    for original_hash in &requested_hashes {
-        let original_bytes = match handle.store.get(original_hash) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => {
-                emit_redact_error(
-                    format,
-                    "missing_object",
-                    format!(
-                        "requested object {} is referenced but missing from store",
-                        original_hash.to_hex()
-                    ),
-                    None,
-                    None,
-                );
-                return ExitCode::from(3);
-            }
-            Err(err) => {
-                emit_redact_error(
-                    format,
-                    "io_error",
-                    format!("cannot read object {}: {err}", original_hash.to_hex()),
-                    None,
-                    None,
-                );
-                return ExitCode::from(3);
-            }
-        };
-        let marker =
-            sentinel_from_original(original_hash, original_bytes.len() as u64, &reason, now);
-        let sentinel_bytes = match sentinel_to_canonical_cbor(&marker) {
-            Ok(v) => v,
-            Err(err) => {
-                emit_redact_error(
-                    format,
-                    "bundle_error",
-                    format!(
-                        "cannot serialize sentinel for {}: {err}",
-                        original_hash.to_hex()
-                    ),
-                    None,
-                    None,
-                );
-                return ExitCode::from(3);
-            }
-        };
-        let sentinel_hash = digest_bytes(algorithm, sentinel_bytes.as_slice());
-        replacement_map.insert(original_hash.clone(), sentinel_hash.clone());
-        sentinel_by_hash.insert(sentinel_hash.clone(), sentinel_bytes);
-        redacted_entries.push(RedactedObjectEntry {
-            original_hash: original_hash.to_hex(),
-            sentinel_hash: sentinel_hash.to_hex(),
-            original_size: original_bytes.len() as u64,
-        });
-    }
-
-    let mut rewritten_events: Vec<Event> = Vec::with_capacity(history.len());
-    let mut rewritten_hashes: Vec<Hash> = Vec::with_capacity(history.len());
-    let mut events_rewritten_count: u64 = 0;
-    for (idx, (old_hash, old_event)) in history.iter().enumerate() {
-        let (rewritten_kind, _) = rewrite_event_kind_hashes(&old_event.kind, &replacement_map);
-        let mut parents = old_event.parents.clone();
-        if idx > 0 {
-            let prev = rewritten_hashes[idx - 1].clone();
-            if parents.is_empty() {
-                parents.push(prev);
-            } else {
-                parents[0] = prev;
-            }
-        }
-        let rewritten_event = Event {
-            parents,
-            kind: rewritten_kind,
-            emitted_at: old_event.emitted_at,
-            sequence: old_event.sequence,
-        };
-        let rewritten_hash = match rewritten_event.content_hash(algorithm) {
-            Ok(h) => h,
-            Err(err) => {
-                emit_redact_error(
-                    format,
-                    "bundle_error",
-                    format!(
-                        "cannot recompute event hash at sequence {}: {err}",
-                        old_event.sequence
-                    ),
-                    None,
-                    None,
-                );
-                return ExitCode::from(3);
-            }
-        };
-        if rewritten_hash != *old_hash {
-            events_rewritten_count += 1;
-        }
-        rewritten_events.push(rewritten_event);
-        rewritten_hashes.push(rewritten_hash);
-    }
-    let Some(derivative_head) = rewritten_hashes.last().cloned() else {
-        emit_redact_error(
-            format,
-            "malformed_journal",
-            "malformed session: empty event graph (no events)".to_owned(),
-            None,
-            None,
-        );
-        return ExitCode::from(3);
-    };
-
-    let Some(start_event) = rewritten_events
-        .iter()
-        .find(|e| matches!(e.kind, EventKind::SessionStart { .. }))
-    else {
-        emit_redact_error(
-            format,
-            "malformed_journal",
-            "malformed session: journal has no SessionStart event".to_owned(),
-            None,
-            None,
-        );
-        return ExitCode::from(3);
-    };
-    let Some(end_event) = rewritten_events
-        .iter()
-        .rev()
-        .find(|e| matches!(e.kind, EventKind::SessionEnd { .. }))
-    else {
-        emit_redact_error(
-            format,
-            "malformed_journal",
-            "malformed session: journal has no SessionEnd event".to_owned(),
-            None,
-            None,
-        );
-        return ExitCode::from(3);
-    };
-
-    let mut derivative_objects: HashMap<Hash, Vec<u8>> = HashMap::new();
-    for event in &rewritten_events {
-        for hash in referenced_object_hashes_for_kind(&event.kind) {
-            if derivative_objects.contains_key(&hash) {
-                continue;
-            }
-            if let Some(bytes) = sentinel_by_hash.get(&hash) {
-                derivative_objects.insert(hash, bytes.clone());
-                continue;
-            }
-            match handle.store.get(&hash) {
-                Ok(Some(bytes)) => {
-                    derivative_objects.insert(hash, bytes.to_vec());
-                }
-                Ok(None) => {
-                    emit_redact_error(
-                        format,
-                        "missing_object",
-                        format!(
-                            "referenced object {} is missing from source store",
-                            hash.to_hex()
-                        ),
-                        None,
-                        None,
-                    );
-                    return ExitCode::from(3);
-                }
-                Err(err) => {
-                    emit_redact_error(
-                        format,
-                        "io_error",
-                        format!("cannot read object {}: {err}", hash.to_hex()),
-                        None,
-                        None,
-                    );
-                    return ExitCode::from(3);
-                }
-            }
-        }
-    }
-
-    let manifest = Manifest {
-        agef_version: AGEF_SPEC_VERSION.to_owned(),
-        producer: Producer {
-            name: "akmon".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-        },
-        session: SessionMetadata {
-            id: session_id.as_hyphenated().to_string(),
-            head: derivative_head.to_hex(),
-            created_at: format_iso_utc(
-                start_event.emitted_at.unix_timestamp(),
-                start_event.emitted_at.nanosecond(),
-            ),
-            ended_at: format_iso_utc(
-                end_event.emitted_at.unix_timestamp(),
-                end_event.emitted_at.nanosecond(),
-            ),
-        },
-        hash_algorithm: algorithm.to_string(),
-        object_count: derivative_objects.len() as u64,
-        event_count: rewritten_events.len() as u64,
-        signatures: None,
-        operator_attestations: None,
-        extra: BTreeMap::new(),
-    };
-
-    let mut file = match std::fs::File::create(&output) {
-        Ok(f) => f,
-        Err(err) => {
-            emit_redact_error(
-                format,
-                "io_error",
-                format!("cannot create bundle file {}: {err}", output.display()),
-                None,
-                None,
-            );
-            return ExitCode::from(3);
-        }
-    };
-    if let Err(err) = write_bundle(
-        &mut file,
-        &manifest,
-        &rewritten_events,
-        &derivative_objects,
-        &WriteBundleOptions::default(),
-    ) {
-        let _ = std::fs::remove_file(&output);
-        emit_redact_error(
-            format,
-            "bundle_error",
-            format!("bundle write failed: {err}"),
-            None,
-            None,
-        );
-        return ExitCode::from(3);
-    }
-    let size_bytes = match std::fs::metadata(&output) {
-        Ok(m) => m.len(),
-        Err(err) => {
-            emit_redact_error(
-                format,
-                "io_error",
-                format!("cannot stat bundle file {}: {err}", output.display()),
-                None,
-                None,
-            );
-            return ExitCode::from(3);
-        }
-    };
-
-    match format {
-        RedactFormat::Human => {
-            eprintln!("redacted: source session {}", session_id.as_hyphenated());
-            eprintln!("  events in session: {}", rewritten_events.len());
-            eprintln!("  events rewritten: {events_rewritten_count}");
-            eprintln!("  objects redacted: {}", redacted_entries.len());
-            eprintln!("  source head: {}", truncate_hash(&source_head));
-            eprintln!("  new head: {}", truncate_hash(&derivative_head));
-            eprintln!(
-                "  bundle: {}",
-                bundle_cmd::bundle_export_output_display(output.as_path())
-            );
-            eprintln!(
-                "  size: {}",
-                bundle_cmd::format_bundle_byte_size(size_bytes)
-            );
-        }
-        RedactFormat::Json => {
-            let report = RedactReportV1 {
-                akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-                agef_version: AGEF_SPEC_VERSION.to_owned(),
-                source_session_id: session_id.as_hyphenated().to_string(),
-                source_head: source_head.to_hex(),
-                derivative_head: derivative_head.to_hex(),
-                events_in_session: rewritten_events.len() as u64,
-                events_rewritten_count,
-                objects_redacted_count: redacted_entries.len() as u64,
-                redacted_objects: redacted_entries,
-                output_path: bundle_cmd::bundle_export_output_display(output.as_path()),
-                bundle_size_bytes: size_bytes,
-            };
-            if let Err(err) = print_redact_json_report(&report) {
-                eprintln!("akmon: redact: failed to render JSON output: {err}");
-                return ExitCode::from(3);
-            }
-        }
-    }
-    ExitCode::SUCCESS
 }
 
 fn resolve_replay_persist_journal_dir(
@@ -2698,348 +1984,11 @@ async fn run_replay(args: ReplayArgs) -> ExitCode {
     }
 }
 
-fn parse_requested_redact_hashes(
-    algorithm: HashAlgorithm,
-    values: &[String],
-) -> Result<Vec<Hash>, String> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for value in values {
-        let parsed = Hash::parse_hex(algorithm, value).map_err(|_| value.clone())?;
-        if seen.insert(parsed.clone()) {
-            out.push(parsed);
-        }
-    }
-    Ok(out)
-}
-
-fn rewrite_hash(hash: &Hash, replacements: &HashMap<Hash, Hash>) -> (Hash, bool) {
-    if let Some(replacement) = replacements.get(hash) {
-        (replacement.clone(), true)
-    } else {
-        (hash.clone(), false)
-    }
-}
-
 // NOTE: Per-EventKind rewrite logic lives here in akmon-cli
 // for v2.0.0 since redact is the sole consumer. If Item
 // 4.4.1 (redact on existing bundles) ships, or if Phase 6
 // diff requires similar event transformations, extract to
 // akmon-bundle as public API.
-fn rewrite_event_kind_hashes(
-    kind: &EventKind,
-    replacements: &HashMap<Hash, Hash>,
-) -> (EventKind, bool) {
-    let mut changed = false;
-    let rewritten = match kind {
-        EventKind::SessionStart {
-            cwd_hash,
-            config_hash,
-        } => {
-            let (cwd_hash, c1) = rewrite_hash(cwd_hash, replacements);
-            let (config_hash, c2) = rewrite_hash(config_hash, replacements);
-            changed = c1 || c2;
-            EventKind::SessionStart {
-                cwd_hash,
-                config_hash,
-            }
-        }
-        EventKind::UserTurn { prompt_hash } => {
-            let (prompt_hash, c1) = rewrite_hash(prompt_hash, replacements);
-            changed = c1;
-            EventKind::UserTurn { prompt_hash }
-        }
-        EventKind::ProviderCall {
-            provider_id,
-            attempts,
-            stream_hash,
-        } => {
-            let mut rewritten_attempts = Vec::with_capacity(attempts.len());
-            for attempt in attempts {
-                let (request_hash, c1) = rewrite_hash(&attempt.request_hash, replacements);
-                let (response_hash, c2) = match attempt.response_hash.as_ref() {
-                    Some(h) => {
-                        let (rewritten, c) = rewrite_hash(h, replacements);
-                        (Some(rewritten), c)
-                    }
-                    None => (None, false),
-                };
-                let (attempt_stream_hash, c3) = match attempt.stream_hash.as_ref() {
-                    Some(h) => {
-                        let (rewritten, c) = rewrite_hash(h, replacements);
-                        (Some(rewritten), c)
-                    }
-                    None => (None, false),
-                };
-                changed |= c1 || c2 || c3;
-                rewritten_attempts.push(akmon_journal::AttemptRecord {
-                    attempt_number: attempt.attempt_number,
-                    started_at: attempt.started_at,
-                    ended_at: attempt.ended_at,
-                    status: attempt.status.clone(),
-                    request_hash,
-                    response_hash,
-                    stream_hash: attempt_stream_hash,
-                    error_message: attempt.error_message.clone(),
-                });
-            }
-            let (stream_hash, c4) = match stream_hash.as_ref() {
-                Some(h) => {
-                    let (rewritten, c) = rewrite_hash(h, replacements);
-                    (Some(rewritten), c)
-                }
-                None => (None, false),
-            };
-            changed |= c4;
-            EventKind::ProviderCall {
-                provider_id: provider_id.clone(),
-                attempts: rewritten_attempts,
-                stream_hash,
-            }
-        }
-        EventKind::ToolCall {
-            tool_id,
-            input_hash,
-            output_hash,
-            side_effects_hash,
-        } => {
-            let (input_hash, c1) = rewrite_hash(input_hash, replacements);
-            let (output_hash, c2) = rewrite_hash(output_hash, replacements);
-            let (side_effects_hash, c3) = match side_effects_hash.as_ref() {
-                Some(h) => {
-                    let (rewritten, c) = rewrite_hash(h, replacements);
-                    (Some(rewritten), c)
-                }
-                None => (None, false),
-            };
-            changed = c1 || c2 || c3;
-            EventKind::ToolCall {
-                tool_id: tool_id.clone(),
-                input_hash,
-                output_hash,
-                side_effects_hash,
-            }
-        }
-        EventKind::RetrievalCall {
-            index_id,
-            query_hash,
-            results_hash,
-        } => {
-            let (query_hash, c1) = rewrite_hash(query_hash, replacements);
-            let (results_hash, c2) = rewrite_hash(results_hash, replacements);
-            changed = c1 || c2;
-            EventKind::RetrievalCall {
-                index_id: index_id.clone(),
-                query_hash,
-                results_hash,
-            }
-        }
-        EventKind::PermissionGate {
-            policy_id,
-            decision,
-            context_hash,
-        } => {
-            let (context_hash, c1) = rewrite_hash(context_hash, replacements);
-            changed = c1;
-            EventKind::PermissionGate {
-                policy_id: policy_id.clone(),
-                decision: decision.clone(),
-                context_hash,
-            }
-        }
-        EventKind::AssistantTurn {
-            message_hash,
-            tool_calls_hash,
-        } => {
-            let (message_hash, c1) = rewrite_hash(message_hash, replacements);
-            let (tool_calls_hash, c2) = match tool_calls_hash.as_ref() {
-                Some(h) => {
-                    let (rewritten, c) = rewrite_hash(h, replacements);
-                    (Some(rewritten), c)
-                }
-                None => (None, false),
-            };
-            changed = c1 || c2;
-            EventKind::AssistantTurn {
-                message_hash,
-                tool_calls_hash,
-            }
-        }
-        EventKind::SessionEnd { summary_hash } => {
-            let (summary_hash, c1) = match summary_hash.as_ref() {
-                Some(h) => {
-                    let (rewritten, c) = rewrite_hash(h, replacements);
-                    (Some(rewritten), c)
-                }
-                None => (None, false),
-            };
-            changed = c1;
-            EventKind::SessionEnd { summary_hash }
-        }
-    };
-    (rewritten, changed)
-}
-
-fn print_redact_json_report(report: &RedactReportV1) -> std::io::Result<()> {
-    let json =
-        serde_json::to_string_pretty(report).map_err(|e| std::io::Error::other(e.to_string()))?;
-    println!("{json}");
-    Ok(())
-}
-
-fn emit_redact_error(
-    format: RedactFormat,
-    category: &str,
-    error: String,
-    invalid_object_hash: Option<String>,
-    missing_object_hash: Option<String>,
-) {
-    match format {
-        RedactFormat::Human => eprintln!("akmon: redact: {error}"),
-        RedactFormat::Json => {
-            let body = RedactError {
-                akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-                error,
-                category: category.to_owned(),
-                invalid_object_hash,
-                missing_object_hash,
-            };
-            match serde_json::to_string_pretty(&body) {
-                Ok(json) => println!("{json}"),
-                Err(err) => eprintln!("akmon: redact: failed to render JSON error output: {err}"),
-            }
-        }
-    }
-}
-
-fn print_sign_json_error(category: &'static str, error: String) -> std::io::Result<()> {
-    let body = SignError {
-        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        category: category.to_owned(),
-        error,
-    };
-    let json =
-        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
-    println!("{json}");
-    Ok(())
-}
-
-fn print_sign_json_report(report: &SignReportV1) -> std::io::Result<()> {
-    let json =
-        serde_json::to_string_pretty(report).map_err(|e| std::io::Error::other(e.to_string()))?;
-    println!("{json}");
-    Ok(())
-}
-
-/// Signs a session head by invoking the configured `[signing]` command (Decision D-05).
-async fn run_sign(
-    session_id: uuid::Uuid,
-    journal: Option<PathBuf>,
-    format: SignFormat,
-) -> ExitCode {
-    let json = matches!(format, SignFormat::Json);
-
-    // The signing command is read ONLY from the trusted per-user config, never
-    // from repo-local files, so a cloned repository cannot inject a command.
-    let signing = load_user_global_config().signing;
-    if !signing.is_enabled() {
-        let msg = "no signing command configured; set [signing] command in ~/.akmon/config.toml"
-            .to_owned();
-        if json {
-            let _ = print_sign_json_error("no_signing_command", msg);
-        } else {
-            eprintln!("akmon: sign: {msg}");
-        }
-        return ExitCode::from(2);
-    }
-
-    let head_hex = match signing::resolve_session_head_hex(session_id, journal) {
-        Ok(hex) => hex,
-        Err(msg) => {
-            if json {
-                let _ = print_sign_json_error(verify_error_category(&msg), msg);
-            } else {
-                eprintln!("akmon: sign: {msg}");
-            }
-            return ExitCode::from(3);
-        }
-    };
-    let program = signing.command.first().cloned().unwrap_or_default();
-    let outcome = signing::run_signing_hook(&signing, &head_hex, &session_id.to_string()).await;
-
-    match outcome {
-        signing::SigningOutcome::Disabled => {
-            let msg = "no signing command configured".to_owned();
-            if json {
-                let _ = print_sign_json_error("no_signing_command", msg);
-            } else {
-                eprintln!("akmon: sign: {msg}");
-            }
-            ExitCode::from(2)
-        }
-        signing::SigningOutcome::SpawnError { message } => {
-            if json {
-                let _ = print_sign_json_error("signing_command_not_spawnable", message);
-            } else {
-                eprintln!("akmon: sign: {message}");
-            }
-            ExitCode::from(3)
-        }
-        signing::SigningOutcome::TimedOut { timeout } => {
-            if json {
-                let report = SignReportV1 {
-                    akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-                    session_id: session_id.to_string(),
-                    head: head_hex,
-                    program,
-                    success: false,
-                    exit_code: None,
-                    timed_out: true,
-                    elapsed_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                };
-                let _ = print_sign_json_report(&report);
-            } else {
-                eprintln!(
-                    "akmon: sign: signing command timed out after {}s",
-                    timeout.as_secs()
-                );
-            }
-            ExitCode::from(1)
-        }
-        out @ signing::SigningOutcome::Completed {
-            exit_code,
-            success,
-            stdout: _,
-            stderr: _,
-            elapsed,
-        } => {
-            if json {
-                let report = SignReportV1 {
-                    akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-                    session_id: session_id.to_string(),
-                    head: head_hex,
-                    program,
-                    success,
-                    exit_code,
-                    timed_out: false,
-                    elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-                };
-                if let Err(err) = print_sign_json_report(&report) {
-                    eprintln!("akmon: sign: failed to render JSON output: {err}");
-                    return ExitCode::from(3);
-                }
-            } else {
-                signing::emit_sign_outcome(session_id, &head_hex, &program, &out, false);
-            }
-            if success {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
-        }
-    }
-}
-
 fn run_verify(
     session_id: uuid::Uuid,
     journal: Option<PathBuf>,
@@ -3266,7 +2215,7 @@ fn run_verify(
     }
 }
 
-fn truncate_hash(hash: &akmon_journal::Hash) -> String {
+pub(crate) fn truncate_hash(hash: &akmon_journal::Hash) -> String {
     let hex = hash.to_hex();
     if hex.len() <= 8 {
         format!("{hex}...")
@@ -4015,6 +2964,14 @@ fn format_event(
     }
 }
 
+/// The `--binary` value exactly as the user types it (`hex`, `base64`, `meta`).
+fn binary_mode_flag_value(binary: BinaryMode) -> String {
+    binary
+        .to_possible_value()
+        .map(|v| v.get_name().to_owned())
+        .unwrap_or_else(|| format!("{binary:?}").to_ascii_lowercase())
+}
+
 fn run_inspect(
     session_id: uuid::Uuid,
     journal: Option<PathBuf>,
@@ -4024,7 +2981,15 @@ fn run_inspect(
     binary: BinaryMode,
 ) -> ExitCode {
     if matches!(binary, BinaryMode::Hex | BinaryMode::Base64) && !resolve {
-        eprintln!("error: --binary {binary:?} requires --resolve");
+        let msg = format!(
+            "--binary {} requires --resolve",
+            binary_mode_flag_value(binary)
+        );
+        if matches!(format, InspectFormat::Json) {
+            let _ = print_inspect_json_error("usage", msg);
+        } else {
+            eprintln!("error: {msg}");
+        }
         return ExitCode::from(2);
     }
     let journal_dir = match journal {
@@ -4111,26 +3076,17 @@ fn run_inspect(
     ExitCode::SUCCESS
 }
 
-#[cfg(feature = "semantic-index")]
-type SemanticIndexParts = (
-    Arc<RwLock<Option<akmon_index::RepoIndex>>>,
-    Arc<std::sync::Mutex<TextEmbedding>>,
-);
-
 /// Builds the tool registry; [`ShellTool`] is registered only when at least one `--shell-allow` pattern is set
 /// and `plan_mode` is `false`.
 ///
 /// [`WebFetchTool`] is registered only when `web_fetch` is true (`--web-fetch`).
 ///
 /// When `plan_mode` is `true`, only read-oriented tools are registered (no write, shell, git, MCP added here).
-///
-/// [`SemanticSearchTool`] is included when built with `semantic-index` and `semantic` is [`Some`].
 fn build_tool_registry(
     shell_allow: &[String],
     web_fetch: bool,
     has_git_root: bool,
     plan_mode: bool,
-    #[cfg(feature = "semantic-index")] semantic: Option<SemanticIndexParts>,
 ) -> Vec<Box<dyn akmon_tools::Tool>> {
     if plan_mode {
         let mut tools: Vec<Box<dyn akmon_tools::Tool>> = vec![
@@ -4143,10 +3099,6 @@ fn build_tool_registry(
         ];
         if web_fetch {
             tools.push(Box::new(WebFetchTool::new()));
-        }
-        #[cfg(feature = "semantic-index")]
-        if let Some((slot, emb)) = semantic {
-            tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
         }
         return tools;
     }
@@ -4168,94 +3120,10 @@ fn build_tool_registry(
     if !shell_allow.is_empty() {
         tools.push(Box::new(ShellTool::new(shell_allow.to_vec())));
     }
-    #[cfg(feature = "semantic-index")]
-    if let Some((slot, emb)) = semantic {
-        tools.push(Box::new(SemanticSearchTool::new(slot, Some(emb))));
-    }
     if has_git_root {
         tools.push(Box::new(GitTool::new()));
     }
     tools
-}
-
-#[cfg(feature = "semantic-index")]
-#[allow(clippy::too_many_arguments)]
-fn cli_attach_specs_subagent(
-    tools: &mut Vec<Box<dyn akmon_tools::Tool>>,
-    cli: &Cli,
-    has_git_root: bool,
-    plan_mode: bool,
-    provider: &Arc<dyn LlmProvider>,
-    sandbox: &Arc<Sandbox>,
-    akmon_md: &Option<String>,
-    semantic_parts: Option<SemanticIndexParts>,
-) {
-    tools.push(Box::new(ReadSpecTool::new()));
-    if !plan_mode {
-        tools.push(Box::new(WriteSpecTool::new()));
-    }
-    // Multi-agent orchestration is an explicit non-goal (decision doc §1.2/§3.4: "one agent,
-    // one session, one artifact"). spawn_subagent is registered only behind the experimental
-    // opt-in; default sessions never expose it.
-    if akmon_config::experimental_subagents_enabled() {
-        let shell_allow = cli.shell_allow.clone();
-        let web_fetch = cli.web_fetch;
-        let semantic = semantic_parts.clone();
-        let plan_for_sub = plan_mode;
-        let factory: SubagentToolFactory = Arc::new(move || {
-            build_tool_registry(
-                &shell_allow,
-                web_fetch,
-                has_git_root,
-                plan_for_sub,
-                semantic.clone(),
-            )
-        });
-        let rt = Arc::new(SubagentRuntime {
-            provider: Arc::clone(provider),
-            sandbox: Arc::clone(sandbox),
-            akmon_md: akmon_md.clone(),
-            plan_mode,
-            confirmation_timeout_secs: 30,
-            tool_factory: factory,
-        });
-        tools.push(Box::new(SpawnSubagentTool::new(rt)));
-    }
-}
-
-#[cfg(not(feature = "semantic-index"))]
-fn cli_attach_specs_subagent(
-    tools: &mut Vec<Box<dyn akmon_tools::Tool>>,
-    cli: &Cli,
-    has_git_root: bool,
-    plan_mode: bool,
-    provider: &Arc<dyn LlmProvider>,
-    sandbox: &Arc<Sandbox>,
-    akmon_md: &Option<String>,
-) {
-    tools.push(Box::new(ReadSpecTool::new()));
-    if !plan_mode {
-        tools.push(Box::new(WriteSpecTool::new()));
-    }
-    // See the semantic-index variant above: spawn_subagent is an explicit non-goal, gated
-    // behind the experimental opt-in and absent from default sessions.
-    if akmon_config::experimental_subagents_enabled() {
-        let shell_allow = cli.shell_allow.clone();
-        let web_fetch = cli.web_fetch;
-        let plan_for_sub = plan_mode;
-        let factory: SubagentToolFactory = Arc::new(move || {
-            build_tool_registry(&shell_allow, web_fetch, has_git_root, plan_for_sub)
-        });
-        let rt = Arc::new(SubagentRuntime {
-            provider: Arc::clone(provider),
-            sandbox: Arc::clone(sandbox),
-            akmon_md: akmon_md.clone(),
-            plan_mode,
-            confirmation_timeout_secs: 30,
-            tool_factory: factory,
-        });
-        tools.push(Box::new(SpawnSubagentTool::new(rt)));
-    }
 }
 
 fn load_user_global_config() -> AkmonGlobalConfig {
@@ -4770,102 +3638,22 @@ fn seed_project_dot_akmon_if_applicable(project_root: &Path, has_git_root: bool)
     }
 }
 
+/// Whether the "no git repository found" sandbox notice is relevant for `command` (F-15).
+///
+/// Only paths that run the agent in a project sandbox (`chat`, the bare command, `init`) print it.
+fn sandbox_warning_applies(command: Option<&Commands>) -> bool {
+    matches!(command, None | Some(Commands::Chat | Commands::Init))
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            exit_early_config_error(&cli, format!("cannot read current directory: {e}"), None, 2);
-        }
-    };
-
-    let (project_root, has_git_root) = cli_project::resolve_sandbox_root(&cwd);
-    if !has_git_root {
-        eprintln!("akmon: no git repository found.");
-        eprintln!(
-            "Using cwd as sandbox: {}",
-            dunce::canonicalize(&project_root)
-                .unwrap_or_else(|_| project_root.clone())
-                .display()
-        );
-        eprintln!("Run git init to enable git features.");
-    }
-
+    // Trust-path commands never touch the project sandbox: dispatch them before resolving the
+    // working directory, so offline verification prints no git/sandbox noise (F-15).
     match &cli.command {
-        Some(Commands::Init) => {
-            return cli_project::run_init(&cli, &project_root).await;
-        }
-        Some(Commands::Import(args)) => {
-            let provider = match cli_project::resolve_provider(&cli) {
-                Ok(p) => p,
-                Err(e) => {
-                    exit_early_config_error(&cli, e.to_string(), None, 2);
-                }
-            };
-            return match import_cmd::run_import(args.clone(), project_root.clone(), provider).await
-            {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("akmon: import: {e:#}");
-                    ExitCode::from(1)
-                }
-            };
-        }
-        Some(Commands::Export(args)) => {
-            return match export_cmd::run_export(args.clone(), &project_root) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("akmon: export: {e:#}");
-                    ExitCode::from(1)
-                }
-            };
-        }
         Some(Commands::Bundle(bundle_args)) => return bundle_cmd::run_bundle(bundle_args),
         Some(Commands::Otel(otel_args)) => return otel_cmd::run_otel(otel_args),
-        Some(Commands::New(args)) => {
-            return cli_project::run_new(&cli, args, &cwd).await;
-        }
-        Some(Commands::Config(c)) => {
-            return config_cmd::run_config(c.clone(), &cli).await;
-        }
-        Some(Commands::Doctor(d)) => {
-            let global = load_user_global_config();
-            let connect = llm_connect_from_cli(&cli, &global, cli.model.clone());
-            return doctor_cmd::run_doctor(d.clone(), cli.output == OutputFormat::Json, &connect)
-                .await;
-        }
-        Some(Commands::Audit(a)) => {
-            return audit_cmd::run_audit(a.clone(), cli.output == OutputFormat::Json);
-        }
-        Some(Commands::Evidence(e)) => {
-            return evidence_cmd::run_evidence(e.clone(), cli.output == OutputFormat::Json);
-        }
-        Some(Commands::Slo(s)) => {
-            let global = load_user_global_config();
-            return slo_cmd::run_slo(s.clone(), cli.output == OutputFormat::Json, &global);
-        }
-        Some(Commands::Policy(p)) => {
-            let global = load_user_global_config();
-            return policy_cmd::run_policy(
-                p.clone(),
-                cli.output == OutputFormat::Json,
-                &project_root,
-                &global,
-            );
-        }
-        Some(Commands::Scout(s)) => {
-            return scout_cmd::run_scout(
-                s.clone(),
-                &project_root,
-                cli.output == OutputFormat::Json,
-                cli.max_budget_usd,
-            );
-        }
-        Some(Commands::Spec(sc)) => {
-            return spec_cmd::run_spec(&cli, &project_root, sc.clone()).await;
-        }
         Some(Commands::Verify {
             session_id,
             journal,
@@ -4873,13 +3661,6 @@ async fn main() -> ExitCode {
             verbose,
         }) => {
             return run_verify(*session_id, journal.clone(), *format, *verbose);
-        }
-        Some(Commands::Sign {
-            session_id,
-            journal,
-            format,
-        }) => {
-            return run_sign(*session_id, journal.clone(), *format).await;
         }
         Some(Commands::Inspect {
             session_id,
@@ -4899,7 +3680,7 @@ async fn main() -> ExitCode {
             );
         }
         Some(Commands::Redact(args)) => {
-            return run_redact(
+            return redact_cmd::run_redact(
                 args.session_id,
                 args.output.clone(),
                 args.object.clone(),
@@ -4914,6 +3695,79 @@ async fn main() -> ExitCode {
         Some(Commands::Replay(args)) => {
             return run_replay(args.clone()).await;
         }
+        Some(Commands::Audit(a)) => {
+            return audit_cmd::run_audit(a.clone(), cli.output == OutputFormat::Json);
+        }
+        Some(Commands::Evidence(e)) => {
+            return evidence_cmd::run_evidence(e.clone(), cli.output == OutputFormat::Json);
+        }
+        Some(Commands::Config(c)) => {
+            return config_cmd::run_config(c.clone(), &cli).await;
+        }
+        Some(Commands::Doctor(d)) => {
+            let global = load_user_global_config();
+            let connect = llm_connect_from_cli(&cli, &global, cli.model.clone());
+            return doctor_cmd::run_doctor(d.clone(), cli.output == OutputFormat::Json, &connect)
+                .await;
+        }
+        _ => {}
+    }
+
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            exit_early_config_error(&cli, format!("cannot read current directory: {e}"), 2);
+        }
+    };
+
+    let (project_root, has_git_root) = cli_project::resolve_sandbox_root(&cwd);
+    if !has_git_root && sandbox_warning_applies(cli.command.as_ref()) {
+        eprintln!("akmon: no git repository found.");
+        eprintln!(
+            "Using cwd as sandbox: {}",
+            dunce::canonicalize(&project_root)
+                .unwrap_or_else(|_| project_root.clone())
+                .display()
+        );
+        eprintln!("Run git init to enable git features.");
+    }
+
+    match &cli.command {
+        Some(Commands::Init) => {
+            return cli_project::run_init(&cli, &project_root).await;
+        }
+        Some(Commands::New(args)) => {
+            return cli_project::run_new(&cli, args, &cwd).await;
+        }
+        Some(Commands::Policy(p)) => {
+            let global = load_user_global_config();
+            return policy_cmd::run_policy(
+                p.clone(),
+                cli.output == OutputFormat::Json,
+                &project_root,
+                &cwd,
+                &global,
+                &policy_cmd::PolicyResolutionOptions {
+                    profile: cli.policy_profile.map(Into::into),
+                    pack_paths: cli.policy_pack.clone(),
+                    override_path: cli.policy_override.clone(),
+                },
+            );
+        }
+        // Dispatched above; listed so this match stays exhaustive.
+        Some(
+            Commands::Bundle(_)
+            | Commands::Otel(_)
+            | Commands::Verify { .. }
+            | Commands::Inspect { .. }
+            | Commands::Redact(_)
+            | Commands::Diff(_)
+            | Commands::Replay(_)
+            | Commands::Audit(_)
+            | Commands::Evidence(_)
+            | Commands::Config(_)
+            | Commands::Doctor(_),
+        ) => {}
         Some(Commands::Chat) | None => {}
     }
 
@@ -4935,17 +3789,6 @@ async fn main() -> ExitCode {
                 None
             }
         };
-        let dossier_block = match &cli.dossier {
-            Some(path) => match load_dossier_system_block(path) {
-                Ok(block) => Some(block),
-                Err(e) => {
-                    eprintln!("akmon: invalid dossier {}: {e}", path.display());
-                    return ExitCode::from(2);
-                }
-            },
-            None => None,
-        };
-        let akmon_content = merge_akmon_with_dossier(akmon_content, dossier_block);
         let has_akmon_md = project_root.join("AKMON.md").is_file();
 
         let mode_label = if cli.yes { "AUTO" } else { "INTERACTIVE" };
@@ -4970,81 +3813,6 @@ async fn main() -> ExitCode {
         let audit_log_path =
             resolve_audit_log_path(&project_root, session_id, cli.audit_log.clone());
 
-        #[cfg(feature = "semantic-index")]
-        let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
-        #[cfg(not(feature = "semantic-index"))]
-        let index_thread: Option<std::thread::JoinHandle<()>> = None;
-
-        #[cfg(feature = "semantic-index")]
-        let semantic_index: Option<akmon_tui::SemanticIndexSlot> = if cli.index {
-            let sandbox = sandbox_for_cli(project_root.clone(), has_git_root, &cli.add_dirs);
-            let index_path = project_root.join(".akmon").join("index.bin");
-            if !index_path.is_file() {
-                eprintln!("akmon: downloading embedding model (~22MB) on first use...");
-            }
-            match TextEmbedding::try_new(
-                TextInitOptions::default().with_show_download_progress(true),
-            ) {
-                Ok(m) => {
-                    let emb = Arc::new(std::sync::Mutex::new(m));
-                    let slot = Arc::new(RwLock::new(None));
-
-                    if index_path.is_file() {
-                        match akmon_index::load_index(&index_path) {
-                            Ok(idx) => {
-                                eprintln!(
-                                    "akmon: semantic index loaded ({} files, {} chunks)",
-                                    idx.file_count, idx.chunk_count
-                                );
-                                *slot.write().await = Some(idx);
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "akmon: warning: could not load semantic index, rebuilding: {e}"
-                                );
-                                let slot_bg = Arc::clone(&slot);
-                                let root_bg = project_root.clone();
-                                let sandbox_bg = Arc::clone(&sandbox);
-                                let emb_bg = Arc::clone(&emb);
-                                let path_bg = index_path.clone();
-                                index_thread = spawn_semantic_index_os_thread(
-                                    root_bg, emb_bg, sandbox_bg, path_bg, slot_bg,
-                                );
-                                poll_index_ready_up_to_3s(&slot).await;
-                            }
-                        }
-                    } else {
-                        let slot_bg = Arc::clone(&slot);
-                        let root_bg = project_root.clone();
-                        let sandbox_bg = Arc::clone(&sandbox);
-                        let emb_bg = Arc::clone(&emb);
-                        let path_bg = index_path.clone();
-                        index_thread = spawn_semantic_index_os_thread(
-                            root_bg, emb_bg, sandbox_bg, path_bg, slot_bg,
-                        );
-                        poll_index_ready_up_to_3s(&slot).await;
-                    }
-
-                    Some((slot, emb))
-                }
-                Err(e) => {
-                    eprintln!("akmon: warning: semantic index disabled (embedding model): {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        #[cfg(not(feature = "semantic-index"))]
-        let semantic_index = {
-            if cli.index {
-                eprintln!(
-                    "akmon: --index is ignored (this binary was built without the `semantic-index` feature)."
-                );
-            }
-            None
-        };
-
         let tui_config = TuiLaunchConfig {
             version: env!("CARGO_PKG_VERSION").to_string(),
             project_root: project_root.clone(),
@@ -5052,7 +3820,6 @@ async fn main() -> ExitCode {
             mode_label: mode_label.to_string(),
             session_id,
             max_iterations: AgentConfig::default().max_iterations,
-            index_enabled: cli.index,
             anthropic_key: coalesce_opt(
                 cli.anthropic_key.clone(),
                 global.anthropic_api_key.clone(),
@@ -5092,7 +3859,6 @@ async fn main() -> ExitCode {
             akmon_md: akmon_content,
             has_akmon_md,
             sandbox_has_git_root: has_git_root,
-            semantic_index,
             auto_commit: cli.auto_commit,
             planner_model: planner_model_for_tui(&cli),
             display_theme: global.display.theme,
@@ -5101,12 +3867,7 @@ async fn main() -> ExitCode {
             journal_resume: resolved_resume.is_some(),
             model_estimates: global.model_estimates.clone(),
         };
-        let tui_outcome = akmon_tui::run_interactive(tui_config).await;
-        if let Some(handle) = index_thread {
-            eprintln!("akmon: waiting for index to finish building...");
-            let _ = handle.join();
-        }
-        return match tui_outcome {
+        return match akmon_tui::run_interactive(tui_config).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("akmon: TUI error: {e}");
@@ -5120,32 +3881,12 @@ async fn main() -> ExitCode {
     let akmon_content = match load_akmon_md(&project_root) {
         Ok(c) => c,
         Err(e) => {
-            exit_early_config_error(&cli, format!("failed to read AKMON.md: {e}"), None, 2);
+            exit_early_config_error(&cli, format!("failed to read AKMON.md: {e}"), 2);
         }
     };
-    let dossier_block = match &cli.dossier {
-        Some(path) => match load_dossier_system_block(path) {
-            Ok(block) => Some(block),
-            Err(e) => {
-                exit_early_config_error(
-                    &cli,
-                    format!("invalid dossier {}: {e}", path.display()),
-                    None,
-                    2,
-                );
-            }
-        },
-        None => None,
-    };
-    let akmon_content = merge_akmon_with_dossier(akmon_content, dossier_block);
 
     if cli.plan && cli.architect {
-        exit_early_config_error(
-            &cli,
-            "--plan cannot be combined with --architect".into(),
-            None,
-            2,
-        );
+        exit_early_config_error(&cli, "--plan cannot be combined with --architect".into(), 2);
     }
 
     if cli.output == OutputFormat::Text {
@@ -5195,7 +3936,8 @@ async fn main() -> ExitCode {
             profile: cli.policy_profile.map(Into::into),
             pack_paths: cli.policy_pack.clone(),
             override_path: cli.policy_override.clone(),
-        },
+        }
+        .with_cli_paths_relative_to(&cwd),
     );
     let policy_mode = match resolved_policy {
         Ok(Some(resolved)) => PolicyEngineMode::Configured(resolved.effective),
@@ -5215,123 +3957,20 @@ async fn main() -> ExitCode {
             }
         }
         Err(e) => {
-            exit_early_config_error(
-                &cli,
-                format!("failed to resolve effective policy: {e}"),
-                None,
-                2,
-            );
+            exit_early_config_error(&cli, format!("failed to resolve effective policy: {e}"), 2);
         }
     };
     let policy = Arc::new(PolicyEngine::new(policy_mode));
     let sandbox = sandbox_for_cli(project_root.clone(), has_git_root, &cli.add_dirs);
 
-    #[cfg(feature = "semantic-index")]
-    let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
-    #[cfg(not(feature = "semantic-index"))]
-    let mut index_thread: Option<std::thread::JoinHandle<()>> = None;
-
-    #[cfg(feature = "semantic-index")]
-    let semantic_parts: Option<SemanticIndexParts> = if cli.index {
-        let index_path = project_root.join(".akmon").join("index.bin");
-        if !index_path.is_file() {
-            eprintln!("akmon: downloading embedding model (~22MB) on first use...");
-        }
-        match TextEmbedding::try_new(TextInitOptions::default().with_show_download_progress(true)) {
-            Ok(m) => {
-                let emb = Arc::new(std::sync::Mutex::new(m));
-                let slot = Arc::new(RwLock::new(None));
-
-                if index_path.is_file() {
-                    match akmon_index::load_index(&index_path) {
-                        Ok(idx) => {
-                            eprintln!(
-                                "akmon: semantic index loaded ({} files, {} chunks)",
-                                idx.file_count, idx.chunk_count
-                            );
-                            *slot.write().await = Some(idx);
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "akmon: warning: could not load semantic index, rebuilding: {e}"
-                            );
-                            let slot_bg = Arc::clone(&slot);
-                            let root_bg = project_root.clone();
-                            let sandbox_bg = Arc::clone(&sandbox);
-                            let emb_bg = Arc::clone(&emb);
-                            let path_bg = index_path.clone();
-                            index_thread = spawn_semantic_index_os_thread(
-                                root_bg, emb_bg, sandbox_bg, path_bg, slot_bg,
-                            );
-                            poll_index_ready_up_to_3s(&slot).await;
-                        }
-                    }
-                } else {
-                    let slot_bg = Arc::clone(&slot);
-                    let root_bg = project_root.clone();
-                    let sandbox_bg = Arc::clone(&sandbox);
-                    let emb_bg = Arc::clone(&emb);
-                    let path_bg = index_path.clone();
-                    index_thread = spawn_semantic_index_os_thread(
-                        root_bg, emb_bg, sandbox_bg, path_bg, slot_bg,
-                    );
-                    poll_index_ready_up_to_3s(&slot).await;
-                }
-
-                Some((slot, emb))
-            }
-            Err(e) => {
-                eprintln!("akmon: warning: semantic index disabled (embedding model): {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    #[cfg(not(feature = "semantic-index"))]
-    if cli.index {
-        eprintln!(
-            "akmon: --index is ignored (this binary was built without the `semantic-index` feature)."
-        );
-    }
-
     if cli.plan {
         let provider = match resolve_llm(&cli, &global, run_model.clone()) {
             Ok(p) => p,
             Err(e) => {
-                exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
+                exit_early_config_error(&cli, e.to_string(), 2);
             }
         };
-        let mut tools = build_tool_registry(
-            &cli.shell_allow,
-            cli.web_fetch,
-            has_git_root,
-            true,
-            #[cfg(feature = "semantic-index")]
-            semantic_parts.clone(),
-        );
-        #[cfg(feature = "semantic-index")]
-        cli_attach_specs_subagent(
-            &mut tools,
-            &cli,
-            has_git_root,
-            true,
-            &provider,
-            &sandbox,
-            &akmon_content,
-            semantic_parts.clone(),
-        );
-        #[cfg(not(feature = "semantic-index"))]
-        cli_attach_specs_subagent(
-            &mut tools,
-            &cli,
-            has_git_root,
-            true,
-            &provider,
-            &sandbox,
-            &akmon_content,
-        );
+        let tools = build_tool_registry(&cli.shell_allow, cli.web_fetch, has_git_root, true);
         let plan_agent_config = AgentConfig {
             auto_commit: false,
             ..agent_config.clone()
@@ -5341,9 +3980,7 @@ async fn main() -> ExitCode {
             journal_resume,
         ) {
             Ok(j) => j,
-            Err(e) => {
-                exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
-            }
+            Err(e) => exit_early_config_error(&cli, format!("journal: {e}"), 2),
         };
         let mut session = match AgentSession::new(
             plan_agent_config,
@@ -5356,9 +3993,7 @@ async fn main() -> ExitCode {
             journal,
         ) {
             Ok(s) => s,
-            Err(e) => {
-                exit_early_config_error(&cli, format!("session: {e}"), Some(&mut index_thread), 2)
-            }
+            Err(e) => exit_early_config_error(&cli, format!("session: {e}"), 2),
         };
         if !resume_ctx.is_empty() {
             session.restore_context_from_messages(resume_ctx.clone());
@@ -5376,12 +4011,7 @@ async fn main() -> ExitCode {
         let saved_path = match akmon_core::save_plan_markdown(&project_root, &task, &plan_body) {
             Ok(p) => p,
             Err(e) => {
-                exit_early_config_error(
-                    &cli,
-                    format!("failed to save plan: {e}"),
-                    Some(&mut index_thread),
-                    2,
-                );
+                exit_early_config_error(&cli, format!("failed to save plan: {e}"), 2);
             }
         };
         if cli.output == OutputFormat::Text {
@@ -5412,14 +4042,6 @@ async fn main() -> ExitCode {
         }
         let _ = write_handoff_file(&session, &project_root, &cli.model);
         headless_persist(&project_root, &session, &cli.model, headless_started_at);
-        signing::maybe_sign_after_session(session_id, None, &global.signing).await;
-        if let Some(handle) = index_thread {
-            eprintln!("akmon: waiting for index to finish building...");
-            eprintln!(
-                "akmon: (CPU-bound embedding — more `akmon:` lines may appear until the index is saved)"
-            );
-            let _ = handle.join();
-        }
         if cli.output == OutputFormat::Json {
             let (status, error_opt): (&'static str, Option<String>) = match &run_outcome {
                 Ok(()) => ("success", None),
@@ -5477,38 +4099,11 @@ async fn main() -> ExitCode {
         let provider_planner = match resolve_llm(&cli, &global, planner_model.clone()) {
             Ok(p) => p,
             Err(e) => {
-                exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
+                exit_early_config_error(&cli, e.to_string(), 2);
             }
         };
-        let mut tools_planner = build_tool_registry(
-            &cli.shell_allow,
-            cli.web_fetch,
-            has_git_root,
-            true,
-            #[cfg(feature = "semantic-index")]
-            semantic_parts.clone(),
-        );
-        #[cfg(feature = "semantic-index")]
-        cli_attach_specs_subagent(
-            &mut tools_planner,
-            &cli,
-            has_git_root,
-            true,
-            &provider_planner,
-            &sandbox,
-            &akmon_content,
-            semantic_parts.clone(),
-        );
-        #[cfg(not(feature = "semantic-index"))]
-        cli_attach_specs_subagent(
-            &mut tools_planner,
-            &cli,
-            has_git_root,
-            true,
-            &provider_planner,
-            &sandbox,
-            &akmon_content,
-        );
+        let tools_planner =
+            build_tool_registry(&cli.shell_allow, cli.web_fetch, has_git_root, true);
         let planner_agent_config = AgentConfig {
             auto_commit: false,
             ..agent_config.clone()
@@ -5518,9 +4113,7 @@ async fn main() -> ExitCode {
             journal_resume,
         ) {
             Ok(j) => j,
-            Err(e) => {
-                exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
-            }
+            Err(e) => exit_early_config_error(&cli, format!("journal: {e}"), 2),
         };
         let mut planner_session = match AgentSession::new(
             planner_agent_config,
@@ -5533,9 +4126,7 @@ async fn main() -> ExitCode {
             journal,
         ) {
             Ok(s) => s,
-            Err(e) => {
-                exit_early_config_error(&cli, format!("session: {e}"), Some(&mut index_thread), 2)
-            }
+            Err(e) => exit_early_config_error(&cli, format!("session: {e}"), 2),
         };
         if !resume_ctx.is_empty() {
             planner_session.restore_context_from_messages(resume_ctx.clone());
@@ -5558,10 +4149,6 @@ async fn main() -> ExitCode {
                     audit_log_path.display()
                 );
             }
-            if let Some(handle) = index_thread {
-                eprintln!("akmon: waiting for index to finish building...");
-                let _ = handle.join();
-            }
             if cli.output == OutputFormat::Text {
                 eprintln!("akmon: {e}");
             }
@@ -5575,44 +4162,14 @@ async fn main() -> ExitCode {
         let provider_main = match resolve_llm(&cli, &global, run_model.clone()) {
             Ok(p) => p,
             Err(e) => {
-                exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
+                exit_early_config_error(&cli, e.to_string(), 2);
             }
         };
-        let mut tools = build_tool_registry(
-            &cli.shell_allow,
-            cli.web_fetch,
-            has_git_root,
-            false,
-            #[cfg(feature = "semantic-index")]
-            semantic_parts.clone(),
-        );
+        let mut tools = build_tool_registry(&cli.shell_allow, cli.web_fetch, has_git_root, false);
         register_mcp_tools(&mut tools, &mcp_servers).await;
-        #[cfg(feature = "semantic-index")]
-        cli_attach_specs_subagent(
-            &mut tools,
-            &cli,
-            has_git_root,
-            false,
-            &provider_main,
-            &sandbox,
-            &akmon_content,
-            semantic_parts.clone(),
-        );
-        #[cfg(not(feature = "semantic-index"))]
-        cli_attach_specs_subagent(
-            &mut tools,
-            &cli,
-            has_git_root,
-            false,
-            &provider_main,
-            &sandbox,
-            &akmon_content,
-        );
         let journal = match open_or_resume_default_journal_handle(agent_config.session_id, true) {
             Ok(j) => j,
-            Err(e) => {
-                exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
-            }
+            Err(e) => exit_early_config_error(&cli, format!("journal: {e}"), 2),
         };
         let mut session = match AgentSession::new(
             agent_config,
@@ -5625,9 +4182,7 @@ async fn main() -> ExitCode {
             journal,
         ) {
             Ok(s) => s,
-            Err(e) => {
-                exit_early_config_error(&cli, format!("session: {e}"), Some(&mut index_thread), 2)
-            }
+            Err(e) => exit_early_config_error(&cli, format!("session: {e}"), 2),
         };
         let impl_task = format!(
             "Implement this plan exactly:\n\n{plan_text}\n\nOriginal task: {task}\n\nFollow the plan step by step.\nDo not deviate from the plan without explaining why."
@@ -5660,14 +4215,6 @@ async fn main() -> ExitCode {
         }
         let _ = write_handoff_file(&session, &project_root, &cli.model);
         headless_persist(&project_root, &session, &cli.model, headless_started_at);
-        signing::maybe_sign_after_session(session_id, None, &global.signing).await;
-        if let Some(handle) = index_thread {
-            eprintln!("akmon: waiting for index to finish building...");
-            eprintln!(
-                "akmon: (CPU-bound embedding — more `akmon:` lines may appear until the index is saved)"
-            );
-            let _ = handle.join();
-        }
         if cli.output == OutputFormat::Json {
             let (status, error_opt): (&'static str, Option<String>) = match &run_outcome {
                 Ok(()) => ("success", None),
@@ -5723,47 +4270,17 @@ async fn main() -> ExitCode {
     let provider = match resolve_llm(&cli, &global, run_model.clone()) {
         Ok(p) => p,
         Err(e) => {
-            exit_early_config_error(&cli, e.to_string(), Some(&mut index_thread), 2);
+            exit_early_config_error(&cli, e.to_string(), 2);
         }
     };
 
-    let mut tools = build_tool_registry(
-        &cli.shell_allow,
-        cli.web_fetch,
-        has_git_root,
-        false,
-        #[cfg(feature = "semantic-index")]
-        semantic_parts.clone(),
-    );
+    let mut tools = build_tool_registry(&cli.shell_allow, cli.web_fetch, has_git_root, false);
     register_mcp_tools(&mut tools, &mcp_servers).await;
-    #[cfg(feature = "semantic-index")]
-    cli_attach_specs_subagent(
-        &mut tools,
-        &cli,
-        has_git_root,
-        false,
-        &provider,
-        &sandbox,
-        &akmon_content,
-        semantic_parts,
-    );
-    #[cfg(not(feature = "semantic-index"))]
-    cli_attach_specs_subagent(
-        &mut tools,
-        &cli,
-        has_git_root,
-        false,
-        &provider,
-        &sandbox,
-        &akmon_content,
-    );
 
     let journal =
         match open_or_resume_default_journal_handle(agent_config.session_id, journal_resume) {
             Ok(j) => j,
-            Err(e) => {
-                exit_early_config_error(&cli, format!("journal: {e}"), Some(&mut index_thread), 2)
-            }
+            Err(e) => exit_early_config_error(&cli, format!("journal: {e}"), 2),
         };
     let mut session = match AgentSession::new(
         agent_config,
@@ -5776,9 +4293,7 @@ async fn main() -> ExitCode {
         journal,
     ) {
         Ok(s) => s,
-        Err(e) => {
-            exit_early_config_error(&cli, format!("session: {e}"), Some(&mut index_thread), 2)
-        }
+        Err(e) => exit_early_config_error(&cli, format!("session: {e}"), 2),
     };
 
     if !resume_ctx.is_empty() {
@@ -5816,15 +4331,6 @@ async fn main() -> ExitCode {
     let _ = write_handoff_file(&session, &project_root, &cli.model);
 
     headless_persist(&project_root, &session, &cli.model, headless_started_at);
-    signing::maybe_sign_after_session(session_id, None, &global.signing).await;
-
-    if let Some(handle) = index_thread {
-        eprintln!("akmon: waiting for index to finish building...");
-        eprintln!(
-            "akmon: (CPU-bound embedding — more `akmon:` lines may appear until the index is saved)"
-        );
-        let _ = handle.join();
-    }
 
     let audit_log_path_str = audit_log_path.to_string_lossy().into_owned();
 
@@ -5900,7 +4406,6 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::scout_cmd::{ScoutCandidateFile, ScoutDossier};
     use akmon_journal::{HashAlgorithm, MemoryObjectStore, MemorySessionGraph};
     use akmon_query::JournalHandle;
     use clap::CommandFactory;
@@ -5922,14 +4427,7 @@ mod tests {
         has_git_root: bool,
         plan_mode: bool,
     ) -> Vec<Box<dyn akmon_tools::Tool>> {
-        build_tool_registry(
-            shell_allow,
-            web_fetch,
-            has_git_root,
-            plan_mode,
-            #[cfg(feature = "semantic-index")]
-            None,
-        )
+        build_tool_registry(shell_allow, web_fetch, has_git_root, plan_mode)
     }
 
     #[test]
@@ -6275,7 +4773,7 @@ mod tests {
     ) -> akmon_replay::ReplayReportV1 {
         akmon_replay::ReplayReportV1 {
             akmon_version: "0.0.0-test".to_owned(),
-            agef_version: AGEF_SPEC_VERSION.to_owned(),
+            agef_version: akmon_journal::AGEF_SPEC_VERSION.to_owned(),
             source_session_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
             source_head: "deadbeef".to_owned(),
             replay_session_id: replay_session_id.map(str::to_owned),
@@ -6581,8 +5079,7 @@ mod tests {
         }
         assert!(
             !line.is_char_boundary(RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES),
-            "byte {} must fall inside a multi-byte character (你好 is 6 bytes; 1020 + 4 = 1024)",
-            RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES
+            "byte {RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES} must fall inside a multi-byte character (你好 is 6 bytes; 1020 + 4 = 1024)"
         );
         assert!(
             line.len() > RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES,
@@ -6624,7 +5121,7 @@ mod tests {
                 assert_eq!(args.object, vec!["abc".to_owned()]);
                 assert_eq!(args.reason, "test");
                 assert!(args.journal.is_none());
-                assert_eq!(args.format, RedactFormat::Human);
+                assert_eq!(args.format, redact_cmd::RedactFormat::Human);
             }
             other => panic!("expected redact command, got {other:?}"),
         }
@@ -6824,7 +5321,9 @@ mod tests {
         ])
         .expect("parse redact");
         match cli.command {
-            Some(Commands::Redact(args)) => assert_eq!(args.format, RedactFormat::Human),
+            Some(Commands::Redact(args)) => {
+                assert_eq!(args.format, redact_cmd::RedactFormat::Human)
+            }
             other => panic!("expected redact command, got {other:?}"),
         }
     }
@@ -7196,60 +5695,51 @@ mod tests {
     }
 
     #[test]
-    fn merge_akmon_with_dossier_appends_context_block() {
-        let merged = merge_akmon_with_dossier(
-            Some("# AKMON\nrules".into()),
-            Some("=== Context Scout Dossier ===\nblock".into()),
-        );
-        let text = merged.expect("merged");
-        assert!(text.contains("# AKMON"));
-        assert!(text.contains("Context Scout Dossier"));
+    fn agent_flags_are_global_and_parse_after_the_subcommand() {
+        // F-6: documented as global, so they must work after `chat` as well as before it.
+        let cli = Cli::try_parse_from([
+            "akmon",
+            "chat",
+            "--web-fetch",
+            "--yes-web",
+            "--shell-allow",
+            "cargo *",
+            "--mcp-server",
+            "http://127.0.0.1:9/mcp",
+            "--audit-log",
+            "a.jsonl",
+            "--evidence-path",
+            "e.json",
+        ])
+        .expect("global agent flags after the subcommand");
+        assert!(cli.web_fetch && cli.yes_web);
+        assert_eq!(cli.shell_allow, vec!["cargo *".to_owned()]);
+        assert_eq!(cli.mcp_server, vec!["http://127.0.0.1:9/mcp".to_owned()]);
+        assert_eq!(cli.audit_log, Some(PathBuf::from("a.jsonl")));
+        assert_eq!(cli.evidence_path, Some(PathBuf::from("e.json")));
     }
 
     #[test]
-    fn load_dossier_system_block_success() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let p = dir.path().join("dossier.json");
-        let dossier = ScoutDossier {
-            schema_version: "context_scout.v1".into(),
-            task: "task".into(),
-            project_root: dir.path().display().to_string(),
-            scanned_paths: vec!["src".into()],
-            key_entrypoints: vec!["Cargo.toml".into()],
-            candidate_files: vec![ScoutCandidateFile {
-                path: "src/main.rs".into(),
-                rationale: "path matches task terms: main".into(),
-            }],
-            related_tests: vec!["tests/main_test.rs".into()],
-            constraints: vec!["read-only".into()],
-            unresolved_questions: vec![],
-            confidence: "medium".into(),
-            files_scanned: 10,
-            max_files: 20,
-            truncated: false,
-            generated_at: None,
-        };
-        let raw = serde_json::to_string_pretty(&dossier).expect("json");
-        std::fs::write(&p, raw).expect("write");
-        let block = load_dossier_system_block(&p).expect("load");
-        assert!(block.contains("Context Scout Dossier"));
-        assert!(block.contains("candidate_files"));
+    fn cli_definition_is_consistent() {
+        Cli::command().debug_assert();
     }
 
     #[test]
-    fn load_dossier_system_block_missing_path_errors() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let p = dir.path().join("missing.json");
-        let err = load_dossier_system_block(&p).expect_err("must fail");
-        assert!(err.contains("failed to read dossier"));
+    fn sandbox_notice_only_for_agent_paths() {
+        assert!(sandbox_warning_applies(None));
+        assert!(sandbox_warning_applies(Some(&Commands::Chat)));
+        assert!(sandbox_warning_applies(Some(&Commands::Init)));
+        let cli = Cli::try_parse_from(["akmon", "policy", "show-effective"]).expect("parse");
+        assert!(!sandbox_warning_applies(cli.command.as_ref()));
+        let cli = Cli::try_parse_from(["akmon", "verify", "550e8400-e29b-41d4-a716-446655440000"])
+            .expect("parse");
+        assert!(!sandbox_warning_applies(cli.command.as_ref()));
     }
 
     #[test]
-    fn load_dossier_system_block_malformed_json_errors() {
-        let dir = tempfile::tempdir().expect("tmp");
-        let p = dir.path().join("bad.json");
-        std::fs::write(&p, "{bad").expect("write");
-        let err = load_dossier_system_block(&p).expect_err("must fail");
-        assert!(err.contains("invalid dossier JSON"));
+    fn binary_mode_flag_value_matches_cli_spelling() {
+        assert_eq!(binary_mode_flag_value(BinaryMode::Hex), "hex");
+        assert_eq!(binary_mode_flag_value(BinaryMode::Base64), "base64");
+        assert_eq!(binary_mode_flag_value(BinaryMode::Meta), "meta");
     }
 }

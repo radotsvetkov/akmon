@@ -580,7 +580,7 @@ mod tests {
         let bytes = event
             .to_wire_cbor_bytes()
             .unwrap_or_else(|_| unreachable!());
-        println!("{:02x?}", bytes);
+        println!("{bytes:02x?}");
         assert!(!bytes.is_empty());
     }
 }

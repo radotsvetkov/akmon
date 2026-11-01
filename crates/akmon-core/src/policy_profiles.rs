@@ -102,11 +102,8 @@ pub fn built_in_policy_profile(profile: PolicyProfileName) -> PolicyConfig {
                 "shell".into(),
                 "web_fetch".into(),
                 "git".into(),
-                "read_spec".into(),
-                "write_spec".into(),
                 "ask_followup".into(),
                 "todo_write".into(),
-                "spawn_subagent".into(),
             ];
             cfg
         }
@@ -163,8 +160,6 @@ pub fn built_in_policy_profile(profile: PolicyProfileName) -> PolicyConfig {
                 "edit".into(),
                 "patch".into(),
                 "apply_patch".into(),
-                "read_spec".into(),
-                "write_spec".into(),
                 "ask_followup".into(),
                 "todo_write".into(),
             ];
@@ -192,7 +187,6 @@ pub fn built_in_policy_profile(profile: PolicyProfileName) -> PolicyConfig {
                 "read_*".into(),
                 "list_directory".into(),
                 "search".into(),
-                "read_spec".into(),
                 "ask_followup".into(),
                 "todo_write".into(),
             ];

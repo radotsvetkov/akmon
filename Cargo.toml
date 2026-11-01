@@ -7,7 +7,6 @@ members = [
     "crates/akmon-models",
     "crates/akmon-tools",
     "crates/akmon-query",
-    "crates/akmon-index",
     "crates/akmon-tui",
     "crates/akmon-journal",
     "crates/akmon-bundle",
@@ -16,6 +15,7 @@ members = [
     "crates/agef-verify",
     "crates/akmon-otel",
 ]
+exclude = ["archive"]
 
 [workspace.dependencies]
 crossterm = "0.27"
@@ -44,8 +44,8 @@ rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/radotsvetkov/akmon"
 homepage = "https://radotsvetkov.github.io/akmon/"
-description = "Local-first, trust-first Rust AI coding agent"
-keywords = ["ai", "agent", "coding", "llm", "cli"]
+description = "Tamper-evident, signed, offline-verifiable evidence for AI agent sessions"
+keywords = ["ai-agent", "audit", "evidence", "signing", "compliance"]
 categories = ["command-line-utilities", "development-tools"]
 authors = ["Akmon Contributors"]
 

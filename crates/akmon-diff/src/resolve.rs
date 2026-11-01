@@ -268,8 +268,7 @@ mod tests {
         }
         assert!(
             !line.is_char_boundary(RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES),
-            "byte {} must fall inside a multi-byte character (你好 is 6 bytes; 1020 + 4 = 1024)",
-            RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES
+            "byte {RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES} must fall inside a multi-byte character (你好 is 6 bytes; 1020 + 4 = 1024)"
         );
         assert!(
             line.len() > RESOLVE_TEXT_PREVIEW_MAX_LINE_BYTES,

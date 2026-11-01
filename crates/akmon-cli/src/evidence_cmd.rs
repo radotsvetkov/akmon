@@ -25,8 +25,16 @@ pub enum EvidenceSubcommand {
     },
 }
 
+/// One-line stderr notice printed by the deprecated, hidden `akmon evidence verify`.
+pub(crate) const DEPRECATION_NOTICE: &str = "akmon: warning: `akmon evidence verify` is deprecated and \
+hidden; verify sessions with `akmon bundle verify` (after `akmon bundle export <session-id>`)";
+
 /// Runs one `akmon evidence` invocation.
+///
+/// Deprecated: kept working for existing pipelines but hidden from `--help`; the legacy
+/// writers stay until a compatibility renderer exists.
 pub fn run_evidence(args: EvidenceArgs, json_output: bool) -> ExitCode {
+    eprintln!("{DEPRECATION_NOTICE}");
     match args.cmd {
         EvidenceSubcommand::Verify { path } => match verify_evidence_path(&path) {
             Ok(artifact) => {
@@ -73,6 +81,13 @@ pub fn verify_evidence_path(path: &Path) -> Result<akmon_core::EvidenceArtifact,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deprecation_notice_points_to_bundle_verify() {
+        assert!(DEPRECATION_NOTICE.contains("deprecated"));
+        assert!(DEPRECATION_NOTICE.contains("akmon bundle verify"));
+        assert!(!DEPRECATION_NOTICE.contains('\n'));
+    }
     use akmon_core::{
         AuditEvent, EvidenceArtifact, EvidenceAudit, EvidencePolicy, EvidenceToolCall,
         EvidenceTools, EvidenceVerification, ReplayMetadata, write_audit_jsonl,

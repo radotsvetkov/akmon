@@ -8,14 +8,13 @@ use akmon_core::project::{
     ProjectSummary, ProjectType, ScaffoldKind, ScaffoldLanguage, count_source_files_for_summary,
     detect_project, format_project_context_for_init, scaffold_project, suggested_akmon_title,
 };
-use akmon_core::scan_context_files;
+use akmon_core::{ContextFile, scan_context_files};
 use akmon_models::{LlmProvider, ProviderError};
 use akmon_query::generate_akmon_md_markdown;
 use clap::Args;
 use clap::ValueEnum;
 
 use crate::Cli;
-use crate::import_cmd::{ImportArgs, run_import};
 
 /// Arguments for `akmon new`.
 #[derive(Args, Debug, Clone)]
@@ -125,6 +124,20 @@ fn prompt_yes_no(question: &str) -> bool {
     }
 }
 
+/// Formats other tools' context files (CLAUDE.md, AGENTS.md, …) as extra `akmon init` input.
+fn existing_context_block(files: &[ContextFile]) -> String {
+    let mut out = String::from("## Existing AI tool context files\n\n");
+    for cf in files {
+        out.push_str(&format!(
+            "=== {}: {} ===\n{}\n=== END ===\n\n",
+            cf.tool.display_name(),
+            cf.path,
+            cf.content
+        ));
+    }
+    out
+}
+
 fn prompt_import_default_yes(question: &str) -> bool {
     use std::io::Write;
     let _ = std::io::stderr().flush();
@@ -165,6 +178,7 @@ pub async fn run_init(cli: &Cli, project_root: &Path) -> ExitCode {
 
     let dest = project_root.join("AKMON.md");
     let scan = scan_context_files(project_root);
+    let mut existing_context: Option<String> = None;
     if !scan.files.is_empty() {
         let mut labels: Vec<String> = scan
             .files
@@ -175,41 +189,8 @@ pub async fn run_init(cli: &Cli, project_root: &Path) -> ExitCode {
         labels.dedup();
         let list = labels.join(", ");
         println!("Found context from: {list}");
-        if prompt_import_default_yes("Import these? [Y/n] ") {
-            if dest.is_file() && !cli.yes {
-                let ok = prompt_yes_no("AKMON.md already exists. Overwrite? [y/N] ");
-                if !ok {
-                    eprintln!("akmon: cancelled.");
-                    return ExitCode::from(3);
-                }
-            }
-            let provider = match resolve_provider(cli) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("akmon: {e}");
-                    return ExitCode::from(2);
-                }
-            };
-            return match run_import(
-                ImportArgs {
-                    force: true,
-                    dry_run: false,
-                    from: None,
-                },
-                project_root.to_path_buf(),
-                provider,
-            )
-            .await
-            {
-                Ok(()) => {
-                    println!("\nRun akmon chat to start coding.");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("akmon: import: {e:#}");
-                    ExitCode::from(1)
-                }
-            };
+        if prompt_import_default_yes("Use these as input for AKMON.md? [Y/n] ") {
+            existing_context = Some(existing_context_block(&scan.files));
         }
     }
 
@@ -221,7 +202,11 @@ pub async fn run_init(cli: &Cli, project_root: &Path) -> ExitCode {
         }
     }
 
-    let ctx = format_project_context_for_init(&summary);
+    let mut ctx = format_project_context_for_init(&summary);
+    if let Some(block) = existing_context {
+        ctx.push_str("\n\n");
+        ctx.push_str(&block);
+    }
     let title = suggested_akmon_title(&summary);
     let provider = match resolve_provider(cli) {
         Ok(p) => p,

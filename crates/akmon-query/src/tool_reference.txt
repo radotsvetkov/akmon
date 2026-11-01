@@ -37,25 +37,9 @@ TOOL: shell
 Purpose: Run allowlisted shell command; cwd persists between calls.
 Input: command.
 
-TOOL: semantic_search
-Purpose: Find relevant code by meaning.
-Input: query, optional top_k.
-
 TOOL: web_fetch
 Purpose: Fetch a public HTTPS URL (SSRF protected).
 Input: url.
-
-TOOL: write_spec
-Purpose: Save durable project spec loaded in later sessions.
-Input: name, content.
-
-TOOL: read_spec
-Purpose: Read one spec or list specs.
-Input: optional name.
-
-TOOL: spawn_subagent
-Purpose: Run isolated research agent and return summary.
-Input: task.
 
 TOOL: todo_write
 Purpose: Update project task list stored in `.akmon/todos/current.json`.
