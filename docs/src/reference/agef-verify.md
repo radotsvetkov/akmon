@@ -1,93 +1,71 @@
 # agef-verify
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
-## Who this is for
+`agef-verify` is a small, standalone verifier for `.akmon` bundles. It is what you give an auditor. It does not include the agent, the journal, or any network code, and it runs fully offline.
 
-Auditors, compliance reviewers, and CI pipelines that must verify an AGEF `.akmon` bundle
-**without installing or running the Akmon agent CLI**. `agef-verify` is a minimal binary that
-depends only on `akmon-bundle` (manifest, framing, objects, and store-independent integrity
-checks).
+## Install
 
-## What you will have at the end
+```bash
+brew tap radotsvetkov/akmon
+brew install agef-verify
+```
 
-- Confirmation that a portable bundle's objects, event chain, and manifest head are internally
-  consistent, or a structured list of violations.
-
-## Prerequisites
-
-- A `.akmon` bundle file on disk.
+or download the `agef-verify-*` binary from a GitHub release and check it against `SHA256SUMS` ([Install](../getting-started/installation.md)).
 
 ## Usage
 
 ```bash
-agef-verify /path/to/audit.akmon
+agef-verify audit.akmon --verify-key signer.pub --require-signature
+agef-verify audit.akmon --verify-key signer.pub --require-signature --format markdown > report.md
+agef-verify audit.akmon --format json
 ```
 
-```bash
-agef-verify /path/to/audit.akmon --format json
-```
+## Options
 
-Optional flags:
+The same verification flags as [`akmon bundle verify`](./bundle-verify.md):
 
-- `--allow-extra-files`: tolerate unknown files inside the archive (same semantics as
-  `akmon bundle import`).
-- `--format human|json`: default `human`.
-
-## Operator identity (`--operator-key`)
-
-`agef-verify` checks operator attestations recorded by [`akmon bundle attest`](./bundle-attest.md)
-with the same flags as [`akmon bundle verify`](./bundle-verify.md):
-
-- `--operator-key <HEX_FILE>`: a trusted operator Ed25519 public key (64 hex chars). Repeatable.
-  Each `manifest.operator_attestations[]` entry is verified against the supplied keys.
-- `--require-operator`: fail (exit 1) unless at least one operator attestation verifies against an
-  `--operator-key`.
-- `--require-operator-key <HEX_FILE>`: fail unless that specific key has a verified attestation.
-  Repeatable; each listed key is also trusted for verification.
-
-"Verified" attaches to the **key**, not the name. The JSON carries the self-asserted
-`operator_id`/`role`/`org` strings verbatim, but the only trust signal is the distinct boolean
-`operator_key_verified` (`true` only for outcome `verified` against a key you supplied). Trust in the
-name is out-of-band.
-
-```bash
-agef-verify /path/to/audit.akmon --operator-key operator.pub.hex --require-operator --format json
-```
+| Option | Meaning |
+| --- | --- |
+| `--verify-key <HEX_FILE>` | Trusted signer public key (64 hex chars in a file). Repeatable. |
+| `--require-signature` | Fail unless a signature verifies against a `--verify-key`. |
+| `--operator-key <HEX_FILE>` | Trusted operator public key. Repeatable. |
+| `--require-operator` | Fail unless an operator attestation verifies. |
+| `--require-operator-key <HEX_FILE>` | Fail unless this specific key attested. Repeatable. |
+| `--require-capture full` | Fail unless the session captured full message content. |
+| `--allow-extra-files` | Tolerate unknown files in the archive. |
+| `--max-decoded-bytes <BYTES>` | Decompression limit. Default `1073741824` (1 GiB). |
+| `--format human\|json\|markdown` | `human` on stderr (default), `json` on stdout, or a Markdown auditor report on stdout. |
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Bundle passed all integrity checks |
-| `1` | Bundle read succeeded but verification failed (or non-I/O parse/integrity error) |
-| `3` | I/O or environment error (path not found, not a file, cannot render JSON) |
+| `0` | Passed. Without `--require-signature` this means **integrity only**; check `signature_verified` in JSON. |
+| `1` | Failed, including a malformed, corrupt, truncated, or oversized archive. |
+| `2` | Usage error. |
+| `3` | I/O or environment error: bundle or key file missing or unreadable, invalid key file. |
 
-## JSON output
+## Output
 
-`--format json` emits **BundleVerifyReportV1**, the same shape as
-`akmon bundle import --verify-only --format json`, so automation can share `jq` filters. The
-`akmon_version` field carries the `agef-verify` crate version.
+The human headline, the JSON report (`BundleVerifyReportV1`), and the Markdown report are the same as `akmon bundle verify`; see [Reading the result](./bundle-verify.md#reading-the-result). `akmon_version` in the JSON is the `agef-verify` version.
 
-```bash
-agef-verify /path/to/audit.akmon --format json | jq '.passed'
+Errors use the shared error object:
+
+```json
+{
+  "tool": "agef-verify",
+  "akmon_version": "3.0.0",
+  "passed": false,
+  "error": "cannot resolve bundle path audit.akmon: No such file or directory (os error 2)",
+  "category": "io_error"
+}
 ```
 
-Infrastructure errors (cannot open or parse the archive) emit **VerifyInfraErrorV1** with
-`tool: "agef-verify"`.
-
-## Relation to Akmon
-
-| Tool | Scope |
-| --- | --- |
-| `akmon verify <session-id>` | On-disk journal / redb store |
-| `akmon bundle verify` | Same bundle checks as `agef-verify`, embedded in Akmon |
-| `akmon bundle import --verify-only` | Legacy alias of `bundle verify` |
-| `agef-verify` | Bundle file only; no journal, no agent |
+In v3.0.0 the field `tool_version` was renamed to `akmon_version`, and every error now carries `tool` and `passed: false`. Update any automation that parsed the old name.
 
 ## See also
 
-- [akmon bundle import](./bundle-import.md)
-- [akmon bundle attest](./bundle-attest.md)
+- [Hand evidence to an auditor](../guides/hand-to-auditor.md)
+- [Verify on an air-gapped machine](../use-cases/air-gapped-audit.md)
 - [akmon bundle prove-openssl](./bundle-prove-openssl.md)
-- [akmon verify](./verify.md)

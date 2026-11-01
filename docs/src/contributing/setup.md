@@ -15,11 +15,7 @@ cd akmon
 ## Build
 
 ```bash
-# Slim / faster, no default feature bundles
-cargo build --release --no-default-features
-
-# Full: semantic indexing and related deps
-cargo build --release
+cargo build --release -p akmon-cli -p agef-verify
 ```
 
 ## Test & lint (maintainer expectations)
@@ -33,14 +29,21 @@ cargo clippy --workspace -- -D warnings
 
 | Crate | Role |
 | --- | --- |
+| `akmon-journal` | Content-addressed store and hash-linked journal |
+| `akmon-bundle` | AGEF bundles: export, import, verify, sign, attest |
+| `agef-verify` | Standalone verifier binary |
+| `akmon-otel` | OpenTelemetry GenAI importer |
+| `akmon-replay` | Deterministic replay |
+| `akmon-diff` | Session comparison |
 | `akmon-cli` | Binary entry |
-| `akmon-core` | Sandbox, policy, FSM, audit |
+| `akmon-core` | Sandbox, policy, FSM, legacy audit chain |
 | `akmon-config` | Configuration |
-| `akmon-models` | LLM backends |
-| `akmon-tools` | Built-in tools |
-| `akmon-query` | Agent session / context |
-| `akmon-index` | Semantic index |
-| `akmon-tui` | Ratatui front-end |
+| `akmon-models` | LLM backends (reference agent) |
+| `akmon-tools` | Built-in tools (reference agent) |
+| `akmon-query` | Agent session / context (reference agent) |
+| `akmon-tui` | Ratatui front-end (reference agent) |
+
+Archived code (not built) lives under `archive/`; see `archive/README.md`.
 
 ## Dogfood
 

@@ -1,6 +1,6 @@
 # Tools reference
 
-Akmon’s agent invokes **tools** the model chooses from a fixed registry. Availability depends on **mode** (for example plan mode registers read-only tools) and **CLI flags** (`--web-fetch`, `--index`, `--shell-allow`, …).
+Akmon’s agent invokes **tools** the model chooses from a fixed registry. Availability depends on **mode** (for example plan mode registers read-only tools) and **CLI flags** (`--web-fetch`, `--shell-allow`, `--mcp-server`, …).
 
 ## Categories
 
@@ -46,10 +46,6 @@ Practical flow:
 
 - **web_fetch**: HTTPS fetch with SSRF protections (optional via flag).
 
-### Semantic
-
-- **semantic_search**: embedding search when `--index` and full build (see [Semantic search](../features/semantic-search.md)).
-
 ### MCP
 
 Dynamic tools from configured MCP servers ([MCP](../features/mcp.md)).
@@ -57,14 +53,6 @@ Dynamic tools from configured MCP servers ([MCP](../features/mcp.md)).
 ## Permissions
 
 The [security model](../features/security.md) and policy engine decide auto-approval vs confirmation. Writes and dangerous operations require explicit approval unless your mode says otherwise.
-
-## Scout workflow (read-only)
-
-`akmon scout` is a bounded read-only analysis workflow that generates a `context_scout.v1` dossier under `.akmon/context/`.
-
-- Uses read signals only (filesystem listing/reading/search-like path analysis).
-- Does not invoke write/edit/patch/apply_patch/shell side effects.
-- Emits deterministic sorted sections (`scanned_paths`, `key_entrypoints`, `candidate_files`, `related_tests`) and explicit truncation indicators when bounds are hit.
 
 ## Schema
 

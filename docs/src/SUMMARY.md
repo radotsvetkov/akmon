@@ -2,22 +2,42 @@
 
 [Introduction](./introduction.md)
 
-# Concepts and trust
+# Start here
+
+- [Quick start](./getting-started/quickstart.md)
+- [Install](./getting-started/installation.md)
+
+# Concepts
 
 - [Trust model](./concepts/trust-model.md)
-- [Architecture](./concepts/architecture.md)
-- [Verifying evidence](./concepts/verifying-evidence.md)
-- [Compliance](./concepts/compliance.md)
+- [Capture levels](./concepts/capture-levels.md)
+- [What verification proves](./concepts/verifying-evidence.md)
+- [How Akmon works](./concepts/architecture.md)
 - [Glossary](./concepts/glossary.md)
+- [Akmon and other tools](./comparison.md)
+
+# Guides
+
+- [Seal an OpenTelemetry trace from any agent](./guides/seal-otel-trace.md)
+  - [Walkthrough: trace to OpenSSL proof](./tutorials/otel-to-openssl-walkthrough.md)
+- [Hand evidence to an auditor](./guides/hand-to-auditor.md)
+- [Verify on an air-gapped machine](./use-cases/air-gapped-audit.md)
+- [Record who approved a session](./use-cases/operator-sign-off.md)
+- [Assemble a release evidence pack](./use-cases/release-evidence-pack.md)
 - [Regulated reviewer flow](./concepts/reviewer-flow.md)
-- [Other tools vs Akmon](./comparison.md)
+- [Trusted timestamps](./guides/trusted-timestamps.md)
+- [Retention and archiving](./guides/retention.md)
 
----
+# Compliance
 
-# Evidence and verification
+- [Compliance crosswalk](./concepts/compliance.md)
 
+# Reference
+
+- [akmon seal](./reference/seal.md)
+- [akmon otel import](./reference/otel-import.md)
 - [akmon bundle keygen](./reference/bundle-keygen.md)
-- [akmon sign](./reference/sign.md)
+- [akmon bundle sign](./reference/bundle-sign.md)
 - [akmon bundle attest](./reference/bundle-attest.md)
 - [akmon bundle verify](./reference/bundle-verify.md)
 - [agef-verify](./reference/agef-verify.md)
@@ -29,114 +49,67 @@
 - [akmon replay](./reference/replay.md)
 - [akmon diff](./reference/diff.md)
 - [akmon verify](./reference/verify.md)
-
----
-
-# Use cases
-
-- [Record who approved an AI change](./use-cases/operator-sign-off.md)
-- [Verify evidence on an air-gapped machine](./use-cases/air-gapped-audit.md)
-- [Assemble a signed evidence pack for a release](./use-cases/release-evidence-pack.md)
-
----
-
-# Tutorials
-
-- [Tutorials overview](./tutorials/overview.md)
-- [Local-first developer flow (Ollama)](./tutorials/local-first-ollama.md)
-- [CI headless governance flow](./tutorials/ci-headless-governance.md)
-- [Third-party OTEL trace to offline openssl proof](./tutorials/otel-to-openssl-walkthrough.md)
-- [Enterprise policy rollout](./tutorials/enterprise-policy-rollout.md)
-
----
-
-# Getting Started
-
-- [Installation](./getting-started/installation.md)
-- [Quick Start](./getting-started/quickstart.md)
-- [Provider Setup](./getting-started/providers.md)
-- [Configuration](./getting-started/configuration.md)
-
----
-
-# Providers
-
-- [Ollama (Local)](./providers/ollama.md)
-- [Anthropic](./providers/anthropic.md)
-- [OpenRouter](./providers/openrouter.md)
-- [OpenAI](./providers/openai.md)
-- [Groq](./providers/groq.md)
-- [Azure OpenAI](./providers/azure.md)
-- [Amazon Bedrock](./providers/bedrock.md)
-- [Custom Endpoints](./providers/custom.md)
-
----
+- [CLI reference](./reference/cli.md)
+- [Capabilities](./reference/capabilities.md)
+- [Configuration reference](./reference/config.md)
+- [Environment variables](./reference/env-vars.md)
 
 # Bundled reference agent
 
-The bundled coding agent is the reference, gold-fidelity producer. Use it when you want a full recording that replays deterministically. The evidence and verification layer above works with any producer through OpenTelemetry.
+- [Interactive mode](./usage/interactive.md)
+  - [Headless mode](./usage/headless.md)
+  - [Plan mode](./usage/plan-mode.md)
+  - [Architect mode](./usage/architect-mode.md)
+  - [Provider setup](./getting-started/providers.md)
+    - [Ollama (local)](./providers/ollama.md)
+    - [Anthropic](./providers/anthropic.md)
+    - [OpenRouter](./providers/openrouter.md)
+    - [OpenAI](./providers/openai.md)
+    - [Groq](./providers/groq.md)
+    - [Azure OpenAI](./providers/azure.md)
+    - [Amazon Bedrock](./providers/bedrock.md)
+    - [Custom endpoints](./providers/custom.md)
+  - [Configuration](./getting-started/configuration.md)
+  - [akmon init](./project/init.md)
+  - [AKMON.md reference](./project/akmon-md.md)
+  - [Policy profiles and packs](./features/policy-profiles.md)
+  - [Security model](./features/security.md)
+  - [MCP tools](./features/mcp.md)
+  - [Git integration](./features/git.md)
+  - [Cost transparency](./features/cost.md)
+  - [Audit log (legacy)](./features/audit-log.md)
+  - [Evidence artifact (legacy)](./features/evidence.md)
+  - [Tools reference](./reference/tools.md)
+  - [Slash commands](./reference/slash-commands.md)
+  - [Rust projects](./languages/rust.md)
+  - [Python projects](./languages/python.md)
+  - [TypeScript projects](./languages/typescript.md)
+  - [Go projects](./languages/go.md)
+  - [Other languages](./languages/other.md)
+  - [Tutorials](./tutorials/overview.md)
+    - [Local-first flow (Ollama)](./tutorials/local-first-ollama.md)
+    - [CI headless governance](./tutorials/ci-headless-governance.md)
+    - [Enterprise policy rollout](./tutorials/enterprise-policy-rollout.md)
 
-- [Interactive Mode](./usage/interactive.md)
-- [Headless Mode](./usage/headless.md)
-- [Plan Mode](./usage/plan-mode.md)
-- [Architect Mode](./usage/architect-mode.md)
-- [Spec Workflow](./usage/spec-workflow.md)
+# Releases
 
-## Project setup
-
-- [akmon init](./project/init.md)
-- [AKMON.md Reference](./project/akmon-md.md)
-- [Importing Context](./project/import.md)
-- [Exporting Context](./project/export.md)
-
-## Language guides
-
-- [Rust Projects](./languages/rust.md)
-- [Python Projects](./languages/python.md)
-- [TypeScript Projects](./languages/typescript.md)
-- [Go Projects](./languages/go.md)
-- [Other Languages](./languages/other.md)
-
-## Agent features
-
-- [Semantic Search](./features/semantic-search.md)
-- [Git Integration](./features/git.md)
-- [MCP Tools](./features/mcp.md)
-- [Audit Log](./features/audit-log.md)
-- [Policy Profiles and Packs](./features/policy-profiles.md)
-- [Evidence Artifact](./features/evidence.md)
-- [Security Model](./features/security.md)
-- [Reliability and SLO Metrics](./features/reliability-slos.md)
-- [Cost Transparency](./features/cost.md)
-
----
-
-# Reference
-
-- [Capabilities](./reference/capabilities.md)
-- [CLI Reference](./reference/cli.md)
-- [Slash Commands](./reference/slash-commands.md)
-- [Configuration Reference](./reference/config.md)
-- [Tools Reference](./reference/tools.md)
-- [Environment Variables](./reference/env-vars.md)
-- [Release notes: v2.2.1](./releases/v2.2.1.md)
-- [Release notes: v2.2.0](./releases/v2.2.0.md)
-- [Release notes: v2.1.0](./releases/v2.1.0.md)
-- [Release notes: v2.0.0](./releases/v2.0.0.md)
-- [Release notes: v1.8.2](./releases/v1.8.2.md)
-- [Release notes: v1.8.1](./releases/v1.8.1.md)
-- [Release notes: v1.8.0](./releases/v1.8.0.md)
-
----
+- [v3.0.0](./releases/v3.0.0.md)
+- [v2.2.1](./releases/v2.2.1.md)
+- [v2.2.0](./releases/v2.2.0.md)
+- [v2.1.0](./releases/v2.1.0.md)
+- [v2.0.0](./releases/v2.0.0.md)
+- [v1.8.2](./releases/v1.8.2.md)
+- [v1.8.1](./releases/v1.8.1.md)
+- [v1.8.0](./releases/v1.8.0.md)
 
 # Contributing
 
-- [Development Setup](./contributing/setup.md)
+- [Development setup](./contributing/setup.md)
 - [Architecture](./contributing/architecture.md)
-- [Adding a Provider](./contributing/providers.md)
+- [Adding a provider](./contributing/providers.md)
 - [Changelog](./contributing/changelog.md)
 
 ---
 
-[Security Policy](./security.md)
+[Security policy](./security.md)
 [License](./license.md)

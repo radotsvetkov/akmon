@@ -1,12 +1,12 @@
 # Installation
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
 Engineers and auditors installing Akmon on macOS or Linux. Two binaries ship from this project:
 
-- `akmon`, the full evidence and verification layer (import, sign, attest, verify, prove, and the bundled reference agent).
+- `akmon`, the full tool: `akmon seal`, import, sign, attest, verify, prove, and the bundled reference agent.
 - `agef-verify`, a small standalone verifier. An auditor who only needs to check a bundle can install this one binary, without the full Akmon CLI.
 
 If you only receive signed bundles to verify, install `agef-verify` (or use plain `openssl`, see the [quick start](./quickstart.md)). If you produce evidence, install `akmon`.
@@ -39,13 +39,13 @@ Verify:
 
 ```bash
 akmon --version
-# e.g. akmon 2.2.0
+# e.g. akmon 3.0.0
 agef-verify --version
 ```
 
 ## Option 2: Prebuilt binaries
 
-Each GitHub release publishes platform binaries for both tools plus a `SHA256SUMS` file. The asset names are `akmon-darwin-arm64`, `akmon-darwin-x86_64`, `akmon-linux-x86_64`, and the matching `agef-verify-*` names. These are slim builds (`--no-default-features`, no bundled semantic index).
+Each GitHub release publishes platform binaries for both tools plus a `SHA256SUMS` file. The asset names are `akmon-darwin-arm64`, `akmon-darwin-x86_64`, `akmon-linux-x86_64`, and the matching `agef-verify-*` names.
 
 ### Download and verify the checksum
 
@@ -119,7 +119,7 @@ Use the correct asset name for your platform, and verify the checksum before fir
 
 ```bash
 akmon --version
-# e.g. akmon 2.2.0
+# e.g. akmon 3.0.0
 ```
 
 ## Option 3: From source
@@ -128,11 +128,7 @@ akmon --version
 git clone https://github.com/radotsvetkov/akmon
 cd akmon
 
-# Slim build, no semantic indexing, smaller binary
-cargo build --release --no-default-features
-
-# Full build, with semantic indexing
-cargo build --release
+cargo build --release -p akmon-cli -p agef-verify
 
 mkdir -p ~/bin
 cp target/release/akmon ~/bin/
@@ -198,7 +194,7 @@ ENTRYPOINT ["akmon"]
 
 - name: Verify a bundle
   run: |
-    akmon bundle verify build/session.akmon --verify-key signer.pub.hex --require-signature --format json \
+    akmon bundle verify build/session.akmon --verify-key signer.pub --require-signature --format json \
       | jq .passed
 ```
 
@@ -217,6 +213,8 @@ For auditors who only verify, install just the standalone binary:
 rm -f ~/bin/akmon ~/bin/agef-verify /usr/local/bin/akmon /usr/local/bin/agef-verify
 rm -rf ~/.akmon   # removes config, sessions, audit logs
 ```
+
+Removing `~/.akmon` or the journal directory deletes recorded sessions. If those sessions are evidence you must retain, export and archive them first (see [Retention and archiving](../guides/retention.md)).
 
 If you installed through Homebrew:
 

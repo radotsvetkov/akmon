@@ -41,7 +41,7 @@ akmon inspect 550e8400-e29b-41d4-a716-446655440000
 
 ### `--journal <path>` (optional)
 
-Journal directory to inspect. If omitted, Akmon resolves the default per-user journal path (`$XDG_STATE_HOME/akmon/journal`, per D-04).
+Journal directory to inspect. If omitted, Akmon resolves the default per-user journal path (`$XDG_STATE_HOME/akmon/journal`).
 
 ### `--format <human|json>` (optional, default: `human`)
 
@@ -141,7 +141,7 @@ journal: /home/user/.local/state/akmon/journal
 
 ```json
 {
-  "akmon_version": "2.1.0",
+  "akmon_version": "3.0.0",
   "agef_version": "0.1.1",
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
   "journal_path": "/home/user/.local/state/akmon/journal",
@@ -211,7 +211,7 @@ Infrastructure failures use this JSON shape:
 
 ```json
 {
-  "akmon_version": "2.1.0",
+  "akmon_version": "3.0.0",
   "category": "session_not_found",
   "error": "cannot open journal ...: session not found: 550e8400-e29b-41d4-a716-446655440000"
 }
@@ -220,6 +220,8 @@ Infrastructure failures use this JSON shape:
 - `akmon_version`: Akmon CLI version that produced the error.
 - `category`: one of:
   - `journal_not_found`
+  - `journal_locked` (exit `3`; another process holds `journal.redb`)
+  - `usage` (exit `2`; for example `--binary hex` without `--resolve`)
   - `session_not_found`
   - `inspect_infrastructure_error`
 - `error`: human-readable diagnostic message.
@@ -302,4 +304,4 @@ $ akmon inspect 550e8400-e29b-41d4-a716-446655440000 --journal /tmp/my-journal
 
 - `akmon verify`: [./verify.md](./verify.md)
 - AGEF specification: [github.com/radotsvetkov/agef](https://github.com/radotsvetkov/agef)
-- `akmon export` / `akmon import` (Item 4.3, coming)
+- [akmon bundle export](./bundle-export.md) / [akmon bundle import](./bundle-import.md)

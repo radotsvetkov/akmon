@@ -21,159 +21,203 @@
 
 </div>
 
+
 # Akmon
 
-Akmon is a tamper-evident evidence and verification layer for AI agents. It sits on top of whatever agent you already run, whether that is your own or any tool that emits OpenTelemetry. Each session becomes a portable, content-addressed, cryptographically signed record that someone else can verify for themselves. The part that matters most is this: a third party can check a signature offline using nothing but `openssl`, with no Akmon install, no cloud service, and no need to trust whoever produced the record.
+**Prove what your AI agent did, to someone who doesn't trust you.**
 
-Website: [radotsvetkov.github.io/akmon](https://radotsvetkov.github.io/akmon/). Documentation: [radotsvetkov.github.io/akmon/docs](https://radotsvetkov.github.io/akmon/docs/).
+Sooner or later someone asks you to prove what an AI agent actually did: an auditor, a customer's security team, an incident reviewer, a regulator. It may be years after the session. They don't trust you, they won't install your tools, and "here are our logs" doesn't help when those logs are mutable spans you produced yourself. Akmon turns an agent session into **one sealed file**. That file is a signed, tamper-evident [AGEF](https://github.com/radotsvetkov/agef) bundle, and the person asking can verify it **offline**: with the small `agef-verify` binary, or with nothing but stock OpenSSL 3. It works on top of any agent that emits OpenTelemetry GenAI traces, and on Akmon's own bundled reference agent.
 
-[![CI](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml/badge.svg)](https://github.com/radotsvetkov/akmon/actions)
-[![Passed tests](https://img.shields.io/github/actions/workflow/status/radotsvetkov/akmon/ci.yml?branch=main&label=passed%20tests)](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml)
+Website: [radotsvetkov.github.io/akmon](https://radotsvetkov.github.io/akmon/) · Handbook: [radotsvetkov.github.io/akmon/docs](https://radotsvetkov.github.io/akmon/docs/) · Current release: **v3.0.0** ([what changed](CHANGELOG.md))
+
+[![CI](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml/badge.svg)](https://github.com/radotsvetkov/akmon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
-## Why this exists
+## 60-second quickstart
 
-When an AI agent changes something, you may have to prove later what it actually did. The person asking could be a regulator, a security reviewer, or an incident team, and it might be years after the fact. They may not trust you, and they may not run your tools. Most agent telemetry cannot stand up to that. It lives in process memory, or in mutable, unsigned spans, and "the AI did it" is not an answer anyone will accept. Under the EU AI Act, the high-risk logging obligations in Article 12 and Annex IV start to apply on 2 August 2026.
+Seal: you, the producer.
 
-Akmon treats the evidence itself as the thing you ship. It takes a session, either your own or one from any OpenTelemetry-instrumented agent, and turns it into a sealed record. Someone else can then check that record's integrity and authorship independently, with standard tools, even on a machine that has never heard of Akmon.
+```bash
+# 1. One-time: make an Ed25519 signing key. Keep signer.pk8 secret, hand out signer.pub.
+akmon bundle keygen --out signer.pk8 --public-out signer.pub
 
-## The trust toolchain
+# 2. Seal an agent session. The input is an OTLP/JSON trace from any agent, or a journal session id.
+#    This one command imports, bundles, verifies integrity, signs and self-verifies.
+akmon seal trace.json --key signer.pk8 --output audit.akmon
+# sealed: audit.akmon
+#   capture level: full
+#   integrity: OK | signature: verified | self-verify: passed
+# It also writes audit.akmon.pub (the signer public key, hex) and prints the exact
+# agef-verify commands to hand over. Add --proof-dir proof for OpenSSL artifacts.
+```
 
-Every command here ships today and is covered by tests. The focus is the verification chain, not the agent.
+Verify: the auditor, on their own machine, with no Akmon install.
 
-| Step | Command | What it does |
-| --- | --- | --- |
-| Import any agent | `akmon otel import <trace.json>` | Turns an OpenTelemetry GenAI trace into an AGEF session. It reads the current v1.37 structured form and the older v1.36 message-event form that most agents still emit. The capture level (`full` or `structural`) is recorded honestly. |
-| Generate a key | `akmon bundle keygen --out k.pk8 --public-out k.pub` | Creates an Ed25519 signing key (PKCS#8 v2). |
-| Sign | `akmon bundle sign <bundle> --key k.pk8` | Adds an offline Ed25519 signature over the session head. |
-| Attest an operator | `akmon bundle attest <bundle> --key op.pk8 --operator-id you@org --role approver` | Records the accountable person behind a session, signed separately from the head signature. |
-| Verify | `akmon bundle verify <bundle> --verify-key k.pub --require-signature` | Checks integrity, the signature, any operator attestation, and the capture level. |
-| Verify on its own | `agef-verify <bundle> --verify-key k.pub` | A small, separate binary for auditors. It does not need the full Akmon install. |
-| Prove with openssl | `akmon bundle prove-openssl <bundle> --verify-key k.pub --out-dir proof` | Writes out the statement, signature, and public key so anyone can check the signature with plain `openssl`. |
+```bash
+agef-verify audit.akmon --verify-key signer.pub --require-signature
+# verified bundle: integrity OK; signature verified by key_id=c452d258…: audit.akmon
+#   capture: FULL (OTEL import; message content captured)
+#   ...
 
-Other commands round out the lifecycle: `bundle export` and `bundle import`, `inspect`, `diff`, `replay` (deterministic playback of sessions Akmon produced itself), `redact`, `audit`, `evidence`, `verify`, `policy`, and `doctor`.
+# A plain-language report to attach to a ticket or audit file:
+agef-verify audit.akmon --verify-key signer.pub --require-signature --format markdown > report.md
+```
 
-## Quickstart
+Send the public key over a **separate, trusted channel** (not next to the bundle). If an attacker can swap both the bundle and the key, a signature proves nothing.
 
-You can install Akmon a few ways.
+**No Akmon at all? Use OpenSSL.** Add `--proof-dir proof` to `akmon seal`, or run `akmon bundle prove-openssl audit.akmon --verify-key signer.pub --out-dir proof` on a bundle you already have. The verifier then runs:
 
-On macOS or Linux with Homebrew:
+```bash
+openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin \
+  -in proof/statement.bin -sigfile proof/signature.bin
+# Signature Verified Successfully
+```
+
+This shows that the key holder signed session head *H*. `agef-verify` is the part that ties *H* to the bundle's contents. Use OpenSSL 3.x: the `openssl` that ships with macOS is LibreSSL, which cannot verify Ed25519 (`brew install openssl@3`).
+
+The step-by-step version, with a real OpenTelemetry fixture, is the [OTEL trace → openssl proof walkthrough](docs/src/tutorials/otel-to-openssl-walkthrough.md).
+
+## Install
+
+**Homebrew** (macOS, Linux):
 
 ```bash
 brew tap radotsvetkov/akmon
-brew install akmon         # the CLI
-brew install agef-verify   # the standalone verifier for auditors
+brew install akmon          # the CLI
+brew install agef-verify    # the standalone verifier, which is all an auditor needs
 ```
 
-Or grab the prebuilt binaries directly. Each GitHub release attaches prebuilt `akmon` and `agef-verify` binaries for Linux and macOS, plus a `SHA256SUMS` file so you can check what you downloaded. For Linux on x86_64:
+**Prebuilt binaries + checksums.** Every GitHub release ships `akmon` and `agef-verify` for Linux x86_64 and macOS (arm64, x86_64), plus `SHA256SUMS` and a CycloneDX SBOM (`akmon.cdx.json`):
 
 ```bash
 base=https://github.com/radotsvetkov/akmon/releases/latest/download
-curl -LO $base/akmon-linux-x86_64
-curl -LO $base/agef-verify-linux-x86_64
-curl -LO $base/SHA256SUMS
-
-# Check the downloads against the published checksums before installing.
-sha256sum --check --ignore-missing SHA256SUMS
-
+curl -LO "$base/akmon-linux-x86_64" -LO "$base/agef-verify-linux-x86_64" -LO "$base/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS      # macOS: shasum -a 256 --check --ignore-missing SHA256SUMS
 chmod +x akmon-linux-x86_64 agef-verify-linux-x86_64
-mv akmon-linux-x86_64 ~/bin/akmon
-mv agef-verify-linux-x86_64 ~/bin/agef-verify
+mv akmon-linux-x86_64 ~/bin/akmon && mv agef-verify-linux-x86_64 ~/bin/agef-verify
 ```
 
-On macOS the file names are `akmon-darwin-arm64` and `agef-verify-darwin-arm64` for Apple silicon, or the `-x86_64` variants for Intel, and you check them with `shasum -a 256 --check --ignore-missing SHA256SUMS`.
+On macOS the file names are `akmon-darwin-arm64` / `agef-verify-darwin-arm64` (Apple silicon) or `-darwin-x86_64` (Intel).
 
-Or build from source on any platform:
+**From source** (Rust 1.88+). The CLI's package is `akmon-cli`, which installs the `akmon` binary:
 
 ```bash
-cargo install --git https://github.com/radotsvetkov/akmon akmon
-cargo install --git https://github.com/radotsvetkov/akmon agef-verify
+cargo install --locked --git https://github.com/radotsvetkov/akmon akmon-cli
+cargo install --locked --git https://github.com/radotsvetkov/akmon agef-verify
 ```
 
-Here is a full run, from any agent's OpenTelemetry trace to a proof a stranger can check.
+## What a verification proves, and what it doesn't
+
+| A passing `agef-verify … --verify-key K --require-signature` proves | It does **not** prove |
+| --- | --- |
+| **Integrity:** every event and content object hashes into the session head *H*. Nothing was changed, added, removed or reordered since *H* was computed. | **When** the session happened. Event times come from the producer's clock, and AGEF signatures do not yet cover a trusted time (see below). |
+| **Authorship of H:** the holder of private key *K* signed *H*, under the domain-separated `AGEF-SIG-v1` statement. | **Who holds K.** Tying a key to a person or organization is up to you: out-of-band key exchange, a key register, a PKI. |
+| **Operator sign-off** (with `--operator-key`): a second key signed an `AGEF-OPERATOR-v1` attestation naming an accountable person and role. | That the operator's name, role or org are true. They are self-asserted text, and only the key is verified. |
+| **Capture honesty:** the capture level (`full` / `partial` / `structural`) is inside the signed record, so nobody can quietly overstate it. | That the agent behaved correctly, or that any legal obligation is met. |
+
+Without `--require-signature`, a pass means **integrity only**. Anyone can build an internally consistent unsigned bundle. Fields shown as *unsigned metadata* (`created_at`, `ended_at`, producer) can be edited by whoever holds the file.
+
+### Trusted time: an honest gap, and an interim recipe
+
+AGEF v0.1.3 signatures do not cover a timestamp. Native RFC 3161 timestamps embedded in the bundle (`manifest.timestamps[]`, AGEF v0.1.4) are **planned, not shipped**. Until then, you can get an independent time attestation with stock OpenSSL and any RFC 3161 Time-Stamping Authority:
 
 ```bash
-# 1. Make a signing key. Keep the private half secret and hand out only the .pub.
-akmon bundle keygen --out signer.pk8 --public-out signer.pub
-
-# 2. Turn a real trace into a session, then a portable bundle.
-akmon otel import trace.json --journal ./journal
-akmon bundle export <session-id> --journal ./journal --output audit.akmon
-
-# 3. Sign it.
-akmon bundle sign audit.akmon --key signer.pk8
-
-# 4. Verify integrity, the signature, and the capture level.
-akmon bundle verify audit.akmon --verify-key signer.pub --require-signature
-
-# 5. Prove it with openssl alone, no Akmon involved.
 akmon bundle prove-openssl audit.akmon --verify-key signer.pub --out-dir proof
-openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin -in proof/statement.bin -sigfile proof/signature.bin
+openssl ts -query -data proof/statement.bin -sha256 -cert -out proof/statement.tsq
+curl -sS -H "Content-Type: application/timestamp-query" \
+  --data-binary @proof/statement.tsq https://freetsa.org/tsr -o proof/statement.tsr
+# Keep statement.tsr next to the bundle. Anyone can later check it:
+openssl ts -verify -data proof/statement.bin -in proof/statement.tsr -CAfile tsa-ca.pem -untrusted tsa.crt
 ```
 
-Use OpenSSL 3.x for the verify step. The `openssl` that ships with macOS is LibreSSL, which cannot verify Ed25519. Install OpenSSL 3.x first, for example with `brew install openssl@3`.
+FreeTSA works for experiments. Where legal weight matters in the EU, use a **qualified** trust service provider's TSA (eIDAS Art. 41; Implementing Regulation (EU) 2025/1929; RFC 3161 / ETSI EN 319 422).
 
-There is a full walkthrough in the docs: [from an OTEL trace to an offline openssl proof](docs/src/tutorials/otel-to-openssl-walkthrough.md).
+## Capture levels
 
-## How much a session captures
+Akmon records how complete a session is and signs that level into the record:
 
-Akmon is explicit about how complete each record is, and it signs that level into the record so nobody can quietly overstate it.
+| Level | Meaning | Typical source |
+| --- | --- | --- |
+| `full` | Every content slot is real: request and response for each provider call, input and output for each tool call. | Akmon's reference agent; OTEL traces with content capture enabled |
+| `partial` | Some content slots are real, others are missing. | OTEL traces with partial content capture. Embeddings calls never count as `full`, because their output is not a message. |
+| `structural` | No content, only the shape: provider calls, tool calls, timings, token counts, errors. | OTEL traces with content capture off (the common default) |
 
-Full capture (`capture_level = full`) comes from Akmon's own agent. It keeps the prompts, responses, and tool calls, so the session replays deterministically with `akmon replay`.
+`agef-verify --require-capture full` rejects `partial` and `structural` bundles. `akmon replay` refuses OTEL imports at any level, because an imported trace is a record, not a replayable execution. Only reference-agent sessions replay deterministically.
 
-Structural capture (`capture_level = structural`) comes from importing another agent's OpenTelemetry trace. You get the shape of the session, its provider calls, tool calls, metadata, and whatever content the trace happened to include, but not a byte-for-byte replay. `akmon bundle verify --require-capture full` fails on these on purpose, and `akmon replay` refuses them.
+## The toolchain
 
-An imported trace is never dressed up as a full recording. Keeping that line clear is the whole reason a trust layer is worth having.
+| Command | What it does |
+| --- | --- |
+| `akmon seal <trace.json \| session-id> --key k.pk8` | **The one-shot path.** Import or select, export, verify integrity, sign, optionally attest, self-verify, and optionally write openssl proof artifacts (`--proof-dir`). |
+| `akmon otel import <trace.json>` | OTLP/JSON GenAI trace (semconv v1.37–v1.42 structured form, the inference-details event, or the legacy ≤ v1.36 message events) → AGEF session. Prints the session id on stdout. Use `--trace-id` to pick one trace from a multi-trace file. |
+| `akmon bundle keygen --out k.pk8 --public-out k.pub` | Ed25519 signing key (PKCS#8 v2, file mode `0600`) plus its public key as hex. |
+| `akmon bundle export <session-id> --output s.akmon` / `bundle import` | Journal session ↔ portable `.akmon` bundle (tar.zst). |
+| `akmon bundle sign <bundle> --key k.pk8` | Adds an `AGEF-SIG-v1` Ed25519 signature over the session head. Refuses a bundle that fails integrity. |
+| `akmon bundle attest <bundle> --key op.pk8 --operator-id … --role …` | Adds a separately signed `AGEF-OPERATOR-v1` operator attestation. |
+| `akmon bundle verify <bundle> --verify-key k.pub` | Full verification: integrity, signatures, operator attestations, capture level. `--format human\|json\|markdown`. |
+| `agef-verify <bundle> --verify-key k.pub` | The same verification as a small standalone binary for auditors and CI. |
+| `akmon bundle prove-openssl <bundle> --verify-key k.pub --out-dir proof` | Verifies the bundle first, then writes `statement.bin`, `signature.bin` and `pubkey.pem` for a check with stock `openssl`. |
+| `akmon inspect <session-id>` | Read a session's events and resolve content objects. |
+| `akmon diff <a> <b>` | Structural and field-level comparison of two sessions, including provider requests and retry attempts. |
+| `akmon replay <session-id>` | Deterministic playback of a full-capture reference-agent session. |
+| `akmon redact <session-id> --object <hash> --reason "…" --output r.akmon` | Derivative bundle with chosen objects replaced by redaction sentinels (for example to honour GDPR erasure without breaking verification). |
 
-## How it compares to Microsoft
+The trust commands share one exit-code convention: `0` passed, `1` verification failed or was refused (including corrupt, truncated or oversized archives), `2` usage or bad input, `3` I/O or environment. They also take `--format json`. `akmon seal`, the `bundle` subcommands and `agef-verify` report errors as one `ToolErrorV1` object `{tool, akmon_version, passed:false, error, category}`.
 
-Microsoft ships a solid governance runtime, the open-source Agent Governance Toolkit, which has been generally available since April 2026, and a strong tamper-evident cloud ledger in Azure Confidential Ledger. As of June 2026, though, no single Microsoft product gives you one portable, self-contained evidence artifact that is signed with an asymmetric key (Ed25519), checkable by a stranger who has nothing from Microsoft installed, deterministically replayable, and able to sit on top of any agent. The Toolkit's tamper-evidence is a hash chain plus HMAC, with no asymmetric signature and no standalone verifier. Confidential Ledger's signed Merkle receipts are genuinely good, but they are tied to Azure and are not aware of agents. Microsoft's own Foundry documentation says its traces cannot support full replay.
+## EU AI Act: where this fits (as of 1 Nov 2026)
 
-That gap is where Akmon fits. It is portable, signed, cloud-independent, agent-aware, and replayable.
+Akmon **helps you produce evidence**. It does not make a system compliant, it is not a certification, and nothing here is legal advice. The dates below follow Regulation (EU) 2024/1689 (the AI Act) **as amended by the Digital Omnibus on AI, Regulation (EU) 2026/1744** (OJ 24 July 2026, in force 27 July 2026).
 
-Akmon is not trying to replace any of that, and there are places where Microsoft is clearly ahead. Its distribution is one: Purview and the Copilot Control System are already in every Microsoft 365 tenant. Confidential Ledger's offline-verifiable receipts are another, and so is Microsoft's weight in the standards bodies. A single tool will not match those. Akmon is meant to complement them: seal what Purview captures, and export and verify what Foundry traces.
+- **High-risk obligations are deferred, not cancelled.** Chapter III duties, including **Art. 12** (automatic logging), **Art. 19** (providers keep logs for at least 6 months) and **Art. 26(6)** (deployers keep logs for at least 6 months), apply from **2 December 2027** for Annex III systems and **2 August 2028** for Annex I (product-embedded) systems.
+- **Already applicable:** prohibitions and AI literacy (Feb 2025), general-purpose AI model obligations (Aug 2025, with Commission enforcement powers from 2 Aug 2026), Art. 50 transparency (2 Aug 2026; machine-readable marking has a grace period to 2 Dec 2026 for systems already on the market), and the penalties regime.
+- **Where a sealed bundle helps:** tamper-evident session logs for Art. 12-style record-keeping, retained under your own Art. 19/26(6) retention (pair bundles with WORM or object-lock storage); **Annex IV point 2(g)**, *"test logs and all test reports dated and signed by the responsible persons"*, where a signed test-session bundle plus an operator attestation is a good fit (for the "dated" part, add a trusted timestamp as described above); and **Art. 73** serious-incident reporting, where a frozen, signed bundle helps show records were not altered before the authorities were informed (Art. 73(6)). Commission guidance on Art. 73 is still a draft.
+- **What it does not do:** operator attestation helps you **evidence** human oversight and sign-off. It does not by itself satisfy Art. 14. The Art. 12(3) minimum log fields apply only to remote biometric identification systems (Annex III point 1(a)). AI agents are not a separate category under the Act (AI Office FAQ, preliminary).
+- **Standards are not there yet:** ISO/IEC 24970 (AI system logging) is at FDIS, prEN 18229-1 (AI trustworthiness, logging) is at CEN enquiry, and EN 18286 (QMS) was published in 2026. None gives a presumption of conformity for Art. 12 today.
+- **Adjacent rules that already apply:** DORA RTS (EU) 2024/1774 Art. 12 (tamper-protected, time-synchronised, retained ICT logs), NIS2 Implementing Regulation (EU) 2024/2690 §3.2, and Cyber Resilience Act vulnerability and incident reporting (since 11 Sep 2026).
 
-## Compliance
+The handbook's [compliance page](docs/src/concepts/compliance.md) has the details, sources and caveats. Check the mapping with your own legal and compliance teams.
 
-Akmon is built to help you produce evidence for frameworks like the EU AI Act (Article 12 and Annex IV logging, with high-risk obligations from 2 August 2026), the NIST AI Risk Management Framework (MEASURE 2.8), and SOC 2 (CC7.x and CC8.1). It is not a compliance certification, and it does not guarantee compliance. Treat any mapping from AGEF evidence to specific controls as something to validate with your own compliance and legal teams.
+## How it compares (as of Nov 2026)
 
-## The bundled agent
+Akmon does not replace your agent or your governance platform. It adds a portable, asymmetrically signed record that a stranger can verify offline.
 
-Akmon ships with its own agent (`akmon`, `akmon chat`, and `akmon --task ...`). It has typed permission checks for file writes, shell, and network, runs local or hosted models, supports policy profiles, and governs MCP servers. It exists mainly as the reference producer, the way to get full-capture sessions that replay deterministically. It is not trying to out-code Cursor or Claude Code. The value Akmon offers is the evidence layer, and that works no matter which agent you prefer.
+- **Microsoft Agent Governance Toolkit**: a governance runtime whose documentation now describes a Merkle-chained, tamper-evident audit log. That is real tamper-evidence, but it is not an asymmetric signature a stranger can check with only a public key, and there is no standalone third-party verifier or openssl-checkable proof.
+- **Azure Confidential Ledger**: genuinely strong signed receipts, but tied to the Azure service and not agent-aware.
+- **Vendor tracing (for example Microsoft Foundry)**: built for live observability. Microsoft's own docs say Foundry traces cannot support full replay.
+- **Plain OpenTelemetry**: the right way to *emit* agent telemetry, and Akmon imports it. But spans are unsigned and mutable once exported.
+
+Where those tools lead: distribution, ecosystem integration and standards presence. The realistic stack is layered: produce and govern in your platform, then seal the session into a record that can leave that trust domain. There is a longer, sourced comparison in the [handbook](docs/src/comparison.md).
+
+## The bundled reference agent
+
+Akmon still ships its own terminal agent (`akmon`, `akmon chat`, `akmon --task "…"`), with typed permission gates, a path-normalizing policy engine, a sandbox, and MCP governance. In v3 it has one role: it is the **full-capture reference producer**, the source of sessions that record every prompt, response and tool call and so can be replayed and diffed deterministically. It is not trying to out-code other agents.
 
 ```bash
-# A session from Akmon's own agent, with its verification pipeline.
-akmon --yes --output json --task "apply rustfmt fixes only" | tee run.json
-akmon audit verify .akmon/audit/<session-id>.jsonl
-akmon evidence verify .akmon/evidence/<session-id>.json
-akmon slo verify .akmon/evidence/<session-id>.json --strict
+akmon --yes --output json --task "apply rustfmt fixes only" > run.json   # records a journal session
+akmon seal <session-id> --key signer.pk8 --output run.akmon             # seal it like any other
 ```
 
 ## The evidence format (AGEF)
 
-Akmon's records follow the [AGEF specification](https://github.com/radotsvetkov/agef), a portable, content-addressed, tamper-evident format for AI-agent session evidence. Akmon implements AGEF v0.1.3. That version adds two optional pieces on top of the hash chain: offline Ed25519 signatures in `manifest.signatures[]`, which make a record attributable to a key, and operator attestations in `manifest.operator_attestations[]`, which record the accountable person behind a session. Both are optional, so a plain bundle stays small and older readers keep working.
+Akmon implements the [AGEF specification](https://github.com/radotsvetkov/agef) **v0.1.3**: a portable, content-addressed, hash-linked format for AI-agent session evidence. A bundle is a `tar.zst` archive with `manifest.json`, `events.bin` (CBOR-framed events) and `objects/<sha256>`. Signatures (`manifest.signatures[]`, `AGEF-SIG-v1`) and operator attestations (`manifest.operator_attestations[]`, `AGEF-OPERATOR-v1`) are optional and never enter the hash chain, so integrity verification works without any key.
 
 ## Documentation
 
-- Project site: [radotsvetkov.github.io/akmon](https://radotsvetkov.github.io/akmon/)
-- Hosted handbook: [radotsvetkov.github.io/akmon/docs](https://radotsvetkov.github.io/akmon/docs/)
-- Introduction: [docs/src/introduction.md](docs/src/introduction.md)
-- Tutorial, from an OTEL trace to an openssl proof: [docs/src/tutorials/otel-to-openssl-walkthrough.md](docs/src/tutorials/otel-to-openssl-walkthrough.md)
-- Reference for `bundle keygen`: [docs/src/reference/bundle-keygen.md](docs/src/reference/bundle-keygen.md)
-- Reference for `bundle attest`: [docs/src/reference/bundle-attest.md](docs/src/reference/bundle-attest.md)
-- Reference for `bundle prove-openssl`: [docs/src/reference/bundle-prove-openssl.md](docs/src/reference/bundle-prove-openssl.md)
+- [Introduction](docs/src/introduction.md) and [Quickstart](docs/src/getting-started/quickstart.md)
+- [Verifying evidence](docs/src/concepts/verifying-evidence.md) and the [trust model](docs/src/concepts/trust-model.md)
+- [`akmon seal` reference](docs/src/reference/seal.md), [`otel import`](docs/src/reference/otel-import.md), [`bundle sign`](docs/src/reference/bundle-sign.md), [capture levels](docs/src/concepts/capture-levels.md)
+- [`agef-verify` reference](docs/src/reference/agef-verify.md), [`bundle verify`](docs/src/reference/bundle-verify.md), [`bundle keygen`](docs/src/reference/bundle-keygen.md), [`bundle attest`](docs/src/reference/bundle-attest.md), [`bundle prove-openssl`](docs/src/reference/bundle-prove-openssl.md)
+- [Compliance (EU AI Act and adjacent rules)](docs/src/concepts/compliance.md)
+- Use cases: [operator sign-off](docs/src/use-cases/operator-sign-off.md), [air-gapped audit](docs/src/use-cases/air-gapped-audit.md), [release evidence pack](docs/src/use-cases/release-evidence-pack.md)
 
-## Contributing
+## What changed in 3.0
 
-- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Code of Conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- Security policy: [SECURITY.md](SECURITY.md)
+v3.0.0 is the **focus** release. It adds `akmon seal`, an auditor Markdown report (`--format markdown`) and hardened verification (stricter archive parsing, terminal-escape sanitizing, explicit integrity-only vs. signature-verified verdicts). It also archives everything that wasn't evidence: `akmon import/export/spec/scout/slo/sign`, the semantic index, and subagents. Some JSON and CLI changes are breaking. See the [CHANGELOG](CHANGELOG.md) and the [v3.0.0 release notes](docs/src/releases/v3.0.0.md). Archived code is under [`archive/`](archive/README.md) and the tag `archive/pre-focus-v2.2.1`.
 
-## License
+## Contributing, security, license
 
-Apache-2.0 only. See [LICENSE](LICENSE).
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) · [SECURITY.md](SECURITY.md) (please report vulnerabilities privately)
+- Apache-2.0 only. See [LICENSE](LICENSE).
 
-## Where the name comes from
-
-Akmon is an old Greek word for anvil. The idea is to shape difficult work with pressure and precision while keeping control over every strike: the permissions, the tamper-evident audit trail, and the evidence anyone can verify.
+*Akmon* (ἄκμων) is Greek for anvil: the surface that work is shaped against, under pressure, one strike at a time.

@@ -1,12 +1,12 @@
 # Regulated Reviewer Flow
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
 Reviewers, tech leads, compliance engineers, and external auditors validating AI-assisted sessions. This page is the checklist from a received bundle to a verification-ready, signature-backed handoff.
 
-It covers both kinds of session Akmon handles: sessions imported from another agent's OpenTelemetry trace (`structural` capture) and sessions produced by Akmon's own reference agent (`full` capture). The verification chain is the same; only the capture level and the availability of replay differ.
+It covers both kinds of session Akmon handles: sessions imported from another agent's OpenTelemetry trace (capture level `full`, `partial`, or `structural`, depending on the trace) and sessions produced by the bundled reference agent (`full`). The verification chain is the same; only the capture level and the availability of replay differ.
 
 ## What you will have at the end
 
@@ -27,9 +27,9 @@ For a received bundle, this is the primary check. It validates the hash-linked e
 
 ```bash
 akmon bundle verify session.akmon \
-  --verify-key signer.pub.hex \
+  --verify-key signer.pub \
   --require-signature \
-  --operator-key operator.pub.hex
+  --operator-key operator.pub
 ```
 
 "Verified" attaches to the key, not to the self-asserted operator name. A bundle that carries an attestation but is verified without a trusted key reports `unverified_no_key`, which is informational, not a failure.
@@ -37,36 +37,34 @@ akmon bundle verify session.akmon \
 An auditor who does not run the full Akmon CLI can use the standalone binary for the same integrity and signature checks:
 
 ```bash
-agef-verify session.akmon --verify-key signer.pub.hex --require-signature
+agef-verify session.akmon --verify-key signer.pub --require-signature
 ```
 
 ### 2. Enforce capture level when the use case demands a full recording
 
 ```bash
-akmon bundle verify session.akmon --verify-key signer.pub.hex --require-capture full
+akmon bundle verify session.akmon --verify-key signer.pub --require-capture full
 ```
 
-This passes only for full-capture sessions from Akmon's own agent. It correctly fails on OTEL imports, which are `structural`. Decide up front which categories of change require `full` and gate accordingly.
+This fails on `partial` and `structural` sessions, which is the honest result. Decide up front which categories of change require full content and gate accordingly.
 
 ### 3. Reproduce the proof offline with openssl (when zero-trust verification is required)
 
 If a counterparty does not trust your tools, hand them the proof artifacts and the exact command.
 
 ```bash
-akmon bundle prove-openssl session.akmon --verify-key signer.pub.hex --out-dir proof
+akmon bundle prove-openssl session.akmon --verify-key signer.pub --out-dir proof
 openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin -in proof/statement.bin -sigfile proof/signature.bin
 ```
 
 A valid signature prints `Signature Verified Successfully`. This needs only OpenSSL 3.x, no Akmon install.
 
-### 4. For full-capture own-agent sessions, also check the on-disk chain and evidence
+### 4. For reference-agent sessions in a local journal, check the journal too
 
-When the artifacts live in a local repository rather than arriving as a bundle:
+When the session lives in a local journal rather than arriving as a bundle:
 
 ```bash
 SESSION_ID="<session-uuid>"
-akmon audit verify ".akmon/audit/${SESSION_ID}.jsonl"
-akmon evidence verify ".akmon/evidence/${SESSION_ID}.json"
 akmon verify "${SESSION_ID}"
 ```
 
@@ -76,13 +74,12 @@ akmon verify "${SESSION_ID}"
 akmon replay "${SESSION_ID}" --format json | tee replay.json
 ```
 
-Replay applies to full-capture sessions from Akmon's own agent. OTEL imports are refused for replay because a structural capture does not contain enough to reproduce execution.
+Replay applies to sessions from the bundled reference agent. OpenTelemetry imports are refused for replay at any capture level, because an imported trace is an evidence record, not an execution.
 
-### 6. Export, sign, and (if needed) redact for archive or external review
+### 6. Seal, and (if needed) redact for archive or external review
 
 ```bash
-akmon bundle export "${SESSION_ID}" --output "${SESSION_ID}.akmon"
-akmon bundle sign "${SESSION_ID}.akmon" --key signer.pk8
+akmon seal "${SESSION_ID}" --key signer.pk8 --output "${SESSION_ID}.akmon"
 ```
 
 If sensitive content must be removed, create a derivative redacted bundle and re-verify it before distribution:
@@ -92,7 +89,10 @@ akmon redact "${SESSION_ID}" \
   --output "${SESSION_ID}-sanitized.akmon" \
   --object <object-hash> \
   --reason "compliance redaction"
+akmon bundle sign "${SESSION_ID}-sanitized.akmon" --key signer.pk8
 ```
+
+A redacted bundle is a new derivative with its own head; sign it again and keep the original sealed bundle under retention.
 
 ## Verification
 
@@ -107,7 +107,7 @@ A handoff is review-ready when:
 ## Troubleshooting
 
 - If `bundle verify` fails, stop the review and inspect the violation category before proceeding.
-- If `--require-capture full` fails on an imported session, that is expected. Treat the session as structural evidence, not as a replayable recording.
+- If `--require-capture full` fails on an imported session, the trace did not carry all message content. Treat it as `partial` or `structural` evidence.
 - If `openssl` cannot verify the signature, confirm OpenSSL 3.x rather than LibreSSL.
 - If `replay` diverges, treat it as a change-detection signal and triage expected versus unexpected drift.
 - If bundle verification fails, do not distribute the bundle externally.

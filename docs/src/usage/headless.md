@@ -1,5 +1,7 @@
 # Headless mode
 
+Documented for Akmon `3.0.0`.
+
 Headless mode is for CI and scripted runs.
 
 ## Basic run
@@ -15,28 +17,25 @@ akmon \
 
 Default artifacts:
 
-- audit: `.akmon/audit/<session-id>.jsonl`
-- evidence: `.akmon/evidence/<session-id>.json`
+- journal session: the signed record source; seal it with `akmon seal <session-id>`
+- audit (legacy): `.akmon/audit/<session-id>.jsonl`
+- evidence summary (legacy): `.akmon/evidence/<session-id>.json`
 
 ## CI governance flow
 
 ```bash
 # run
 akmon --yes --output json --task "run unit tests and summarize failures" | tee run.json
+SESSION_ID="$(jq -r '.session_id' run.json)"
 
-# verify trust artifacts
-akmon audit verify .akmon/audit/<session-id>.jsonl
-akmon evidence verify .akmon/evidence/<session-id>.json
+# seal the session into a signed bundle and self-verify it
+akmon seal "${SESSION_ID}" --key signer.pk8 --output "${SESSION_ID}.akmon"
 
-# enforce SLO policy
-akmon slo verify .akmon/evidence/<session-id>.json --strict
-
-# enforce trend regression gate
-akmon slo trend .akmon/evidence/<session-id>.json \
-  --baseline-dir .akmon/evidence/history \
-  --window 20 \
-  --strict
+# gate: the bundle must verify against the trusted key, at full capture
+agef-verify "${SESSION_ID}.akmon" --verify-key signer.pub --require-signature --require-capture full
 ```
+
+Archive the bundle and its `.pub` file as a build artifact. See [CI headless governance flow](../tutorials/ci-headless-governance.md).
 
 ## JSON report fields
 
@@ -52,10 +51,9 @@ Use `exit_reason` + command exit code for CI gating.
 ## Exit code guidance
 
 - `akmon` run: process exits non-zero on runtime/config failures.
-- `akmon audit verify`: `0` valid, `1` invalid/missing.
-- `akmon evidence verify`: `0` valid, `1` invalid/missing.
-- `akmon slo verify`: `0` pass, `1` violation, `2` invalid input/config.
-- `akmon slo trend`: `0` pass, `1` violation, `2` invalid input/config.
+- `akmon seal`: `0` sealed, `1` verification failure, `2` bad input, `3` I/O error.
+- `agef-verify` / `akmon bundle verify`: `0` passed, `1` failed, `2` usage, `3` I/O.
+- `akmon audit verify` and `akmon evidence verify` still work but are deprecated and hidden.
 
 ## Common mistakes
 

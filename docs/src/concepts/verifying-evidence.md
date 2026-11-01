@@ -1,127 +1,85 @@
-# Verifying evidence (for auditors)
+# What verification proves
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
-## Who this is for
-
-An auditor, regulator, or counterparty who received an Akmon `.akmon` bundle and a public key and
-wants to check it independently. You may be working air-gapped, you may not run Akmon, and you do not
-need to trust whoever produced the bundle. This page shows you how to verify the record and how to
-read the outcome. For the underlying guarantees, see [Trust and threat model](./trust-model.md).
+This page is for the person who received a `.akmon` bundle and a public key and has to decide what it is worth. You may be air-gapped, you may not run Akmon, and you do not need to trust whoever produced the bundle. For the underlying guarantees, see [Trust model](./trust-model.md).
 
 ## What you should have
 
-- The `.akmon` bundle file.
-- The signer's public key (and, if accountability matters, the operator's public key), obtained
-  through a channel you trust. Key trust is out of band; Akmon does not distribute keys.
+- The `.akmon` bundle.
+- The signer's public key (64 hex characters in a file), obtained through a channel you trust, separate from the bundle. If accountability matters, the operator's public key too. Akmon does not distribute or vouch for keys.
 
-## Three ways, increasing independence
+## Three ways to verify, increasing independence
 
-Pick the level of independence the situation calls for. Each proves the same record; they differ in
-how much you must trust the producer's tooling.
+### 1. `agef-verify` (recommended)
 
-### 1. Akmon's own verifier
-
-If you have Akmon installed, this is the most convenient path. It runs every stage of the
-verification chain.
+A small standalone binary with no agent, journal, or network code.
 
 ```bash
-akmon bundle verify /path/to/session.akmon \
-  --verify-key signer.pub.hex \
-  --require-signature \
-  --operator-key operator.pub.hex \
-  --require-operator \
-  --require-capture full
+agef-verify audit.akmon --verify-key signer.pub --require-signature
+agef-verify audit.akmon --verify-key signer.pub --require-signature --format markdown > report.md
 ```
 
-Drop the require flags you do not need. Without `--require-signature` an unsigned or unknown-key
-bundle is reported, not failed; with it, missing provenance is a hard failure. The same applies to
-the operator and capture requirements.
+Add `--operator-key operator.pub --require-operator` to require a key-backed operator claim, and `--require-capture full` to require a complete recording.
 
-### 2. The standalone verifier
+### 2. `akmon bundle verify`
 
-`agef-verify` is a minimal binary that performs the bundle integrity, signature, operator, and
-capture checks without the full Akmon agent CLI. Install it on its own (Homebrew tap or release
-binary). Use this when you want to verify without bringing in the whole agent.
+The same checks and flags, built into the full `akmon` CLI. See [akmon bundle verify](../reference/bundle-verify.md).
+
+### 3. Stock OpenSSL 3, no Akmon at all
+
+Someone with Akmon (the producer, or you) writes the proof artifacts, with `akmon seal … --proof-dir proof` or:
 
 ```bash
-agef-verify /path/to/session.akmon \
-  --verify-key signer.pub.hex \
-  --require-signature
+akmon bundle prove-openssl audit.akmon --verify-key signer.pub --out-dir proof
 ```
 
-It also accepts `--operator-key` and `--require-operator` with the same semantics as
-[`akmon bundle verify`](../reference/bundle-verify.md).
-
-### 3. Plain openssl, no Akmon at all
-
-This is the strongest form of independence: verify the Ed25519 signature with stock `openssl` and
-nothing else. First, someone with Akmon (possibly the producer, possibly you) emits the proof
-artifacts:
+Then anyone checks the signature:
 
 ```bash
-akmon bundle prove-openssl /path/to/session.akmon \
-  --verify-key signer.pub.hex \
-  --operator-key operator.pub.hex \
-  --out-dir ./proof
+openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin \
+  -in proof/statement.bin -sigfile proof/signature.bin
 ```
 
-That writes `statement.bin` (the exact signed bytes), `signature.bin` (the raw 64-byte signature),
-and `pubkey.pem` (the signer's public key in PEM form), plus the operator equivalents when
-`--operator-key` is given. Then you verify the head signature with OpenSSL 3.x:
+This proves the key holder signed session head H. It does not by itself tie H to the bundle's contents; that is what the hash-chain check in `agef-verify` does. Use OpenSSL 3: the macOS system `openssl` is LibreSSL and cannot verify Ed25519.
 
-```bash
-openssl pkeyutl -verify -pubin -inkey ./proof/pubkey.pem -rawin -in ./proof/statement.bin -sigfile ./proof/signature.bin
-```
+## What a passing verification proves
 
-A valid signature prints a success line and exits `0`. To check the operator attestation, run the
-same command against the `operator_pubkey.pem`, `operator_statement.bin`, and
-`operator_signature.bin` files. The exact commands are also printed by `prove-openssl`.
+- **Integrity.** Every event and object in the bundle is exactly what the session head commits to. Nothing was changed, added, or removed after the head was computed. (On its own this only shows internal consistency: anyone can build a consistent bundle. Authorship comes from the next point.)
+- **Signature.** With `--require-signature` and a key you trust: the holder of that private key signed this exact session head, and therefore these exact contents.
+- **Operator attestation.** With `--require-operator` and an operator key you trust: the holder of that key signed the operator identity fields together with the session head.
+- **Capture level.** How much of the session was recorded (`full`, `partial`, or `structural`). The level is inside the signed record, so it cannot be upgraded after sealing.
 
-Note the requirement: you need **OpenSSL 3.x**. The macOS system `openssl` is LibreSSL and cannot
-verify Ed25519 (it lacks `-rawin` and cannot load the key). Use an OpenSSL 3.x build.
+## What it does not prove
 
-## How to read the outcome
+- **When.** Event timestamps come from the producer's clock, and the manifest's `created_at` and `ended_at` are not signed at all. No trusted time is part of the signature yet. If time matters, use an RFC 3161 timestamp alongside the bundle: see [Trusted timestamps](../guides/trusted-timestamps.md).
+- **Who holds the key.** Binding a public key to a person or organization happens outside Akmon (a key ceremony, a signed roster, a PKI).
+- **Who the operator is.** `operator_id`, `role`, and `org` are self-asserted text. Only the key is verified.
+- **That the agent was right,** or that the session complied with any rule or obligation.
+- **That nothing was left out.** A bundle records the session the producer sealed. It cannot prove that a different, unsealed session did not also happen.
+- **For imported traces, that the trace was complete.** Akmon records what the OpenTelemetry trace contained. If the instrumentation dropped spans or omitted content, the capture level shows the omitted content, but missing spans cannot be detected.
 
-A verification result is not a single yes or no. Read each signal for what it actually says.
+## Reading the headline
 
-- **Verified.** Integrity holds, and any provenance or accountability you required checked out
-  against a key you supplied. You can conclude the record was not altered and that the holders of the
-  named keys sealed and (if attested) claimed it. You still cannot conclude the agent was correct or
-  that any person holds the key; that is out of band.
-- **Invalid (hard fail).** Integrity failed, or a check you required did not pass. Do not rely on the
-  record. If integrity failed, the bytes were altered or corrupted and nothing downstream is
-  trustworthy. Stop here.
-- **Unverified, no key.** The bundle carries a signature (or attestation), but you did not supply a
-  matching trusted key, so it reports `unverified_no_key`. This is not a failure on its own. It means
-  you have not yet established provenance. Obtain the right key out of band and re-run, or require it
-  explicitly if its absence should fail.
-- **Unattributed.** No operator attestation is present, or none verifies against a key you trust. The
-  record may still have integrity and a valid head signature, but no operator key has claimed
-  accountability for the session. If you need a named, key-backed claim, treat this as insufficient
-  and require it.
-- **`capture_level: structural` versus `full`.** A structural record (an OpenTelemetry import)
-  captures the shape of the session, not a complete recording, and it cannot be replayed
-  deterministically. A full record (Akmon's own reference agent) is a complete, replayable recording.
-  If your evidence needs a full recording, require it with `--require-capture full`; a structural
-  import will fail that check, which is the honest result. Do not read a structural import as a full
-  recording.
+| Headline | What to conclude |
+| --- | --- |
+| `verified bundle: integrity OK; signature verified by key_id=<id>` | Intact and signed by a key you trust. |
+| `…; signature present but NOT verified (…integrity only)` | Signed, but not by any key you supplied. Get the right key out of band, or treat as unsigned. |
+| `…; UNSIGNED (integrity only)` | No signature. Integrity alone proves little. |
+| `bundle verification FAILED` | Do not rely on it. The violations list says what broke. |
 
-## A note on stripped trust metadata
+In JSON, read `passed`, `integrity_ok`, and `signature_verified` together. Without `--require-signature`, `passed: true` means integrity only.
 
-Signatures and operator attestations are additive manifest fields. An intermediary who controls the
-file can remove them, and the remaining record still verifies for integrity. Cryptography cannot
-prove that something absent was once present. If provenance or accountability matters to you, do not
-rely on a signature merely being present in a bundle you happened to receive. Require it with the
-flags above and supply the trusted keys, so a stripped or unknown-key bundle fails rather than passes
-quietly. See [Trust and threat model](./trust-model.md).
+Operator outcomes: `verified` (against a key you supplied), `unverified_no_key` (attested, but you supplied no matching key; not a failure on its own), or unattributed (no attestation).
+
+## Stripped signatures
+
+Signatures and attestations are additive fields. Someone who controls the file can remove them, and the rest still verifies for integrity. Cryptography cannot prove that something absent was once there. If provenance matters, always pass `--require-signature` (and `--require-operator`) with the trusted keys, so a stripped bundle fails instead of quietly passing.
 
 ## See also
 
-- [Trust and threat model](./trust-model.md)
-- [How Akmon works](./architecture.md)
-- [Compliance and evidence](./compliance.md)
-- [akmon bundle verify](../reference/bundle-verify.md)
+- [Trust model](./trust-model.md)
+- [Capture levels](./capture-levels.md)
+- [Hand evidence to an auditor](../guides/hand-to-auditor.md)
 - [agef-verify](../reference/agef-verify.md)
-- [akmon bundle prove-openssl](../reference/bundle-prove-openssl.md)
-- [Regulated reviewer flow](./reviewer-flow.md)
+- [Compliance crosswalk](./compliance.md)

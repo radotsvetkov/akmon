@@ -1,6 +1,6 @@
 # akmon bundle import
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -62,9 +62,9 @@ akmon bundle import /path/to/audit.akmon --verify-only --format json
 | Code | Meaning |
 | --- | --- |
 | `0` | Bundle imported successfully (or verified successfully with `--verify-only`) |
-| `1` | Bundle validation failed (AGEF integrity/structure violation) |
-| `2` | Usage/recoverable import error (for example, session collision without suitable `--rename-to`) |
-| `3` | I/O or environment error (bundle not found, unwritable journal, local store corruption) |
+| `1` | Validation failed (integrity or structure violation), including a malformed, corrupt, truncated, or oversized archive |
+| `2` | Usage error: session id collision without `--rename-to`, or the target journal uses a different hash algorithm (`hash_algorithm_mismatch`, checked before anything is written) |
+| `3` | I/O or environment error (bundle not found, unwritable journal) |
 
 ## Verification
 
@@ -81,7 +81,7 @@ Import validation aligns with AGEF structural/integrity requirements, including:
 - Manifest parse/schema-required fields
 - `events.bin` frame decoding (length-prefixed canonical CBOR events)
 - Event hash-chain integrity
-- Object closure (all referenced hashes present)
+- Object closure (all referenced hashes present, no unreferenced objects)
 - Object byte re-hash (bytes match hash key)
 - Head consistency (`manifest.session.head` matches terminal event hash)
 - Session boundary invariants (`SessionStart` first, `SessionEnd` terminal)

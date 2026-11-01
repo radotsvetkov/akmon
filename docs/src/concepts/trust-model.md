@@ -1,6 +1,6 @@
 # Trust and threat model
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -38,11 +38,14 @@ These boundaries are deliberate. State them plainly to anyone who consumes the e
 - **A signature proves which key signed, not who holds it.** Binding a key to a person or
   organization is out of band. Akmon has no view into who controls a private key. If you want a name,
   you must establish key ownership through your own channels.
-- **An imported trace is structural, not a full recording.** A session brought in through
-  OpenTelemetry records `capture_level: structural`. It captures the shape of the session, not a
-  complete, replayable recording. Only Akmon's own bundled reference agent produces
-  `capture_level: full`, which replays deterministically. Do not read a structural import as a full
-  recording.
+- **It does not prove when.** The signature covers the session head, not a time. Event timestamps
+  come from the producer's clock and the manifest's `created_at`/`ended_at` are unsigned. Use an
+  RFC 3161 timestamp alongside the bundle when time matters (see
+  [Trusted timestamps](../guides/trusted-timestamps.md)).
+- **An import is only as complete as its trace.** A session imported from OpenTelemetry records
+  `capture_level` `full`, `partial`, or `structural` depending on how much message content the trace
+  carried. It is never replayable, and spans the instrumentation never emitted cannot be detected.
+  See [Capture levels](./capture-levels.md).
 
 ## Cryptographic design
 
@@ -88,7 +91,8 @@ by the `ring` crate, which is already in the tree.
 Key trust is out of band, by design.
 
 - There is no PKI, no DID, no certificate authority.
-- There is no transparency log.
+- There is no transparency log, and no key revocation list. If a signing key leaks, tell your
+  verifiers to stop trusting its key_id.
 - There is no key distribution or discovery mechanism in Akmon.
 
 You obtain the signer's and operator's public keys through a channel you already trust (a signed
@@ -116,8 +120,8 @@ Each step is independent. A later step does not rescue an earlier failure.
 3. **Operator attestation.** If you require named accountability, pass `--require-operator` (or
    `--require-operator-key`) with the trusted operator key. A pass proves which operator key claimed
    the session.
-4. **Capture level.** If you require a full, replayable recording, pass `--require-capture full`. A
-   structural import will fail this check, which is the correct and honest outcome.
+4. **Capture level.** If you require full message content, pass `--require-capture full`. A
+   `partial` or `structural` session fails this check, which is the correct and honest outcome.
 
 The mechanics of running each step, including the standalone verifier and the plain `openssl` path,
 are covered in [Verifying evidence (for auditors)](./verifying-evidence.md).

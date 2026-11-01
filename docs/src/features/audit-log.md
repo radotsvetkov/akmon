@@ -1,10 +1,10 @@
 # Audit log
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
-The audit log is the tamper-evident decision trail of a reference-agent session. When Akmon's own bundled agent runs, it writes a per-session JSONL audit log where each row is hash-linked to the row before it. This is part of what earns a reference-agent session its `full` capture level: every policy decision and tool outcome is recorded in order, and the order cannot be changed after the fact without detection.
+The audit log is the tamper-evident decision trail of a reference-agent session. When Akmon's own bundled agent runs, it writes a per-session JSONL audit log where each row is hash-linked to the row before it. Every policy decision and tool outcome is recorded in order, and the order cannot be changed after the fact without detection.
 
-This is a producer-side artifact of the reference agent. An OpenTelemetry import carries whatever the third-party trace emitted at `structural` capture level, not this chain.
+This is a legacy, producer-side artifact of the reference agent. It is not signed. The record to hand to a third party is the sealed session bundle (`akmon seal <session-id> --key signer.pk8`). OpenTelemetry imports do not produce this log.
 
 ## Why this matters
 
@@ -33,6 +33,8 @@ The session id is shown in UI and session output, and links runtime behavior to 
 akmon audit verify .akmon/audit/<session-id>.jsonl
 akmon --output json audit verify .akmon/audit/<session-id>.jsonl
 ```
+
+`akmon audit verify` is deprecated in 3.0.0: it still works, prints a warning, and is hidden from `--help`. For evidence you hand over, verify the sealed bundle with [`akmon bundle verify`](../reference/bundle-verify.md) or [`agef-verify`](../reference/agef-verify.md).
 
 Exit codes:
 

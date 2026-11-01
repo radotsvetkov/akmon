@@ -1,6 +1,6 @@
 # Configuration reference
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -9,7 +9,7 @@ Operators and maintainers who need the exact supported keys in `~/.akmon/config.
 ## What you will have at the end
 
 - A code-accurate list of user config keys and sections.
-- Confirmed policy/SLO sections used by current CLI commands.
+- Confirmed policy sections used by current CLI commands.
 
 ## Prerequisites
 
@@ -148,27 +148,9 @@ For MCP actions, fail-closed behavior also applies:
 - ambiguous MCP context denies,
 - parent policy modes without configured MCP rules deny.
 
-## Reliability defaults (`[slo]` and `[slo.trend]`)
+## Removed sections
 
-```toml
-[slo]
-min_tool_success_rate = 0.95
-max_timeout_rate = 0.02
-max_tool_failure_rate = 0.05
-max_retries_total = 3
-max_timeouts_total = 2
-min_tool_calls_total = 5
-
-[slo.trend]
-max_success_rate_drop_abs = 0.05
-max_timeout_rate_increase_abs = 0.02
-max_failure_rate_increase_abs = 0.03
-max_retries_increase_ratio = 1.0
-max_latency_avg_increase_ratio = 0.50
-min_baseline_samples = 5
-```
-
-`max_policy_denial_rate` is supported by `akmon slo verify` CLI thresholds, but is not part of `[slo]` defaults in `AkmonGlobalConfig`.
+`[slo]`, `[slo.trend]`, and `[signing]` were removed in v3.0.0 along with `akmon slo` and `akmon sign`. If they are still in your file they are ignored, and the next `akmon config` write drops them. To sign evidence, use [`akmon seal`](./seal.md) or [`akmon bundle sign`](./bundle-sign.md).
 
 ## Model estimates (`[[model_estimates]]`)
 
@@ -187,13 +169,11 @@ note = "Pricing/context hint for local estimation."
 ```bash
 akmon config show --json
 akmon policy show-effective --profile dev
-akmon slo verify .akmon/evidence/<session-id>.json --strict
 ```
 
-Expected result: config parses, policy can render effective configuration, and SLO settings are consumed.
+Expected result: config parses and policy can render effective configuration.
 
 ## Troubleshooting
 
 - If `akmon config show` fails, validate TOML syntax and remove unknown keys.
 - If policy packs fail to load, check file paths and TOML/JSON parse errors from `akmon policy show-effective`.
-- If SLO commands fail on thresholds, check whether you are using CLI overrides vs `[slo]` defaults.

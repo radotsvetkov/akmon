@@ -1,6 +1,6 @@
 # Configuration
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 

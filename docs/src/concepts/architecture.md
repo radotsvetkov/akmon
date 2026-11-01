@@ -1,6 +1,6 @@
 # How Akmon works
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -17,8 +17,8 @@ honestly with a `capture_level` so a reader is never misled.
 
 | Producer | How it enters Akmon | `capture_level` | Replayable | Notes |
 | --- | --- | --- | --- | --- |
-| Akmon bundled reference agent | Run directly under Akmon | `full` | Yes, deterministically | The gold-fidelity reference producer. |
-| Any agent via OpenTelemetry | `akmon otel import <trace.json>` | `structural` | No (`replay` refuses it) | Captures the shape of a GenAI trace, not a complete recording. |
+| Akmon bundled reference agent | Run directly under Akmon | `full` | Yes, deterministically | The full-capture reference producer. |
+| Any agent via OpenTelemetry | `akmon seal <trace.json>` or `akmon otel import <trace.json>` | `full`, `partial`, or `structural`, depending on the trace's content | No (`replay` refuses it) | An evidence record of the trace, not an execution. |
 
 The bundled coding agent is the reference producer, not the headline. The point of Akmon is that the
 record and its verification are the same regardless of who produced the session. A regulator or
@@ -26,9 +26,9 @@ auditor verifies a bundle the same way whether it came from Akmon's own agent or
 trace. What changes is only how much the record can claim, and that claim is carried in
 `capture_level`.
 
-`akmon otel import` reads the OTLP/JSON OpenTelemetry GenAI form. It accepts both the v1.37 structured
-form and the legacy v1.36-and-earlier message-event form, and records `capture_level: structural` in
-both cases.
+The OpenTelemetry importer reads OTLP/JSON GenAI traces in the structured form (semantic conventions
+v1.37 through v1.42) and the legacy v1.36-and-earlier message-event form. It counts which content
+slots actually hold content and records the [capture level](./capture-levels.md) accordingly.
 
 ## The AGEF substrate
 
@@ -54,7 +54,7 @@ the important property: adding or checking trust never changes the event chain o
 
 - **`manifest.signatures[]` (AGEF v0.1.2).** Zero or more Ed25519 detached signatures over the
   domain-separated `AGEF-SIG-v1` statement (which commits to the head). Added by
-  [`akmon bundle sign`](../reference/sign.md). The signing key is created by
+  [`akmon bundle sign`](../reference/bundle-sign.md) or [`akmon seal`](../reference/seal.md). The signing key is created by
   [`akmon bundle keygen`](../reference/bundle-keygen.md), which produces an Ed25519 PKCS#8 v2 key that
   the `ring` crate accepts.
 - **`manifest.operator_attestations[]` (AGEF v0.1.3).** Zero or more separately-signed
@@ -79,8 +79,8 @@ earlier failure, and each stage trusts only the keys and requirements you supply
 3. **Operator attestation.** Check `manifest.operator_attestations[]` against a trusted operator
    public key. With `--require-operator` or `--require-operator-key` a missing or unverifiable
    attestation is a hard failure. "Verified" attaches to the key, not the self-asserted name.
-4. **Capture level.** With `--require-capture full`, a structural import fails. This keeps a
-   structural record from being treated as a full, replayable one.
+4. **Capture level.** With `--require-capture full`, a `partial` or `structural` session fails. This
+   keeps a metadata-only record from being treated as a full one.
 
 These stages are exposed by [`akmon bundle verify`](../reference/bundle-verify.md).
 
@@ -101,6 +101,29 @@ all.
 That openssl path is the point of the whole design. The record is portable and content-addressed, the
 signature is a standard detached Ed25519 signature over a canonical statement, and the only thing a
 verifier needs is the public key they already trust.
+
+## Crate layout
+
+The workspace has 13 crates:
+
+| Crate | Role |
+| --- | --- |
+| `akmon-journal` | Content-addressed object store and hash-linked session journal (redb). |
+| `akmon-bundle` | AGEF bundle format: export, import, verification, signing, attestation, reports. |
+| `agef-verify` | The standalone verifier binary. Depends only on `akmon-bundle` and `akmon-journal`. |
+| `akmon-otel` | OpenTelemetry GenAI importer. |
+| `akmon-replay` | Deterministic replay of reference-agent sessions. |
+| `akmon-diff` | Structural and field-level session comparison. |
+| `akmon-cli` | The `akmon` binary: argument parsing and command wiring. |
+| `akmon-core` | Shared primitives: permissions, policy engine, sandbox, secrets, legacy audit chain. |
+| `akmon-config` | `~/.akmon/config.toml`. |
+| `akmon-models` | Model provider clients (reference agent). |
+| `akmon-tools` | Agent tools: filesystem, shell, git, web fetch, MCP (reference agent). |
+| `akmon-query` | The agent session loop (reference agent). |
+| `akmon-tui` | The interactive terminal UI (reference agent). |
+
+The evidence path (`akmon-journal`, `akmon-bundle`, `agef-verify`, `akmon-otel`) does not depend on
+the agent crates.
 
 ## See also
 

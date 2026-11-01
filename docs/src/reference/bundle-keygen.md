@@ -1,6 +1,6 @@
 # akmon bundle keygen
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -40,14 +40,14 @@ akmon bundle keygen --out signer.pk8
 Generate a key and also write the public key for verifiers:
 
 ```bash
-akmon bundle keygen --out signer.pk8 --public-out signer.pub.hex
+akmon bundle keygen --out signer.pk8 --public-out signer.pub
 ```
 
-Then sign and verify a bundle:
+Then seal and verify a session:
 
 ```bash
-akmon bundle sign /path/to/audit.akmon --key signer.pk8
-akmon bundle verify /path/to/audit.akmon --verify-key signer.pub.hex --require-signature
+akmon seal trace.json --key signer.pk8 --output audit.akmon
+agef-verify audit.akmon --verify-key signer.pub --require-signature
 ```
 
 ## Optional flags
@@ -66,10 +66,16 @@ akmon bundle verify /path/to/audit.akmon --verify-key signer.pub.hex --require-s
 | `0` | Key written; public key hex and key_id surfaced |
 | `3` | I/O error, refuse-to-clobber (pass `--force` to replace), or key generation failure |
 
+Errors in `--format json` use the shared error object `{tool, akmon_version, passed: false, error, category}`.
+
 ## Security notes
 
 - **Keep the private key secret.** Anyone holding it can forge signatures attributed to you. Only
-  ever distribute the public key (hex).
+  ever distribute the public key (hex), and send it over a channel separate from the bundle.
+- For production evidence, keep signing keys in a controlled location (a secrets manager or an
+  HSM-backed workflow that exports the key only to the signing host) and record which key_id
+  belongs to which team. Akmon has no key revocation list; if a key leaks, tell your verifiers to
+  stop trusting that key_id.
 - On unix the private key is created with `0600` permissions at create time (never a broader-then-
   narrowed window). A `--force` overwrite re-asserts `0600` on the file before any bytes are
   written.
@@ -84,7 +90,8 @@ akmon bundle verify /path/to/audit.akmon --verify-key signer.pub.hex --require-s
 
 ## See also
 
-- [akmon sign](./sign.md)
+- [akmon bundle sign](./bundle-sign.md)
+- [akmon seal](./seal.md)
 - [akmon bundle verify](./bundle-verify.md)
 - [akmon bundle prove-openssl](./bundle-prove-openssl.md)
 - [agef-verify](./agef-verify.md)

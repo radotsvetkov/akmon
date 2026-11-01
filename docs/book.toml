@@ -1,9 +1,13 @@
 [book]
 title = "Akmon"
-description = "Tamper-evident evidence and verification layer for AI agents."
+description = "Seal AI agent sessions into signed, tamper-evident evidence anyone can verify offline."
 authors = ["Rado Tsvetkov"]
 language = "en"
 src = "src"
+
+[build]
+# Fail instead of silently creating empty pages for missing SUMMARY entries.
+create-missing = false
 
 [output.html]
 site-url = "/akmon/docs/"

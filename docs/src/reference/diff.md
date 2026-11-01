@@ -1,5 +1,7 @@
 # akmon diff
 
+Documented for Akmon `3.0.0`.
+
 ## Synopsis
 
 ```bash
@@ -57,15 +59,38 @@ Dereference content hashes for comparable fields and attach byte-level summaries
 
 First lines mirror the replay report shape: command line, indented stats (`mode`, `events compared`, per-session event counts, `divergence count`, `matches: yes|no`). When comparison fails, optional `structural break:` and `divergences:` sections follow, with `expected:` / `actual:` lines per divergence. With `--resolve`, divergences may include `resolved:` byte summaries or `resolve skipped:` reasons.
 
+Control characters in values and previews are shown escaped (`\u{..}`), and newlines in single-line fields as `\n`, so a crafted session cannot rewrite your terminal.
+
 ### JSON
 
 Pretty-printed `DiffReportV1` (schema owned by the `akmon-diff` crate). Suitable for CI ingestion and golden tests.
+
+When diff cannot run, `--format json` prints a `DiffErrorV1` object on stdout and nothing on stderr:
+
+```json
+{
+  "akmon_version": "3.0.0",
+  "category": "session_not_found",
+  "error": "source session not found: 550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+Categories: `invalid_session_id`, `session_not_found` (also when the journal is missing), `session_load_failed`, `source_precondition_violated`, `store_access_failed`, `diff_infrastructure_error`.
+
+## Provider-call divergences
+
+Besides event kinds and fields, diff compares every provider-call attempt:
+
+| Divergence kind | Field | Values |
+| --- | --- | --- |
+| `provider_call_request_difference` | `attempts[i].request_hash` | Request hashes |
+| `provider_call_attempt_count_difference` | `attempts.len` | Attempt counts |
+| `provider_call_attempt_status_difference` | `attempts[i].status` | `success`, `rate_limited`, `network_error`, `server_error`, `client_error`, `cancelled`, `other:<s>` |
+| `provider_call_attempt_error_difference` | `attempts[i].error_message` | Error text, or `none` |
+
+Two sessions that differ only in a retried request or an attempt outcome now diverge (exit `1`); before v3.0.0 they could report `matches: yes`.
 
 ## See also
 
 - [akmon replay](./replay.md): replay comparison and exit-code discipline aligned with diff
 - [akmon inspect](./inspect.md): single-event inspection; `--resolve` preview rules are aligned with diff resolve mode
-
----
-
-**Phase 6 (Item 6.3).** v2.0.0 ships CLI diff with human and JSON reporting, integration tests, and a single shared `journal.redb` open when loading both sessions so redb per-process locking is respected.

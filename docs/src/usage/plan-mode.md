@@ -18,7 +18,6 @@ Large tasks fail when implementation starts before scope is understood. Plan mod
 ## What is allowed in plan mode
 
 - read/list/search tools,
-- optional semantic search when enabled,
 - no write/edit/patch tool registration.
 
 This is structural read-only behavior, not just "please don't write."
@@ -60,4 +59,4 @@ akmon --task "Implement the approved plan in .akmon/plans/<latest>.md step by st
 - **Mistake:** one giant implementation step instead of checkpoints.
 - **Mistake:** missing verification commands in plan.
 
-Plan mode pairs naturally with [architect mode](./architect-mode.md) and [spec workflow](./spec-workflow.md).
+Plan mode pairs naturally with [architect mode](./architect-mode.md).

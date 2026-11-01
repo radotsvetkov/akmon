@@ -1,10 +1,12 @@
 # akmon replay
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
-Engineers replaying recorded sessions to detect divergences and regression behavior.
+Engineers replaying sessions recorded by the bundled reference agent to detect divergences and regressions.
+
+Replay needs a full recording of every provider response and tool output, so it only works on reference-agent sessions. Sessions imported from OpenTelemetry are evidence records, not executions; replaying one is refused with exit `2`.
 
 ## What you will have at the end
 
@@ -54,13 +56,15 @@ akmon replay <session-id> --format json
 akmon replay <session-id> --persist --persist-to /path/to/replay-journal
 ```
 
+`--persist-to` must be a different directory from the source journal (aliases and symlinks to it included); otherwise replay exits `2` with category `usage`. Without `--persist`, replay works in a random scratch directory that is always cleaned up.
+
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | `0` | Replay completed with no divergences (`passed: true`) |
 | `1` | Replay completed with divergences (`passed: false`) |
-| `2` | Usage error (invalid arguments or invalid flag combinations) |
+| `2` | Usage error (invalid arguments, invalid flag combinations, `--persist-to` pointing at the source journal, or an OpenTelemetry-imported source session) |
 | `3` | I/O or environment error (missing source session, malformed source, unwritable persist target, etc.) |
 
 ## Verification

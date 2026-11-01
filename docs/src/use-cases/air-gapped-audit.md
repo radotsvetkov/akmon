@@ -1,6 +1,6 @@
 # Verify evidence on an air-gapped machine
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -21,9 +21,9 @@ If you have Akmon installed, this runs every stage of the chain in one command.
 
 ```bash
 akmon bundle verify /path/to/session.akmon \
-  --verify-key signer.pub.hex \
+  --verify-key signer.pub \
   --require-signature \
-  --operator-key operator.pub.hex \
+  --operator-key operator.pub \
   --require-operator \
   --require-capture full
 ```
@@ -36,11 +36,13 @@ Drop the require flags you do not need. Without `--require-signature`, an unsign
 
 ```bash
 agef-verify /path/to/session.akmon \
-  --verify-key signer.pub.hex \
+  --verify-key signer.pub \
   --require-signature
 ```
 
-It accepts `--operator-key`, `--require-operator`, and `--require-operator-key` with the same semantics as `akmon bundle verify`.
+It accepts `--operator-key`, `--require-operator`, and `--require-operator-key` with the same semantics as `akmon bundle verify`. Add `--format markdown > report.md` for a report you can file.
+
+To bring `agef-verify` onto the air-gapped machine, download the release binary and `SHA256SUMS` on a connected machine, compare the checksum, and carry both across. The binary makes no network calls.
 
 ### 3. Plain openssl, no Akmon at all
 
@@ -48,8 +50,8 @@ This is the strongest independence: verify the Ed25519 signature with stock `ope
 
 ```bash
 akmon bundle prove-openssl /path/to/session.akmon \
-  --verify-key signer.pub.hex \
-  --operator-key operator.pub.hex \
+  --verify-key signer.pub \
+  --operator-key operator.pub \
   --out-dir ./proof
 ```
 
@@ -71,7 +73,8 @@ A verification result is not a single yes or no. Read each signal for what it ac
 - Invalid (hard fail). Integrity failed, or a check you required did not pass. Do not rely on the record. If integrity failed, the bytes were altered or corrupted and nothing downstream is trustworthy. Stop here.
 - Unverified, no key (`unverified_no_key`). The bundle carries a signature or attestation, but you did not supply a matching trusted key, so provenance is not yet established. This is not a failure on its own. Obtain the right key out of band and re-run, or require it explicitly if its absence should fail.
 - Unattributed. No operator attestation is present, or none verifies against a key you trust. The record may still have integrity and a valid head signature, but no operator key has claimed accountability. If you need a named, key-backed claim, treat this as insufficient and require it.
-- `capture_level: structural` versus `full`. A structural record (an OpenTelemetry import) captures the shape of the session, not a complete recording, and cannot be replayed deterministically. A full record (Akmon's own reference agent) is a complete, replayable recording. If your evidence needs a full recording, require it with `--require-capture full`; a structural import will fail that check, which is the honest result. Do not read a structural import as a full recording.
+- Capture level `full`, `partial`, or `structural`. It says how much of the session content was recorded, and it is part of the signed record. If your evidence needs full message content, require it with `--require-capture full`; a `partial` or `structural` session fails that check, which is the honest result. See [Capture levels](../concepts/capture-levels.md).
+- Time. A passing verification says nothing about when the session happened. If the producer supplied an RFC 3161 timestamp token, verify it offline too ([Trusted timestamps](../guides/trusted-timestamps.md)).
 
 ## A note on stripped trust metadata
 

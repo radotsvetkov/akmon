@@ -8,7 +8,7 @@ This guide defines how to keep Akmon documentation accurate for regulated engine
 
 For CLI/config/reference pages:
 
-1. Validate command and flag behavior from `crates/akmon-cli/src/main.rs` and command modules in `crates/akmon-cli/src/*_cmd.rs`.
+1. Validate command and flag behavior from the built binary (`akmon <command> --help`, `agef-verify --help`) and from `crates/akmon-cli/src/main.rs` and the command modules in `crates/akmon-cli/src/`.
 2. Validate config keys from `crates/akmon-config/src/lib.rs`.
 3. Validate provider resolution behavior from `crates/akmon-models/src/llm_connect.rs`.
 4. Only use `docs/src/releases/*.md` for release narrative; never as authoritative CLI/config truth.
@@ -35,12 +35,21 @@ bash scripts/docs/run_all.sh
 
 6. Fix all reported links/structure issues before merge.
 
+## Writing rules
+
+- Lead with the one job: seal a session, hand over one file, a stranger verifies offline.
+- Never claim compliance. Say Akmon "helps produce evidence", and say what it does not cover.
+- Date regulatory and vendor claims ("checked on <date>") and link a primary source. Re-check them before each release.
+- No internal jargon in published pages (decision ids, item numbers, metric codes).
+- Pages for removed features move to `archive/docs/` with `git mv`; old release notes stay as history.
+
 ## Quarterly docs audit checklist
 
 - Verify `Documented for Akmon X.Y.Z` markers match current workspace version.
 - Re-check every `docs/src/reference/*.md` page against CLI/config Rust sources.
 - Confirm tutorials still produce expected artifact paths under `.akmon/`.
 - Confirm policy/evidence/verify/replay pages align with fail-closed integrity model.
+- Re-check the EU regulatory timeline and standards status in `docs/src/concepts/compliance.md`.
 - Remove or relabel any roadmap-only claims that are not implemented.
 - Re-run `bash scripts/docs/run_all.sh` on a clean working tree.
 

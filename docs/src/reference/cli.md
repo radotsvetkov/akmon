@@ -1,337 +1,119 @@
-# CLI Reference
+# CLI reference
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
-## Who this is for
+An overview of every command in `akmon` 3.0.0, with links to the per-command pages. When this page and your binary disagree, `akmon <command> --help` is the source of truth.
 
-Engineers and CI maintainers who need an accurate command-surface overview before using the command-specific reference pages. Akmon is an evidence and verification layer first; the trust commands are the core of the surface, and the bundled reference agent is one producer that feeds them.
+## Evidence commands
 
-## What you will have at the end
+These work on traces, journals, and bundles. None of them needs a model provider or network access.
 
-- The trust command surface (import, key, sign, attest, verify, prove).
-- The reference-agent command surface and global flags.
-- Pointers to per-command reference pages for stable automation.
+| Command | What it does | Reference |
+| --- | --- | --- |
+| `akmon seal <trace.json\|session-id> --key <pk8>` | Import or select, export, sign, optionally attest, and self-verify in one step | [seal](./seal.md) |
+| `akmon otel import <trace.json>` | Import an OpenTelemetry GenAI trace into a new session | [otel import](./otel-import.md) |
+| `akmon bundle keygen --out <pk8>` | Generate an Ed25519 signing key | [bundle keygen](./bundle-keygen.md) |
+| `akmon bundle export <session-id>` | Export a session as a `.akmon` bundle | [bundle export](./bundle-export.md) |
+| `akmon bundle sign <bundle> --key <pk8>` | Sign the session head | [bundle sign](./bundle-sign.md) |
+| `akmon bundle attest <bundle> --key <pk8> --operator-id <id>` | Add a signed operator attestation | [bundle attest](./bundle-attest.md) |
+| `akmon bundle verify <bundle>` | Verify integrity, signatures, operators, capture level | [bundle verify](./bundle-verify.md) |
+| `akmon bundle prove-openssl <bundle> --verify-key <hex>` | Write artifacts for verification with stock OpenSSL 3 | [bundle prove-openssl](./bundle-prove-openssl.md) |
+| `akmon bundle import <bundle>` | Import a bundle into the local journal | [bundle import](./bundle-import.md) |
+| `akmon verify <session-id>` | Verify a session in the local journal | [verify](./verify.md) |
+| `akmon inspect <session-id>` | Show a session's events and contents | [inspect](./inspect.md) |
+| `akmon redact <session-id> --object <hash> --reason <text> --output <bundle>` | Write a redacted derivative bundle | [redact](./redact.md) |
+| `akmon diff <session-a> <session-b>` | Compare two sessions | [diff](./diff.md) |
+| `akmon replay <session-id>` | Replay a full-capture session deterministically | [replay](./replay.md) |
 
-## Prerequisites
+The standalone verifier is a separate binary: [`agef-verify`](./agef-verify.md).
 
-1. Akmon installed and runnable (`akmon --version`).
-2. For producing evidence with the bundled agent, a project repository.
+## Reference agent and setup commands
 
-## The trust commands (core)
+| Command | What it does |
+| --- | --- |
+| `akmon` / `akmon chat` | Interactive terminal UI for the bundled agent |
+| `akmon --task "<text>"` | Headless agent run |
+| `akmon init` | Generate `AKMON.md` for the current project |
+| `akmon new <name>` | Create a new project with starter files |
+| `akmon config …` | Manage `~/.akmon/config.toml`: `path`, `show`, `edit`, `reset`, `model`, `ollama-url`, `key`, `mcp`, `explain-provider` |
+| `akmon doctor providers` | Provider health checks with remediation hints |
+| `akmon policy show-effective` | Print the merged effective policy |
 
-These are the producer-agnostic evidence and verification commands. They operate on bundles and traces, not on a running agent.
+## Removed in 3.0.0
 
-```bash
-# Bring any agent's OpenTelemetry trace into AGEF (honest capture level)
-akmon otel import trace.json --journal .akmon/journal
+`akmon import`, `akmon export`, `akmon spec`, `akmon scout`, `akmon slo`, and `akmon sign` were removed, together with the `--index` and `--dossier` flags. They now fail with a usage error (exit `2`). For signing use [`akmon seal`](./seal.md) or [`akmon bundle sign`](./bundle-sign.md).
 
-# Make an Ed25519 signing key (openssl genpkey cannot make a usable one)
-akmon bundle keygen --out signer.pk8 --public-out signer.pub.hex
+`akmon audit verify` and `akmon evidence verify` still work but are deprecated and hidden from `--help`; they print a warning. Verify sessions with `akmon bundle export <session-id>` followed by [`akmon bundle verify`](./bundle-verify.md).
 
-# Export, then sign the session head offline
-akmon bundle export <session-id> --output session.akmon
-akmon bundle sign session.akmon --key signer.pk8
+## Flag placement
 
-# Record the accountable operator (trust attaches to the key, not the name)
-akmon bundle attest session.akmon --key signer.pk8 --operator-id you@org --role approver
-
-# Verify integrity, signature, operator attestation, capture level
-akmon bundle verify session.akmon --verify-key signer.pub.hex --require-signature
-
-# Emit an offline proof anyone can check with plain openssl (OpenSSL 3.x)
-akmon bundle prove-openssl session.akmon --verify-key signer.pub.hex --out-dir proof
-```
-
-Inspect exact flags before scripting:
-
-```bash
-akmon otel import --help
-akmon bundle keygen --help
-akmon bundle sign --help
-akmon bundle attest --help
-akmon bundle verify --help
-akmon bundle prove-openssl --help
-akmon bundle export --help
-akmon bundle import --help
-```
-
-The standalone verifier is a separate binary for auditors who do not install the full agent:
+`--output text|json` is **not** global. It must come before the subcommand, because `redact` and `bundle export` have their own `--output <PATH>`:
 
 ```bash
-agef-verify session.akmon --verify-key signer.pub.hex --require-signature
+akmon --output json policy show-effective --profile staging
 ```
 
-## The reference agent
-
-The bundled coding agent is the gold-fidelity producer of full-capture sessions.
+Evidence commands take their own `--format human|json` (and `markdown` for `bundle verify`) after the subcommand:
 
 ```bash
-# Interactive TUI
-akmon
-
-# Headless run
-akmon --task "run tests and summarize failures" --output json --yes
+akmon bundle verify audit.akmon --format json
 ```
 
-Inspect top-level help for current global options and subcommands:
+These agent flags are global and also work after a subcommand: `--audit-log`, `--evidence-path`, `--shell-allow`, `--web-fetch`, `--yes-web`, `--mcp-server`.
 
-```bash
-akmon --help
-```
+## Agent options
 
-## Verification
-
-Run a no-side-effect check on command availability:
-
-```bash
-akmon --help
-akmon config --help
-akmon policy --help
-akmon slo --help
-```
-
-Expected result: commands parse and help exits `0`.
-
-## Troubleshooting
-
-- If a command in this page differs from your binary, treat `akmon --help` as the source of truth.
-- If `akmon bundle sign` rejects a key, regenerate with `akmon bundle keygen`. An `openssl`-made key is PKCS#8 v1 and will not work.
-- If `openssl` cannot verify a proof on macOS, you are on LibreSSL. Use OpenSSL 3.x.
-- For provider or auth routing confusion in the reference agent, run `akmon config explain-provider`.
-- For failed provider setup, run `akmon doctor providers`.
-
-## Top-level subcommands
-
-Trust and evidence:
-
-- `otel import`
-- `bundle keygen`
-- `bundle sign`
-- `bundle attest`
-- `bundle verify`
-- `bundle prove-openssl`
-- `bundle export`
-- `bundle import`
-- `sign`
-- `verify`
-- `inspect`
-- `diff`
-- `redact`
-- `replay`
-
-Reference agent and governance:
-
-- `chat`
-- `init`
-- `new`
-- `config`
-- `doctor`
-- `audit`
-- `evidence`
-- `slo`
-- `policy`
-- `scout`
-- `spec`
-- `import`
-- `export`
-
-## Common global flags
+Shown under "Agent options" in `akmon --help`. They only affect the bundled agent.
 
 - `--task <TEXT>`: headless task run.
-- `--model <MODEL>`: active model id.
-- `--yes`: auto-approve read-only tools.
-- `--output <text|json>`: output format.
-- `--audit-log <PATH>`: override audit JSONL output path.
-- `--evidence-path <PATH>`: override evidence JSON path.
-- `--policy-profile <dev|staging|prod>`: select built-in policy profile.
-- `--policy-pack <PATH>`: add policy pack (repeatable).
-- `--policy-override <PATH>`: highest-precedence override file.
-- `--web-fetch`: enable `web_fetch` tool.
-- `--yes-web`: auto-approve `web_fetch` to allowed public URLs.
-- `--mcp-server <URL>`: register MCP tools from a remote server (repeatable).
-- `--index`: load or build semantic index.
-- `--plan`: read-only planning mode.
-- `--architect`: two-phase planner and implementation mode.
-- `--planner-model <MODEL>`: planner model override.
-- `--continue`: resume last project session.
-- `--session <ID_OR_PREFIX>`: resume specific session.
-- `--name <TEXT>`: session display name.
-- `--max-budget-usd <USD>`: headless spend cap.
-- `--add-dir <DIR>`: add sandbox directory (repeatable).
-- `--dossier <PATH>`: inject scout dossier context.
-- `--fallback-model <MODEL>`: fallback on repeated 429 or 529 (headless).
+- `--model <MODEL>`: model id (Ollama tag, or a Claude id when an Anthropic key is set).
+- `--yes`: auto-approve read-only tools. Writes and `shell` still ask.
+- `--audit-log <PATH>`, `--evidence-path <PATH>`: override the agent's audit and evidence output paths.
+- `--policy-profile <dev|staging|prod>`, `--policy-pack <PATH>` (repeatable), `--policy-override <PATH>`.
+- `--shell-allow <PATTERN>` (repeatable), `--web-fetch`, `--yes-web`, `--mcp-server <URL>` (repeatable).
+- `--auto-commit`, `--plan`, `--architect`, `--planner-model <MODEL>`.
+- `--continue`, `--session <ID_OR_PREFIX>`, `--name <TEXT>`.
+- `--max-budget-usd <USD>`, `--fallback-model <MODEL>` (headless only), `--add-dir <DIR>` (repeatable).
+- Provider flags: `--anthropic-key`, `--openrouter-key`, `--openai-key`, `--groq-key`, `--azure-endpoint`, `--azure-key`, `--azure-api-version`, `--bedrock`, `--aws-region`, `--openai-compatible-url`, `--openai-compatible-key`, `--ollama-url`.
 
-## Command-specific references
+## Setup and governance commands
 
-Trust and evidence:
+### `akmon config key set <provider> [KEY]`
 
-- [akmon bundle keygen](./bundle-keygen.md)
-- [akmon sign](./sign.md)
-- [akmon bundle verify](./bundle-verify.md)
-- [akmon bundle attest](./bundle-attest.md)
-- [akmon bundle prove-openssl](./bundle-prove-openssl.md)
-- [agef-verify](./agef-verify.md)
-- [akmon bundle export](./bundle-export.md)
-- [akmon bundle import](./bundle-import.md)
-- [akmon verify](./verify.md)
-- [akmon inspect](./inspect.md)
-- [akmon redact](./redact.md)
-- [akmon replay](./replay.md)
-- [akmon diff](./diff.md)
-
-## Trust and governance commands
-
-### `akmon audit verify <PATH>`
-
-Verify tamper-evident audit chain integrity.
+Store an API key. Omit `KEY` and the key is read from piped stdin, then the provider's environment variable (for example `ANTHROPIC_API_KEY`), then an interactive prompt. Passing the key on the command line works but prints a warning, because it lands in shell history. `~/.akmon/config.toml` is written with mode `0600` on unix.
 
 ```bash
-akmon audit verify .akmon/audit/<session-id>.jsonl
-akmon --output json audit verify .akmon/audit/<session-id>.jsonl
+printf '%s' "$ANTHROPIC_API_KEY" | akmon config key set anthropic
 ```
-
-Exit codes:
-
-- `0`: valid chain
-- `1`: invalid or missing audit file
-
-### `akmon evidence verify <PATH>`
-
-Verify evidence schema, replay metadata shape, and linked audit consistency.
-
-```bash
-akmon evidence verify .akmon/evidence/<session-id>.json
-akmon --output json evidence verify .akmon/evidence/<session-id>.json
-```
-
-Exit codes:
-
-- `0`: valid evidence
-- `1`: invalid or missing evidence
-
-### `akmon slo verify <PATH>`
-
-Evaluate run and evidence reliability metrics against thresholds.
-
-```bash
-akmon slo verify .akmon/evidence/<session-id>.json --strict
-akmon slo verify run.json --thresholds .akmon/slo.toml
-akmon --output json slo verify run.json --min-tool-success-rate 0.95
-```
-
-Exit codes:
-
-- `0`: all enabled checks pass
-- `1`: threshold violation(s)
-- `2`: invalid input or config
-
-### `akmon slo trend <CURRENT_PATH>`
-
-Compare current metrics against a historical baseline window.
-
-```bash
-akmon slo trend .akmon/evidence/current.json \
-  --baseline-dir .akmon/evidence/history \
-  --window 20 \
-  --strict
-
-akmon --output json slo trend run.json \
-  --baseline-file .akmon/evidence/r1.json \
-  --baseline-file .akmon/evidence/r2.json
-```
-
-Exit codes:
-
-- `0`: no regression violations
-- `1`: regression violations (or strict-mode skipped checks)
-- `2`: invalid input, config, or baseline setup
-
-### `akmon policy show-effective`
-
-Print the effective merged policy and its source layers.
-
-```bash
-akmon policy show-effective --profile staging
-akmon policy show-effective --profile prod --policy-pack .akmon/policy-packs/org.toml
-akmon --output json policy show-effective --policy-override /tmp/policy.toml
-```
-
-Exit codes:
-
-- `0`: command succeeded (with or without configured policy sources)
-- `1`: merge or load error (invalid pack, ambiguous local policy, parse failure)
 
 ### `akmon config explain-provider`
 
-Print a deterministic provider resolution trace for the effective CLI model and merged `~/.akmon/config.toml`. This command is explainability only: it does not change routing rules and mirrors the same selection as `LlmConnectConfig::resolve`.
+Print how Akmon would route the current model to a provider. Explainability only; it does not change routing. Secrets are never echoed.
 
 ```bash
 akmon config explain-provider
 akmon config explain-provider --json
-akmon --output json config explain-provider
 ```
-
-The JSON object includes `selected_provider`, `selected_reason`, `model_id`, optional `resolution_error`, and `candidates[]` (each with `provider`, `eligible`, `reason`, `missing_prerequisites`, `priority_order`). Secrets are never echoed, only named prerequisites.
-
-Pair this with `akmon doctor providers` when debugging: explain-provider answers which branch won and why, while doctor checks reachability and credential sanity.
 
 ### `akmon doctor providers`
 
-Run provider preflight diagnostics with actionable remediation hints.
+Provider preflight checks: key presence (masked), endpoint format and reachability, auth-mode hints. The JSON report includes the same `provider_resolution` block as `explain-provider`.
 
 ```bash
 akmon doctor providers
 akmon --output json doctor providers
 ```
 
-The report includes a `provider_resolution` block (same schema as `akmon config explain-provider`) so you can correlate routing decisions with health checks in one JSON payload.
+Exit `0` when the active provider checks pass, `1` on a critical misconfiguration.
 
-Checks include:
+### `akmon policy show-effective`
 
-- key and env presence (masked),
-- endpoint format sanity,
-- endpoint reachability (where applicable),
-- auth mode mismatch hints,
-- model hint availability probes where feasible.
-
-Exit codes:
-
-- `0`: active or required provider health checks passed
-- `1`: critical misconfiguration or unreachable required provider
-
-### `akmon scout --task "..."`
-
-Run bounded, read-only repository scouting and write a structured dossier.
+Print the effective merged policy and its source layers. It honours the global `--policy-profile`, `--policy-pack`, and `--policy-override`; a conflicting profile or override between global and subcommand flags exits `2`.
 
 ```bash
-akmon scout --task "find MCP policy enforcement path"
-akmon scout --task "TUI state boundaries" --max-files 300 --out .akmon/context/tui-scout.json
-akmon --output json scout --task "docs CI checks"
+akmon policy show-effective --profile staging
+akmon --output json policy show-effective --policy-override ./policy.toml
 ```
-
-Key flags:
-
-- `--task`: required scout question.
-- `--max-files`: upper bound for scanned files (default `200`).
-- `--out`: dossier output path (default `.akmon/context/scout-<timestamp>.json`).
-- `--max-budget-usd`: optional cap (scout itself has zero model spend).
-
-Exit codes:
-
-- `0`: dossier generated and written successfully
-- `1`: scan or write failure
-- `2`: invalid input (empty task, invalid bounds, invalid budget)
-
-### `--dossier <PATH>` ingestion
-
-Use a previously generated dossier to seed implementation context:
-
-```bash
-akmon scout --task "provider routing and doctor coverage" --out .akmon/context/providers.json
-akmon --dossier .akmon/context/providers.json --task "implement provider explainability"
-```
-
-Invalid or malformed dossier files fail fast before session start.
 
 ## Headless JSON output shape
 
@@ -413,3 +195,5 @@ Override with:
 ```bash
 akmon --task "..." --evidence-path /tmp/run-evidence.json
 ```
+
+This JSON file is the agent's legacy run summary, not signed evidence. The signed record of a run is its journal session: seal it with `akmon seal <session-id> --key signer.pk8`.

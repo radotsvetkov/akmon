@@ -1,10 +1,10 @@
 # Record who approved an AI change
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
-An operator or approver who has to put their name, backed by a key, behind an AI agent session. If your process needs a human to sign off on what an agent did, for example to satisfy a human-oversight requirement such as EU AI Act Article 14, this page shows how to attach a key-backed operator attestation to a bundle and how a verifier later confirms it offline.
+An operator or approver who has to put their name, backed by a key, behind an AI agent session. If your process needs a human to sign off on what an agent did, for example as part of your evidence of human oversight (the EU AI Act's Art. 14 for high-risk systems, or an internal change-approval control), this page shows how to attach a key-backed operator attestation to a bundle and how a verifier later confirms it offline.
 
 The session itself is produced separately (by Akmon's reference agent or imported from an OpenTelemetry trace) and exported to a `.akmon` bundle. This use case is about the sign-off layered on top of that bundle.
 
@@ -22,14 +22,14 @@ A verifier establishes which key belongs to which person out of band, through yo
 
 What this does prove: the holder of operator key `K` approved this exact session, with the role they stated, and the attestation is bound to this bundle's head so it cannot be transplanted onto a different session.
 
-What it does not prove: that the named person physically pressed a button, that the agent's work was correct, or that any obligation was met. Those are out of band.
+What it does not prove: that the named person physically pressed a button, when they signed (no trusted time is signed yet), that the agent's work was correct, or that any obligation was met. An attestation helps evidence oversight and sign-off; it does not by itself satisfy a human-oversight requirement, which also covers how oversight is designed and whether the overseer can intervene.
 
 ## Steps
 
 1. Generate an operator key. Keep the private key secret; you will distribute only the public key.
 
 ```bash
-akmon bundle keygen --out operator.pk8 --public-out operator.pub.hex
+akmon bundle keygen --out operator.pk8 --public-out operator.pub
 ```
 
 2. Attest the bundle with your operator id and role. The attestation is appended in place and is purely additive: the event hash chain and any existing head signature are left byte-untouched.
@@ -43,17 +43,27 @@ akmon bundle attest /path/to/session.akmon \
   --org "Example Corp"
 ```
 
-3. Distribute `operator.pub.hex` to verifiers out of band, through the channel your process trusts. This step is what makes the name meaningful later; without it a verifier only sees a self-asserted string.
+3. Distribute `operator.pub` to verifiers out of band, through the channel your process trusts. This step is what makes the name meaningful later; without it a verifier only sees a self-asserted string.
 
 4. The verifier requires that specific operator key to have a valid attestation.
 
 ```bash
 akmon bundle verify /path/to/session.akmon \
-  --operator-key operator.pub.hex \
-  --require-operator-key operator.pub.hex
+  --operator-key operator.pub \
+  --require-operator-key operator.pub
 ```
 
 This exits `0` only when the named key has a cryptographically valid attestation on the bundle. With `--require-operator` instead, any one trusted operator key satisfies the gate; with `--require-operator-key` the gate names a specific key. Without any trusted key supplied, an attested bundle reports `unverified_no_key`, which is informational rather than a failure. A verifier who does not run Akmon can use the standalone `agef-verify` with the same flags.
+
+## In one step with `akmon seal`
+
+When you seal a session you can attest at the same time. The operator public key is written next to the bundle as `<output>.operator.pub`:
+
+```bash
+akmon seal trace.json --key signer.pk8 \
+  --operator-key operator.pk8 --operator-id approver@example.com --role approver \
+  --output audit.akmon
+```
 
 ## Combine with a head signature
 
@@ -61,8 +71,8 @@ Operator sign-off answers "who approved this". The bundle's head signature answe
 
 ```bash
 akmon bundle verify /path/to/session.akmon \
-  --verify-key signer.pub.hex --require-signature \
-  --operator-key operator.pub.hex --require-operator-key operator.pub.hex
+  --verify-key signer.pub --require-signature \
+  --operator-key operator.pub --require-operator-key operator.pub
 ```
 
 ## See also

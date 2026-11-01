@@ -1,87 +1,95 @@
 # akmon bundle verify
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
-## Who this is for
+Verify a `.akmon` bundle without touching the local journal. It runs the same checks as the standalone [`agef-verify`](./agef-verify.md) and takes the same flags.
 
-Reviewers and CI jobs that need to validate a portable `.akmon` bundle **without** writing to a
-local journal. This is the preferred Akmon entrypoint for bundle-only verification (Item 4.3).
-
-## What you will have at the end
-
-- Confirmation that the bundle's objects, event chain, and manifest head are internally
-  consistent, or a structured violation list.
-
-## Prerequisites
-
-- Path to a `.akmon` bundle file.
-
-## Steps
+## Usage
 
 ```bash
-akmon bundle verify /path/to/audit.akmon
+akmon bundle verify audit.akmon
+akmon bundle verify audit.akmon --verify-key signer.pub --require-signature
+akmon bundle verify audit.akmon --verify-key signer.pub --format markdown > report.md
+akmon bundle verify audit.akmon --format json
 ```
 
-```bash
-akmon bundle verify /path/to/audit.akmon --format json
-```
+## What it checks
 
-Optional flags:
+- Manifest schema, event framing, and that every object re-hashes to its name.
+- The hash chain from the first event to the session head, and that the manifest head matches.
+- Object closure: every referenced object is present, and no unreferenced object is (`unreferenced_object`).
+- Provider-call invariants inside events (`event_invariant`).
+- Archive strictness: duplicate entries, badly named objects, and (by default) any file outside `manifest.json`, `events.bin`, and `objects/<hex>` fail verification.
+- With `--verify-key`: each signature in `manifest.signatures[]` against the keys you trust.
+- With `--operator-key`: each operator attestation against the operator keys you trust.
 
-- `--allow-extra-files`: tolerate unknown files inside the archive (default is strict reject).
-- `--format human|json`: default `human`.
+**Without `--require-signature`, a pass means integrity only.** Anyone can build an internally consistent bundle. Authorship needs a key you trust.
 
-## Operator identity (`--operator-key`)
+## Options
 
-[`akmon bundle attest`](./bundle-attest.md) records signed operator attestations on a bundle. To
-check them at verify time:
+| Option | Meaning |
+| --- | --- |
+| `--verify-key <HEX_FILE>` | Trusted signer public key (64 hex chars in a file). Repeatable. |
+| `--require-signature` | Fail unless at least one signature verifies against a `--verify-key`. |
+| `--operator-key <HEX_FILE>` | Trusted operator public key. Repeatable. |
+| `--require-operator` | Fail unless at least one operator attestation verifies against an `--operator-key`. |
+| `--require-operator-key <HEX_FILE>` | Fail unless this specific key attested. Repeatable; also trusts the key. |
+| `--require-capture full` | Fail unless the session captured full message content. Rejects `partial` and `structural`. |
+| `--allow-extra-files` | Tolerate unknown files in the archive. Default is strict reject. |
+| `--max-decoded-bytes <BYTES>` | Decompression limit. Default `1073741824` (1 GiB). |
+| `--format human\|json\|markdown` | `human` on stderr (default), `json` on stdout, or a Markdown auditor report on stdout. |
 
-- `--operator-key <HEX_FILE>`: a trusted operator Ed25519 public key (64 hex chars). Repeatable.
-  Each `manifest.operator_attestations[]` entry is verified against the supplied keys; a matching,
-  cryptographically valid attestation reports outcome `verified`. An attested bundle verified
-  **without** a trusted key reports `unverified_no_key`, not a failure on its own.
-- `--require-operator`: fail (exit 1) unless **at least one** operator attestation verifies against
-  an `--operator-key`.
-- `--require-operator-key <HEX_FILE>`: fail unless **that specific** key has a verified attestation.
-  Repeatable; each listed key is also trusted for verification.
+## Reading the result
 
-"Verified" attaches to the **key**, not the name. The JSON `operators[]` entries carry the
-self-asserted `operator_id`/`role`/`org` strings verbatim, but the only trust signal is the distinct
-boolean `operator_key_verified` (outcome `verified`) against a key **you** supplied. A self-asserted
-identity never reads as key-verified without a trusted key; trust in the name is out-of-band.
+The human headline states exactly what was established:
 
-```bash
-akmon bundle verify /path/to/audit.akmon --operator-key operator.pub.hex --require-operator --format json
-```
+| Headline | Meaning |
+| --- | --- |
+| `verified bundle: integrity OK; signature verified by key_id=<id>` | Contents match the head, and a trusted key signed it. |
+| `verified bundle: integrity OK; signature present but NOT verified (…integrity only)` | Signed, but not by any key you supplied. |
+| `verified bundle: integrity OK; UNSIGNED (integrity only)` | No signature at all. |
+| `bundle verification FAILED` | Something does not match. The violations list says what. |
+
+The body shows the head, the session window (first and last event timestamps, from the producer's clock), capture level, signatures, operators, and the **unsigned metadata** (`created_at`, `ended_at`, producer). That metadata is not covered by any signature. If it disagrees with the event timestamps you get a warning, not a failure.
+
+`--format markdown` writes the same result as a report with a verdict, a checks table, and "What this proves" and "What this does not prove" sections. Untrusted values from the bundle are escaped.
+
+## JSON output
+
+`--format json` prints `BundleVerifyReportV1`. Main fields:
+
+| Field | Meaning |
+| --- | --- |
+| `passed` | The overall verdict, including any `--require-*` flags. |
+| `integrity_ok` | The hash chain, objects, and head are consistent. |
+| `signature_verified` | At least one signature verified against a trusted key. Read it together with `integrity_ok` and `passed`. |
+| `operator_key_verified` | At least one operator attestation verified against a trusted key. |
+| `head`, `hash_algorithm` | The session head and its algorithm. |
+| `session_window` | `first_event_at` and `last_event_at`. Omitted when there are no events. |
+| `capture` | `level` (`full`, `partial`, `structural`) and `source_semconv` for imports. |
+| `signatures[]`, `operators[]` | Per-entry outcomes. Operator identity strings are self-asserted. |
+| `unsigned_metadata` | `created_at`, `ended_at`, `producer_name`, `producer_version`. Not signed. |
+| `warnings[]` | For example `manifest_created_at_mismatch`. Never fail verification. |
+| `violations[]` | Why verification failed, each with a `category`. |
+
+Errors that stop verification before a report exists (unreadable file, bad key file) use the shared error object `{tool, akmon_version, passed: false, error, category}`.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Bundle passed all integrity checks |
-| `1` | Verification failed |
-| `3` | I/O or environment error |
+| `0` | Passed: integrity plus any `--require-*` requirements. |
+| `1` | Failed, including a malformed, corrupt, truncated, or oversized archive. |
+| `2` | Usage error. |
+| `3` | I/O or environment error, for example a missing bundle or an invalid key file. |
 
-## Verification
+## Operator identity
 
-```bash
-akmon bundle verify /path/to/audit.akmon --format json | jq '.passed'
-```
-
-Expected result: `true` for a valid exported bundle.
-
-## Equivalents
-
-| Command | Notes |
-| --- | --- |
-| `akmon bundle verify` | Preferred; no journal access |
-| `akmon bundle import --verify-only` | Legacy alias; same checks and JSON schema |
-| `agef-verify` | Standalone binary; no Akmon CLI |
+"Verified" attaches to the key, never to the name. The `operator_id`, `role`, and `org` strings are whatever the signer typed. Binding a key to a real person is something you establish out of band. See [Operator sign-off](../use-cases/operator-sign-off.md).
 
 ## See also
 
-- [akmon bundle import](./bundle-import.md)
-- [akmon bundle attest](./bundle-attest.md)
 - [agef-verify](./agef-verify.md)
+- [What verification proves](../concepts/verifying-evidence.md)
 - [akmon bundle prove-openssl](./bundle-prove-openssl.md)
-- [akmon verify](./verify.md)
+- [akmon bundle import](./bundle-import.md) (`--verify-only` runs the same checks)

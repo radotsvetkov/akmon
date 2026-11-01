@@ -59,16 +59,16 @@ Use Akmon's local status hints and remediation guidance (`/clear`, `ollama ps`, 
 Use multiple levers together:
 
 - `--max-budget-usd` for hard stop,
-- plan/spec workflow to avoid repeated exploratory context,
+- plan mode to avoid repeated exploratory context,
 - smaller focused tasks,
 - context hygiene (`/clear` when a session gets noisy),
 - use `/context` and `/cost` during long runs.
 
-For automated runs, pair budget caps with evidence/SLO checks:
+For automated runs, pair budget caps with a sealed record of the run:
 
 ```bash
 akmon --yes --output json --max-budget-usd 1.50 --task "..." | tee run.json
-akmon slo verify run.json --thresholds .akmon/slo.toml
+akmon seal "$(jq -r '.session_id' run.json)" --key signer.pk8
 ```
 
 ## Common mistakes and troubleshooting

@@ -1,141 +1,103 @@
 # Contributing to Akmon
 
-Thanks for your interest in improving Akmon.
+Thanks for your interest in improving Akmon. Akmon does one job: it seals AI agent sessions into signed, tamper-evident evidence that someone who doesn't trust you can verify offline. Contributions that make that job more correct, more honest or easier are the most welcome.
 
-This guide explains how to contribute code, docs, and bug reports in a way that is easy to review and ship.
-
-All participants must follow the **[Code of Conduct](CODE_OF_CONDUCT.md)**. Report **security** issues per **[SECURITY.md](SECURITY.md)** (do not file public issues for undisclosed vulnerabilities).
+All participants must follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately as described in [SECURITY.md](SECURITY.md). Never open public issues for undisclosed vulnerabilities.
 
 ## Developer Certificate of Origin (DCO)
 
-Akmon uses the Developer Certificate of Origin (DCO) to certify that contributors have the right to submit their contributions. By signing off on each commit, you certify that you wrote the code or otherwise have the right to submit it under the project's open source license.
+Akmon uses the [Developer Certificate of Origin](https://developercertificate.org). By signing off a commit, you certify that you wrote it or otherwise have the right to submit it under the project's license (Apache-2.0).
 
-### How to sign off
-
-Add a `Signed-off-by` line to every commit message:
-
-```text
-Signed-off-by: Your Name <your.email@example.com>
-```
-
-Git can do this automatically with the `-s` flag:
+Add a `Signed-off-by` line to every commit, which Git does for you with `-s`:
 
 ```bash
-git commit -s -m "your commit message"
+git commit -s -m "fix(bundle): reject duplicate manifest entries"
+# -> Signed-off-by: Your Name <your.email@example.com>
 ```
 
-The full DCO text is available at [developercertificate.org](https://developercertificate.org).
-
-Pull requests with unsigned commits will be asked to amend their history before review.
+Pull requests with commits that are not signed off will be asked to amend their history before review.
 
 ## Ways to contribute
 
-- Report bugs and UX issues.
-- Propose features and architecture improvements.
-- Improve docs, tutorials, and examples.
+- Report bugs, especially anything where verification output claims more than it proved.
+- Improve docs, tutorials and examples (they must be copy-paste runnable).
+- Add OpenTelemetry GenAI fixtures from real instrumentations, with provenance.
 - Submit focused pull requests with tests.
 
-## Before you start
-
-- Search existing issues and pull requests to avoid duplicates.
-- Open an issue first for large changes or behavior changes.
-- Keep one pull request scoped to one logical change.
+Open an issue first for large changes, behaviour changes, or anything that touches the AGEF format.
 
 ## Local setup
+
+The toolchain is pinned in `rust-toolchain.toml` (Rust **1.88**, the same as CI), so `rustup` selects it automatically.
 
 ```bash
 git clone https://github.com/radotsvetkov/akmon
 cd akmon
-cargo build --release
+cargo build --workspace
+# binaries: target/debug/akmon and target/debug/agef-verify
 ```
 
-Optional smaller build (without semantic indexing):
+Optional tools for the full gate set: [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) (`cargo install --locked cargo-deny`), [`mdbook`](https://github.com/rust-lang/mdBook) 0.4.x for the handbook, and OpenSSL 3.x so the end-to-end `openssl` leg runs instead of skipping (macOS ships LibreSSL: `brew install openssl@3`).
+
+## Required gates
+
+CI runs these, so run them before you open a PR:
 
 ```bash
-cargo build --release --no-default-features
-```
-
-## Development workflow
-
-1. Create a branch from `main`.
-2. Implement the change.
-3. Add or update tests.
-4. Run checks locally.
-5. Open a pull request with context and test notes.
-
-## Required checks
-
-Run these before opening a PR:
-
-```bash
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+RUSTFLAGS='-D warnings' cargo test --workspace --no-default-features
+cargo deny check
 ```
 
-If you touched no-default-features behavior, also run:
+Clippy runs with `--all-targets` because the pinned toolchain also lints test code. Since v3.0 there are no optional cargo features, so `--no-default-features` changes nothing; it stays in the commands for parity with CI.
 
-```bash
-cargo build --release --no-default-features
-```
+The end-to-end harness `crates/akmon-cli/tests/e2e_otel_to_openssl_integration.rs` is the frozen proof that a real OTEL trace goes all the way to a stock-OpenSSL verification. Do not weaken it. If it has to change, explain why in the PR.
 
 ## Docs checks
 
-When your PR touches documentation, run the same deterministic docs checks used by CI:
+When a PR touches `README.md`, `CHANGELOG.md`, `landing/` or `docs/`, run the same deterministic checks as CI (mdbook must be on `PATH`):
 
 ```bash
-# Prerequisite: mdbook installed and available on PATH
-bash scripts/docs/run_all.sh
+bash scripts/docs/run_all.sh        # mdbook build, links, CLI smoke, JSON snippets, version markers
+bash scripts/docs/test_fixtures.sh  # self-tests for the checkers
 ```
 
-You can also run checks individually:
-
-```bash
-mdbook build docs
-python3 scripts/docs/check_markdown_links.py
-bash scripts/docs/check_cli_smoke.sh
-python3 scripts/docs/check_json_snippets.py
-bash scripts/docs/test_fixtures.sh
-```
+`scripts/docs/check_version_markers.py` requires every `Documented for Akmon \`X.Y.Z\`` marker, the README and the landing page to match the workspace version in `Cargo.toml`. Update them in the same PR that bumps the version.
 
 ## Coding standards
 
-- Match existing crate boundaries and style.
-- Prefer small, composable functions.
-- Avoid unnecessary abstractions.
-- Add rustdoc to new public APIs.
-- Do not use `unwrap()` in library code unless failure is truly impossible and documented.
-- Keep user-facing errors actionable.
+- Respect crate boundaries. The trust path (`akmon-journal`, `akmon-bundle`, `agef-verify`, `akmon-otel`) must not depend on the agent crates.
+- **Never change AGEF substrate bytes**: event encoding, hashing, signed statements (`AGEF-SIG-v1`, `AGEF-OPERATOR-v1`) or the manifest format. Format changes go through the [AGEF specification](https://github.com/radotsvetkov/agef) first.
+- **Fail closed.** A verifier that is unsure must fail. Output must never claim more than was verified (integrity only vs. signature verified, `full` vs. `partial` vs. `structural` capture).
+- **Sanitize untrusted text** (anything from a bundle, trace or session) before it reaches a terminal (`akmon_bundle::sanitize_display`, `akmon_diff::sanitize_for_terminal`).
+- No `unwrap()`/`expect()` outside tests unless failure is impossible and documented. Slice strings only on character boundaries (`akmon_core::truncate_at_char_boundary`).
+- Every public item has a rustdoc comment. User-facing errors say what to do next and use the shared JSON error shape and exit codes (`0` ok, `1` verification failed, `2` usage, `3` I/O).
+- Agent file paths always go through sandbox validation. Secrets never appear in logs, errors, journals or argv.
 
-For TUI changes, place state-transition logic in focused `crates/akmon-tui/src/state/*` modules and keep `TuiApp` as orchestration/composition glue.
+## The `archive/` directory
 
-## Commit and PR guidelines
+Code that no longer serves the evidence job lives in [`archive/`](archive/README.md). The workspace excludes it (`exclude = ["archive"]`), so it is **not compiled, tested, linted or shipped**, and `cargo-deny` does not scan it. The complete pre-archive tree is tagged `archive/pre-focus-v2.2.1`.
 
-- Use clear commit messages that explain why.
-- Keep diffs focused; avoid unrelated refactors.
-- Include a concise PR description:
-  - Problem
-  - Approach
-  - Trade-offs (if any)
-  - Test plan
+- Don't fix or modernize archived code, and don't add new code there except by moving it with `git mv` (which keeps history).
+- To bring an item back, open an issue explaining how it serves the evidence job. Then restore it with `git checkout archive/pre-focus-v2.2.1 -- <path>`, re-add its wiring, give it tests, and update `archive/README.md` and the CHANGELOG.
+- Retired handbook pages go to `archive/docs/`.
 
-## Documentation changes
+## Commits and pull requests
 
-- Update `README.md` when behavior visible to users changes.
-- Update `docs/` and `CHANGELOG.md` for release-relevant changes.
-- Prefer examples that can be copied and run as-is.
+- Use Conventional Commit style subjects (`fix(bundle): …`, `feat(cli): …`, `docs: …`) and explain *why* in the body.
+- Keep each PR to one logical change, without unrelated refactors.
+- PR description: problem, approach, trade-offs, test plan, and any user-visible change (CLI, JSON, exit codes, docs).
+- User-visible changes need a `CHANGELOG.md` entry under `[Unreleased]` and the matching README or `docs/` update.
 
-## Security and policy-sensitive changes
+## Security- and policy-sensitive changes
 
-Akmon prioritizes trust and auditability.
+For changes to verification, signing, archive parsing, sandboxing, permissions, shell, MCP or network access:
 
-For changes around sandboxing, permissions, shell, MCP, or network access:
-
-- explain the risk model in the PR,
-- include regression tests,
-- and call out any new permission surface explicitly.
+- explain the threat model in the PR;
+- add regression tests for both the accept and the reject paths;
+- call out any new permission surface or any change in what a verdict means.
 
 ## Questions
 
-If you are unsure about direction, open a draft PR early or start a discussion in an issue.
-
+If you're unsure about direction, open a draft PR early or start a discussion in an issue.

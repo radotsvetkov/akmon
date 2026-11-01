@@ -21,7 +21,7 @@ Run the same docs checks CI runs:
 bash scripts/docs/run_all.sh
 ```
 
-This includes mdBook build, link checks, CLI smoke checks, JSON snippet checks, and required version-marker checks on maintained pages.
+This includes mdBook build, link checks, CLI smoke checks, JSON snippet checks, and version-marker checks (every `Documented for Akmon X.Y.Z` marker must match the workspace version).
 
 ## Maintainers workflow
 
@@ -40,18 +40,22 @@ See `docs/MAINTAINERS.md` for the docs update protocol, quarterly audit checklis
 docs/
   book.toml          mdBook configuration
   src/
-    SUMMARY.md       Table of contents — defines navigation
-    introduction.md  Landing page
-    comparison.md    Short “other tools vs Akmon” (not on the marketing page)
-    getting-started/ Installation, quickstart, providers
-    usage/           Interactive, headless, plan, spec modes
-    project/         init, AKMON.md, import, export
-    languages/       Rust, Python, TypeScript, Go guides
-    examples/        Complete worked examples
-    features/        Audit log, security, cost, git, MCP
-    providers/       Per-provider setup guides
-    reference/       CLI, slash commands, env vars
+    SUMMARY.md       Table of contents: defines navigation
+    introduction.md  Landing page: the one job (seal, hand over, verify offline)
+    getting-started/ Quick start, install, and reference-agent provider/config setup
+    concepts/        Trust model, capture levels, what verification proves, compliance
+    guides/          Seal an OTEL trace, hand evidence over, timestamps, retention
+    use-cases/       Air-gapped verification, operator sign-off, release evidence pack
+    reference/       One page per command (seal, otel import, bundle *, agef-verify, ...)
+    usage/           Bundled reference agent: interactive, headless, plan, architect
+    features/        Bundled reference agent: policy, security, MCP, git, cost, legacy logs
+    providers/       Per-provider setup for the reference agent
+    languages/       Language guides for the reference agent
+    tutorials/       Longer walkthroughs
+    releases/        Release notes (historical pages keep their own versions)
     contributing/    Setup, architecture, adding providers
   theme/
-    custom.css       Amber accent, tip/warning callouts
+    custom.css       Accent styling
 ```
+
+Pages for features removed in v3.0.0 live under `archive/docs/` and are not built.

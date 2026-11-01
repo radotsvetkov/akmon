@@ -1,6 +1,6 @@
 # Slash Commands
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 In `akmon chat`, type `/` then command name. Use `/help` in-session as runtime source of truth.
 
@@ -20,8 +20,6 @@ In `akmon chat`, type `/` then command name. Use `/help` in-session as runtime s
 | Command | Description |
 | --- | --- |
 | `/init` | Generate or refresh `AKMON.md` |
-| `/import` | Import external tool context |
-| `/export` | Export `AKMON.md` to another format |
 | `/update-context` | Open `AKMON.md` in `$EDITOR` and reload |
 | `/new <name>` | Scaffold a new project in current directory |
 
@@ -51,7 +49,6 @@ In `akmon chat`, type `/` then command name. Use `/help` in-session as runtime s
 | `/audit` | Session audit log view |
 | `/context` | Context-window usage breakdown |
 | `/config` | Settings UI for model estimates |
-| `/index` | Semantic index status |
 | `/doctor` | Provider key/status summary |
 | `/mcp` | MCP setup hints and configured servers |
 | `/copy` | Copy last assistant response |

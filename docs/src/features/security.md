@@ -1,6 +1,6 @@
 # Security model
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 Akmon is an evidence and verification layer for AI agents. Its security model has two halves, and they are deliberately separate.
 
@@ -46,7 +46,7 @@ The rest of this page concerns Akmon's own reference agent. The risk it manages 
 - accessing network resources,
 - mutating git state.
 
-The reference agent mediates each of these through sandboxing, typed permissions, and policy, and records every decision in the audit chain. That mediation is what earns the `full` capture level. None of it applies to imported third-party traces, which carry only what the producing agent emitted.
+The reference agent mediates each of these through sandboxing, typed permissions, and policy, and records every decision in the audit chain. None of it applies to imported third-party traces, which carry only what the producing agent emitted.
 
 ## Sandbox boundaries
 
@@ -123,27 +123,6 @@ Recommended posture:
 
 The selected profile and pack contents feed the effective policy, and the effective policy is hashed into evidence as `policy_hash`. A governance change is therefore visible to CI even when the behavioral effect is subtle.
 
-## Nested/subagent safety ceiling
-
-`spawn_subagent` runs under a strict parent permission ceiling:
-
-- nested sessions never seed broad "allow all writes" approvals,
-- parent interactive mode is downgraded to read-oriented nested execution with no implicit side effects,
-- tool eligibility is pre-filtered with policy evaluation using tool-name context,
-- side-effect decisions still pass through normal permission checks at dispatch time.
-
-This closes the class of escalation where a nested run could gain broader write/shell/network rights than the parent session posture.
-
-Before:
-
-- nested bootstrap pre-seeded broad interactive allow replies,
-- side-effect tools could be available in nested runs even when parent posture was read-only.
-
-After:
-
-- nested runs fail closed when confirmations cannot be satisfied safely,
-- nested tool access is a subset of parent policy capability.
-
 ## Network and SSRF posture
 
 `web_fetch` applies protections against common private-address and metadata-endpoint abuse patterns. This reduces risk from prompt injection that tries to exfiltrate internal data.
@@ -163,12 +142,12 @@ Operational guidance:
 
 ## Reliability metrics are observability only
 
-Run and evidence reliability counters (tool success rates, denials, retries, timeouts) are for operational visibility and SLO monitoring. They do not grant permissions and do not bypass policy enforcement. See [Reliability and SLO metrics](./reliability-slos.md).
+Run and evidence reliability counters (tool success rates, denials, retries, timeouts) are for operational visibility only. They do not grant permissions and do not bypass policy enforcement.
 
 ## Common mistakes and troubleshooting
 
-- Mistake: treating a `structural` OTEL import as if it were a full recording.
-  - Fix: gate strict workflows with `akmon bundle verify --require-capture full`, and use replay only on reference-agent sessions.
+- Mistake: treating a `partial` or `structural` OTEL import as if it were a full recording.
+  - Fix: gate strict workflows with `agef-verify --require-capture full`, and use replay only on reference-agent sessions.
 - Mistake: trusting an operator name because it appears in a bundle.
   - Fix: trust the attesting key. Verify with `--operator-key` and establish key trust out of band.
 - Mistake: enabling broad shell access in unattended workflows.
@@ -183,5 +162,4 @@ Run and evidence reliability counters (tool success rates, denials, retries, tim
 - [Audit log](./audit-log.md)
 - [Evidence artifact](./evidence.md)
 - [Policy profiles and packs](./policy-profiles.md)
-- [Reliability and SLO metrics](./reliability-slos.md)
 - [Security policy](../security.md)

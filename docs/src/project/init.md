@@ -11,7 +11,7 @@ akmon init
 
 - Detects stack (languages, frameworks, tooling).
 - Writes or updates `AKMON.md` with product context, architecture, conventions, and sprint sections.
-- If other tools already left context files (`CLAUDE.md`, `.cursorrules`, …), you can run [`akmon import`](./import.md) first to synthesize them into `AKMON.md`.
+- If other tools already left context files (`CLAUDE.md`, `.cursorrules`, …), `akmon init` offers to use them as input (`Use these as input for AKMON.md? [Y/n]`).
 
 ## Why run it
 
@@ -30,4 +30,3 @@ Same operation from inside the interactive UI.
 ## See also
 
 - [AKMON.md reference](./akmon-md.md)
-- [Importing context](./import.md)

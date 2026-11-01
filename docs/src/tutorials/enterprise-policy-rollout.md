@@ -1,6 +1,6 @@
 # Tutorial: Enterprise policy profile rollout
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 Time estimate: 30-45 minutes  
 Complexity: Advanced
@@ -21,7 +21,7 @@ Platform and security teams introducing policy governance for AI agents, moving 
 1. Repository contains an `.akmon/` directory.
 2. You can run headless tasks (`akmon --task ...`).
 3. Team agrees on approval and CI gate expectations.
-4. A signing key for the evidence handoff, created with `akmon bundle keygen --out signer.pk8 --public-out signer.pub.hex`. Keep the private key secret and publish only the public key.
+4. A signing key for the evidence handoff, created with `akmon bundle keygen --out signer.pk8 --public-out signer.pub`. Keep the private key secret and publish only the public key.
 
 ## Steps
 
@@ -93,12 +93,11 @@ Because the same effective policy produces the same `policy_hash`, two governed 
 
 ## Hand reviewers a signed bundle
 
-Export the governed session, sign it offline, and verify the signature. The reviewer then receives a bundle whose sealed evidence includes the `policy_hash`, so the governance context travels with the proof.
+Seal the governed session and verify it. The reviewer then receives a bundle whose sealed record includes the `policy_hash`, so the governance context travels with the proof.
 
 ```bash
-akmon bundle export "${SESSION_ID}" --output "${SESSION_ID}.akmon"
-akmon bundle sign "${SESSION_ID}.akmon" --key signer.pk8
-akmon bundle verify "${SESSION_ID}.akmon" --verify-key signer.pub.hex --require-signature
+akmon seal "${SESSION_ID}" --key signer.pk8 --output "${SESSION_ID}.akmon"
+agef-verify "${SESSION_ID}.akmon" --verify-key signer.pub --require-signature
 ```
 
 A reviewer can verify this offline with `akmon bundle verify`, the standalone `agef-verify`, or plain `openssl`; see [Verify evidence on an air-gapped machine](../use-cases/air-gapped-audit.md).
@@ -132,6 +131,6 @@ A reviewer can verify this offline with `akmon bundle verify`, the standalone `a
 ## See also
 
 - [akmon bundle verify](../reference/bundle-verify.md)
-- [akmon bundle sign](../reference/sign.md)
+- [akmon seal](../reference/seal.md)
 - [Regulated reviewer flow](../concepts/reviewer-flow.md)
-- [Compliance and evidence](../concepts/compliance.md)
+- [Compliance crosswalk](../concepts/compliance.md)

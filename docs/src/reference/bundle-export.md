@@ -1,6 +1,6 @@
 # akmon bundle export
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -76,10 +76,12 @@ An `.akmon` bundle is a `tar.zst` archive containing:
 
 - If export fails with output-exists error, choose a new `--output` path.
 - If export fails with session/journal errors, verify UUID and `--journal` location.
-- Export does not replace integrity checks; run `akmon verify` before export when required.
+- Export does not sign. Use [`akmon bundle sign`](./bundle-sign.md), or [`akmon seal`](./seal.md) to export, sign, and verify in one step.
+- If the journal is in use by another process, JSON errors report category `journal_locked` (exit `3`).
 
 ## See also
 
+- [akmon seal](./seal.md)
 - `akmon bundle import`: [./bundle-import.md](./bundle-import.md)
 - `akmon verify`: [./verify.md](./verify.md)
 - `akmon inspect`: [./inspect.md](./inspect.md)

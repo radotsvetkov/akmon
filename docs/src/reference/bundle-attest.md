@@ -1,6 +1,6 @@
 # akmon bundle attest
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -44,14 +44,14 @@ verifier supplied. Akmon never claims the name is true on its own.
 Generate an operator key and attest a bundle in place:
 
 ```bash
-akmon bundle keygen --out operator.pk8 --public-out operator.pub.hex
+akmon bundle keygen --out operator.pk8 --public-out operator.pub
 akmon bundle attest /path/to/audit.akmon --key operator.pk8 --operator-id ops@example.com --role approver
 ```
 
-Then distribute `operator.pub.hex` to verifiers (out-of-band) and have them verify:
+Then distribute `operator.pub` to verifiers (out-of-band) and have them verify:
 
 ```bash
-akmon bundle verify /path/to/audit.akmon --operator-key operator.pub.hex --require-operator
+akmon bundle verify /path/to/audit.akmon --operator-key operator.pub --require-operator
 ```
 
 ## Optional flags
@@ -64,11 +64,12 @@ akmon bundle verify /path/to/audit.akmon --operator-key operator.pub.hex --requi
   `akmon_version`, `bundle_path`, `session_id`, `operator_id`, `role`, `key_id`, `public_key_hex`,
   and `output_path`. The private key is never printed.
 
-## Note on head signatures (O9)
+## Note on existing signatures
 
-If the bundle already carries a head signature, `attest` leaves `agef_version` untouched so the
-existing `AGEF-SIG-v1` signature stays valid; on an unsigned bundle it stamps the current spec
-version. Either way the attestation is built from the manifest's current `agef_version`, so it is
+The bundle must pass integrity verification first; a bundle that fails is refused (category
+`integrity_failed`, exit `1`) and left untouched. If the bundle already carries a head signature or
+an earlier operator attestation, `attest` leaves `agef_version` untouched so those stay valid; on a
+bundle with neither it stamps the current spec version. Either way the attestation is built from the manifest's current `agef_version`, so it is
 self-consistent. Attesting never invalidates a previously verifiable head signature.
 
 ## Exit codes
@@ -76,7 +77,7 @@ self-consistent. Attesting never invalidates a previously verifiable head signat
 | Code | Meaning |
 | --- | --- |
 | `0` | Attestation appended and bundle written |
-| `1` | Bundle read or integrity error |
+| `1` | Refused: the bundle failed integrity verification, or the archive is malformed or corrupt |
 | `2` | Invalid private key, or an operator identity field is empty (`operator-id`) or contains a newline/carriage return |
 | `3` | I/O error (bundle unreadable, key unreadable, or bundle write/rename failed) |
 
@@ -86,4 +87,4 @@ self-consistent. Attesting never invalidates a previously verifiable head signat
 - [akmon bundle verify](./bundle-verify.md)
 - [akmon bundle prove-openssl](./bundle-prove-openssl.md)
 - [agef-verify](./agef-verify.md)
-- [akmon sign](./sign.md)
+- [akmon seal](./seal.md) (`--operator-key` attests in the same step)

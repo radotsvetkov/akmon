@@ -35,14 +35,39 @@ jobs:
           cargo test --workspace
           --no-default-features
 
+      # --all-targets lints tests, benches and examples too: the pinned 1.88
+      # toolchain flags test code, so this keeps CI in parity with local gates.
       - name: Clippy
         run: >
           cargo clippy --workspace
+          --all-targets
           --no-default-features
           -- -D warnings
 
       - name: Format check
         run: cargo fmt --all -- --check
+
+  # The trust commands write files with explicit Unix modes, resolve symlinks,
+  # and shell out to openssl in tests; run the suite on macOS as well.
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: >
+          RUSTFLAGS='-D warnings'
+          cargo test --workspace
+          --no-default-features
 
   supply-chain:
     name: Supply chain
@@ -90,6 +115,9 @@ jobs:
 
       - name: JSON snippet sanity checks
         run: python3 scripts/docs/check_json_snippets.py
+
+      - name: Version marker checks
+        run: python3 scripts/docs/check_version_markers.py
 
       - name: Docs checker fixture tests
         run: bash scripts/docs/test_fixtures.sh

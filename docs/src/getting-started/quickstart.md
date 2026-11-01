@@ -1,127 +1,86 @@
-# Quick Start
+# Quick start
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
-## Who this is for
+Seal an agent session into one signed file, then verify it the way a stranger would. Five commands.
 
-Engineers and compliance reviewers who want one end-to-end pass through the thing that makes Akmon useful: take an agent session, seal it, sign it, and prove to a third party what happened, with nothing but `openssl` on the other end.
+## You need
 
-Akmon is a producer-agnostic evidence and verification layer. This quick start uses a session from any OpenTelemetry-instrumented agent (an OTLP/JSON GenAI trace). The same flow applies to sessions from Akmon's own bundled reference agent. The verification chain is the point; the agent that produced the trace is interchangeable.
+- `akmon` and `agef-verify` on your `PATH` ([Install](./installation.md)).
+- An OpenTelemetry GenAI trace exported as OTLP/JSON (`trace.json`). Any instrumented agent works. If you use the bundled reference agent instead, you can seal its session by id; see step 2.
+- Optional: OpenSSL 3 for the last step. The macOS system `openssl` is LibreSSL and cannot verify Ed25519.
 
-## What you will have at the end
-
-- A signed, portable `.akmon` bundle made from an agent trace.
-- A verification that passes integrity, signature, and operator-attestation checks.
-- An offline proof a stranger can verify with plain `openssl`, no Akmon install required.
-
-## Prerequisites
-
-1. `akmon --version` reports `2.2.0`.
-2. An OpenTelemetry GenAI trace file on disk (OTLP/JSON). Akmon reads the v1.37 structured form and the older v1.36-and-earlier message-event form that most deployed agents still emit.
-3. OpenSSL 3.x for the final `openssl` step. The macOS system `openssl` is LibreSSL and cannot verify Ed25519.
-
-## The trust flow
-
-### 1. Generate a signing key
-
-`openssl genpkey` emits a PKCS#8 v1 key that the `ring` library rejects, so it cannot sign an Akmon bundle. Use `keygen`, which produces the PKCS#8 v2 key Akmon accepts (and sets `0600` on unix).
+## 1. Make a signing key
 
 ```bash
-akmon bundle keygen --out signer.pk8 --public-out signer.pub.hex
+akmon bundle keygen --out signer.pk8 --public-out signer.pub
 ```
 
-Keep `signer.pk8` secret. Distribute only `signer.pub.hex` (64 hex characters) to verifiers.
+`signer.pk8` is your private key (created `0600` on unix). Keep it secret. `signer.pub` holds the public key as 64 hex characters; that is what you give to verifiers.
 
-### 2. Import an agent trace
+Do not use `openssl genpkey` to make the key. It writes PKCS#8 v1, which Akmon cannot sign with.
 
-Turn the OpenTelemetry trace into an AGEF session. Akmon records an honest capture level: imported traces are `structural`, not a full recording, and are never dressed up as one.
+## 2. Seal the session
 
 ```bash
-akmon otel import trace.json --journal .akmon/journal
+akmon seal trace.json --key signer.pk8 --output audit.akmon
 ```
 
-### 3. Export and sign the bundle
+`akmon seal` imports the trace, exports it as a bundle, checks its integrity, signs the session head, and verifies the result with the derived public key before it reports success. It writes:
 
-Export the session to a portable bundle, then add an offline Ed25519 signature over the session head (the `AGEF-SIG-v1` statement).
+- `audit.akmon`: the sealed bundle.
+- `audit.akmon.pub`: the signer's public key in hex, the same content as `signer.pub`.
+
+It also prints the exact commands to hand to your verifier. The input can be a session id instead of a trace file, for example a session recorded by the bundled reference agent: `akmon seal <session-id> --key signer.pk8`.
+
+## 3. Hand it over
+
+Send `audit.akmon` to the verifier. Send the public key over a **separate, trusted channel** (a signed email, your website, a ticket in their system). If the bundle and key travel together, whoever can swap one can swap both.
+
+## 4. Verify as a stranger
+
+On any machine, with only the bundle and the public key:
 
 ```bash
-akmon bundle export <session-id> --output session.akmon
-akmon bundle sign session.akmon --key signer.pk8
+agef-verify audit.akmon --verify-key signer.pub --require-signature
 ```
 
-### 4. (Optional) Attest the accountable operator
+Exit code `0` and a headline starting `verified bundle: integrity OK; signature verified by key_id=…` means the contents match the signed head and the key you trust signed it.
 
-Record a separately signed operator-identity claim. Verification attaches trust to the key, never to the self-asserted string; key trust is established out of band.
+For a plain-language report an auditor can file:
 
 ```bash
-akmon bundle attest session.akmon \
-  --key signer.pk8 \
-  --operator-id you@org \
-  --role approver
+agef-verify audit.akmon --verify-key signer.pub --require-signature --format markdown > report.md
 ```
 
-### 5. Verify
+## 5. Optional: verify with nothing but OpenSSL
 
-Check integrity, signature, and (if attested) operator identity in one command.
+Seal with `--proof-dir proof` (or run `akmon bundle prove-openssl audit.akmon --verify-key signer.pub --out-dir proof` later), then on the verifier's machine:
 
 ```bash
-akmon bundle verify session.akmon \
-  --verify-key signer.pub.hex \
-  --require-signature \
-  --operator-key signer.pub.hex
+openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin \
+  -in proof/statement.bin -sigfile proof/signature.bin
 ```
 
-Because this session came from an OTEL import, it is `structural`. Adding `--require-capture full` here would correctly fail: that gate is reserved for full-capture sessions from Akmon's own reference agent.
+`Signature Verified Successfully` means the key holder signed session head H. `agef-verify` is what ties H to the bundle's contents, so a careful verifier runs both.
 
-### 6. Emit an offline proof
+## What you just proved, and what you did not
 
-Write the exact bytes a third party needs, plus the `openssl` command to check them.
+- Proved: the bundle has not been altered since it was sealed, and the holder of `signer.pk8` sealed it.
+- Not proved: when it was sealed, who holds the key, or that the agent was right. See [What verification proves](../concepts/verifying-evidence.md) and [Trusted timestamps](../guides/trusted-timestamps.md).
 
-```bash
-akmon bundle prove-openssl session.akmon \
-  --verify-key signer.pub.hex \
-  --out-dir proof
-```
+The capture level tells the verifier how much of the session was recorded. A trace with message content is `full`; a metadata-only trace is `structural`. See [Capture levels](../concepts/capture-levels.md).
 
-This writes `statement.bin`, `signature.bin`, and `pubkey.pem` into `proof/`.
+## Next steps
 
-### 7. Verify with plain openssl
-
-This is the step that proves there is no lock-in. It runs on any machine with OpenSSL 3.x, with no Akmon installed.
-
-```bash
-openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin -in proof/statement.bin -sigfile proof/signature.bin
-```
-
-A valid signature prints `Signature Verified Successfully` and exits `0`. Tampering with `statement.bin` makes `openssl` print a verification failure and exit non-zero.
-
-## Verification
-
-The flow is complete when:
-
-- `akmon bundle verify ... --require-signature` exits `0`.
-- `openssl pkeyutl -verify ...` prints `Signature Verified Successfully`.
-
-For an auditor who has only the bundle and the public key, the standalone binary does the same integrity and signature checks without the full Akmon CLI:
-
-```bash
-agef-verify session.akmon --verify-key signer.pub.hex --require-signature
-```
-
-## Running Akmon's own reference agent
-
-The bundled agent is the gold-fidelity producer: its sessions capture at `full` and replay deterministically. To produce one instead of importing a trace, start a session in a repository:
-
-```bash
-cd /path/to/your-repo
-akmon
-```
-
-End it with `/exit`. A full-capture session can then be exported, signed, and proven exactly as above, and additionally supports `akmon bundle verify ... --require-capture full` and deterministic `akmon replay`.
+- [Seal an OpenTelemetry trace from any agent](../guides/seal-otel-trace.md)
+- [Hand evidence to an auditor](../guides/hand-to-auditor.md)
+- [Record who approved a session](../use-cases/operator-sign-off.md)
+- [`akmon seal` reference](../reference/seal.md)
 
 ## Troubleshooting
 
-- If `openssl` cannot verify the signature, confirm you are on OpenSSL 3.x, not LibreSSL. See [akmon bundle prove-openssl](../reference/bundle-prove-openssl.md).
-- If `akmon bundle sign` rejects a key, regenerate it with `akmon bundle keygen`. An `openssl`-made key will not work.
-- If `--require-capture full` fails on an imported session, that is expected. Imports are `structural`.
-- If a provider call fails while running the reference agent, run `akmon doctor providers`.
+- `akmon seal` refuses to overwrite `audit.akmon`: pass `--force`, or choose another `--output`.
+- The trace holds several traces: pass `--trace-id <HEX>`.
+- `openssl` cannot verify: you are probably on LibreSSL. Install OpenSSL 3.
+- `--require-capture full` fails: the trace did not include message content. That is the capture level working as intended.

@@ -9,8 +9,60 @@ permissions:
   contents: write
 
 jobs:
+  # Gate: nothing is built or published unless the tag matches the workspace
+  # version and the full test + lint suite passes on the tagged commit.
+  verify:
+    name: Verify tag, tests, and lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88'
+          components: rustfmt, clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Tag must equal the workspace version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::release tag '$TAG' is not of the form vX.Y.Z"
+            exit 1
+          fi
+          VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "akmon-cli") | .version')"
+          if [ "v${VERSION}" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match workspace version ${VERSION} in Cargo.toml"
+            exit 1
+          fi
+          echo "tag $TAG matches workspace version $VERSION"
+
+      - name: Release notes exist for this tag
+        run: |
+          NOTES="docs/src/releases/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$NOTES" ]; then
+            echo "::warning::$NOTES is missing; the release body will fall back to a CHANGELOG link"
+          fi
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all targets)
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+      - name: Test
+        run: >
+          RUSTFLAGS='-D warnings'
+          cargo test --workspace
+          --no-default-features
+
   build:
     name: Build ${{ matrix.artifact }}
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -116,3 +168,19 @@ jobs:
           generate_release_notes: true
           files: release-assets/*
           body_path: RELEASE_NOTES.md
+
+      # The Homebrew tap (radotsvetkov/homebrew-akmon) is updated by hand from
+      # SHA256SUMS; surface the exact values in the run summary so it is not forgotten.
+      - name: Homebrew formula reminder
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          {
+            echo "## Homebrew tap update needed"
+            echo
+            echo "Bump \`version \"${VERSION}\"\` and these sha256 values in"
+            echo "packaging/homebrew/Formula/{akmon,agef-verify}.rb and in the radotsvetkov/homebrew-akmon tap:"
+            echo
+            echo '```'
+            grep -E ' (akmon|agef-verify)-(darwin|linux)-' release-assets/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

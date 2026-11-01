@@ -1,6 +1,6 @@
-# Evidence artifact
+# Evidence artifact (legacy run summary)
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -8,16 +8,18 @@ Developers, reviewers, and compliance engineers who need a portable, machine-che
 
 ## Where the evidence artifact sits
 
-Akmon is an evidence and verification layer. The evidence artifact is the CI-facing summary of a reference-agent run. It is a deterministic JSON document that links the run's replay metadata, audit-chain integrity, policy decisions, tool timeline, reliability metrics, and touched files into one object a pipeline can verify in a single step.
+> **Legacy.** The `evidence.v1` JSON file is an unsigned run summary from the bundled reference agent. It is not the evidence Akmon is built around. The signed, offline-verifiable record of a run is its sealed `.akmon` bundle: `akmon seal <session-id> --key signer.pk8`. `akmon evidence verify` still works in 3.0.0 but is deprecated and hidden from `--help`.
+
+The evidence artifact is the CI-facing summary of a reference-agent run. It is a deterministic JSON document that links the run's replay metadata, audit-chain integrity, policy decisions, tool timeline, reliability metrics, and touched files into one object a pipeline can verify in a single step.
 
 It is distinct from the portable AGEF bundle. The evidence artifact is for in-repo CI gating. The AGEF bundle is for external, offline, signed handoff. They are complementary, and a regulated workflow usually produces both: the evidence artifact gates the merge, the signed bundle is the record a third party verifies later. See [Security model](./security.md) for the verification layer, and the audit chain it builds on in [Audit log](./audit-log.md).
 
-This artifact comes from Akmon's own reference agent, which records `full` capture. An OpenTelemetry import is a `structural` capture and does not produce this artifact.
+This artifact comes only from Akmon's own reference agent. OpenTelemetry imports do not produce it.
 
 ## What you will have at the end
 
 - A clear model of what Akmon records in evidence artifacts.
-- Commands to validate artifact integrity and enforce reliability gates in CI.
+- How to turn the same run into a sealed bundle a third party can verify.
 
 ## Prerequisites
 
@@ -41,10 +43,11 @@ Akmon writes a deterministic evidence artifact per successful or budget-stopped 
 
 You can override the location with `--evidence-path <path>`.
 
-3. Verify the evidence and its linked audit chain:
+3. Seal the run's journal session for external use:
 
 ```bash
-akmon evidence verify .akmon/evidence/<session-id>.json
+SESSION_ID="$(jq -r '.session_id' run.json)"
+akmon seal "${SESSION_ID}" --key signer.pk8 --output "${SESSION_ID}.akmon"
 ```
 
 ## Why it exists
@@ -55,7 +58,7 @@ The artifact is designed for CI and PR automation and links:
 - audit-chain integrity (`audit.audit_chain_valid`, `session_final_hash`),
 - the policy decision summary,
 - the tool execution timeline and aggregates,
-- reliability and SLO metrics,
+- reliability counters,
 - touched files and verification outcomes.
 
 ## Schema version
@@ -120,69 +123,23 @@ Consumers should validate the schema version before strict parsing.
 }
 ```
 
-## Validation
+## Validation (deprecated)
 
-`akmon evidence verify` checks schema support, replay metadata shape, the linked audit-chain integrity, and session hash consistency.
-
-Exit codes:
-
-- `0`: evidence valid
-- `1`: evidence invalid, missing, or tampered
-
-## Verification
-
-```bash
-SESSION_ID="$(jq -r '.session_id' run.json)"
-akmon evidence verify ".akmon/evidence/${SESSION_ID}.json"
-```
-
-Expected result: the command exits `0` and reports valid schema and session linkage.
+`akmon evidence verify <path>` still checks schema support, replay metadata shape, the linked audit-chain integrity, and session hash consistency (exit `0` valid, `1` invalid). It is hidden from `--help` and prints a deprecation warning. Use [`akmon bundle verify`](../reference/bundle-verify.md) on a sealed bundle instead.
 
 ## From in-repo evidence to a signed, offline-verifiable bundle
 
 The evidence artifact proves integrity to a party who can run Akmon against your repository. To hand the same session to a party who does not trust you and does not run your tools, export it as a signed AGEF bundle:
 
 1. Generate a signing key once: `akmon bundle keygen --out signer.pk8 --public-out signer.pub`.
-2. Export and sign the session: `akmon bundle export <session-id> --output session.akmon`, then `akmon bundle sign session.akmon --key signer.pk8`.
-3. Optionally record the accountable operator: `akmon bundle attest session.akmon --key operator.pk8 --operator-id you@org --role approver`.
-4. The recipient verifies with `akmon bundle verify session.akmon --verify-key signer.pub --require-signature`, or with the standalone `agef-verify`, or with stock `openssl` after `akmon bundle prove-openssl`.
+2. Seal the session: `akmon seal <session-id> --key signer.pk8 --output session.akmon`. Add `--operator-key operator.pk8 --operator-id you@org --role approver` to record the accountable operator.
+3. The recipient verifies with `agef-verify session.akmon --verify-key signer.pub --require-signature`, or with stock `openssl` after `akmon bundle prove-openssl`.
 
 The evidence artifact and the bundle are anchored to the same content-addressed session, so the `session_final_hash` you gated on in CI is the head the signature covers.
 
-## Enforcing SLOs in CI
-
-You can enforce reliability guardrails directly against evidence:
-
-```bash
-akmon slo verify .akmon/evidence/<session-id>.json --strict
-```
-
-Example GitHub Actions step:
-
-```yaml
-- name: Enforce Akmon SLO guardrails
-  run: |
-    akmon slo verify .akmon/evidence/${SESSION_ID}.json \
-      --thresholds .github/akmon/slo.toml \
-      --strict
-```
-
-Trend and regression check against prior evidence history:
-
-```yaml
-- name: Detect reliability regressions
-  run: |
-    akmon slo trend .akmon/evidence/${SESSION_ID}.json \
-      --baseline-dir .akmon/evidence/history \
-      --window 20 \
-      --strict
-```
-
 ## Troubleshooting
 
-- If evidence verify fails, confirm the artifact path and JSON validity.
 - If session linkage errors appear, ensure the audit and evidence files are from the same session.
-- If SLO gates fail, inspect thresholds and `reliability_metrics` fields before relaxing policy.
 
 ## Policy provenance and hash impact
 
@@ -196,5 +153,5 @@ Treat `evidence_schema_version` as required for parsers and reject unknown versi
 
 - [Audit log](./audit-log.md)
 - [Security model](./security.md)
-- [Reliability and SLO metrics](./reliability-slos.md)
+- [akmon seal](../reference/seal.md)
 - [Regulated reviewer flow](../concepts/reviewer-flow.md)

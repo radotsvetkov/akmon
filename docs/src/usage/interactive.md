@@ -1,5 +1,7 @@
 # Interactive mode
 
+> **About the bundled reference agent.** Akmon ships a coding agent so there is always a producer that records sessions at `full` capture and can be replayed deterministically with `akmon replay`. It is a reference producer, not the product: you do not need it to seal and verify sessions from your own agent. The pages in this section cover running it (interactive, headless, plan, architect), providers, policy, MCP, and its security model. Seal any of its sessions with `akmon seal <session-id> --key signer.pk8`.
+
 Interactive mode is the default way to work with Akmon when you want close control over prompts, permissions, and step-by-step execution.
 
 ```bash

@@ -1,6 +1,13 @@
-# Tutorial: Third-party OTEL trace to offline openssl proof
+# Walkthrough: a metadata-only OTEL trace to an OpenSSL proof
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
+
+This is the step-by-step version of what [`akmon seal`](../reference/seal.md) does in one command, run against a checked-in fixture so you can see every intermediate result. The one-command equivalent is:
+
+```bash
+akmon seal crates/akmon-cli/tests/fixtures/openai_v2_weather_legacy.otlp.json \
+  --key signer.pk8 --journal ./journal --proof-dir ./proof --output ./audit.akmon
+```
 
 Time estimate: 15-20 minutes  
 Complexity: Intermediate
@@ -14,9 +21,7 @@ no vendor lock-in.
 
 This is the headline trust loop, end to end, on what real agents emit **today**: a real-framework
 OTLP trace becomes an AGEF bundle that a counterparty verifies offline. It is producer-agnostic; it
-does not require Akmon's own agent at all. It is the concrete answer to the gaps competitors leave:
-HMAC-only or unsigned manifests, no standalone verifier, cloud-locked verification, and "cannot
-replay."
+does not require Akmon's own agent at all.
 
 ## What you will have at the end
 
@@ -52,17 +57,21 @@ akmon otel import crates/akmon-cli/tests/fixtures/openai_v2_weather_legacy.otlp.
   --journal ./journal --format json
 ```
 
-The JSON report records `capture_level`, the provider/tool counts, and the new `session_id`:
+The JSON report (abridged) records the capture level, how many content slots held content, the provider and tool counts, and the new `session_id`:
 
 ```json
 {
+  "akmon_version": "3.0.0",
+  "session_id": "8b994320-e80e-4651-9896-3b1fc3d622b5",
   "capture_level": "structural",
+  "content_slots_real": 0,
+  "content_slots_total": 4,
   "provider_calls": 1,
   "tool_calls": 1,
-  "turns_emitted": 0,
-  "turns_suppressed_no_content": 1,
-  "semconv_version": "1.37.0",
-  "session_id": "de52d29b-e7ee-4f53-8526-3c479d4f8c37"
+  "semconv_version": "1.42.0",
+  "source_semconv": "undeclared",
+  "source_form": "none",
+  "trace_id": "9f1b2c3d4e5f60718293a4b5c6d7e8f9"
 }
 ```
 
@@ -81,13 +90,13 @@ akmon bundle sign ./audit.akmon --key signer.pk8 --format json
 4. Verify integrity and the signature, requiring a signature to be present.
 
 ```bash
-akmon bundle verify ./audit.akmon --verify-key signer.pub.hex --require-signature --format json
+akmon bundle verify ./audit.akmon --verify-key signer.pub --require-signature --format json
 ```
 
 5. Emit the standalone verification artifacts.
 
 ```bash
-akmon bundle prove-openssl ./audit.akmon --verify-key signer.pub.hex --out-dir ./proof
+akmon bundle prove-openssl ./audit.akmon --verify-key signer.pub --out-dir ./proof
 ```
 
 6. Verify offline with **OpenSSL 3.x** alone (this command is also printed by the step above).
@@ -107,12 +116,12 @@ operated the session. To attach a named operator (and have it verify offline too
 operator key, attest, and pass `--operator-key` to verify and to `prove-openssl`.
 
 ```bash
-akmon bundle keygen --out operator.pk8 --public-out operator.pub.hex
+akmon bundle keygen --out operator.pk8 --public-out operator.pub
 akmon bundle attest ./audit.akmon --key operator.pk8 --operator-id ops@example.com --role approver
-akmon bundle verify ./audit.akmon --verify-key signer.pub.hex --require-signature \
-  --operator-key operator.pub.hex --require-operator --format json
-akmon bundle prove-openssl ./audit.akmon --verify-key signer.pub.hex \
-  --operator-key operator.pub.hex --out-dir ./proof
+akmon bundle verify ./audit.akmon --verify-key signer.pub --require-signature \
+  --operator-key operator.pub --require-operator --format json
+akmon bundle prove-openssl ./audit.akmon --verify-key signer.pub \
+  --operator-key operator.pub --out-dir ./proof
 ```
 
 The last step emits three more files alongside the head-signature artifacts:
@@ -123,13 +132,13 @@ verifies the operator attestation with OpenSSL 3.x alone:
 openssl pkeyutl -verify -pubin -inkey ./proof/operator_pubkey.pem -rawin -in ./proof/operator_statement.bin -sigfile ./proof/operator_signature.bin
 ```
 
-**Trust the key, not the name.** Verification proves only that the holder of `operator.pub.hex`
+**Trust the key, not the name.** Verification proves only that the holder of `operator.pub`
 signed the `operator_id`/`role` claims. It does not prove the person is who the name says. A
 verifier decides which operator key they trust **out-of-band** (a directory, a roster, a key
 ceremony); only then does the self-asserted name carry weight. See
 [akmon bundle attest](../reference/bundle-attest.md).
 
-## Honesty: this is STRUCTURAL capture, not full replay
+## This is structural capture, not a full recording
 
 The source instrumentation did not capture message content (the content-off default), so Akmon
 imports the trace as **`capture_level=structural`**: metadata only. This is surfaced, not hidden:
@@ -146,10 +155,9 @@ This exits `1`: a metadata-only OTEL import must never read as VERIFIED-full. Th
 signature still verify (the **evidence** is intact and authentic); what is *absent* is the
 verbatim message content, so **no byte-level or full replay is implied** from imported telemetry.
 
-A note on versions: the fixture's **source form** is the legacy `<= v1.36` message-event
-convention, while Akmon records `source_semconv 1.37.0` in the signed session config for all
-imports regardless of the source form (a hardcoded constant). The recorded value is therefore not
-a faithful descriptor of the source form; this is documented in the fixture README and is cosmetic.
+A note on versions: the fixture declares no schema URL, so Akmon records `source_semconv:
+"undeclared"`. `semconv_version` is the version the importer supports (1.42.0). Because the fixture
+carries no message content, `source_form` is `none`.
 
 ## How a reviewer validates this
 
@@ -181,4 +189,6 @@ drift.
 
 - [akmon bundle prove-openssl](../reference/bundle-prove-openssl.md)
 - [akmon bundle verify](../reference/bundle-verify.md)
-- [akmon sign](../reference/sign.md)
+- [akmon bundle sign](../reference/bundle-sign.md)
+- [akmon seal](../reference/seal.md)
+- [Capture levels](../concepts/capture-levels.md)

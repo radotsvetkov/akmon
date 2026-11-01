@@ -1,6 +1,6 @@
 # Environment Variables
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 ## Who this is for
 
@@ -19,7 +19,18 @@ Users configuring Akmon via environment (shell, CI, secret managers) instead of 
 
 1. Export provider variables needed for your route.
 
-## Provider keys
+## Evidence commands
+
+The evidence commands (`seal`, `otel import`, `bundle …`, `verify`, `inspect`, `redact`, `diff`, `replay`) and `agef-verify` need no provider keys and no network. They read only:
+
+```bash
+XDG_STATE_HOME    # default journal location: $XDG_STATE_HOME/akmon/journal
+HOME              # fallback for the journal location when XDG_STATE_HOME is unset
+```
+
+Pass `--journal <DIR>` to choose a journal explicitly. Signing keys are always passed as files (`--key`), never through the environment.
+
+## Provider keys (bundled agent only)
 
 ```bash
 ANTHROPIC_API_KEY
@@ -69,6 +80,8 @@ Use `akmon config explain-provider` to print the same order with per-branch reas
 EDITOR            # used by `akmon config edit` and TUI edit flows
 AKMON_DEBUG_GIT   # enables git root discovery debug logging
 ```
+
+`AKMON_EXPERIMENTAL_SUBAGENTS` was removed in v3.0.0 and is ignored.
 
 ## Wizard vs env vs `config.toml`
 

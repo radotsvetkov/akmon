@@ -1,6 +1,6 @@
 # Policy profiles and packs
 
-Documented for Akmon `2.2.0`.
+Documented for Akmon `3.0.0`.
 
 Policy profiles and packs govern Akmon's own reference agent. They decide what side effects the bundled agent may take and how strictly each environment is locked down. This is a producer-side control: it shapes the behavior of a reference-agent run, and the effective policy is hashed into the run's evidence so a reviewer can detect governance drift. It does not apply to imported third-party OpenTelemetry traces, which carry only what the producing agent emitted.
 
@@ -66,7 +66,7 @@ Typical enterprise rollout:
 1. Start with `dev` plus narrow team packs.
 2. Tighten shell, network, and tool scope in `staging`.
 3. Lock production automation to `prod` plus an audited, minimal override pack.
-4. Enforce evidence and SLO checks in CI after policy changes, and gate on `policy_hash` to catch unreviewed governance drift.
+4. Seal sessions and verify them in CI after policy changes, and gate on `policy_hash` to catch unreviewed governance drift.
 
 For a step-by-step rollout, see the [Enterprise policy rollout tutorial](../tutorials/enterprise-policy-rollout.md).
 
@@ -74,4 +74,3 @@ For a step-by-step rollout, see the [Enterprise policy rollout tutorial](../tuto
 
 - [Security model](./security.md)
 - [Evidence artifact](./evidence.md)
-- [Reliability and SLO metrics](./reliability-slos.md)

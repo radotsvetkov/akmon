@@ -4,20 +4,110 @@ All notable changes to Akmon are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.8.2] - 2026-04-20
+## [Unreleased]
+
+## [3.0.0] - 2026-11-01
+
+**The focus release.** Akmon now does one job: seal any AI agent session into a signed, tamper-evident AGEF bundle that a stranger can verify offline. Everything that didn't serve that job has been archived (it is not deleted, and can be restored from the tag `archive/pre-focus-v2.2.1`). This is a major version because commands, flags, config keys, JSON shapes and library APIs changed. The AGEF format is unchanged (v0.1.3), and every bundle produced by 2.x still verifies.
+
+### Highlights
+
+- **`akmon seal`**: one command goes from an OpenTelemetry trace (or a journal session) to a signed, self-verified bundle plus the exact commands to hand to a verifier.
+- **Auditor report**: `agef-verify --format markdown` and `akmon bundle verify --format markdown` print a plain-language report with a verdict, a checks table, and explicit "what this proves / does not prove" sections.
+- **Hardened verification**: verdicts now say exactly what was established (integrity only vs. signature verified). Archive parsing is stricter, terminal output is sanitized, and `sign`, `attest` and `prove-openssl` refuse bundles that don't verify.
+- **Honest capture, three levels**: OTEL imports are now `full`, `partial` or `structural`, computed from the content slots actually present. The importer supports semconv v1.37–v1.42.
 
 ### Added
 
-- **Provider resolution explainability:** deterministic `ProviderResolutionTrace` (`selected_provider`, `selected_reason`, `model_id`, ordered `candidates[]` with `eligible`, `reason`, `missing_prerequisites`, `priority_order`) mirroring `LlmConnectConfig::resolve` without changing routing.
-- **`akmon config explain-provider`:** prints the resolution trace (use `--json` on `config` or global `--output json` for machine-readable output). This is diagnostics only; it does not change which provider is selected at runtime.
-- **`akmon doctor providers`:** embeds the same `provider_resolution` block in text and JSON reports for side-by-side troubleshooting with reachability checks.
-- **Headless JSON runs:** `--output json` run summaries include an optional `provider_resolution` field with the trace for the effective CLI model and merged `~/.akmon/config.toml` (additive for automation).
+- `akmon seal <INPUT> --key <signer.pk8> [--output <PATH>] [--journal <DIR>] [--trace-id <HEX>] [--operator-key <op.pk8> --operator-id <ID> [--display-name] [--role] [--org]] [--proof-dir <DIR>] [--force] [--format human|json]`. `INPUT` is an OTLP/JSON trace file or an existing journal session id. Steps: import or select → export → integrity verify → Ed25519 sign → optional operator attestation → self-verify with the derived public key(s) → optional `prove-openssl` artifacts. Writes `<OUTPUT>` (default `./<session-id>.akmon`, atomic, refuses to overwrite without `--force`), the signer public key as hex at `<OUTPUT>.pub` (and `<OUTPUT>.operator.pub` when attesting), and prints the hand-over commands. Exit codes: `0` sealed, `1` integrity/verification failure, `2` usage or bad input, `3` I/O or environment. The JSON success object is `{tool, akmon_version, passed, session_id, bundle, signer_public_key, signer_key_id, operator_public_key?, capture_level, proof_dir?, verify_command}`.
+- `--format markdown` on `akmon bundle verify` and `agef-verify`: an auditor report on stdout. Untrusted manifest values are sanitized and Markdown-escaped.
+- `--max-decoded-bytes <BYTES>` on `akmon bundle verify` and `agef-verify` (default 1 GiB, the decompression-bomb guard). The `bundle_too_large` error names the flag.
+- New `BundleVerifyReportV1` fields (additive): `integrity_ok`, `signature_verified`, `operator_key_verified`, `hash_algorithm`, `head`, `session_window {first_event_at, last_event_at}`, `unsigned_metadata {created_at, ended_at, producer_name, producer_version}`, and `warnings[]` (`manifest_created_at_mismatch`, `manifest_ended_at_mismatch`, which never fail verification). `signature_verified` and `operator_key_verified` are `false` whenever `integrity_ok` is `false`.
+- New verification failure categories: `unreferenced_object` (an object no event references; carries `object_hash`) and `event_invariant` (provider-call attempt numbering and ordering re-checked from the bundle alone).
+- `akmon otel import`: `--trace-id <HEX>` (selects one trace; required when the file holds several) and `--max-bytes <BYTES>` (default 256 MiB). Human mode prints the session id alone on stdout (`sid=$(akmon otel import t.json)`), with details and a `next:` command on stderr.
+- OTEL importer: the `gen_ai.client.inference.operation.details` event as a content source; operation names `invoke_agent`, `create_agent`, `execute_tool`, `invoke_workflow`, `chat`, `text_completion`, `embeddings` and `generate_content`; span status, `error.type` and exception events mapped to failed attempts (new `akmon-otel-tool-error-v1` object for failed tool calls); lenient OTLP/JSON scalar decoding (numbers as strings, `NaN`/`Infinity`, `bytesValue`, status-code names). Unknown non-legacy `gen_ai.*` events (for example `gen_ai.evaluation.result`) are recorded in the signed config as `structural_events` rather than refused.
+- New `otel import --format json` fields: `content_slots_real`, `content_slots_total`, `failed_calls`, `user_messages_omitted`, `non_text_parts_omitted`, `duplicate_spans_dropped`, `spans_skipped`, `structural_events_recorded`, `source_semconv`, `source_form`, `trace_id` and `next_command`.
+- `akmon diff` divergence kinds: `provider_call_attempt_count_difference`, `provider_call_attempt_status_difference` and `provider_call_attempt_error_difference` (material), plus `provider_call_request_difference`, which is **informational**: it is reported and tagged `[informational]`, but does not set `matches: false`, because request payloads carry runtime context a replay does not reproduce. `DiffReportV1` gains `informational_divergence_count`.
+- JSON error category `journal_locked` (exit 3) for `verify`, `inspect`, `redact` and `bundle export` when another process holds `journal.redb`. These used to be reported as `journal_not_found`.
+- `bundle import` into a journal with a different hash algorithm now exits 2 with `hash_algorithm_mismatch` before writing any object.
+- Release pipeline: a `verify` job (tag must equal the workspace version; the workspace tests and clippy must pass) gates every release build.
 
-### Notes
+### Changed
 
-- Resolver priority and selection semantics are unchanged; all additions are strictly introspection/diagnostics. Traces never echo secret values—only named prerequisites (env vars / flags).
+**Breaking: CLI and JSON**
 
-## [Unreleased]
+- **`agef-verify` error JSON:** `tool_version` is renamed to `akmon_version`. Every error body from `agef-verify`, `akmon seal` and all `akmon bundle` subcommands is now the shared `ToolErrorV1 {tool, akmon_version, passed:false, error, category, colliding_session_id?}`.
+- **Verify headline text** (human mode) now states what was established: `verified bundle: integrity OK; signature verified by key_id=…`, `…; signature present but NOT verified (no trusted --verify-key matched; integrity only)`, `…; UNSIGNED (integrity only)`, or `bundle verification FAILED`. The old `verified bundle (integrity + signature)` text is gone. Scripts should use exit codes or `--format json`, not grep.
+- **Stricter archive reading:** a duplicate `manifest.json`, `events.bin` or `objects/<hex>` entry, or an object name that is not 64 lowercase hex characters, gives `invalid_archive` (exit 1). In strict mode (the default), symlinks, hardlinks, devices and other non-regular entries give `unknown_bundle_file` (exit 1). Pax global headers are rejected. An out-of-range event or attempt timestamp gives `malformed_framing` (exit 1) instead of silently becoming 1970.
+- **Exit codes:** malformed, corrupt, truncated or oversized archives now exit `1` (verification failed). Only I/O and environment problems exit `3`.
+- **`bundle sign` and `bundle attest`** refuse a bundle that fails integrity (`integrity_failed`, exit 1, input untouched). `sign` and `attest` no longer re-stamp `agef_version` once a bundle carries signatures or attestations, so co-signing keeps earlier signatures valid.
+- **`bundle prove-openssl`** verifies first and refuses, before writing anything, on `integrity_failed`, `signature_invalid` or `operator_signature_invalid` (exit 1). Its JSON gains `integrity_verified`, `signature_verified`, `head`, `openssl_proves` and `operator.operator_key_verified`. The artifact bytes are unchanged for valid bundles.
+- **`otel import`:** `capture_level` can be `partial`. `semconv_version` is now `"1.42.0"` (the importer's supported version). In the signed config, `source_semconv` is the producer-declared schema version or `"undeclared"` (it used to be hard-coded to `1.37.0`), with new keys `importer_semconv`, `source_form`, `trace_id` and, when present, `agent_identity` and `structural_events`. Per-slot metadata envelopes now record `importer_semconv`. Newly refused inputs (exit 2): files with several traces and no `--trace-id` (`multiple_traces`), an unknown `--trace-id` (`trace_id_not_found`), conflicting duplicate spans (`duplicate_span_id`), traces with no GenAI provider or tool span (`no_genai_spans`), missing or invalid GenAI span timestamps (`invalid_timestamp`), and oversized files (`trace_too_large`). `legacy_semconv_unsupported` now fires only for legacy-shaped `gen_ai.<role>.message` events and names the event. A refused trace creates no journal and no session.
+- **Capture level rule:** `full` means every content slot is real (request and response per provider call, input and output per tool call), `partial` means some are, and `structural` means none. Empty strings, `null`, `[]` and `{}` count as absent. System instructions alone don't make a request slot real. Embeddings calls add no content slots. `--require-capture full` rejects `partial`, and the verify headline flags `partial` as clearly as `structural`.
+- **`akmon diff`:** sessions that used to match may now diverge (exit 1) on retry counts, attempt status or error. Request-hash differences are listed as informational and do not change `matches`. With `--format json`, failures print a `DiffErrorV1 {akmon_version, category, error}` object on stdout and nothing on stderr. Categories: `invalid_session_id`, `session_not_found`, `session_load_failed`, `source_precondition_violated`, `store_access_failed`, `diff_infrastructure_error`. Control characters in human output are escaped.
+- **`akmon replay --persist-to <source journal>`** (including aliases and symlinks) is now a usage error (exit 2, category `usage`), not exit 3. Non-persisted replays use a random scratch journal that is always removed.
+- **Policy path normalization (agent):** filesystem paths are lexically normalized before allow and deny matching, and the normalized form appears in decision reasons (`src/../build.rs` → `build.rs`, `./.git/config` → `.git/config`). An absolute path inside the project root is matched as its project-relative form. Paths outside the root (for example `--add-dir` roots, or a `..` that climbs out) are matched as normalized absolute paths, so they need an explicit allow glob (or `**`) and deny globs still apply. The empty placeholder path that tools declare is matched as `.`.
+- **Agent file writes:** `write_file`, `edit` and `patch` never write through a final-component symlink (new tool error code, the message names the link). Temp files are named `.akmon-w-<uuid>-<name>` and created exclusively, the existing permission bits (including the exec bit) are kept, and data is fsynced before the atomic rename. The parent directory must already exist.
+- **`akmon config key set <provider> [KEY]`:** `KEY` is optional and is read from piped stdin, then the provider's environment variable (for example `$ANTHROPIC_API_KEY`; also used when stdin is a non-terminal but empty), then an interactive prompt. Passing it on argv still works but prints a warning. JSON gains `"source": "argv|stdin|env|prompt"`.
+- **`~/.akmon/config.toml` is written with mode `0600`** on every write (wizard and all `config` subcommands).
+- **`akmon config show --json`** no longer contains `slo`.
+- **`akmon policy show-effective`** honours the global `--policy-profile`, `--policy-pack` and `--policy-override`. Conflicting values are a usage error (exit 2). Relative CLI pack and override paths now resolve against the current directory, including for agent runs.
+- **`inspect --binary hex|base64` without `--resolve`** gives a JSON usage error on stdout in `--format json` mode (exit 2).
+- **Help and flags reorganized:** `akmon --help` leads with the trust commands, and agent flags are grouped under "Agent options". `--audit-log`, `--evidence-path`, `--shell-allow`, `--web-fetch`, `--yes-web` and `--mcp-server` are now truly global. `--output text|json` is **not** global and must come before the subcommand. Trust commands no longer print "no git repository found".
+- **`akmon init`** offers existing `CLAUDE.md`/`AGENTS.md`/… files as optional input for `AKMON.md`. The separate import flow is gone.
+- Workspace metadata: the description is now "Tamper-evident, signed, offline-verifiable evidence for AI agent sessions", and the keywords are updated.
+
+**Breaking: library API (`akmon-bundle`, `akmon-otel`)**
+
+- `akmon_bundle::EventsReader::new` now takes `(reader, algorithm)`. Removed: `EventsReader::with_max_frame_len`, `EventsReader::with_hash_algorithm`, `EventsWriter::with_hash_algorithm`, `object_path`, `read_object_file`, `write_object_file`, and `manifest_hash_algorithm` (use the now-public `archive::parse_algorithm`). `WireEvent::into_event`, `into_kind` and `into_attempt` return `Result`.
+- New in `akmon-bundle`: modules `sanitize` and `render`, plus `sanitize_display`, `headline`, `human_lines`, `markdown`, `markdown_escape`, `VerifyPolicy`, `evaluate_bundle`, `ToolErrorV1`, `load_verify_key`, `metadata_warnings` and `read_bundle_limited`.
+- `akmon-otel`'s public API is reduced to `import_otel_genai`, `plan_otel_import`, `ImportPlan`, `ImportOptions`, `ImportReport`, `CaptureLevel` (new `Partial`), `OtelImportError`, `SEMCONV_VERSION`, `DEFAULT_MAX_TRACE_BYTES`, `read_trace_file` and `import_trace_file_into_store`. The `keys` module, `canonical_json_bytes` and the `otlp` re-exports are no longer public.
+- `akmon-journal` exports `journal_db_path`, `open_journal_read_only`, `journal_contains_session`, `same_journal_dir` and `JOURNAL_DB_FILE_NAME`. `akmon-diff` exports `sanitize_for_terminal`. `akmon_replay::SourceSession` gains `with_journal_dir()` and `journal_dir()`. `akmon-core` adds `truncate_at_char_boundary` and `truncate_string_at_char_boundary`.
+
+### Removed (archived)
+
+All archived code is under [`archive/`](archive/README.md), which lists each item's original path and how to restore it (`git checkout archive/pre-focus-v2.2.1 -- <path>`). Removed commands now fail with a clap usage error (exit 2).
+
+| Removed | Migration |
+| --- | --- |
+| `akmon import` / `akmon export` (AKMON.md ↔ CLAUDE.md/AGENTS.md sync), TUI `/import` `/export` | `akmon init` reads existing context files as optional input. For evidence, use `akmon otel import` and `akmon bundle export`. |
+| `akmon spec`, tools `read_spec` / `write_spec` | None. Restore from the tag if you depend on it. |
+| `akmon scout`, global `--dossier` | None. |
+| `akmon slo verify` / `akmon slo trend`, config `[slo]` / `[slo.trend]` | Gate CI on `agef-verify` / `akmon bundle verify` exit codes. A legacy `[slo]` section is ignored, and the next `akmon config` write drops it. |
+| `akmon sign` and the post-run `[signing]` hook (D-05) | `akmon bundle keygen` + `akmon seal` (or `bundle export` + `bundle sign`), verified with `--verify-key`. The hook signed the bare head outside the bundle, where no verifier could check it. A legacy `[signing]` section is ignored. |
+| Semantic index: `semantic-index` cargo feature (was the default), crate `akmon-index`, `fastembed`/ONNX stack, tool `semantic_search`, `--index`, TUI `/index` | Use the `search` tool. Builds with and without `--no-default-features` are now identical, and the dependency tree is much smaller. |
+| Tool `spawn_subagent`, env `AKMON_EXPERIMENTAL_SUBAGENTS` | None ("one agent, one session, one artifact"). |
+| Handbook pages for the items above | Moved to `archive/docs/`. `POLICY_SYSTEM_EXPLANATION.md` (orphaned, documented non-existent CLI forms) moved to `archive/docs/`. |
+
+### Deprecated
+
+- `akmon audit verify` and `akmon evidence verify` still work, with unchanged output and exit codes, but they are hidden from `--help` and print a deprecation notice on stderr. Use `akmon bundle export <session-id>` followed by `akmon bundle verify` (or simply `akmon seal <session-id>`). The legacy audit JSONL and evidence JSON writers remain until a compatibility renderer exists.
+
+### Fixed
+
+- **Agent sandbox: symlink and temp-file escapes.** The atomic-write temp file used a predictable name (`.akmon-w-<counter>-<name>`), so a planted symlink could redirect a write outside the sandbox. Temp files are now random and opened with `O_CREAT|O_EXCL`, and the parent is re-resolved through the sandbox immediately before writing. `write_file` could follow a final-component symlink pointing outside the sandbox and leak its contents into the diff; file-modifying tools now refuse any final-component symlink before reading.
+- **Agent policy: path traversal.** `src/../.git/config` matched an `src/**` allow rule and slipped past `.git/**` deny rules. Paths are now normalized before both allow and deny matching.
+- **UTF-8 panics.** Fixed byte-offset slicing that panicked inside multi-byte characters in run-summary snippets (2000-byte cap), `edit` not-found previews, git diff/show output caps, and the config key masker.
+- **Terminal escape injection.** Every manifest-sourced string printed by `akmon bundle verify`, `agef-verify`, `prove-openssl`, `import`, `sign` and `attest` (key ids, schemes, operator identity fields, producer, timestamps, violation messages, paths, error text from a crafted `agef_version` or hash algorithm) is sanitized: C0/C1/DEL and bidi/format characters, including Unicode TAG characters, are escaped. `akmon diff` human output escapes control characters, and multi-line previews can no longer imitate report lines.
+- **Verification correctness.** Unreferenced objects and broken provider-call invariants now fail verification. Out-of-range timestamps are rejected instead of mapped to the epoch. A signature over a head the contents don't hash to no longer reports `signature_verified: true`.
+- **`prove-openssl`** wrote OpenSSL artifacts for bundles whose integrity or signature did not verify, so a stranger could get "Signature Verified Successfully" for a broken bundle. It now verifies first.
+- **OTEL importer.** Capture level used to be `full` when any content existed anywhere, including on `invoke_agent` spans; it is now computed per slot. Parent and child spans starting in the same nanosecond are ordered correctly. Duplicate (retried) spans are dropped instead of duplicated. `invalid_timestamp` replaces silent 1970 dates. A refused import no longer leaves an empty journal behind. One `UserTurn` is emitted per new user message, and one `AssistantTurn` per assistant choice with text or tool calls.
+- **Replay:** concurrent or stale non-persisted replays no longer collide on a fixed scratch journal, and persisting into the source journal is rejected cleanly.
+- **Auto-sign hook** (removed): it always failed on the journal lock.
+- **Argv key leaks:** the archived `spec` and TUI `/import` forwarders put API keys on child-process argv.
+
+### Security
+
+- Trust-layer hardening: stricter archive parsing, sanitized terminal output, integrity-gated `sign`, `attest` and `prove-openssl`, and integrity-gated `signature_verified`, as detailed above. See [SECURITY.md](SECURITY.md) for supported versions (3.0.x, plus security fixes for 2.2.x until 2027-05-01) and the disclosure process.
+- Supply chain: the `fastembed`/`ort` ML stack and its transitive dependencies are gone, and `agef-verify` no longer depends on `serde`. Every release ships `SHA256SUMS` and a CycloneDX SBOM.
+
+### Documentation
+
+- **EU AI Act timeline corrected** for Regulation (EU) 2026/1744 (the Digital Omnibus on AI, in force 27 July 2026). High-risk Chapter III obligations, including Art. 12 logging and Art. 19/26(6) log retention, apply from 2 December 2027 (Annex III) and 2 August 2028 (Annex I), not 2 August 2026. Annex IV is now described as technical documentation (point 2(g): signed and dated test logs), not "logging".
+- **Correction to the 2.2.0 entry:** that entry says operator attestation closes the EU AI Act "Art. 14 / Art. 12(3) 'which operator' gap". That overstated it. Art. 12(3) applies only to remote biometric identification systems (Annex III point 1(a)), and a signed attestation helps **evidence** human oversight and sign-off; it does not by itself satisfy Art. 14. The 2.2.0 text is left as originally published.
+- The README, landing page and handbook are rewritten around the seal → hand over → verify job, with a "what a verification proves / does not prove" section and an interim RFC 3161 trusted-timestamp recipe (AGEF signatures don't yet cover a time; native timestamps are planned for AGEF v0.1.4).
+- New reference pages for `akmon seal`, `akmon otel import` and `akmon bundle sign`. Archived features' pages moved to `archive/docs/`.
+- `scripts/docs/check_version_markers.py` now requires every "Documented for Akmon" marker, the README and the landing page to match the workspace version.
 
 ## [2.2.1] - 2026-07-10
 
@@ -136,6 +226,19 @@ Akmon v2.0.0 is the production-ready release. Earlier 1.x releases were explorat
 - **New command references:** replay/diff and other v2 command docs added or expanded under `docs/src/reference/`.
 - **Release documentation updates:** release notes and planning artifacts aligned with v2 rollout.
 - **Landing documentation refresh:** README and related docs now reflect regulated-engineering positioning and trust pipeline workflows.
+
+## [1.8.2] - 2026-04-20
+
+### Added
+
+- **Provider resolution explainability:** deterministic `ProviderResolutionTrace` (`selected_provider`, `selected_reason`, `model_id`, ordered `candidates[]` with `eligible`, `reason`, `missing_prerequisites`, `priority_order`) mirroring `LlmConnectConfig::resolve` without changing routing.
+- **`akmon config explain-provider`:** prints the resolution trace (use `--json` on `config` or global `--output json` for machine-readable output). This is diagnostics only; it does not change which provider is selected at runtime.
+- **`akmon doctor providers`:** embeds the same `provider_resolution` block in text and JSON reports for side-by-side troubleshooting with reachability checks.
+- **Headless JSON runs:** `--output json` run summaries include an optional `provider_resolution` field with the trace for the effective CLI model and merged `~/.akmon/config.toml` (additive for automation).
+
+### Notes
+
+- Resolver priority and selection semantics are unchanged; all additions are strictly introspection/diagnostics. Traces never echo secret values—only named prerequisites (env vars / flags).
 
 ## [1.8.1] - 2026-04-20
 

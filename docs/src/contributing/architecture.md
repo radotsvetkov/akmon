@@ -1,6 +1,6 @@
 # Architecture guide for contributors
 
-This document explains how Akmon is organized internally and how the core agent loop works.
+This document explains how Akmon is organized internally and how the bundled agent's loop works. For the evidence path (journal, bundle, verification), see [How Akmon works](../concepts/architecture.md).
 
 ## Crate structure
 
@@ -14,7 +14,12 @@ akmon/
 │   ├── akmon-tools/    # tool implementations
 │   ├── akmon-query/    # agent loop, context assembly, session lifecycle
 │   ├── akmon-tui/      # ratatui UI and runtime bridge
-│   └── akmon-index/    # optional semantic index
+│   ├── akmon-journal/  # content-addressed store, hash-linked journal
+│   ├── akmon-bundle/   # AGEF bundles: export/import/verify/sign/attest
+│   ├── agef-verify/    # standalone verifier binary
+│   ├── akmon-otel/     # OpenTelemetry GenAI importer
+│   ├── akmon-replay/   # deterministic replay
+│   └── akmon-diff/     # session comparison
 ```
 
 ## The agent loop (`akmon-query/src/session.rs`)

@@ -57,4 +57,3 @@ and what the data flow is between crates
 | Documentation | `add rustdoc to all public items in src/lib.rs` |
 | Clippy | `fix all clippy warnings in the workspace` |
 
-See [Semantic search](../features/semantic-search.md) for `--index` usage on large Rust trees.
