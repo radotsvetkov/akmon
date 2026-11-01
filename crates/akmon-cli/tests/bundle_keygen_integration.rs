@@ -229,7 +229,7 @@ fn t_keygen_roundtrip_sign_verify() {
     assert!(!report.any_invalid());
 }
 
-/// A second keygen to the same --out without --force is refused (exit 3) and the original key is
+/// A second keygen to the same --out without --force is refused (exit 2, `output_exists`) and the original key is
 /// byte-for-byte unchanged.
 #[test]
 fn t_keygen_no_clobber_refuses_without_force() {
@@ -249,8 +249,8 @@ fn t_keygen_no_clobber_refuses_without_force() {
         .expect("second keygen");
     assert_eq!(
         second.status.code(),
-        Some(3),
-        "no-clobber must exit 3; stderr={}",
+        Some(2),
+        "no-clobber must exit 2; stderr={}",
         String::from_utf8_lossy(&second.stderr)
     );
     let after = std::fs::read(&out).expect("read key after refusal");
@@ -358,8 +358,8 @@ fn t_keygen_public_out_no_clobber() {
         .expect("run keygen");
     assert_eq!(
         run.status.code(),
-        Some(3),
-        "public-out clobber must exit 3; stderr={}",
+        Some(2),
+        "public-out clobber must exit 2; stderr={}",
         String::from_utf8_lossy(&run.stderr)
     );
     assert!(

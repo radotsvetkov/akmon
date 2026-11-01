@@ -253,7 +253,8 @@ Examples:\n\
   akmon bundle keygen --out signer.pk8 --force --format json\n\n\
 Exit codes:\n\
   0 — key written; public key hex + key_id surfaced\n\
-  3 — I/O error, refuse-to-clobber (use --force), or key generation failure"
+  2 — refused: --out or --public-out already exists (use --force)\n\
+  3 — I/O error or key generation failure"
     )]
     Keygen(crate::bundle_keygen::BundleKeygenArgs),
     /// Record a signed operator attestation on a bundle (AGEF v0.1.3, decision D-20).

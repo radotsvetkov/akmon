@@ -88,6 +88,21 @@ pub(crate) fn split_unified_patches(raw: &str) -> Vec<String> {
     out
 }
 
+/// Every file path named in a single-file segment's `---` / `+++` headers (a/ b/ prefixes
+/// stripped, forward slashes, `/dev/null` skipped). `None` when the segment does not parse.
+pub(crate) fn header_relative_paths(chunk: &str) -> Option<Vec<String>> {
+    let patch = Patch::from_str(chunk).ok()?;
+    Some(
+        [patch.original(), patch.modified()]
+            .into_iter()
+            .flatten()
+            .map(strip_ab_prefix)
+            .filter(|p| !p.is_empty() && !is_dev_null(p))
+            .map(|p| p.replace('\\', "/"))
+            .collect(),
+    )
+}
+
 /// Target path string (sandbox-relative, forward slashes) from a parsed [`Patch`].
 fn target_relative_path(patch: &Patch<'_, str>) -> Option<String> {
     let raw = patch.modified().or_else(|| patch.original())?;

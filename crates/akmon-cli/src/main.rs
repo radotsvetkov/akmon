@@ -1531,14 +1531,19 @@ using the same policy as `akmon bundle verify --require-signature`, and optional
 Outputs (written atomically; nothing is left behind on failure):\n\
   <OUTPUT>                the signed bundle (default ./<session-id>.akmon)\n\
   <OUTPUT>.pub            signer public key, 64 hex chars (same format as keygen --public-out)\n\
-  <OUTPUT>.operator.pub   operator public key, when --operator-key is given\n\n\
+  <OUTPUT>.operator.pub   operator public key, when --operator-key is given\n\
+  <PROOF_DIR>/...         the prove-openssl artifacts, when --proof-dir is given\n\n\
+A trace import is the one step that persists: the imported session stays in the journal even if \
+a later step fails (the output and proof directories are checked before importing, so the common \
+failures happen first; a retry after a late failure imports the trace again).\n\n\
 Example:\n\
   akmon bundle keygen --out signer.pk8 --public-out signer.pub\n\
   akmon seal trace.json --key signer.pk8 --output audit.akmon\n\
   agef-verify audit.akmon --verify-key signer.pub --require-signature   # the auditor\n\
   agef-verify audit.akmon --verify-key signer.pub --require-signature --format markdown > report.md\n\n\
-Send the public key to the auditor over a separate trusted channel. An existing output is never \
-overwritten without --force. AGEF signatures do not cover a trusted time; see the handbook for \
+Send the public key to the auditor over a separate trusted channel. An existing output (bundle, \
+.pub files, or --proof-dir artifacts) is never overwritten without --force; a --force reseal \
+without --operator-key removes a stale <OUTPUT>.operator.pub. AGEF signatures do not cover a trusted time; see the handbook for \
 an RFC 3161 timestamp recipe over the --proof-dir statement.\n\n\
 Exit codes:\n\
   0 - sealed and self-verified\n\

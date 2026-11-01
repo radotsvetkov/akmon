@@ -1,7 +1,7 @@
 //! Policy engine: deny-all default, interactive resolution, and configured rules.
 
 use chrono::Utc;
-use glob::Pattern;
+use glob::{MatchOptions, Pattern};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -106,7 +106,7 @@ impl PolicyConfig {
                     Ok(s) => s,
                     Err(why) => return deny_unnormalizable_path("filesystem.read", path, why),
                 };
-                evaluate_pattern_rules(
+                evaluate_path_rules(
                     "filesystem.read",
                     "path",
                     &subject,
@@ -119,7 +119,7 @@ impl PolicyConfig {
                     Ok(s) => s,
                     Err(why) => return deny_unnormalizable_path("filesystem.write", path, why),
                 };
-                evaluate_pattern_rules(
+                evaluate_path_rules(
                     "filesystem.write",
                     "path",
                     &subject,
@@ -240,6 +240,30 @@ fn evaluate_pattern_rules(
     evaluate_matches(scope, subject_kind, subject, allow_match, deny_match)
 }
 
+/// Filesystem rules: like [`evaluate_pattern_rules`], except DENY globs match case-insensitively.
+///
+/// Default macOS (APFS) and Windows volumes are case-insensitive, so `.GIT/config` opens the same
+/// file as `.git/config`; a case-sensitive deny glob would let the case variant through. Allow
+/// globs stay case-sensitive, so a case variant can only ever lose permissions, never gain them.
+fn evaluate_path_rules(
+    scope: &str,
+    subject_kind: &str,
+    subject: &str,
+    allow: &[String],
+    deny: &[String],
+) -> (PolicyVerdict, String) {
+    let deny_match = best_pattern_match_with(
+        deny,
+        subject,
+        MatchOptions {
+            case_sensitive: false,
+            ..MatchOptions::new()
+        },
+    );
+    let allow_match = best_pattern_match(allow, subject);
+    evaluate_matches(scope, subject_kind, subject, allow_match, deny_match)
+}
+
 fn evaluate_prefix_rules(
     scope: &str,
     subject_kind: &str,
@@ -284,12 +308,20 @@ fn evaluate_matches(
 }
 
 fn best_pattern_match(patterns: &[String], subject: &str) -> Option<RuleMatch> {
+    best_pattern_match_with(patterns, subject, MatchOptions::new())
+}
+
+fn best_pattern_match_with(
+    patterns: &[String],
+    subject: &str,
+    options: MatchOptions,
+) -> Option<RuleMatch> {
     patterns
         .iter()
         .enumerate()
         .filter_map(|(idx, pattern)| {
             let parsed = Pattern::new(pattern).ok()?;
-            if !parsed.matches(subject) {
+            if !parsed.matches_with(subject, options) {
                 return None;
             }
             Some(RuleMatch {
@@ -484,6 +516,17 @@ pub fn policy_subject_path(
         }
     }
     std::path::PathBuf::from(subject)
+}
+
+/// Whether two filesystem policy subjects normalize to the same subject, so evaluating both would
+/// be redundant (for example `./src/lib.rs` and `src/lib.rs`). Subjects that cannot be normalized
+/// are equivalent only when identical.
+#[must_use]
+pub fn policy_subjects_equivalent(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (normalize_path_for_policy(a), normalize_path_for_policy(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 fn extract_domain(url: &str) -> Option<String> {
@@ -1497,6 +1540,25 @@ mod tests {
             assert_eq!(rv, PolicyVerdict::Deny, "read {p}: {rr}");
             assert!(rr.contains("deny rule `.git/**`"), "read {p}: {rr}");
         }
+    }
+
+    #[test]
+    fn case_variants_cannot_evade_filesystem_deny_globs() {
+        let cfg = dev_cfg();
+        for p in [".GIT/config", "src/../.Git/config", ".git/HOOKS/pre-commit"] {
+            let (wv, wr) = write(&cfg, p);
+            assert_eq!(wv, PolicyVerdict::Deny, "write {p}: {wr}");
+            let (rv, rr) = read(&cfg, p);
+            assert_eq!(rv, PolicyVerdict::Deny, "read {p}: {rr}");
+            assert!(rr.contains("deny rule `.git/**`"), "read {p}: {rr}");
+        }
+        let (rv, rr) = read(&cfg, ".ENV");
+        assert_eq!(rv, PolicyVerdict::Deny, "read .ENV: {rr}");
+        // Allow globs stay case-sensitive: a case variant never gains a permission ...
+        assert_eq!(write(&cfg, "SRC/lib.rs").0, PolicyVerdict::Deny);
+        // ... and ordinary paths are unaffected.
+        assert_eq!(write(&cfg, "src/lib.rs").0, PolicyVerdict::Allow);
+        assert_eq!(read(&cfg, "README.md").0, PolicyVerdict::Allow);
     }
 
     #[test]

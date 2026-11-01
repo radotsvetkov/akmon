@@ -14,11 +14,15 @@
 //! 6. self-verify with the derived public key file(s) —
 //!    [`crate::bundle_cmd::read_and_evaluate_bundle`] with the same [`VerifyPolicy`] that
 //!    `bundle verify --verify-key <pub> --require-signature [--require-operator-key <op.pub>]` builds;
-//! 7. optional `prove-openssl` artifacts — [`crate::bundle_prove::emit_openssl_artifacts`].
+//! 7. optional `prove-openssl` artifacts — [`crate::bundle_prove::plan_openssl_artifacts`].
 //!
-//! Outputs are written atomically: everything lands in temp files in the output directory and is
-//! renamed into place only after self-verification passed. On any failure no bundle, no `.pub`
-//! file, and no proof artifact is left behind.
+//! Outputs are written atomically: everything (bundle, `.pub` files, proof artifacts) lands in
+//! temp files next to its final path and is renamed into place only after self-verification
+//! passed. Every final path — proof artifacts included — is checked up front and never replaced
+//! without `--force`. On any failure no bundle, no `.pub` file, and no proof artifact is left
+//! behind, and nothing seal did not create itself is ever removed. The output and proof
+//! directories are checked BEFORE a trace is imported, so the common failures do not leave an
+//! orphan imported session in the journal (a successful import itself persists, by design).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -40,7 +44,7 @@ use crate::bundle_cmd::{
     bundle_export_output_display, read_and_evaluate_bundle, read_bundle_verified_for_signing,
 };
 use crate::bundle_keygen::write_public_key_file;
-use crate::bundle_prove::{emit_openssl_artifacts, proof_file_names};
+use crate::bundle_prove::{plan_openssl_artifacts, proof_file_names};
 use crate::otel_cmd::{OtelImportFailure, import_trace_into_journal, shell_quote};
 
 /// Tool name used in the JSON success object and in `ToolErrorV1`.
@@ -85,10 +89,13 @@ pub struct SealArgs {
     #[arg(long, value_name = "S", requires = "operator_key")]
     pub(crate) org: Option<String>,
     /// Also write the `prove-openssl` artifacts (statement.bin, signature.bin, pubkey.pem, plus the
-    /// operator_* files when attesting) into this directory.
+    /// operator_* files when attesting) into this directory (created if missing). Existing
+    /// artifacts there are never replaced without --force.
     #[arg(long = "proof-dir", value_name = "DIR")]
     pub(crate) proof_dir: Option<PathBuf>,
-    /// Overwrite an existing output bundle and its `.pub` file(s).
+    /// Overwrite an existing output bundle, its `.pub` file(s), and existing --proof-dir
+    /// artifacts. A stale `<OUTPUT>.operator.pub` from an earlier attested seal is removed when
+    /// resealing without --operator-key.
     #[arg(long)]
     pub(crate) force: bool,
     /// Output format: human (default) or json.
@@ -123,6 +130,10 @@ pub struct SealReportV1 {
     proof_dir: Option<String>,
     /// The exact `agef-verify` command an auditor runs on the handed-over files.
     verify_command: String,
+    /// A stale `<bundle>.operator.pub` from an earlier attested seal that this `--force` reseal
+    /// (without an operator) removed, so it cannot be mistaken for the new bundle's key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed_stale_operator_pub: Option<String>,
 }
 
 /// A refusal: stable category, message, exit code (1 verify, 2 usage/input, 3 I/O/environment).
@@ -187,18 +198,28 @@ struct SealOutcome {
     proof_dir: Option<PathBuf>,
     openssl_commands: Vec<String>,
     imported: bool,
+    removed_stale_operator_pub: Option<PathBuf>,
 }
 
 /// Removes every registered path on drop unless disarmed: the "no partial output" guarantee.
+///
+/// Only paths seal itself created are ever registered (its temp files, the final files it renamed
+/// into place, and directories it created), so a failure never deletes a pre-existing user file.
 #[derive(Default)]
 struct Cleanup {
     paths: Vec<PathBuf>,
+    /// Directories seal created, deepest first; removed only if empty.
+    dirs: Vec<PathBuf>,
     disarmed: bool,
 }
 
 impl Cleanup {
     fn track(&mut self, path: PathBuf) {
         self.paths.push(path);
+    }
+
+    fn track_dir(&mut self, dir: PathBuf) {
+        self.dirs.push(dir);
     }
 }
 
@@ -210,7 +231,95 @@ impl Drop for Cleanup {
         for path in &self.paths {
             let _ = std::fs::remove_file(path);
         }
+        for dir in &self.dirs {
+            let _ = std::fs::remove_dir(dir);
+        }
     }
+}
+
+/// The directory a file path lives in (`.` for a bare file name).
+fn parent_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// Proves `dir` is an existing, writable directory by creating and removing one probe file.
+fn probe_writable_dir(dir: &Path, what: &str) -> Result<(), SealError> {
+    if !dir.is_dir() {
+        return Err(err(
+            "io_error",
+            format!(
+                "{what} {} does not exist or is not a directory",
+                dir.display()
+            ),
+            3,
+        ));
+    }
+    let probe = temp_path_for(&dir.join("probe"), "probe");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .map_err(|e| {
+            err(
+                "io_error",
+                format!("{what} {} is not writable: {e}", dir.display()),
+                3,
+            )
+        })?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// Pre-flight, before any work (in particular before a trace is imported into the journal): the
+/// output's directory must exist and be writable, and `--proof-dir` must be an existing writable
+/// directory or creatable under its nearest existing ancestor.
+fn preflight_dirs(output: Option<&Path>, proof_dir: Option<&Path>) -> Result<(), SealError> {
+    let out_dir = output.map_or_else(|| Path::new("."), parent_dir);
+    probe_writable_dir(out_dir, "output directory")?;
+    if let Some(dir) = proof_dir {
+        let existing = dir
+            .ancestors()
+            .map(|a| {
+                if a.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    a
+                }
+            })
+            .find(|a| a.exists())
+            .unwrap_or_else(|| Path::new("."));
+        if existing != dir && !existing.is_dir() {
+            return Err(err(
+                "io_error",
+                format!(
+                    "cannot create --proof-dir {}: {} is not a directory",
+                    dir.display(),
+                    existing.display()
+                ),
+                3,
+            ));
+        }
+        probe_writable_dir(existing, "--proof-dir")?;
+    }
+    Ok(())
+}
+
+/// The not-yet-existing directories `dir` consists of, deepest first.
+fn missing_dirs(dir: &Path) -> Vec<PathBuf> {
+    dir.ancestors()
+        .filter(|a| !a.as_os_str().is_empty() && !a.exists())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
+/// The final proof artifact paths in `dir`.
+fn proof_targets(dir: &Path, attesting: bool) -> Vec<PathBuf> {
+    proof_file_names(attesting)
+        .into_iter()
+        .map(|name| dir.join(name))
+        .collect()
 }
 
 /// `<path><suffix>` (suffix appended to the full file name, e.g. `audit.akmon` -> `audit.akmon.pub`).
@@ -222,10 +331,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 /// A unique hidden temp path next to `final_path` (same directory, so `rename` is atomic).
 fn temp_path_for(final_path: &Path, tag: &str) -> PathBuf {
-    let dir = final_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+    let dir = parent_dir(final_path);
     let name = final_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -308,8 +414,19 @@ fn operator_identity(args: &SealArgs) -> Result<Option<OperatorIdentity>, SealEr
     Ok(Some(identity))
 }
 
-/// Refuses (exit 2) when any final output already exists and `--force` is absent.
+/// Refuses (exit 2) when any final output is a directory, or already exists and `--force` is
+/// absent.
 fn check_overwrite(outputs: &[&Path], force: bool) -> Result<(), SealError> {
+    if let Some(dir) = outputs.iter().find(|p| p.is_dir()) {
+        return Err(err(
+            "invalid_output",
+            format!(
+                "output path {} is a directory; refusing to replace it",
+                dir.display()
+            ),
+            2,
+        ));
+    }
     if force {
         return Ok(());
     }
@@ -330,6 +447,20 @@ fn check_overwrite(outputs: &[&Path], force: bool) -> Result<(), SealError> {
 fn output_paths(output: &Path, attesting: bool) -> (PathBuf, Option<PathBuf>) {
     let operator_pub = attesting.then(|| with_suffix(output, ".operator.pub"));
     (with_suffix(output, ".pub"), operator_pub)
+}
+
+/// Every path a seal to `output` would create, replace, or (for a stale `.operator.pub` when not
+/// attesting) remove: all of them are subject to the `--force` check.
+fn guarded_paths(output: &Path, attesting: bool, proof_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut paths = vec![
+        output.to_path_buf(),
+        with_suffix(output, ".pub"),
+        with_suffix(output, ".operator.pub"),
+    ];
+    if let Some(dir) = proof_dir {
+        paths.extend(proof_targets(dir, attesting));
+    }
+    paths
 }
 
 /// Writes `contents` as a bundle to `path` (create/truncate).
@@ -369,12 +500,17 @@ fn seal(args: &SealArgs) -> Result<SealOutcome, SealError> {
             2,
         ));
     }
+    let attesting = args.operator_key.is_some();
     if let Some(output) = &args.output {
-        let (pub_path, op_pub) = output_paths(output, args.operator_key.is_some());
-        let mut outs: Vec<&Path> = vec![output.as_path(), pub_path.as_path()];
-        outs.extend(op_pub.as_deref());
+        let guarded = guarded_paths(output, attesting, args.proof_dir.as_deref());
+        let outs: Vec<&Path> = guarded.iter().map(PathBuf::as_path).collect();
+        check_overwrite(&outs, args.force)?;
+    } else if let Some(dir) = &args.proof_dir {
+        let guarded = proof_targets(dir, attesting);
+        let outs: Vec<&Path> = guarded.iter().map(PathBuf::as_path).collect();
         check_overwrite(&outs, args.force)?;
     }
+    preflight_dirs(args.output.as_deref(), args.proof_dir.as_deref())?;
     let signer = load_private_key(&args.key, "--key")?;
     let operator = match &args.operator_key {
         Some(path) => Some(load_private_key(path, "--operator-key")?),
@@ -432,8 +568,8 @@ fn seal(args: &SealArgs) -> Result<SealOutcome, SealError> {
         .unwrap_or_else(|| PathBuf::from(format!("{sid}.akmon")));
     let (pub_path, op_pub_path) = output_paths(&output, operator.is_some());
     {
-        let mut outs: Vec<&Path> = vec![output.as_path(), pub_path.as_path()];
-        outs.extend(op_pub_path.as_deref());
+        let guarded = guarded_paths(&output, operator.is_some(), args.proof_dir.as_deref());
+        let outs: Vec<&Path> = guarded.iter().map(PathBuf::as_path).collect();
         check_overwrite(&outs, args.force)?;
     }
 
@@ -535,29 +671,61 @@ fn seal(args: &SealArgs) -> Result<SealOutcome, SealError> {
         |c| c.level.clone(),
     );
 
-    // 8. Optional prove-openssl artifacts (same writer as `bundle prove-openssl`).
+    // 8. Optional prove-openssl artifacts (same bytes as `bundle prove-openssl`), staged as temp
+    //    files in --proof-dir and renamed into place together with the bundle in step 9.
     let mut openssl_commands = Vec::new();
+    let mut renames = vec![(tmp_bundle, output.clone()), (tmp_pub, pub_path)];
+    if let (Some(tmp), Some(fin)) = (tmp_op_pub, op_pub_path) {
+        renames.push((tmp, fin));
+    }
     if let Some(dir) = &args.proof_dir {
-        for name in proof_file_names(operator.is_some()) {
-            cleanup.track(dir.join(name));
-        }
-        let emitted = emit_openssl_artifacts(
+        let planned = plan_openssl_artifacts(
             &sealed.manifest,
             &signer.public_key,
             operator.as_ref().map(|op| op.public_key.as_slice()),
             dir,
-            "--proof-dir",
         )?;
-        openssl_commands.push(emitted.head.openssl_command);
-        if let Some(op) = emitted.operator {
-            openssl_commands.push(op.openssl_command);
+        let created = missing_dirs(dir);
+        std::fs::create_dir_all(dir).map_err(|e| {
+            err(
+                "io_error",
+                format!("cannot create --proof-dir {}: {e}", dir.display()),
+                3,
+            )
+        })?;
+        for created_dir in created {
+            cleanup.track_dir(created_dir);
         }
+        for file in planned.files() {
+            let tmp = temp_path_for(&file.path, "proof");
+            cleanup.track(tmp.clone());
+            std::fs::write(&tmp, &file.bytes).map_err(|e| {
+                err(
+                    "io_error",
+                    format!("cannot write temp file {}: {e}", tmp.display()),
+                    3,
+                )
+            })?;
+            renames.push((tmp, file.path.clone()));
+        }
+        openssl_commands = planned.openssl_commands();
     }
 
-    // 9. Everything verified: move the outputs into place.
-    let mut renames = vec![(tmp_bundle, output.clone()), (tmp_pub, pub_path)];
-    if let (Some(tmp), Some(fin)) = (tmp_op_pub, op_pub_path) {
-        renames.push((tmp, fin));
+    // 9. Everything verified: remove a stale `.operator.pub` left by an earlier attested seal
+    //    (only reachable with --force: it is a guarded path), then move the outputs into place.
+    let mut removed_stale_operator_pub = None;
+    if operator.is_none() {
+        let stale = with_suffix(&output, ".operator.pub");
+        if stale.is_file() {
+            std::fs::remove_file(&stale).map_err(|e| {
+                err(
+                    "io_error",
+                    format!("cannot remove stale {}: {e}", stale.display()),
+                    3,
+                )
+            })?;
+            removed_stale_operator_pub = Some(stale);
+        }
     }
     for (tmp, fin) in renames {
         std::fs::rename(&tmp, &fin).map_err(|e| {
@@ -580,6 +748,7 @@ fn seal(args: &SealArgs) -> Result<SealOutcome, SealError> {
         proof_dir: args.proof_dir.clone(),
         openssl_commands,
         imported,
+        removed_stale_operator_pub,
     })
 }
 
@@ -638,6 +807,12 @@ fn print_human(outcome: &SealOutcome, verify: &str) {
             bundle_export_output_display(op_path)
         );
     }
+    if let Some(stale) = &outcome.removed_stale_operator_pub {
+        eprintln!(
+            "  removed stale {} (left by an earlier attested seal; this bundle has no operator attestation)",
+            stale.display()
+        );
+    }
     eprintln!();
     eprintln!("hand over the bundle; the auditor verifies offline with:");
     eprintln!("  {verify}");
@@ -685,6 +860,10 @@ pub fn run_seal(args: &SealArgs) -> ExitCode {
                 .as_ref()
                 .map(|d| bundle_export_output_display(d)),
             verify_command: verify,
+            removed_stale_operator_pub: outcome
+                .removed_stale_operator_pub
+                .as_ref()
+                .map(|p| p.display().to_string()),
         };
         match serde_json::to_string_pretty(&report) {
             Ok(s) => println!("{s}"),

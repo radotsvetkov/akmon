@@ -482,3 +482,228 @@ fn seal_failure_leaves_no_files_behind() {
     assert_ne!(failed.status.code(), Some(0), "stderr={}", stderr(&failed));
     assert!(produced_files(tmp).is_empty(), "{:?}", produced_files(tmp));
 }
+
+/// seal-1 / seal-2: existing proof artifacts are guarded like every other output. Without --force
+/// the run is refused before any work (no import), and the user's files are untouched; a target
+/// that is a directory is refused even with --force, and a failure never deletes files seal did
+/// not create.
+#[test]
+fn seal_proof_dir_never_clobbers_or_deletes_existing_files() {
+    let dir = tempdir().expect("tempdir");
+    let tmp = dir.path();
+    let key = write_key(tmp, "signer.pk8");
+    let out = tmp.join("audit.akmon");
+    let proof = tmp.join("proof");
+    std::fs::create_dir_all(&proof).expect("mkdir proof");
+    std::fs::write(proof.join("statement.bin"), b"PRECIOUS").expect("seed statement");
+    std::fs::write(proof.join("other.txt"), b"KEEP").expect("seed other");
+
+    let refused = seal(
+        tmp,
+        &fixture_path(),
+        &key,
+        &[
+            "--output",
+            &s(&out),
+            "--proof-dir",
+            &s(&proof),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "stderr={}",
+        stderr(&refused)
+    );
+    let err: Value = serde_json::from_slice(&refused.stdout).expect("error json");
+    assert_eq!(err["category"], Value::from("output_exists"));
+    assert_eq!(
+        std::fs::read(proof.join("statement.bin")).expect("read"),
+        b"PRECIOUS"
+    );
+    assert!(!out.exists());
+    assert!(!tmp.join("journal").exists(), "refused before importing");
+
+    // A proof target that is a directory: refused even with --force; nothing deleted.
+    std::fs::create_dir_all(proof.join("signature.bin")).expect("mkdir signature.bin");
+    std::fs::write(proof.join("pubkey.pem"), b"PRECIOUS").expect("seed pem");
+    let blocked = seal(
+        tmp,
+        &fixture_path(),
+        &key,
+        &["--output", &s(&out), "--proof-dir", &s(&proof), "--force"],
+    );
+    assert_eq!(
+        blocked.status.code(),
+        Some(2),
+        "stderr={}",
+        stderr(&blocked)
+    );
+    assert_eq!(
+        std::fs::read(proof.join("statement.bin")).expect("read"),
+        b"PRECIOUS"
+    );
+    assert_eq!(
+        std::fs::read(proof.join("pubkey.pem")).expect("read"),
+        b"PRECIOUS"
+    );
+    assert_eq!(
+        std::fs::read(proof.join("other.txt")).expect("read"),
+        b"KEEP"
+    );
+    assert!(!out.exists());
+
+    // With --force and no directory in the way, the proof set is replaced atomically.
+    std::fs::remove_dir(proof.join("signature.bin")).expect("rmdir");
+    let forced = seal(
+        tmp,
+        &fixture_path(),
+        &key,
+        &["--output", &s(&out), "--proof-dir", &s(&proof), "--force"],
+    );
+    assert_eq!(forced.status.code(), Some(0), "stderr={}", stderr(&forced));
+    assert!(
+        std::fs::read(proof.join("statement.bin"))
+            .expect("read")
+            .starts_with(b"AGEF-SIG-v1")
+    );
+    assert_eq!(
+        std::fs::read(proof.join("other.txt")).expect("read"),
+        b"KEEP"
+    );
+    let leftovers: Vec<_> = produced_files(tmp)
+        .into_iter()
+        .filter(|p| p.to_string_lossy().contains("seal-tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+/// seal-3: the printed openssl hand-over command uses the paths as given, shell-quoted.
+#[test]
+fn seal_prints_shell_quoted_relative_openssl_command() {
+    let dir = tempdir().expect("tempdir");
+    let tmp = dir.path();
+    let key = write_key(tmp, "signer.pk8");
+    let sealed = akmon()
+        .current_dir(tmp)
+        .arg("seal")
+        .arg(fixture_path())
+        .arg("--key")
+        .arg(&key)
+        .arg("--journal")
+        .arg(tmp.join("journal"))
+        .args(["--output", "b c.akmon", "--proof-dir", "proof dir"])
+        .output()
+        .expect("run akmon seal");
+    assert_eq!(sealed.status.code(), Some(0), "stderr={}", stderr(&sealed));
+    let err = stderr(&sealed);
+    assert!(
+        err.contains(
+            "openssl pkeyutl -verify -pubin -inkey 'proof dir/pubkey.pem' -rawin -in \
+             'proof dir/statement.bin' -sigfile 'proof dir/signature.bin'"
+        ),
+        "{err}"
+    );
+    assert!(tmp.join("proof dir").join("signature.bin").is_file());
+}
+
+/// seal-4: a missing output directory or an uncreatable --proof-dir is refused BEFORE the trace
+/// is imported, so no orphan session lands in the journal.
+#[test]
+fn seal_preflight_refuses_before_import() {
+    let dir = tempdir().expect("tempdir");
+    let tmp = dir.path();
+    let key = write_key(tmp, "signer.pk8");
+
+    let missing = seal(
+        tmp,
+        &fixture_path(),
+        &key,
+        &["--output", &s(&tmp.join("nope").join("a.akmon"))],
+    );
+    assert_eq!(
+        missing.status.code(),
+        Some(3),
+        "stderr={}",
+        stderr(&missing)
+    );
+    assert!(!tmp.join("journal").exists(), "trace must not be imported");
+
+    let blocker = tmp.join("blocker");
+    std::fs::write(&blocker, b"file").expect("write blocker");
+    let bad_proof = seal(
+        tmp,
+        &fixture_path(),
+        &key,
+        &[
+            "--output",
+            &s(&tmp.join("a.akmon")),
+            "--proof-dir",
+            &s(&blocker.join("proof")),
+        ],
+    );
+    assert_eq!(
+        bad_proof.status.code(),
+        Some(3),
+        "stderr={}",
+        stderr(&bad_proof)
+    );
+    assert!(!tmp.join("journal").exists(), "trace must not be imported");
+    assert!(!tmp.join("a.akmon").exists());
+}
+
+/// seal-5: a --force reseal without an operator removes the stale `<OUTPUT>.operator.pub` from an
+/// earlier attested seal and says so.
+#[test]
+fn seal_force_without_operator_removes_stale_operator_pub() {
+    let dir = tempdir().expect("tempdir");
+    let tmp = dir.path();
+    let key = write_key(tmp, "signer.pk8");
+    let op_key = write_key(tmp, "op.pk8");
+    let out = tmp.join("audit.akmon");
+    let op_pub = tmp.join("audit.akmon.operator.pub");
+
+    let attested = seal(
+        tmp,
+        &fixture_path(),
+        &key,
+        &[
+            "--output",
+            &s(&out),
+            "--operator-key",
+            &s(&op_key),
+            "--operator-id",
+            "alice@example.com",
+        ],
+    );
+    assert_eq!(
+        attested.status.code(),
+        Some(0),
+        "stderr={}",
+        stderr(&attested)
+    );
+    assert!(op_pub.is_file());
+
+    let resealed = seal(
+        tmp,
+        &fixture_path(),
+        &key,
+        &["--output", &s(&out), "--force", "--format", "json"],
+    );
+    assert_eq!(
+        resealed.status.code(),
+        Some(0),
+        "stderr={}",
+        stderr(&resealed)
+    );
+    assert!(!op_pub.exists(), "stale operator key must be removed");
+    let json: Value = serde_json::from_slice(&resealed.stdout).expect("seal json");
+    assert!(
+        json["removed_stale_operator_pub"]
+            .as_str()
+            .expect("removed_stale_operator_pub")
+            .ends_with("audit.akmon.operator.pub")
+    );
+}

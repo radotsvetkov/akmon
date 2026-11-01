@@ -35,7 +35,7 @@ hex = "0.4"
 bytes = "1"
 ciborium = "0.2"
 tar = "0.4"
-zstd = "0.13"
+zstd = "0.14"
 
 [workspace.package]
 version = "3.0.0"

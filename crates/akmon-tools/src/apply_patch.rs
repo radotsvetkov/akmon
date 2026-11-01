@@ -10,7 +10,7 @@ use serde_json::{Value as JsonValue, json};
 use crate::Tool;
 use crate::context::ToolContext;
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::patch::{PatchTool, split_unified_patches};
+use crate::patch::{PatchTool, header_relative_paths, split_unified_patches};
 
 fn apply_patch_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
@@ -22,7 +22,21 @@ fn apply_patch_permissions() -> &'static [Permission] {
     .as_slice()
 }
 
+/// Lexical form used to compare a header path with `file_path`: forward slashes, no empty or `.`
+/// components.
+fn comparable_path(p: &str) -> String {
+    p.replace('\\', "/")
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Prepends `---` / `+++` headers when the model sends only `@@` hunks; ensures a single-file diff.
+///
+/// When the body carries its own headers, every header path must name `file_path`: policy is
+/// evaluated on `file_path`, so a header pointing elsewhere (e.g. `.git/config`) is rejected
+/// instead of silently writing a file the policy never saw.
 fn normalize_single_file_patch(rel: &str, patch_body: &str) -> Result<String, ToolOutput> {
     let rel = rel.replace('\\', "/");
     let rel = rel.trim_start_matches('/').to_string();
@@ -56,6 +70,21 @@ fn normalize_single_file_patch(rel: &str, patch_body: &str) -> Result<String, To
             message:
                 "apply_patch applies to one file only; use the `patch` tool for multi-file diffs"
                     .into(),
+        });
+    }
+
+    let expected = comparable_path(&rel);
+    let headers = header_relative_paths(&chunks[0]).ok_or_else(|| ToolOutput::Error {
+        code: ToolErrorCode::InvalidArgs,
+        message: "patch ---/+++ headers could not be parsed".into(),
+    })?;
+    if let Some(other) = headers.iter().find(|h| comparable_path(h) != expected) {
+        return Err(ToolOutput::Error {
+            code: ToolErrorCode::InvalidArgs,
+            message: format!(
+                "patch header names `{other}` but file_path is `{rel}`; apply_patch only patches \
+                 the file named by file_path (use the `patch` tool for header-addressed diffs)"
+            ),
         });
     }
 
@@ -218,6 +247,55 @@ mod tests {
             matches!(out, ToolOutput::Error { .. }),
             "expected error: {out:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_headers_that_target_a_different_file() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(dir.path().join(".git")).expect("mkdir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        let config = "[core]\n\tbare = false\n";
+        std::fs::write(dir.path().join(".git/config"), config).expect("w");
+        std::fs::write(dir.path().join("src/lib.rs"), "fn a() {}\n").expect("w");
+        let tool = ApplyPatchTool::new();
+        for patch in [
+            "--- a/.git/config\n+++ b/.git/config\n@@ -1,2 +1,3 @@\n [core]\n \tbare = false\n+\tfsmonitor = \"x\"\n",
+            "--- a/src/lib.rs\n+++ b/.git/config\n@@ -1,2 +1,3 @@\n [core]\n \tbare = false\n+\tfsmonitor = \"x\"\n",
+        ] {
+            let out = tool
+                .execute(
+                    json!({ "file_path": "src/lib.rs", "patch": patch }),
+                    &ctx(dir.path()),
+                )
+                .await;
+            let ToolOutput::Error { code, message } = out else {
+                panic!("expected rejection: {out:?}");
+            };
+            assert_eq!(code, ToolErrorCode::InvalidArgs);
+            assert!(message.contains(".git/config"), "{message}");
+        }
+        let disk = std::fs::read_to_string(dir.path().join(".git/config")).expect("read");
+        assert_eq!(disk, config, ".git/config must be untouched");
+    }
+
+    #[tokio::test]
+    async fn accepts_headers_naming_file_path() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        std::fs::write(dir.path().join("src/lib.rs"), "hello\n").expect("w");
+        let tool = ApplyPatchTool::new();
+        let out = tool
+            .execute(
+                json!({
+                    "file_path": "./src/lib.rs",
+                    "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-hello\n+hi\n"
+                }),
+                &ctx(dir.path()),
+            )
+            .await;
+        assert!(matches!(out, ToolOutput::Success { .. }), "{out:?}");
+        let disk = std::fs::read_to_string(dir.path().join("src/lib.rs")).expect("read");
+        assert_eq!(disk, "hi\n");
     }
 
     #[tokio::test]

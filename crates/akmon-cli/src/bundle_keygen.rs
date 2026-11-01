@@ -80,7 +80,7 @@ pub fn run_bundle_keygen(args: &BundleKeygenArgs) -> ExitCode {
                 "refusing to overwrite existing file {}; pass --force to replace",
                 public_out.display()
             ),
-            3,
+            2,
         );
     }
 
@@ -109,7 +109,7 @@ pub fn run_bundle_keygen(args: &BundleKeygenArgs) -> ExitCode {
                     "refusing to overwrite existing key {}; pass --force to replace",
                     args.out.display()
                 ),
-                3,
+                2,
             );
         }
         Err(err) => {

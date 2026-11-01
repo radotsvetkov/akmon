@@ -3167,27 +3167,82 @@ fn git_concrete_permissions(args: &Value) -> Vec<Permission> {
 /// sandbox root: absolute paths inside the workspace are relativized, and paths outside it (for
 /// example into an `--add-dir` root, or a `..` that escapes the workspace) become normalized
 /// absolute paths that policy globs can match explicitly.
+///
+/// Every filesystem permission is checked on BOTH the lexical subject the model supplied and the
+/// canonical path it actually resolves to (symlinks followed, relativized against the canonical
+/// root). When the two differ, both permissions are emitted, so the call is denied if either is
+/// denied and allowed only if both are allowed. This closes intermediate-directory symlink
+/// bypasses (`src -> .git` making `src/hooks/pre-commit` land in `.git/hooks/`) and in-repo links
+/// to denied files (`docs/setup.txt -> ../.env`). The canonical subject is skipped only when both
+/// subjects lie outside the workspace (absolute paths, e.g. into an `--add-dir` root), where
+/// system-level symlinks such as `/tmp -> /private/tmp` would otherwise break absolute rules.
 fn concrete_permissions(
     tool: &dyn Tool,
     name: &str,
     args: &Value,
     sandbox_root: &Path,
 ) -> Vec<Permission> {
-    raw_concrete_permissions(tool, name, args, sandbox_root)
-        .into_iter()
-        .map(|permission| match permission {
-            Permission::ReadFile { path } => Permission::ReadFile {
-                path: akmon_core::policy_subject_path(&path, sandbox_root),
-            },
-            Permission::ListDirectory { path } => Permission::ListDirectory {
-                path: akmon_core::policy_subject_path(&path, sandbox_root),
-            },
-            Permission::WriteFile { path } => Permission::WriteFile {
-                path: akmon_core::policy_subject_path(&path, sandbox_root),
-            },
-            other => other,
-        })
-        .collect()
+    let canonical_root = std::fs::canonicalize(sandbox_root).ok();
+    let mut out = Vec::new();
+    for permission in raw_concrete_permissions(tool, name, args, sandbox_root) {
+        let (raw, rebuild): (PathBuf, fn(PathBuf) -> Permission) = match permission {
+            Permission::ReadFile { path } => (path, |path| Permission::ReadFile { path }),
+            Permission::ListDirectory { path } => (path, |path| Permission::ListDirectory { path }),
+            Permission::WriteFile { path } => (path, |path| Permission::WriteFile { path }),
+            other => {
+                out.push(other);
+                continue;
+            }
+        };
+        let lexical = akmon_core::policy_subject_path(&raw, sandbox_root);
+        let canonical = canonical_root
+            .as_deref()
+            .and_then(|root| canonical_policy_subject(&raw, root));
+        out.push(rebuild(lexical.clone()));
+        // Both subjects outside the workspace (absolute): the lexical subject plus sandbox
+        // containment govern, so rules written against e.g. `/tmp/shared/**` keep working when
+        // the OS spells the canonical path `/private/tmp/shared/...`.
+        let in_workspace =
+            !lexical.is_absolute() || canonical.as_deref().is_some_and(|c| !c.is_absolute());
+        if let Some(canonical) = canonical
+            && in_workspace
+            && !akmon_core::policy_subjects_equivalent(&canonical, &lexical)
+        {
+            out.push(rebuild(canonical));
+        }
+    }
+    out
+}
+
+/// The policy subject for the path `raw` actually resolves to: the longest existing prefix of
+/// `<canonical_root>/<raw>` is canonicalized (following every symlink in it, and taking the
+/// on-disk spelling), the not-yet-existing remainder is appended, and the result is relativized
+/// with [`akmon_core::policy_subject_path`] against the canonical root.
+///
+/// Returns `None` when there is nothing to resolve (no existing prefix, or a `..` in the
+/// non-existing remainder, which the OS would refuse anyway); the lexical check still applies.
+fn canonical_policy_subject(raw: &Path, canonical_root: &Path) -> Option<PathBuf> {
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        canonical_root.join(raw)
+    };
+    let mut existing = joined.as_path();
+    let mut remainder: Vec<&std::ffi::OsStr> = Vec::new();
+    let resolved = loop {
+        match std::fs::canonicalize(existing) {
+            Ok(resolved) => break resolved,
+            Err(_) => {
+                remainder.push(existing.file_name()?);
+                existing = existing.parent()?;
+            }
+        }
+    };
+    let mut full = resolved;
+    for component in remainder.into_iter().rev() {
+        full.push(component);
+    }
+    Some(akmon_core::policy_subject_path(&full, canonical_root))
 }
 
 fn raw_concrete_permissions(
@@ -5609,6 +5664,90 @@ mod tests {
         };
         assert!(path.is_absolute(), "{path:?}");
         assert!(path.ends_with("shared/notes.md"), "{path:?}");
+    }
+
+    /// Evaluates every concrete permission of a call with the built-in Dev profile: the call is
+    /// allowed only when all of them are (the dispatch loop's semantics).
+    fn dev_allows(tool: &dyn Tool, name: &str, args: &Value, root: &Path) -> bool {
+        let cfg = akmon_core::built_in_policy_profile(akmon_core::PolicyProfileName::Dev);
+        concrete_permissions(tool, name, args, root)
+            .iter()
+            .all(|p| matches!(cfg.evaluate_permission(p).0, PolicyVerdict::Allow))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concrete_permissions_check_canonical_target_of_directory_symlink() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git").join("hooks")).expect("mkdir");
+        std::fs::write(root.join(".git").join("config"), "[core]\n").expect("write");
+        std::os::unix::fs::symlink(".git", root.join("src")).expect("symlink src -> .git");
+        let write = akmon_tools::WriteFileTool::new();
+        let args = json!({ "path": "src/hooks/pre-commit", "content": "x" });
+        let p = concrete_permissions(&write, "write_file", &args, &root);
+        assert!(
+            p.contains(&Permission::WriteFile {
+                path: PathBuf::from(".git/hooks/pre-commit")
+            }),
+            "{p:?}"
+        );
+        assert!(!dev_allows(&write, "write_file", &args, &root));
+        let read = akmon_tools::ReadFileTool::new();
+        assert!(!dev_allows(
+            &read,
+            "read_file",
+            &json!({ "path": "src/config" }),
+            &root
+        ));
+        // An in-repo file link to a denied file is checked on its target too.
+        std::fs::write(root.join(".env"), "SECRET=1\n").expect("write env");
+        std::fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+        std::os::unix::fs::symlink("../.env", root.join("docs").join("setup.txt"))
+            .expect("symlink");
+        assert!(!dev_allows(
+            &read,
+            "read_file",
+            &json!({ "path": "docs/setup.txt" }),
+            &root
+        ));
+    }
+
+    #[test]
+    fn concrete_permissions_case_variant_of_denied_path_is_denied() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).expect("mkdir");
+        std::fs::write(root.join(".git").join("config"), "[core]\n").expect("write");
+        let read = akmon_tools::ReadFileTool::new();
+        for path in [".GIT/config", ".git/config", "src/../.Git/config"] {
+            assert!(
+                !dev_allows(&read, "read_file", &json!({ "path": path }), &root),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn concrete_permissions_normal_paths_unaffected() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).expect("mkdir");
+        std::fs::write(root.join("src").join("lib.rs"), "").expect("write");
+        let write = akmon_tools::WriteFileTool::new();
+        for path in ["src/lib.rs", "./src/lib.rs", "src/new_module.rs"] {
+            let args = json!({ "path": path, "content": "x" });
+            let p = concrete_permissions(&write, "write_file", &args, &root);
+            assert_eq!(p.len(), 1, "{path}: {p:?}");
+            assert!(dev_allows(&write, "write_file", &args, &root), "{path}");
+        }
+        let read = akmon_tools::ReadFileTool::new();
+        assert!(dev_allows(
+            &read,
+            "read_file",
+            &json!({ "path": "src/lib.rs" }),
+            &root
+        ));
     }
 
     #[test]
