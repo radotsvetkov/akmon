@@ -10,23 +10,26 @@
 //!
 //! It is purely additive: the `AGEF-SIG-v1` head statement, any existing head signatures, and the
 //! `prove-openssl` bytes stay byte-untouched. In particular it NEVER rewrites `agef_version` when the
-//! bundle already carries head signatures, because that would invalidate the existing
-//! `AGEF-SIG-v1` signature (O9). The private key is consumed but never printed.
+//! bundle already carries head signatures or operator attestations, because that would invalidate
+//! them (O9; the same rule `bundle sign` follows). The bundle must pass integrity verification
+//! before anything is signed. The private key is consumed but never printed.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use akmon_bundle::report::{bundle_read_error_category, bundle_read_exit_code};
+use akmon_bundle::report::ToolErrorV1;
 use akmon_bundle::{
-    DEFAULT_MAX_EVENT_FRAME_LEN, OperatorIdentity, ReadBundleOptions, SigningError,
-    WriteBundleOptions, build_operator_attestation, key_id, public_key_from_pkcs8, read_bundle,
-    write_bundle,
+    OperatorIdentity, SigningError, WriteBundleOptions, build_operator_attestation, key_id,
+    public_key_from_pkcs8, write_bundle,
 };
 use akmon_journal::AGEF_SPEC_VERSION;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-use crate::bundle_cmd::{BundleImportFormat, bundle_export_output_display};
+use crate::bundle_cmd::{
+    BundleImportFormat, bundle_export_output_display, manifest_unsigned_and_unattested,
+    read_bundle_verified_for_signing,
+};
 
 /// Arguments for `akmon bundle attest`.
 #[derive(Args, Debug, Clone)]
@@ -86,37 +89,19 @@ pub fn run_bundle_attest(args: &BundleAttestArgs) -> ExitCode {
     let json = matches!(args.format, BundleImportFormat::Json);
     let fail = |category: &str, msg: String, code: u8| -> ExitCode {
         if json {
-            let _ = print_attest_json_error(category, msg);
+            ToolErrorV1::new("akmon", category, msg).print_json();
         } else {
             eprintln!("akmon: bundle attest: {msg}");
         }
         ExitCode::from(code)
     };
 
-    // 1. Read the bundle strictly (same path run_bundle_sign uses).
-    let mut file = match std::fs::File::open(&args.bundle) {
-        Ok(f) => f,
-        Err(err) => {
-            return fail(
-                "io_error",
-                format!("cannot open bundle {}: {err}", args.bundle.display()),
-                3,
-            );
-        }
-    };
-    let options = ReadBundleOptions {
-        allow_extra_files: false,
-        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
-    };
-    let mut contents = match read_bundle(&mut file, &options) {
+    // 1. Read the bundle strictly and refuse it unless it passes integrity verification (same
+    //    path run_bundle_sign uses), so an attestation never binds to a head that commits to nothing.
+    let mut contents = match read_bundle_verified_for_signing(&args.bundle) {
         Ok(c) => c,
-        Err(err) => {
-            let category = bundle_read_error_category(&err);
-            let code = bundle_read_exit_code(&err);
-            return fail(category, err.to_string(), code);
-        }
+        Err((category, msg, code)) => return fail(&category, msg, code),
     };
-    drop(file);
 
     // 2. Read the raw PKCS#8 key bytes (same error categories run_bundle_sign uses).
     let pkcs8 = match std::fs::read(&args.key) {
@@ -141,15 +126,10 @@ pub fn run_bundle_attest(args: &BundleAttestArgs) -> ExitCode {
     };
 
     // 3. AGEF_VERSION rule (O9): stamp the current spec version ONLY when there is no head
-    //    signature to invalidate. If head signatures already exist, leave agef_version untouched so
-    //    the already-present AGEF-SIG-v1 signature stays valid. The attestation is built from the
+    //    signature and no operator attestation to invalidate. Otherwise leave agef_version untouched
+    //    so every already-present statement stays valid. The attestation is built from the
     //    manifest's current agef_version either way, so it is self-consistent.
-    if contents
-        .manifest
-        .signatures
-        .as_ref()
-        .is_none_or(Vec::is_empty)
-    {
+    if manifest_unsigned_and_unattested(&contents.manifest) {
         contents.manifest.agef_version = AGEF_SPEC_VERSION.to_owned();
     }
 
@@ -274,30 +254,4 @@ pub fn run_bundle_attest(args: &BundleAttestArgs) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
-}
-
-/// JSON shape emitted when `attest` cannot complete (identical contract to the sibling commands).
-#[derive(Debug, Serialize, Deserialize)]
-struct BundleAttestError {
-    /// Producer tool name.
-    tool: String,
-    /// Akmon crate version that produced this error object.
-    akmon_version: String,
-    /// Human-readable error description.
-    error: String,
-    /// Stable error category for automation.
-    category: String,
-}
-
-fn print_attest_json_error(category: &str, error: String) -> std::io::Result<()> {
-    let body = BundleAttestError {
-        tool: "akmon".to_owned(),
-        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        error,
-        category: category.to_owned(),
-    };
-    let json =
-        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
-    println!("{json}");
-    Ok(())
 }

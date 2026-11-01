@@ -1,28 +1,34 @@
 //! Shared bundle-verification report shape and pass/fail policy.
 //!
 //! `akmon bundle verify` and `agef-verify` are two independent binaries that both decide whether
-//! a bundle is trustworthy, and their JSON/human output is what an auditor actually reads. Before
-//! this module existed, each binary carried its own copy of the report struct and the
+//! a bundle is trustworthy, and their JSON/human/Markdown output is what an auditor actually reads.
+//! Before this module existed, each binary carried its own copy of the report struct and the
 //! pass/fail policy (integrity + signature + operator-attestation + capture requirements); a fix
 //! to one copy could silently miss the other, so the same bundle could verify differently
 //! depending on which binary ran it. This module is the single implementation both binaries call
-//! into, so that cannot happen.
+//! into ([`VerifyPolicy::load`] + [`evaluate_bundle`]), so that cannot happen. Rendering lives in
+//! [`crate::render`].
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::archive::BundleContents;
-use crate::capture::OtelCaptureInfo;
+use crate::capture::{OtelCaptureInfo, otel_capture_info};
 use crate::error::BundleError;
+use crate::sanitize::sanitize_display;
 use crate::signing::{
     OperatorOutcome, OperatorVerificationReport, SignatureOutcome, SignatureVerificationReport,
-    parse_public_key_hex,
+    key_id, parse_public_key_hex, verify_manifest_signatures, verify_operator_attestations,
 };
-use crate::verify::BundleVerificationReport;
+use crate::verify::{BundleVerificationReport, verify_bundle};
+
+pub use crate::render::{capture_human_line, capture_human_suffix, print_operator_human_block};
 
 /// Machine-readable bundle verification result, shared by `akmon bundle verify`
 /// (`akmon bundle import --verify-only`) and `agef-verify`.
+///
+/// Fields after `capture` were added in v3.0.0; they are additive, so V1 consumers keep working.
 #[derive(Debug, Serialize)]
 pub struct BundleVerifyReportV1 {
     /// Verifier crate version.
@@ -40,6 +46,9 @@ pub struct BundleVerifyReportV1 {
     /// Holistic verdict: integrity clean, no invalid signatures, no invalid operator
     /// attestations, and (with the relevant `--require-*` flags) at least one signature and/or
     /// operator attestation verified, and any `--require-capture` satisfied.
+    ///
+    /// Without `--require-signature`, `passed == true` means INTEGRITY ONLY: read
+    /// [`Self::signature_verified`] to learn whether a trusted key authenticated the head.
     pub passed: bool,
     /// Collected integrity violations (empty when structurally clean).
     pub violations: Vec<ReportViolation>,
@@ -55,6 +64,49 @@ pub struct BundleVerifyReportV1 {
     /// only (the source telemetry did not capture message content).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureField>,
+    /// `true` when the AGEF integrity checks (hash chain, objects, head, counts) found nothing.
+    pub integrity_ok: bool,
+    /// `true` ONLY when at least one head signature verified against a trusted `--verify-key`.
+    pub signature_verified: bool,
+    /// `true` ONLY when at least one operator attestation verified against a trusted operator key.
+    /// The operator identity strings stay self-asserted; it is the KEY that is verified.
+    pub operator_key_verified: bool,
+    /// Manifest hash algorithm (`sha256` or `blake3`).
+    pub hash_algorithm: String,
+    /// Manifest session head (the digest every signature and attestation covers).
+    pub head: String,
+    /// First and last event timestamps (inside the hash chain, as recorded by the producer).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_window: Option<SessionWindow>,
+    /// Manifest metadata that NO signature covers: anyone holding the file can edit it.
+    pub unsigned_metadata: UnsignedMetadata,
+    /// Non-fatal findings (for example manifest timestamps that disagree with the events).
+    pub warnings: Vec<ReportViolation>,
+}
+
+/// First/last event timestamps, RFC 3339 UTC. These come from the events themselves, so they are
+/// covered by integrity (and by any signature over the head) — but they are the producer's own
+/// clock readings, not a trusted timestamp.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionWindow {
+    /// `emitted_at` of the first event.
+    pub first_event_at: String,
+    /// `emitted_at` of the last event.
+    pub last_event_at: String,
+}
+
+/// Manifest fields that are not part of any signed statement (AGEF-SIG-v1 covers only
+/// `agef_version`, `hash_algorithm`, `session_id`, and `head`).
+#[derive(Debug, Clone, Serialize)]
+pub struct UnsignedMetadata {
+    /// `manifest.session.created_at`.
+    pub created_at: String,
+    /// `manifest.session.ended_at`.
+    pub ended_at: String,
+    /// `manifest.producer.name`.
+    pub producer_name: String,
+    /// `manifest.producer.version`.
+    pub producer_version: String,
 }
 
 /// OTEL-import capture metadata for JSON output (F1).
@@ -164,32 +216,32 @@ pub fn operator_reports(report: &OperatorVerificationReport) -> Vec<OperatorRepo
         .collect()
 }
 
-/// Escapes control characters (anything below `0x20`, plus `0x7f`) in a self-asserted,
-/// attacker-controlled operator identity field before printing it in the human report (O8).
-/// Without this a crafted `operator_id` containing a newline or terminal escape could spoof the
-/// surrounding report lines. Renders such bytes as `\xNN` so the value stays on one visible line.
+/// Escapes an attacker-controlled manifest string for terminal display (O8). Kept for API
+/// compatibility; delegates to the one shared escaper, [`sanitize_display`].
 #[must_use]
 pub fn sanitize_operator_field(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if (ch as u32) < 0x20 || ch == '\u{7f}' {
-            out.push_str(&format!("\\x{:02x}", ch as u32));
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    sanitize_display(value)
+}
+
+/// Loads a trusted public key (hex file -> raw 32 bytes). `flag` names the CLI flag in errors.
+fn load_public_key_file(key_path: &Path, flag: &str) -> Result<Vec<u8>, String> {
+    std::fs::read_to_string(key_path)
+        .map_err(|err| format!("cannot read {flag} {}: {err}", key_path.display()))
+        .and_then(|hex_str| {
+            parse_public_key_hex(&hex_str)
+                .map_err(|err| format!("{flag} {}: {err}", key_path.display()))
+        })
+}
+
+/// Loads a trusted signer public key (hex file -> raw 32 bytes) for `--verify-key`.
+pub fn load_verify_key(key_path: &Path) -> Result<Vec<u8>, String> {
+    load_public_key_file(key_path, "--verify-key")
 }
 
 /// Loads a trusted operator public key (hex file -> raw 32 bytes) for `--operator-key` /
 /// `--require-operator-key`. Mirrors the `--verify-key` loader's error contract.
 pub fn load_operator_key(key_path: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read_to_string(key_path)
-        .map_err(|err| format!("cannot read --operator-key {}: {err}", key_path.display()))
-        .and_then(|hex_str| {
-            parse_public_key_hex(&hex_str)
-                .map_err(|err| format!("--operator-key {}: {err}", key_path.display()))
-        })
+    load_public_key_file(key_path, "--operator-key")
 }
 
 /// Computes whether the operator-attestation requirements are satisfied (decision D-20).
@@ -241,7 +293,8 @@ pub fn bundle_read_error_category(err: &BundleError) -> &'static str {
     }
 }
 
-/// Exit code for a [`BundleError`] encountered while reading a bundle.
+/// Exit code for a [`BundleError`] encountered while reading a bundle: 3 for an I/O failure, 1 for
+/// everything else (a malformed, corrupt, truncated, or oversized archive is a failed verification).
 #[must_use]
 pub fn bundle_read_exit_code(err: &BundleError) -> u8 {
     match err {
@@ -250,7 +303,52 @@ pub fn bundle_read_exit_code(err: &BundleError) -> u8 {
     }
 }
 
-/// One bundle verification violation for JSON output.
+/// One shared JSON error shape for every bundle command and both verifier binaries (TC-13).
+///
+/// Emitted on stdout whenever a command cannot produce its normal report (unreadable file,
+/// malformed archive, bad key, refused operation). `passed` is always `false`, so a consumer can
+/// read one field on every path, success report or error.
+#[derive(Debug, Serialize)]
+pub struct ToolErrorV1 {
+    /// Producer tool name (`akmon` or `agef-verify`).
+    pub tool: String,
+    /// Producer crate version.
+    pub akmon_version: String,
+    /// Always `false`.
+    pub passed: bool,
+    /// Human-readable error description.
+    pub error: String,
+    /// Stable error category for automation.
+    pub category: String,
+    /// Target session UUID when `category` is `session_id_collision` (import only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colliding_session_id: Option<String>,
+}
+
+impl ToolErrorV1 {
+    /// Builds an error body for `tool` with the given category and message.
+    #[must_use]
+    pub fn new(tool: &str, category: &str, error: String) -> Self {
+        Self {
+            tool: tool.to_owned(),
+            akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
+            passed: false,
+            error,
+            category: category.to_owned(),
+            colliding_session_id: None,
+        }
+    }
+
+    /// Prints the error as pretty JSON on stdout (best effort; serialization cannot fail for this
+    /// plain-string shape, and a failure is silently dropped rather than panicking).
+    pub fn print_json(&self) {
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            println!("{json}");
+        }
+    }
+}
+
+/// One bundle verification violation (or warning) for JSON output.
 #[derive(Debug, Serialize)]
 pub struct ReportViolation {
     /// Stable category identifier.
@@ -281,6 +379,12 @@ pub fn report_violations(report: &BundleVerificationReport) -> Vec<ReportViolati
 /// Category string used for the synthetic violation emitted when `--require-capture full` fails.
 pub const CAPTURE_REQUIREMENT_CATEGORY: &str = "capture_requirement_unmet";
 
+/// Warning category: `manifest.session.created_at` disagrees with the first event timestamp.
+pub const CREATED_AT_MISMATCH_CATEGORY: &str = "manifest_created_at_mismatch";
+
+/// Warning category: `manifest.session.ended_at` disagrees with the last event timestamp.
+pub const ENDED_AT_MISMATCH_CATEGORY: &str = "manifest_ended_at_mismatch";
+
 /// Whether an OTEL import satisfies `--require-capture full`.
 ///
 /// Native bundles (`capture == None`) are full-fidelity and always pass. An OTEL import passes
@@ -299,35 +403,7 @@ pub fn capture_requirement_unmet(
         Some(info) if info.capture_level == "full" => None,
         Some(info) => Some(format!(
             "--require-capture full: session capture level is '{}', not 'full' (metadata-only OTEL import; source telemetry did not capture message content)",
-            info.capture_level
-        )),
-    }
-}
-
-/// Short suffix appended to the success headline so a structural import never reads as a bare
-/// "verified bundle". Native bundles (`None`) and full OTEL imports add nothing.
-#[must_use]
-pub fn capture_human_suffix(capture: Option<&CaptureField>) -> String {
-    match capture {
-        Some(c) if c.level == "structural" => " — capture: STRUCTURAL (metadata only)".to_owned(),
-        _ => String::new(),
-    }
-}
-
-/// Prominent capture line for the human report body, or `None` for native (non-OTEL) bundles.
-#[must_use]
-pub fn capture_human_line(capture: Option<&CaptureField>) -> Option<String> {
-    let c = capture?;
-    match c.level.as_str() {
-        "structural" => Some(format!(
-            "capture: STRUCTURAL (metadata only — message content was NOT captured by the source telemetry; source semconv {})",
-            c.source_semconv
-        )),
-        "full" => Some("capture: FULL (OTEL import; message content captured)".to_owned()),
-        other => Some(format!(
-            "capture: {} (OTEL import; source semconv {})",
-            other.to_uppercase(),
-            c.source_semconv
+            sanitize_display(&info.capture_level)
         )),
     }
 }
@@ -363,11 +439,65 @@ pub fn compute_passed_and_violations(
     (passed, violations)
 }
 
+/// Formats an event timestamp as RFC 3339 UTC (whole seconds, as stored on the wire).
+fn rfc3339(ts: time::OffsetDateTime) -> String {
+    ts.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| ts.unix_timestamp().to_string())
+}
+
+/// Compares the manifest's (unsigned) session time window with the first/last event timestamps at
+/// second precision. Disagreement is a WARNING, never a failure: the manifest fields are not
+/// signed, and the authoritative times are the event timestamps inside the hash chain.
+#[must_use]
+pub fn metadata_warnings(contents: &BundleContents) -> Vec<ReportViolation> {
+    let (Some(first), Some(last)) = (contents.events.first(), contents.events.last()) else {
+        return Vec::new();
+    };
+    let session = &contents.manifest.session;
+    let checks = [
+        (
+            CREATED_AT_MISMATCH_CATEGORY,
+            "created_at",
+            &session.created_at,
+            "first",
+            first.emitted_at,
+        ),
+        (
+            ENDED_AT_MISMATCH_CATEGORY,
+            "ended_at",
+            &session.ended_at,
+            "last",
+            last.emitted_at,
+        ),
+    ];
+    let mut warnings = Vec::new();
+    for (category, field, declared, which, event_ts) in checks {
+        let parsed =
+            time::OffsetDateTime::parse(declared, &time::format_description::well_known::Rfc3339);
+        let agrees = parsed.is_ok_and(|ts| ts.unix_timestamp() == event_ts.unix_timestamp());
+        if !agrees {
+            warnings.push(ReportViolation {
+                category: category.to_owned(),
+                event_hash: None,
+                object_hash: None,
+                message: format!(
+                    "unsigned manifest session.{field} ({}) disagrees with the {which} event timestamp ({}); the event timestamp is the one covered by integrity",
+                    sanitize_display(declared),
+                    rfc3339(event_ts)
+                ),
+            });
+        }
+    }
+    warnings
+}
+
 /// Assembles the final [`BundleVerifyReportV1`] from already-computed pieces.
 ///
 /// Takes `passed`/`violations`/`signatures`/`operators` as inputs (rather than computing them)
 /// so callers that skip straight to a failure report (for example an import-time integrity
 /// failure, with no signature or operator checks run) can still produce a well-formed report.
+/// The derived flags (`integrity_ok`, `signature_verified`, `operator_key_verified`) are computed
+/// from those inputs so they can never disagree with the detailed lists.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn build_verify_report(
@@ -379,11 +509,24 @@ pub fn build_verify_report(
     operators: Vec<OperatorReport>,
     capture: Option<&OtelCaptureInfo>,
 ) -> BundleVerifyReportV1 {
+    let manifest = &contents.manifest;
+    let integrity_ok = violations
+        .iter()
+        .all(|v| v.category == CAPTURE_REQUIREMENT_CATEGORY);
+    let signature_verified = signatures.iter().any(|s| s.outcome == "verified");
+    let operator_key_verified = operators.iter().any(|o| o.operator_key_verified);
+    let session_window = match (contents.events.first(), contents.events.last()) {
+        (Some(first), Some(last)) => Some(SessionWindow {
+            first_event_at: rfc3339(first.emitted_at),
+            last_event_at: rfc3339(last.emitted_at),
+        }),
+        _ => None,
+    };
     BundleVerifyReportV1 {
         akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        agef_version: contents.manifest.agef_version.clone(),
+        agef_version: manifest.agef_version.clone(),
         bundle_path: bundle_path_display,
-        session_id: contents.manifest.session.id.clone(),
+        session_id: manifest.session.id.clone(),
         events_in_bundle: contents.events.len() as u64,
         objects_in_bundle: contents.objects.len() as u64,
         passed,
@@ -394,41 +537,129 @@ pub fn build_verify_report(
             level: info.capture_level.clone(),
             source_semconv: info.source_semconv.clone(),
         }),
+        integrity_ok,
+        signature_verified,
+        operator_key_verified,
+        hash_algorithm: manifest.hash_algorithm.clone(),
+        head: manifest.session.head.clone(),
+        session_window,
+        unsigned_metadata: UnsignedMetadata {
+            created_at: manifest.session.created_at.clone(),
+            ended_at: manifest.session.ended_at.clone(),
+            producer_name: manifest.producer.name.clone(),
+            producer_version: manifest.producer.version.clone(),
+        },
+        warnings: metadata_warnings(contents),
     }
 }
 
-/// Emits the human-readable operator-attestation block (decision D-20, honesty contract O8).
-///
-/// "verified" attaches to the KEY, never the self-asserted identity string. Self-asserted fields
-/// are attacker-controlled and are sanitized ([`sanitize_operator_field`]) before printing so they
-/// cannot spoof the surrounding report. Each line is written via `emit` so both `akmon` and
-/// `agef-verify` can share the same wording and route it to their own output stream.
-pub fn print_operator_human_block(operators: &[OperatorReport], mut emit: impl FnMut(String)) {
-    if operators.is_empty() {
-        emit("operator: none (unattributed)".to_owned());
-        return;
-    }
-    emit("operators:".to_owned());
-    for op in operators {
-        let oid = sanitize_operator_field(&op.operator_id);
-        let role = sanitize_operator_field(&op.role);
-        let org = sanitize_operator_field(&op.org);
-        let key_id = &op.key_id;
-        let scheme = &op.scheme;
-        let line = match op.outcome.as_str() {
-            "verified" => format!(
-                "  - verified by operator key key_id={key_id} -- self-asserted operator_id=\"{oid}\" role=\"{role}\" org=\"{org}\""
-            ),
-            "unverified_no_key" => format!(
-                "  - present but UNVERIFIED (no trusted operator key) -- self-asserted operator_id=\"{oid}\" (do not trust this name)"
-            ),
-            "invalid" => format!(
-                "  - INVALID signature for trusted operator key key_id={key_id} (tampered identity/head or corrupt signature; HARD FAIL)"
-            ),
-            other => format!(
-                "  - {other} [{scheme}] key_id={key_id} -- self-asserted operator_id=\"{oid}\" (do not trust this name)"
-            ),
+/// Trusted keys and `--require-*` requirements for one verification run, shared by both binaries.
+#[derive(Debug, Clone, Default)]
+pub struct VerifyPolicy {
+    /// Trusted signer public keys (raw 32-byte Ed25519) from `--verify-key`.
+    pub trusted_keys: Vec<Vec<u8>>,
+    /// `--require-signature`.
+    pub require_signature: bool,
+    /// Trusted operator keys: the union of `--operator-key` and `--require-operator-key`.
+    pub operator_trusted_keys: Vec<Vec<u8>>,
+    /// `--require-operator`.
+    pub require_operator: bool,
+    /// `key_id`s from `--require-operator-key` that MUST have a verified attestation.
+    pub required_operator_key_ids: Vec<String>,
+    /// `--require-capture full`.
+    pub require_capture_full: bool,
+}
+
+/// A key file that could not be loaded while building a [`VerifyPolicy`].
+#[derive(Debug, Clone)]
+pub struct PolicyKeyError {
+    /// Stable category: `verify_key_error` or `operator_key_error`.
+    pub category: &'static str,
+    /// Human-readable description.
+    pub message: String,
+}
+
+impl VerifyPolicy {
+    /// Loads every key file named on the command line and records the requirements.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first key file that cannot be read or parsed, with its stable category.
+    pub fn load(
+        verify_keys: &[PathBuf],
+        require_signature: bool,
+        operator_keys: &[PathBuf],
+        require_operator: bool,
+        require_operator_keys: &[PathBuf],
+        require_capture_full: bool,
+    ) -> Result<Self, PolicyKeyError> {
+        let verify_err = |message| PolicyKeyError {
+            category: "verify_key_error",
+            message,
         };
-        emit(line);
+        let operator_err = |message| PolicyKeyError {
+            category: "operator_key_error",
+            message,
+        };
+        let mut policy = Self {
+            require_signature,
+            require_operator,
+            require_capture_full,
+            ..Self::default()
+        };
+        for path in verify_keys {
+            policy
+                .trusted_keys
+                .push(load_verify_key(path).map_err(verify_err)?);
+        }
+        for path in operator_keys {
+            policy
+                .operator_trusted_keys
+                .push(load_operator_key(path).map_err(operator_err)?);
+        }
+        // Each --require-operator-key is ALSO trusted for verification, and its key_id is recorded
+        // so we can demand that THAT specific key produced a verified attestation.
+        for path in require_operator_keys {
+            let key = load_operator_key(path).map_err(operator_err)?;
+            policy.required_operator_key_ids.push(key_id(&key));
+            policy.operator_trusted_keys.push(key);
+        }
+        Ok(policy)
     }
+}
+
+/// Runs integrity, signature, operator-attestation, and capture checks on a parsed bundle and
+/// returns the complete report. This is the whole verification decision, shared by both binaries.
+#[must_use]
+pub fn evaluate_bundle(
+    bundle_path_display: String,
+    contents: &BundleContents,
+    policy: &VerifyPolicy,
+) -> BundleVerifyReportV1 {
+    let verification = verify_bundle(contents);
+    let sig_report = verify_manifest_signatures(&contents.manifest, &policy.trusted_keys);
+    let op_report = verify_operator_attestations(&contents.manifest, &policy.operator_trusted_keys);
+    let operator_ok = operator_requirements_ok(
+        &op_report,
+        policy.require_operator,
+        &policy.required_operator_key_ids,
+    );
+    let capture = otel_capture_info(contents);
+    let (passed, violations) = compute_passed_and_violations(
+        &verification,
+        &sig_report,
+        policy.require_signature,
+        operator_ok,
+        capture.as_ref(),
+        policy.require_capture_full,
+    );
+    build_verify_report(
+        bundle_path_display,
+        contents,
+        passed,
+        violations,
+        signature_reports(&sig_report),
+        operator_reports(&op_report),
+        capture.as_ref(),
+    )
 }

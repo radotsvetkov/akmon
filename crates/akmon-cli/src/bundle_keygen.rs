@@ -237,28 +237,8 @@ fn write_public_key_file(
     file.flush()
 }
 
-/// JSON shape emitted when `keygen` cannot complete (identical contract to the sibling commands).
-#[derive(Debug, Serialize, Deserialize)]
-struct KeygenError {
-    /// Producer tool name.
-    tool: String,
-    /// Akmon crate version that produced this error object.
-    akmon_version: String,
-    /// Human-readable error description.
-    error: String,
-    /// Stable error category for automation.
-    category: String,
-}
-
+/// Emits the shared `ToolErrorV1` JSON error shape (identical contract to the sibling commands).
 fn print_keygen_json_error(category: &str, error: String) -> std::io::Result<()> {
-    let body = KeygenError {
-        tool: "akmon".to_owned(),
-        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        error,
-        category: category.to_owned(),
-    };
-    let json =
-        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
-    println!("{json}");
+    akmon_bundle::report::ToolErrorV1::new("akmon", category, error).print_json();
     Ok(())
 }

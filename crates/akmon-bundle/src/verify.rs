@@ -11,6 +11,10 @@
 //! - the first event is `SessionStart` with no parents,
 //! - each later event links to exactly the prior event's content hash,
 //! - every object referenced by an event is present in the bundle,
+//! - every object in the bundle is referenced by some event (no unreferenced content can ride
+//!   along inside a verified, signed bundle — neither `bundle export` nor `redact` ever emits one),
+//! - `ProviderCall` events satisfy the journal's write-time invariants (at least one attempt,
+//!   1-indexed contiguous `attempt_number`, non-decreasing `started_at`),
 //! - there is exactly one terminal `SessionEnd`,
 //! - the manifest `session.head` equals the terminal event's content hash, and
 //! - the manifest `object_count` / `event_count` match the bundle contents.
@@ -30,6 +34,7 @@
 use crate::archive::{BundleContents, parse_algorithm};
 use crate::error::BundleError;
 use akmon_journal::{EventKind, Hash, digest_bytes, referenced_object_hashes_for_kind};
+use std::collections::HashSet;
 
 /// A single integrity violation found while verifying a parsed bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +111,19 @@ pub enum BundleViolation {
         /// Content hash of the terminal event.
         terminal: Hash,
     },
+    /// An object is present in `objects/` but no event references it. Such content is not
+    /// committed to by the head, so it must not ride along inside a verified bundle.
+    UnreferencedObject {
+        /// The unreferenced object's key.
+        object_hash: Hash,
+    },
+    /// An event violates a structural invariant the journal enforces at write time.
+    EventInvariant {
+        /// Zero-based position in the event stream.
+        position: usize,
+        /// Human-readable explanation.
+        detail: String,
+    },
 }
 
 impl BundleViolation {
@@ -129,6 +147,8 @@ impl BundleViolation {
             Self::SessionEndNotTerminal => "session_end_not_terminal",
             Self::InvalidManifestHead { .. } => "invalid_manifest_head",
             Self::HeadMismatch { .. } => "head_mismatch",
+            Self::UnreferencedObject { .. } => "unreferenced_object",
+            Self::EventInvariant { .. } => "event_invariant",
         }
     }
 
@@ -149,7 +169,8 @@ impl BundleViolation {
     pub fn object_hash_hex(&self) -> Option<String> {
         match self {
             Self::ObjectKeyHashMismatch { object_hash }
-            | Self::MissingObject { object_hash, .. } => Some(object_hash.to_hex()),
+            | Self::MissingObject { object_hash, .. }
+            | Self::UnreferencedObject { object_hash } => Some(object_hash.to_hex()),
             _ => None,
         }
     }
@@ -202,6 +223,13 @@ impl BundleViolation {
                 declared.to_hex(),
                 terminal.to_hex()
             ),
+            Self::UnreferencedObject { object_hash } => format!(
+                "object {} is present in objects/ but no event references it (not committed to by the head)",
+                object_hash.to_hex()
+            ),
+            Self::EventInvariant { position, detail } => {
+                format!("event at position {position}: {detail}")
+            }
         }
     }
 }
@@ -281,6 +309,7 @@ pub fn verify_bundle(contents: &BundleContents) -> BundleVerificationReport {
         return report;
     }
 
+    let mut referenced: HashSet<Hash> = HashSet::new();
     let mut session_end_count = 0_usize;
     let mut last_session_end_position: Option<usize> = None;
     // Content hash of the previous event; `None` after a non-hashable event so a
@@ -333,8 +362,16 @@ pub fn verify_bundle(contents: &BundleContents) -> BundleVerificationReport {
             });
         }
 
+        if let Some(detail) = event_invariant_violation(&event.kind) {
+            report.violations.push(BundleViolation::EventInvariant {
+                position: idx,
+                detail,
+            });
+        }
+
         for object_hash in referenced_object_hashes_for_kind(&event.kind) {
             report.object_references_checked += 1;
+            referenced.insert(object_hash.clone());
             if !contents.objects.contains_key(&object_hash) {
                 report.violations.push(BundleViolation::MissingObject {
                     object_hash,
@@ -344,6 +381,19 @@ pub fn verify_bundle(contents: &BundleContents) -> BundleVerificationReport {
         }
 
         prev_hash = Some(content_hash);
+    }
+
+    // Every object must be committed to by some event. Sorted for a deterministic report.
+    let mut unreferenced: Vec<&Hash> = contents
+        .objects
+        .keys()
+        .filter(|hash| !referenced.contains(*hash))
+        .collect();
+    unreferenced.sort_by_key(|hash| hash.to_hex());
+    for object_hash in unreferenced {
+        report.violations.push(BundleViolation::UnreferencedObject {
+            object_hash: object_hash.clone(),
+        });
     }
 
     match session_end_count {
@@ -382,6 +432,34 @@ pub fn verify_bundle(contents: &BundleContents) -> BundleVerificationReport {
     report
 }
 
+/// Re-checks the write-time `ProviderCall` invariants the journal enforces on append, so a
+/// hand-built bundle cannot carry an event the journal itself would have refused. Independent
+/// re-implementation by design (see module docs).
+fn event_invariant_violation(kind: &EventKind) -> Option<String> {
+    let EventKind::ProviderCall { attempts, .. } = kind else {
+        return None;
+    };
+    if attempts.is_empty() {
+        return Some("ProviderCall attempts must contain at least one attempt".to_owned());
+    }
+    let mut prev_started = None;
+    for (idx, attempt) in attempts.iter().enumerate() {
+        let expected = u32::try_from(idx).ok().and_then(|i| i.checked_add(1));
+        if Some(attempt.attempt_number) != expected {
+            return Some(format!(
+                "ProviderCall attempts must be 1-indexed and contiguous: expected {}, found {}",
+                idx + 1,
+                attempt.attempt_number
+            ));
+        }
+        if prev_started.is_some_and(|prev| attempt.started_at < prev) {
+            return Some("ProviderCall attempt started_at must be non-decreasing".to_owned());
+        }
+        prev_started = Some(attempt.started_at);
+    }
+    None
+}
+
 /// Verifies a parsed bundle and returns an error on the first violation.
 ///
 /// Integrity violations map onto the dedicated [`BundleError`] variants
@@ -403,6 +481,9 @@ fn violation_to_error(violation: &BundleViolation) -> BundleError {
         }
         BundleViolation::MissingObject { object_hash, .. } => {
             BundleError::MissingObject(object_hash.to_hex())
+        }
+        BundleViolation::UnreferencedObject { object_hash } => {
+            BundleError::InvalidArchive(format!("unreferenced_object: {}", object_hash.to_hex()))
         }
         BundleViolation::HeadMismatch { declared, terminal } => BundleError::HeadMismatch {
             expected: declared.to_hex(),
@@ -429,7 +510,9 @@ mod tests {
         ReadBundleOptions, WriteBundleOptions, read_verified_bundle, write_bundle,
     };
     use crate::manifest::{Manifest, Producer, SessionMetadata};
-    use akmon_journal::{AGEF_SPEC_VERSION, Event, EventKind, HashAlgorithm};
+    use akmon_journal::{
+        AGEF_SPEC_VERSION, AttemptRecord, AttemptStatus, Event, EventKind, HashAlgorithm,
+    };
     use std::collections::{BTreeMap, HashMap};
     use std::io::Cursor;
 
@@ -735,5 +818,98 @@ mod tests {
         let parsed = read_verified_bundle(Cursor::new(out), &ReadBundleOptions::default())
             .expect("verified read");
         assert_eq!(parsed.events.len(), 2);
+    }
+
+    #[test]
+    fn t_unreferenced_object_detected() {
+        let mut contents = valid_bundle();
+        // A self-consistent extra object (bytes hash to their key) that no event references.
+        let (extra_hash, extra_bytes) = object(0x77);
+        contents.objects.insert(extra_hash.clone(), extra_bytes);
+        contents.manifest.object_count = contents.objects.len() as u64;
+
+        let report = verify_bundle(&contents);
+        assert_eq!(categories(&report), vec!["unreferenced_object"]);
+        assert_eq!(
+            report.violations[0].object_hash_hex(),
+            Some(extra_hash.to_hex())
+        );
+        assert!(verify_bundle_strict(&contents).is_err());
+    }
+
+    /// Builds start -> ProviderCall(attempts) -> end with correct links and head.
+    fn bundle_with_provider_call(attempts: Vec<AttemptRecord>) -> BundleContents {
+        let mut contents = valid_bundle();
+        let start_hash = contents.events[0].content_hash(algo()).expect("hash");
+        let (req_hash, req_bytes) = object(0x55);
+        contents.objects.insert(req_hash.clone(), req_bytes);
+        let attempts = attempts
+            .into_iter()
+            .map(|mut a| {
+                a.request_hash = req_hash.clone();
+                a
+            })
+            .collect();
+        let call = Event {
+            parents: vec![start_hash],
+            kind: EventKind::ProviderCall {
+                provider_id: "p".to_owned(),
+                attempts,
+                stream_hash: None,
+            },
+            emitted_at: ts(1_700_000_000),
+            sequence: 1,
+        };
+        let call_hash = call.content_hash(algo()).expect("hash");
+        let end = Event {
+            parents: vec![call_hash],
+            kind: EventKind::SessionEnd { summary_hash: None },
+            emitted_at: ts(1_700_000_001),
+            sequence: 2,
+        };
+        let end_hash = end.content_hash(algo()).expect("hash");
+        contents.events = vec![contents.events[0].clone(), call, end];
+        contents.manifest.event_count = 3;
+        contents.manifest.object_count = contents.objects.len() as u64;
+        contents.manifest.session.head = end_hash.to_hex();
+        contents
+    }
+
+    fn attempt(number: u32, started: i64) -> AttemptRecord {
+        AttemptRecord {
+            attempt_number: number,
+            started_at: ts(started),
+            ended_at: ts(started + 1),
+            status: AttemptStatus::Success,
+            request_hash: Hash::from_bytes(algo(), [0; 32]),
+            response_hash: None,
+            stream_hash: None,
+            error_message: None,
+        }
+    }
+
+    #[test]
+    fn t_provider_call_invariants_ok() {
+        let contents = bundle_with_provider_call(vec![attempt(1, 10), attempt(2, 20)]);
+        let report = verify_bundle(&contents);
+        assert!(report.is_clean(), "violations: {:?}", report.violations);
+    }
+
+    #[test]
+    fn t_provider_call_empty_attempts_detected() {
+        let contents = bundle_with_provider_call(vec![]);
+        assert!(categories(&verify_bundle(&contents)).contains(&"event_invariant"));
+    }
+
+    #[test]
+    fn t_provider_call_non_contiguous_attempts_detected() {
+        let contents = bundle_with_provider_call(vec![attempt(1, 10), attempt(3, 20)]);
+        assert!(categories(&verify_bundle(&contents)).contains(&"event_invariant"));
+    }
+
+    #[test]
+    fn t_provider_call_decreasing_started_at_detected() {
+        let contents = bundle_with_provider_call(vec![attempt(1, 20), attempt(2, 10)]);
+        assert!(categories(&verify_bundle(&contents)).contains(&"event_invariant"));
     }
 }

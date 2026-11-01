@@ -69,7 +69,7 @@ pub enum BundleError {
     /// gigabytes and exhausts memory on the machine reading it (for example an auditor
     /// running `agef-verify`). Raise the limit deliberately for legitimately large bundles.
     #[error(
-        "bundle decompressed size exceeds the {0}-byte safety limit (possible decompression bomb)"
+        "bundle decompressed size exceeds the {0}-byte safety limit (possible decompression bomb); for a legitimately large bundle raise it with --max-decoded-bytes"
     )]
     BundleTooLarge(u64),
 }

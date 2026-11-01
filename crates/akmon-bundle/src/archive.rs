@@ -5,7 +5,7 @@ use crate::events::{EventsReader, EventsWriter};
 use crate::manifest::Manifest;
 use crate::objects::object_filename;
 use akmon_journal::{AGEF_SPEC_VERSION, Event, Hash, HashAlgorithm};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Cursor, Read, Write};
 use std::path::PathBuf;
 
@@ -68,11 +68,12 @@ pub fn write_bundle<W: Write>(
     options: &WriteBundleOptions,
 ) -> Result<(), BundleError> {
     let manifest_bytes = manifest.to_canonical_json_bytes()?;
-    let algorithm = parse_algorithm(&manifest.hash_algorithm)?;
+    // Validate the declared algorithm up front so an unsupported manifest is never written.
+    parse_algorithm(&manifest.hash_algorithm)?;
 
     let mut events_bytes = Vec::new();
     {
-        let mut ew = EventsWriter::with_hash_algorithm(&mut events_bytes, algorithm);
+        let mut ew = EventsWriter::new(&mut events_bytes);
         for event in events {
             ew.write_event(event)?;
         }
@@ -92,11 +93,6 @@ pub fn write_bundle<W: Write>(
     }
     for (_, (hash, bytes)) in sorted {
         let path = format!("objects/{}", object_filename(hash));
-        // TODO(byte-identical-bundles): Normalize mtime to a fixed value
-        // (for example UNIX_EPOCH) to make tar bytes deterministic across
-        // producers. v2.0.0 requires semantic round-trip equivalence only
-        // (F6); byte-identical bundles would require this plus pinned zstd
-        // settings.
         append_bytes(&mut builder, &path, bytes)?;
     }
     builder
@@ -106,6 +102,14 @@ pub fn write_bundle<W: Write>(
 }
 
 /// Reads one AGEF bundle from `tar.zst`.
+///
+/// The archive must be unambiguous: a second `manifest.json`, `events.bin`, or `objects/<hex>`
+/// entry is rejected (different tar tools would otherwise show an auditor different content), and
+/// object file names must be exactly 64 lowercase hex characters. In strict mode
+/// (`allow_extra_files == false`) every entry must be a regular file, except a single directory
+/// entry named exactly `objects/`; symlinks, hard links, devices, and other entry types are
+/// rejected. The total decompressed size is capped at [`DEFAULT_MAX_BUNDLE_DECODED_BYTES`]; use
+/// [`read_bundle_limited`] to choose a different cap.
 pub fn read_bundle<R: Read>(
     reader: R,
     options: &ReadBundleOptions,
@@ -113,12 +117,10 @@ pub fn read_bundle<R: Read>(
     read_bundle_limited(reader, options, DEFAULT_MAX_BUNDLE_DECODED_BYTES)
 }
 
-/// Like [`read_bundle`], but with an explicit cap on total decompressed bytes.
-///
-/// The public entry point always enforces [`DEFAULT_MAX_BUNDLE_DECODED_BYTES`]; this inner
-/// form exists so the decompression-bomb guard can be exercised in tests with a tiny cap
-/// instead of allocating gigabytes.
-fn read_bundle_limited<R: Read>(
+/// Like [`read_bundle`], but with an explicit cap on the total decompressed size in bytes (the
+/// decompression-bomb guard). Exposed so a verifier can let an operator raise the cap deliberately
+/// for a legitimately large session (`--max-decoded-bytes`).
+pub fn read_bundle_limited<R: Read>(
     reader: R,
     options: &ReadBundleOptions,
     max_decoded_bytes: u64,
@@ -131,6 +133,7 @@ fn read_bundle_limited<R: Read>(
     let mut manifest_bytes: Option<Vec<u8>> = None;
     let mut events_bytes: Option<Vec<u8>> = None;
     let mut objects_raw: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut seen_object_names: HashSet<String> = HashSet::new();
 
     let entries = archive
         .entries()
@@ -138,27 +141,50 @@ fn read_bundle_limited<R: Read>(
     for entry in entries {
         let mut entry = entry
             .map_err(|err| archive_read_error(err, max_decoded_bytes, "tar entry read failed"))?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
+        let entry_type = entry.header().entry_type();
         let path = entry
             .path()
             .map_err(|err| BundleError::InvalidArchive(format!("invalid tar path: {err}")))?
             .to_path_buf();
         let path_str = path_to_unix(path);
+        if !entry_type.is_file() {
+            if options.allow_extra_files || (entry_type.is_dir() && path_str == "objects/") {
+                continue;
+            }
+            return Err(BundleError::UnknownBundleFile(format!(
+                "{path_str} (non-regular tar entry type {entry_type:?})"
+            )));
+        }
         let mut bytes = Vec::new();
         entry
             .read_to_end(&mut bytes)
             .map_err(|err| archive_read_error(err, max_decoded_bytes, "tar entry payload"))?;
 
         match path_str.as_str() {
-            "manifest.json" => manifest_bytes = Some(bytes),
-            "events.bin" => events_bytes = Some(bytes),
+            "manifest.json" => {
+                if manifest_bytes.replace(bytes).is_some() {
+                    return Err(BundleError::InvalidArchive(
+                        "duplicate manifest.json entry".to_owned(),
+                    ));
+                }
+            }
+            "events.bin" => {
+                if events_bytes.replace(bytes).is_some() {
+                    return Err(BundleError::InvalidArchive(
+                        "duplicate events.bin entry".to_owned(),
+                    ));
+                }
+            }
             _ if path_str.starts_with("objects/") => {
                 let name = path_str.trim_start_matches("objects/").to_owned();
                 if name.contains('/') || name.is_empty() {
                     return Err(BundleError::InvalidArchive(format!(
                         "invalid object entry path: {path_str}"
+                    )));
+                }
+                if !seen_object_names.insert(name.clone()) {
+                    return Err(BundleError::InvalidArchive(format!(
+                        "duplicate object entry: {path_str}"
                     )));
                 }
                 objects_raw.push((name, bytes));
@@ -192,9 +218,14 @@ fn read_bundle_limited<R: Read>(
 
     let mut objects = HashMap::new();
     for (name, bytes) in objects_raw {
-        if name.len() != 64 || !name.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+        if name.len() != 64
+            || !name
+                .as_bytes()
+                .iter()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+        {
             return Err(BundleError::InvalidArchive(format!(
-                "invalid object filename: {name}"
+                "invalid object filename (must be 64 lowercase hex characters): {name}"
             )));
         }
         let mut digest = [0_u8; 32];
@@ -246,7 +277,12 @@ fn path_to_unix(path: PathBuf) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-pub(crate) fn parse_algorithm(value: &str) -> Result<HashAlgorithm, BundleError> {
+/// Maps a manifest `hash_algorithm` string to a [`HashAlgorithm`].
+///
+/// # Errors
+///
+/// Returns [`BundleError::UnsupportedHashAlgorithm`] for anything other than `sha256`/`blake3`.
+pub fn parse_algorithm(value: &str) -> Result<HashAlgorithm, BundleError> {
     match value {
         "sha256" => Ok(HashAlgorithm::Sha256),
         "blake3" => Ok(HashAlgorithm::Blake3),
@@ -512,5 +548,150 @@ mod tests {
     fn t_write_bundle_uses_zstd_level_19_default() {
         let opts = WriteBundleOptions::default();
         assert_eq!(opts.zstd_level, 19);
+    }
+
+    /// Builds a `tar.zst` from (path, bytes) regular-file entries, in order.
+    fn tar_zst(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut archive_bytes = Vec::new();
+        {
+            let encoder = zstd::Encoder::new(&mut archive_bytes, 3).expect("zstd");
+            let mut builder = tar::Builder::new(encoder.auto_finish());
+            for (path, bytes) in entries {
+                append_bytes(&mut builder, path, bytes).expect("append");
+            }
+            builder.finish().expect("finish");
+        }
+        archive_bytes
+    }
+
+    fn manifest_bytes() -> Vec<u8> {
+        sample_manifest()
+            .to_canonical_json_bytes()
+            .expect("manifest")
+    }
+
+    #[test]
+    fn t_read_bundle_rejects_duplicate_manifest() {
+        let m = manifest_bytes();
+        let bytes = tar_zst(&[
+            ("manifest.json", &m),
+            ("events.bin", &[]),
+            ("manifest.json", &m),
+        ]);
+        let err = read_bundle(Cursor::new(bytes), &ReadBundleOptions::default())
+            .expect_err("duplicate manifest must fail");
+        assert!(
+            matches!(&err, BundleError::InvalidArchive(msg) if msg.contains("duplicate manifest.json")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn t_read_bundle_rejects_duplicate_events_bin() {
+        let m = manifest_bytes();
+        let bytes = tar_zst(&[
+            ("manifest.json", &m),
+            ("events.bin", &[]),
+            ("events.bin", &[]),
+        ]);
+        let err = read_bundle(Cursor::new(bytes), &ReadBundleOptions::default())
+            .expect_err("duplicate events.bin must fail");
+        assert!(matches!(err, BundleError::InvalidArchive(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn t_read_bundle_rejects_duplicate_object_entry() {
+        let m = manifest_bytes();
+        let name = format!("objects/{}", "ab".repeat(32));
+        let bytes = tar_zst(&[
+            ("manifest.json", &m),
+            ("events.bin", &[]),
+            (&name, b"one"),
+            (&name, b"two"),
+        ]);
+        let err = read_bundle(Cursor::new(bytes), &ReadBundleOptions::default())
+            .expect_err("duplicate object must fail");
+        assert!(
+            matches!(&err, BundleError::InvalidArchive(msg) if msg.contains("duplicate object")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn t_read_bundle_rejects_uppercase_object_name() {
+        let m = manifest_bytes();
+        let name = format!("objects/{}", "AB".repeat(32));
+        let bytes = tar_zst(&[("manifest.json", &m), ("events.bin", &[]), (&name, b"x")]);
+        let err = read_bundle(Cursor::new(bytes), &ReadBundleOptions::default())
+            .expect_err("uppercase object name must fail");
+        assert!(
+            matches!(&err, BundleError::InvalidArchive(msg) if msg.contains("lowercase")),
+            "got {err:?}"
+        );
+    }
+
+    /// Builds a bundle whose archive also carries a symlink entry named `evil`.
+    fn bundle_with_symlink() -> Vec<u8> {
+        let m = manifest_bytes();
+        let mut archive_bytes = Vec::new();
+        {
+            let encoder = zstd::Encoder::new(&mut archive_bytes, 3).expect("zstd");
+            let mut builder = tar::Builder::new(encoder.auto_finish());
+            append_bytes(&mut builder, "manifest.json", &m).expect("manifest");
+            append_bytes(&mut builder, "events.bin", &[]).expect("events");
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            builder
+                .append_link(&mut header, "evil", "/etc/passwd")
+                .expect("symlink");
+            builder.finish().expect("finish");
+        }
+        archive_bytes
+    }
+
+    #[test]
+    fn t_read_bundle_rejects_symlink_entry_in_strict_mode() {
+        let err = read_bundle(
+            Cursor::new(bundle_with_symlink()),
+            &ReadBundleOptions::default(),
+        )
+        .expect_err("symlink must fail in strict mode");
+        assert!(
+            matches!(&err, BundleError::UnknownBundleFile(msg) if msg.contains("evil")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn t_read_bundle_skips_symlink_entry_with_allow_extra_files() {
+        let opts = ReadBundleOptions {
+            allow_extra_files: true,
+            ..ReadBundleOptions::default()
+        };
+        assert!(read_bundle(Cursor::new(bundle_with_symlink()), &opts).is_ok());
+    }
+
+    #[test]
+    fn t_read_bundle_accepts_objects_directory_entry_in_strict_mode() {
+        let m = manifest_bytes();
+        let mut archive_bytes = Vec::new();
+        {
+            let encoder = zstd::Encoder::new(&mut archive_bytes, 3).expect("zstd");
+            let mut builder = tar::Builder::new(encoder.auto_finish());
+            append_bytes(&mut builder, "manifest.json", &m).expect("manifest");
+            append_bytes(&mut builder, "events.bin", &[]).expect("events");
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "objects/", std::io::empty())
+                .expect("dir");
+            builder.finish().expect("finish");
+        }
+        assert!(read_bundle(Cursor::new(archive_bytes), &ReadBundleOptions::default()).is_ok());
     }
 }

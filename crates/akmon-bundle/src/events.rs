@@ -14,13 +14,9 @@ pub struct EventsWriter<W: Write> {
 }
 
 impl<W: Write> EventsWriter<W> {
-    /// Creates a new writer using SHA-256 hash interpretation for wire hash fields.
+    /// Creates a new writer. The wire format carries raw digest bytes only, so writing is
+    /// independent of the hash algorithm (the algorithm is declared once in the manifest).
     pub fn new(writer: W) -> Self {
-        Self { inner: writer }
-    }
-
-    /// Creates a writer with explicit hash algorithm for wire hash interpretation.
-    pub fn with_hash_algorithm(writer: W, _algorithm: HashAlgorithm) -> Self {
         Self { inner: writer }
     }
 
@@ -52,31 +48,10 @@ pub struct EventsReader<R: Read> {
 }
 
 impl<R: Read> EventsReader<R> {
-    /// Creates a new reader using SHA-256 hash interpretation for wire hash fields.
-    pub fn new(reader: R) -> Self {
-        Self {
-            inner: reader,
-            max_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
-            algorithm: HashAlgorithm::Sha256,
-        }
-    }
-
-    /// Creates a new reader with explicit maximum frame length.
-    pub fn with_max_frame_len(reader: R, max_frame_len: u32) -> Self {
-        Self {
-            inner: reader,
-            max_frame_len,
-            algorithm: HashAlgorithm::Sha256,
-        }
-    }
-
-    /// Creates a new reader with explicit hash algorithm.
-    pub fn with_hash_algorithm(reader: R, algorithm: HashAlgorithm) -> Self {
-        Self {
-            inner: reader,
-            max_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
-            algorithm,
-        }
+    /// Creates a reader with explicit hash algorithm and the default frame length limit
+    /// ([`DEFAULT_MAX_EVENT_FRAME_LEN`]).
+    pub fn new(reader: R, algorithm: HashAlgorithm) -> Self {
+        Self::with_hash_algorithm_and_max_frame_len(reader, algorithm, DEFAULT_MAX_EVENT_FRAME_LEN)
     }
 
     /// Creates a reader with explicit hash algorithm and frame length limit.
@@ -132,7 +107,7 @@ impl<R: Read> EventsReader<R> {
         if canonical != payload {
             return Err(BundleError::NonCanonicalCbor);
         }
-        Ok(Some(wire.into_event(self.algorithm)))
+        wire.into_event(self.algorithm).map(Some)
     }
 }
 
@@ -215,19 +190,31 @@ impl WireEvent {
         }
     }
 
-    fn into_event(self, algorithm: HashAlgorithm) -> Event {
-        Event {
+    /// Converts the decoded wire form into an [`Event`].
+    ///
+    /// Fails closed on any timestamp the `time` crate cannot represent: mapping it to some other
+    /// value (for example the epoch) would let `events.bin` bytes change without changing the
+    /// content hash, because hashing re-encodes the normalized event.
+    fn into_event(self, algorithm: HashAlgorithm) -> Result<Event, BundleError> {
+        Ok(Event {
             parents: self
                 .parents
                 .into_iter()
                 .map(|b| Hash::from_bytes(algorithm, b))
                 .collect(),
-            kind: self.kind.into_kind(algorithm),
-            emitted_at: time::OffsetDateTime::from_unix_timestamp(self.emitted_at.0)
-                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
+            kind: self.kind.into_kind(algorithm)?,
+            emitted_at: wire_timestamp(self.emitted_at.0, "emitted_at")?,
             sequence: self.sequence,
-        }
+        })
     }
+}
+
+/// Converts a wire Unix timestamp (seconds) into an `OffsetDateTime`, rejecting values outside the
+/// representable range instead of silently substituting a default.
+fn wire_timestamp(seconds: i64, field: &str) -> Result<time::OffsetDateTime, BundleError> {
+    time::OffsetDateTime::from_unix_timestamp(seconds).map_err(|_| {
+        BundleError::MalformedFraming(format!("timestamp out of range in {field}: {seconds}"))
+    })
 }
 
 impl WireEventKind {
@@ -297,8 +284,8 @@ impl WireEventKind {
         }
     }
 
-    fn into_kind(self, algorithm: HashAlgorithm) -> EventKind {
-        match self {
+    fn into_kind(self, algorithm: HashAlgorithm) -> Result<EventKind, BundleError> {
+        Ok(match self {
             WireEventKind::SessionStart {
                 cwd_hash,
                 config_hash,
@@ -318,7 +305,7 @@ impl WireEventKind {
                 attempts: attempts
                     .into_iter()
                     .map(|a| a.into_attempt(algorithm))
-                    .collect(),
+                    .collect::<Result<Vec<_>, _>>()?,
                 stream_hash: stream_hash.map(|b| Hash::from_bytes(algorithm, b)),
             },
             WireEventKind::ToolCall {
@@ -360,7 +347,7 @@ impl WireEventKind {
             WireEventKind::SessionEnd { summary_hash } => EventKind::SessionEnd {
                 summary_hash: summary_hash.map(|b| Hash::from_bytes(algorithm, b)),
             },
-        }
+        })
     }
 }
 
@@ -378,19 +365,17 @@ impl WireAttemptRecord {
         }
     }
 
-    fn into_attempt(self, algorithm: HashAlgorithm) -> AttemptRecord {
-        AttemptRecord {
+    fn into_attempt(self, algorithm: HashAlgorithm) -> Result<AttemptRecord, BundleError> {
+        Ok(AttemptRecord {
             attempt_number: self.attempt_number,
-            started_at: time::OffsetDateTime::from_unix_timestamp(self.started_at.0)
-                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
-            ended_at: time::OffsetDateTime::from_unix_timestamp(self.ended_at.0)
-                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH),
+            started_at: wire_timestamp(self.started_at.0, "attempt started_at")?,
+            ended_at: wire_timestamp(self.ended_at.0, "attempt ended_at")?,
             status: self.status,
             request_hash: Hash::from_bytes(algorithm, self.request_hash),
             response_hash: self.response_hash.map(|b| Hash::from_bytes(algorithm, b)),
             stream_hash: self.stream_hash.map(|b| Hash::from_bytes(algorithm, b)),
             error_message: self.error_message,
-        }
+        })
     }
 }
 
@@ -429,7 +414,7 @@ mod tests {
         writer.write_event(&e).expect("write");
         writer.finish().expect("finish");
 
-        let mut reader = EventsReader::new(out.as_slice());
+        let mut reader = EventsReader::new(out.as_slice(), HashAlgorithm::Sha256);
         let parsed = reader.read_event().expect("read").expect("some");
         assert_eq!(parsed, e);
     }
@@ -444,28 +429,32 @@ mod tests {
         writer.write_event(&e1).expect("write e1");
         writer.finish().expect("finish");
 
-        let mut reader = EventsReader::new(out.as_slice());
+        let mut reader = EventsReader::new(out.as_slice(), HashAlgorithm::Sha256);
         assert_eq!(reader.read_event().expect("e0"), Some(e0));
         assert_eq!(reader.read_event().expect("e1"), Some(e1));
     }
 
     #[test]
     fn t_events_reader_returns_none_at_eof() {
-        let mut reader = EventsReader::new([].as_slice());
+        let mut reader = EventsReader::new([].as_slice(), HashAlgorithm::Sha256);
         assert!(reader.read_event().expect("eof").is_none());
     }
 
     #[test]
     fn t_events_reader_rejects_truncated_frame() {
         let bytes = vec![0, 0, 0, 10, 1, 2, 3];
-        let mut reader = EventsReader::new(bytes.as_slice());
+        let mut reader = EventsReader::new(bytes.as_slice(), HashAlgorithm::Sha256);
         assert!(reader.read_event().is_err());
     }
 
     #[test]
     fn t_events_reader_rejects_oversized_frame() {
         let bytes = vec![0x00, 0x20, 0x00, 0x00];
-        let mut reader = EventsReader::with_max_frame_len(bytes.as_slice(), 128);
+        let mut reader = EventsReader::with_hash_algorithm_and_max_frame_len(
+            bytes.as_slice(),
+            HashAlgorithm::Sha256,
+            128,
+        );
         let err = reader.read_event().expect_err("must fail");
         assert!(matches!(err, BundleError::FrameTooLarge(_)));
     }
@@ -486,7 +475,7 @@ mod tests {
         framed.extend_from_slice(&(non_canonical.len() as u32).to_be_bytes());
         framed.extend_from_slice(&non_canonical);
 
-        let mut reader = EventsReader::new(framed.as_slice());
+        let mut reader = EventsReader::new(framed.as_slice(), HashAlgorithm::Sha256);
         let err = reader.read_event().expect_err("must fail");
         assert!(matches!(err, BundleError::NonCanonicalCbor));
     }
@@ -531,11 +520,11 @@ mod tests {
         };
 
         let mut out = Vec::new();
-        let mut writer = EventsWriter::with_hash_algorithm(&mut out, HashAlgorithm::Sha256);
+        let mut writer = EventsWriter::new(&mut out);
         writer.write_event(&event).expect("write");
         writer.finish().expect("finish");
 
-        let mut reader = EventsReader::with_hash_algorithm(out.as_slice(), HashAlgorithm::Sha256);
+        let mut reader = EventsReader::new(out.as_slice(), HashAlgorithm::Sha256);
         let decoded = reader.read_event().expect("read").expect("some");
 
         let expected_hash = event.content_hash(HashAlgorithm::Sha256).expect("hash");
@@ -558,11 +547,11 @@ mod tests {
         };
 
         let mut out = Vec::new();
-        let mut writer = EventsWriter::with_hash_algorithm(&mut out, HashAlgorithm::Sha256);
+        let mut writer = EventsWriter::new(&mut out);
         writer.write_event(&event).expect("write");
         writer.finish().expect("finish");
 
-        let mut reader = EventsReader::with_hash_algorithm(out.as_slice(), HashAlgorithm::Sha256);
+        let mut reader = EventsReader::new(out.as_slice(), HashAlgorithm::Sha256);
         let decoded = reader.read_event().expect("read").expect("some");
 
         let expected_hash = event.content_hash(HashAlgorithm::Sha256).expect("hash");
@@ -582,15 +571,76 @@ mod tests {
         };
 
         let mut out = Vec::new();
-        let mut writer = EventsWriter::with_hash_algorithm(&mut out, HashAlgorithm::Sha256);
+        let mut writer = EventsWriter::new(&mut out);
         writer.write_event(&event).expect("write");
         writer.finish().expect("finish");
 
-        let mut reader = EventsReader::with_hash_algorithm(out.as_slice(), HashAlgorithm::Sha256);
+        let mut reader = EventsReader::new(out.as_slice(), HashAlgorithm::Sha256);
         let decoded = reader.read_event().expect("read").expect("some");
 
         let expected_hash = event.content_hash(HashAlgorithm::Sha256).expect("hash");
         let actual_hash = decoded.content_hash(HashAlgorithm::Sha256).expect("hash");
         assert_eq!(actual_hash, expected_hash);
+    }
+
+    /// Frames a `WireEvent` exactly as `EventsWriter` would (canonical CBOR, BE length prefix).
+    fn frame_wire(wire: &WireEvent) -> Vec<u8> {
+        let mut payload = Vec::new();
+        ciborium::ser::into_writer(wire, &mut payload).expect("encode");
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&payload);
+        framed
+    }
+
+    #[test]
+    fn t_out_of_range_emitted_at_is_rejected_not_mapped_to_epoch() {
+        let mut wire = WireEvent::from_event(&sample_event(0));
+        wire.emitted_at = ciborium::tag::Required(i64::MAX);
+        let framed = frame_wire(&wire);
+        let mut reader = EventsReader::new(framed.as_slice(), HashAlgorithm::Sha256);
+        let err = reader
+            .read_event()
+            .expect_err("out-of-range timestamp must fail");
+        assert!(
+            matches!(&err, BundleError::MalformedFraming(msg) if msg.contains("timestamp out of range")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn t_out_of_range_attempt_timestamp_is_rejected() {
+        let event = Event {
+            parents: vec![hash(0x10)],
+            kind: EventKind::ProviderCall {
+                provider_id: "p".to_owned(),
+                attempts: vec![AttemptRecord {
+                    attempt_number: 1,
+                    started_at: time::OffsetDateTime::from_unix_timestamp(1).expect("ts"),
+                    ended_at: time::OffsetDateTime::from_unix_timestamp(2).expect("ts"),
+                    status: AttemptStatus::Success,
+                    request_hash: hash(0x21),
+                    response_hash: None,
+                    stream_hash: None,
+                    error_message: None,
+                }],
+                stream_hash: None,
+            },
+            emitted_at: time::OffsetDateTime::from_unix_timestamp(3).expect("ts"),
+            sequence: 1,
+        };
+        let mut wire = WireEvent::from_event(&event);
+        if let WireEventKind::ProviderCall { attempts, .. } = &mut wire.kind {
+            attempts[0].ended_at = ciborium::tag::Required(i64::MIN);
+        }
+        let framed = frame_wire(&wire);
+        let mut reader = EventsReader::new(framed.as_slice(), HashAlgorithm::Sha256);
+        let err = reader
+            .read_event()
+            .expect_err("out-of-range attempt timestamp must fail");
+        assert!(
+            matches!(err, BundleError::MalformedFraming(_)),
+            "got {err:?}"
+        );
     }
 }

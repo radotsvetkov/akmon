@@ -6,17 +6,15 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use akmon_bundle::report::{
-    BundleVerifyReportV1, ReportViolation, build_verify_report, bundle_read_error_category,
-    bundle_read_exit_code, capture_human_line, capture_human_suffix, compute_passed_and_violations,
-    load_operator_key, operator_reports, operator_requirements_ok, print_operator_human_block,
-    report_violations, signature_reports,
+    BundleVerifyReportV1, ReportViolation, ToolErrorV1, VerifyPolicy, build_verify_report,
+    bundle_read_error_category, bundle_read_exit_code, evaluate_bundle, report_violations,
 };
 use akmon_bundle::{
-    BundleContents, BundleError, DEFAULT_MAX_EVENT_FRAME_LEN, Manifest, ManifestSignature,
-    Producer, ReadBundleOptions, SCHEME_ED25519, SIG_STATEMENT_VERSION, SessionMetadata,
-    WriteBundleOptions, key_id, otel_capture_info, parse_public_key_hex, public_key_from_pkcs8,
-    read_bundle, sign_statement, signing_statement, verify_bundle, verify_manifest_signatures,
-    verify_operator_attestations, write_bundle,
+    BundleContents, BundleError, DEFAULT_MAX_BUNDLE_DECODED_BYTES, DEFAULT_MAX_EVENT_FRAME_LEN,
+    Manifest, ManifestSignature, Producer, ReadBundleOptions, SCHEME_ED25519,
+    SIG_STATEMENT_VERSION, SessionMetadata, WriteBundleOptions, human_lines, key_id, markdown,
+    parse_algorithm, public_key_from_pkcs8, read_bundle, read_bundle_limited, sanitize_display,
+    sign_statement, signing_statement, verify_bundle, write_bundle,
 };
 use akmon_journal::{
     AGEF_SPEC_VERSION, Event, EventKind, Hash, HashAlgorithm, ObjectStore, RedbObjectStore,
@@ -41,6 +39,27 @@ pub enum BundleExportFormat {
     Human,
     /// Machine-readable JSON status messages.
     Json,
+}
+
+/// Output format for `akmon bundle verify`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum BundleVerifyFormat {
+    /// Human-readable report on stderr.
+    #[default]
+    Human,
+    /// Machine-readable `BundleVerifyReportV1` JSON on stdout.
+    Json,
+    /// Plain-language Markdown auditor report on stdout.
+    Markdown,
+}
+
+impl From<BundleImportFormat> for BundleVerifyFormat {
+    fn from(value: BundleImportFormat) -> Self {
+        match value {
+            BundleImportFormat::Human => Self::Human,
+            BundleImportFormat::Json => Self::Json,
+        }
+    }
 }
 
 /// Output format for `akmon bundle import` status messages.
@@ -72,17 +91,6 @@ pub struct BundleExportReportV1 {
     bundle_size_bytes: u64,
 }
 
-/// JSON shape emitted when bundle export cannot complete.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BundleExportError {
-    /// CLI crate version that produced this error object.
-    akmon_version: String,
-    /// Human-readable error description.
-    error: String,
-    /// Stable error category for automation.
-    category: String,
-}
-
 /// Machine-readable bundle import result (`akmon bundle import --format json`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BundleImportReportV1 {
@@ -108,19 +116,6 @@ pub struct BundleImportReportV1 {
     journal_path: String,
 }
 
-/// JSON shape emitted when `akmon bundle import` cannot complete (I/O, manifest, collision, or verification failure).
-#[derive(Debug, Serialize)]
-pub(crate) struct BundleImportInfraError {
-    /// CLI crate version that produced this error object.
-    akmon_version: String,
-    /// Human-readable error description.
-    error: String,
-    /// Stable error category for automation.
-    category: String,
-    /// Target session UUID when `category` is `session_id_collision`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    colliding_session_id: Option<String>,
-}
 /// Arguments for `akmon bundle`.
 #[derive(Args, Debug, Clone)]
 pub struct BundleArgs {
@@ -162,32 +157,43 @@ Examples:\n\
   akmon bundle import audit.akmon --format json\n\n\
 Exit codes:\n\
   0 — bundle imported successfully (or verified if --verify-only)\n\
-  1 — verification failed (chain integrity, object closure, head, etc.)\n\
-  2 — usage error (e.g., session_id collision without --rename-to)\n\
-  3 — I/O or environment error (bundle/journal not found, malformed archive, etc.)")]
+  1 — verification failed (chain integrity, object closure, head, etc.), including a malformed, \
+corrupt, truncated, or oversized archive\n\
+  2 — usage error (e.g., session_id collision without --rename-to, or the target journal uses a \
+different hash algorithm than the bundle)\n\
+  3 — I/O or environment error (bundle/journal not found or unreadable, journal write failure)")]
     Import(BundleImportArgs),
     /// Verify an AGEF bundle without modifying the local journal.
     #[command(
         long_about = "Verify an AGEF bundle without modifying the local journal.\n\n\
 Validates manifest schema, event framing, object re-hashing, hash-chain integrity, object \
-closure, and manifest head consistency via the same path as `akmon bundle import \
---verify-only` and the standalone `agef-verify` tool.\n\n\
+closure (every referenced object present, no unreferenced objects), and manifest head consistency \
+via the same shared implementation as `akmon bundle import --verify-only` and the standalone \
+`agef-verify` tool. Without --require-signature a pass means INTEGRITY ONLY; the headline and the \
+JSON field signature_verified say whether a trusted --verify-key authenticated the head.\n\n\
 Examples:\n\
   akmon bundle verify audit.akmon\n\
-  akmon bundle verify audit.akmon --format json\n\n\
+  akmon bundle verify audit.akmon --verify-key signer.pub.hex --require-signature\n\
+  akmon bundle verify audit.akmon --format json\n\
+  akmon bundle verify audit.akmon --verify-key signer.pub.hex --format markdown > report.md\n\n\
 Exit codes:\n\
-  0 — bundle passed all integrity checks\n\
-  1 — verification failed (chain integrity, object closure, head, etc.)\n\
-  3 — I/O or environment error (bundle not found, malformed archive, etc.)"
+  0 — verification passed (integrity, plus any --require-* requirements)\n\
+  1 — verification failed (chain integrity, object closure, head, signature, etc.), including a \
+malformed, corrupt, truncated, or oversized archive\n\
+  2 — usage error (invalid arguments)\n\
+  3 — I/O or environment error (bundle or key file not found/unreadable, invalid key file)"
     )]
     Verify(BundleVerifyArgs),
     /// Sign an AGEF bundle's session head with an Ed25519 key (AGEF v0.1.2).
     #[command(
         long_about = "Sign an AGEF bundle's session head with an Ed25519 key (AGEF v0.1.2).\n\n\
-Reads the bundle, signs the canonical AGEF-SIG-v1 statement over its session head with the given \
-PKCS#8 Ed25519 private key, appends the detached signature to manifest.signatures[], and writes \
+Reads the bundle, verifies its integrity (a bundle whose head does not match its contents is \
+refused, so you never sign a head that commits to nothing), signs the canonical AGEF-SIG-v1 \
+statement over its session head with the given PKCS#8 Ed25519 private key, appends the detached signature to manifest.signatures[], and writes \
 the signed bundle (in place, or to --output). Prints the signer's public key as hex for \
-distribution to verifiers (`akmon bundle verify --verify-key` / `agef-verify --verify-key`).\n\n\
+distribution to verifiers (`akmon bundle verify --verify-key` / `agef-verify --verify-key`). agef_version is \
+only stamped on an unsigned, unattested bundle, so co-signing never invalidates an existing \
+signature or attestation.\n\n\
 Generate a key with: akmon bundle keygen --out signer.pk8 (writes the raw PKCS#8 v2 DER this \
 command expects). NOTE: `openssl genpkey -algorithm ed25519` emits PKCS#8 v1, which ring rejects — \
 it is NOT a usable key for this command.\n\n\
@@ -196,19 +202,25 @@ Examples:\n\
   akmon bundle sign audit.akmon --key signer.pk8 --output signed.akmon\n\n\
 Exit codes:\n\
   0 — bundle signed successfully\n\
-  2 — usage error (unreadable or invalid Ed25519 key)\n\
-  3 — I/O or environment error (bundle not found, malformed archive, write error)"
+  1 — refused: the bundle failed integrity verification, or the archive is malformed/corrupt\n\
+  2 — usage error (invalid Ed25519 key)\n\
+  3 — I/O or environment error (bundle or key file not found/unreadable, write error)"
     )]
     Sign(BundleSignArgs),
     /// Emit artifacts to verify a bundle's signature with stock `openssl` alone (AGEF v0.1.2).
     #[command(
         long_about = "Emit the artifacts a third party needs to verify a bundle's Ed25519 \
 signature with stock OpenSSL 3.x — no Akmon binary, no cloud (metric F.1).\n\n\
-Reads the signed bundle (read-only), reconstructs the canonical AGEF-SIG-v1 statement over its \
-session head, extracts the matching detached signature from manifest.signatures[], and writes \
-three files into --out-dir: statement.bin (the exact signed message), signature.bin (the 64-byte \
+Reads the signed bundle (read-only) and REFUSES unless the bundle passes full AGEF integrity \
+verification and the selected signature (and, with --operator-key, the operator attestation) \
+verifies against the supplied key. Only then does it reconstruct the canonical AGEF-SIG-v1 \
+statement over the session head, extract the matching detached signature from \
+manifest.signatures[], and write three files into --out-dir: statement.bin (the exact signed message), signature.bin (the 64-byte \
 raw signature), and pubkey.pem (the supplied public key in SPKI PEM form). It then prints the \
 exact openssl command to run. This signs nothing and never modifies the bundle.\n\n\
+What the openssl check proves: the holder of the key signed session head H. What ties H to the \
+bundle's events and objects is the AGEF hash chain, checked by `agef-verify` (or `akmon bundle \
+verify`); this command ran that check before writing the artifacts.\n\n\
 The signature is selected by matching the supplied --verify-key (the signer's public key as 64 \
 hex chars, the same artifact `akmon bundle sign` prints) against manifest.signatures[].key_id.\n\n\
 NOTE: stock LibreSSL (macOS /usr/bin/openssl) cannot verify Ed25519; the verifier needs \
@@ -219,8 +231,9 @@ Examples:\n\
   akmon bundle prove-openssl audit.akmon --verify-key signer.pub.hex --format json\n\n\
 Exit codes:\n\
   0 — artifacts written; printed openssl command is ready to run\n\
-  1 — no signature matches the supplied key, or the signature is unsupported/malformed\n\
-  3 — I/O or environment error (bundle/--verify-key unreadable, malformed archive, out-dir not writable)"
+  1 — refused: integrity verification failed, the archive is malformed/corrupt, no signature \
+matches the supplied key, or the signature/attestation is unsupported, malformed, or does not verify\n\
+  3 — I/O or environment error (bundle/--verify-key unreadable, out-dir not writable)"
     )]
     ProveOpenssl(crate::bundle_prove::BundleProveArgs),
     /// Generate an Ed25519 signing key for `akmon bundle sign` (AGEF v0.1.2).
@@ -250,9 +263,10 @@ Answers \"who claims to have operated this session\" — independently of the bu
 chain and of any head signature. Reads the bundle, signs the canonical AGEF-OPERATOR-v1 statement \
 over its session head plus the four operator identity fields (operator-id, display-name, role, org) \
 with the given PKCS#8 Ed25519 private key, appends the attestation to manifest.operator_attestations[], \
-and writes the bundle (in place, or to --output). It is purely additive: an existing AGEF-SIG-v1 head \
+and writes the bundle (in place, or to --output). The bundle must pass integrity verification first. \
+It is purely additive: an existing AGEF-SIG-v1 head \
 signature is left byte-untouched (agef_version is only stamped when the bundle has no head \
-signatures). Prints the operator's public key as hex for distribution to verifiers; the private key \
+signatures and no operator attestations). Prints the operator's public key as hex for distribution to verifiers; the private key \
 is NEVER printed.\n\n\
 The identity fields are self-asserted: a verifier learns nothing about WHO the operator is until \
 they verify the attestation against a trusted operator public key (`akmon bundle verify \
@@ -264,8 +278,9 @@ Examples:\n\
   akmon bundle attest audit.akmon --key operator.pk8 --operator-id alice@example.com --output attested.akmon\n\n\
 Exit codes:\n\
   0 — bundle attested successfully\n\
-  2 — usage error (unreadable or invalid Ed25519 key, or an empty/illegal operator identity field)\n\
-  3 — I/O or environment error (bundle not found, malformed archive, write error)"
+  1 — refused: the bundle failed integrity verification, or the archive is malformed/corrupt\n\
+  2 — usage error (invalid Ed25519 key, or an empty/illegal operator identity field)\n\
+  3 — I/O or environment error (bundle or key file not found/unreadable, write error)"
     )]
     Attest(crate::bundle_attest::BundleAttestArgs),
 }
@@ -328,9 +343,9 @@ pub struct BundleImportArgs {
 pub struct BundleVerifyArgs {
     /// Path to the `.akmon` bundle file to verify.
     bundle: PathBuf,
-    /// Output format for status messages: human (default) or json.
+    /// Output format: human (stderr, default), json (stdout), or markdown (auditor report, stdout).
     #[arg(long, default_value = "human")]
-    format: BundleImportFormat,
+    format: BundleVerifyFormat,
     /// Allow the verify to succeed when the tar archive contains files outside the AGEF normative
     /// set (`manifest.json`, `events.bin`, `objects/<hex>`).
     ///
@@ -359,6 +374,9 @@ pub struct BundleVerifyArgs {
     /// Fail unless the session captured full message content (rejects metadata-only OTEL imports).
     #[arg(long, value_enum, value_name = "LEVEL")]
     require_capture: Option<RequireCapture>,
+    /// Maximum total decompressed size of the bundle in bytes (decompression-bomb guard).
+    #[arg(long, value_name = "BYTES", default_value_t = DEFAULT_MAX_BUNDLE_DECODED_BYTES)]
+    max_decoded_bytes: u64,
 }
 
 /// Arguments for `akmon bundle sign`.
@@ -405,14 +423,7 @@ fn print_bundle_export_json_report(report: &BundleExportReportV1) -> std::io::Re
 }
 
 fn print_bundle_export_json_error(category: &'static str, error: String) -> std::io::Result<()> {
-    let body = BundleExportError {
-        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        category: category.to_owned(),
-        error,
-    };
-    let json =
-        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
-    println!("{json}");
+    ToolErrorV1::new("akmon", category, error).print_json();
     Ok(())
 }
 
@@ -710,15 +721,9 @@ fn print_bundle_import_infra_json_error(
     error: String,
     colliding_session_id: Option<uuid::Uuid>,
 ) -> std::io::Result<()> {
-    let body = BundleImportInfraError {
-        akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        error,
-        category: category.to_owned(),
-        colliding_session_id: colliding_session_id.map(|u| u.as_hyphenated().to_string()),
-    };
-    let json =
-        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
-    println!("{json}");
+    let mut body = ToolErrorV1::new("akmon", category, error);
+    body.colliding_session_id = colliding_session_id.map(|u| u.as_hyphenated().to_string());
+    body.print_json();
     Ok(())
 }
 
@@ -734,14 +739,6 @@ fn print_bundle_import_json_report(report: &BundleImportReportV1) -> std::io::Re
         serde_json::to_string_pretty(report).map_err(|e| std::io::Error::other(e.to_string()))?;
     println!("{json}");
     Ok(())
-}
-
-fn manifest_hash_algorithm(manifest: &Manifest) -> Option<HashAlgorithm> {
-    match manifest.hash_algorithm.as_str() {
-        "sha256" => Some(HashAlgorithm::Sha256),
-        "blake3" => Some(HashAlgorithm::Blake3),
-        _ => None,
-    }
 }
 
 fn bundle_import_history(
@@ -781,15 +778,8 @@ fn exit_bundle_verify_failed(
             }
         }
         BundleImportFormat::Human => {
-            let bundle_disp = bundle_export_output_display(bundle);
-            eprintln!("bundle verification failed: {bundle_disp}");
-            eprintln!("  session_id: {}", contents.manifest.session.id);
-            eprintln!("  events in bundle: {}", contents.events.len());
-            eprintln!("  objects in bundle: {}", contents.objects.len());
-            eprintln!();
-            eprintln!("  violations:");
-            for v in &report.violations {
-                eprintln!("    - [{}] {}", v.category, v.message);
+            for line in human_lines(&report) {
+                eprintln!("{line}");
             }
         }
     }
@@ -797,179 +787,136 @@ fn exit_bundle_verify_failed(
 }
 
 /// Verifies a bundle file without journal access (Item 4.3 / F4).
+///
+/// The verification decision and every rendering come from `akmon_bundle::report` /
+/// `akmon_bundle::render`, the same code `agef-verify` runs.
 #[allow(clippy::too_many_arguments)]
 fn run_bundle_verify(
     bundle: PathBuf,
-    format: BundleImportFormat,
+    format: BundleVerifyFormat,
     allow_extra_files: bool,
+    max_decoded_bytes: u64,
+    policy_inputs: VerifyPolicyInputs,
+    label: &'static str,
+) -> ExitCode {
+    let fail = |category: &str, msg: String, code: u8| -> ExitCode {
+        if format == BundleVerifyFormat::Json {
+            let _ = print_bundle_import_infra_json_error(category, msg, None);
+        } else {
+            eprintln!("akmon: {label}: {}", sanitize_display(&msg));
+        }
+        ExitCode::from(code)
+    };
+
+    let policy = match VerifyPolicy::load(
+        &policy_inputs.verify_keys,
+        policy_inputs.require_signature,
+        &policy_inputs.operator_keys,
+        policy_inputs.require_operator,
+        &policy_inputs.require_operator_keys,
+        matches!(policy_inputs.require_capture, Some(RequireCapture::Full)),
+    ) {
+        Ok(p) => p,
+        Err(err) => return fail(err.category, err.message, 3),
+    };
+
+    let mut file = match std::fs::File::open(&bundle) {
+        Ok(f) => f,
+        Err(err) => {
+            return fail(
+                "io_error",
+                format!("cannot open bundle {}: {err}", bundle.display()),
+                3,
+            );
+        }
+    };
+    let options = ReadBundleOptions {
+        allow_extra_files,
+        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
+    };
+    let contents = match read_bundle_limited(&mut file, &options, max_decoded_bytes) {
+        Ok(c) => c,
+        Err(err) => {
+            let category = bundle_read_error_category(&err);
+            let code = bundle_read_exit_code(&err);
+            return fail(category, err.to_string(), code);
+        }
+    };
+
+    let report = evaluate_bundle(
+        bundle_export_output_display(bundle.as_path()),
+        &contents,
+        &policy,
+    );
+
+    match format {
+        BundleVerifyFormat::Json => {
+            if let Err(err) = print_bundle_verify_json_report(&report) {
+                eprintln!("akmon: {label}: failed to render JSON output: {err}");
+                return ExitCode::from(3);
+            }
+        }
+        BundleVerifyFormat::Markdown => print!("{}", markdown(&report)),
+        BundleVerifyFormat::Human => {
+            for line in human_lines(&report) {
+                eprintln!("{line}");
+            }
+        }
+    }
+
+    if report.passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Key files and `--require-*` flags for [`run_bundle_verify`] (loaded via `VerifyPolicy::load`).
+#[derive(Debug, Default)]
+struct VerifyPolicyInputs {
     verify_keys: Vec<PathBuf>,
     require_signature: bool,
     operator_keys: Vec<PathBuf>,
     require_operator: bool,
     require_operator_keys: Vec<PathBuf>,
     require_capture: Option<RequireCapture>,
-    label: &'static str,
-) -> ExitCode {
-    let json = matches!(format, BundleImportFormat::Json);
-    let mut file = match std::fs::File::open(&bundle) {
-        Ok(f) => f,
-        Err(err) => {
-            let msg = format!("cannot open bundle {}: {err}", bundle.display());
-            if json {
-                let _ = print_bundle_import_infra_json_error("io_error", msg.clone(), None);
-            } else {
-                eprintln!("akmon: {label}: {msg}");
-            }
-            return ExitCode::from(3);
-        }
-    };
+}
 
-    let options = ReadBundleOptions {
-        allow_extra_files,
-        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
-    };
-
-    let contents = match read_bundle(&mut file, &options) {
-        Ok(c) => c,
-        Err(err) => {
-            let msg = err.to_string();
-            let category = bundle_read_error_category(&err);
-            let code = bundle_read_exit_code(&err);
-            if json {
-                let _ = print_bundle_import_infra_json_error(category, msg.clone(), None);
-            } else {
-                eprintln!("akmon: {label}: {msg}");
-            }
-            return ExitCode::from(code);
-        }
-    };
-
-    // Load any trusted public keys (hex -> raw 32 bytes) before signature verification.
-    let mut trusted_keys = Vec::with_capacity(verify_keys.len());
-    for key_path in &verify_keys {
-        let parsed = std::fs::read_to_string(key_path)
-            .map_err(|err| format!("cannot read --verify-key {}: {err}", key_path.display()))
-            .and_then(|hex_str| {
-                parse_public_key_hex(&hex_str)
-                    .map_err(|err| format!("--verify-key {}: {err}", key_path.display()))
-            });
-        match parsed {
-            Ok(key) => trusted_keys.push(key),
-            Err(msg) => {
-                if json {
-                    let _ = print_bundle_import_infra_json_error("verify_key_error", msg, None);
-                } else {
-                    eprintln!("akmon: {label}: {msg}");
-                }
-                return ExitCode::from(3);
-            }
-        }
-    }
-    let sig_report = verify_manifest_signatures(&contents.manifest, &trusted_keys);
-
-    // Load trusted operator keys: the union of --operator-key and --require-operator-key. Each
-    // --require-operator-key is ALSO trusted for verification, and its key_id is recorded so we can
-    // demand that THAT specific key produced a verified attestation.
-    let mut operator_trusted_keys: Vec<Vec<u8>> = Vec::new();
-    for key_path in &operator_keys {
-        match load_operator_key(key_path) {
-            Ok(key) => operator_trusted_keys.push(key),
-            Err(msg) => {
-                if json {
-                    let _ = print_bundle_import_infra_json_error("operator_key_error", msg, None);
-                } else {
-                    eprintln!("akmon: {label}: {msg}");
-                }
-                return ExitCode::from(3);
-            }
-        }
-    }
-    let mut required_operator_key_ids: Vec<String> = Vec::new();
-    for key_path in &require_operator_keys {
-        match load_operator_key(key_path) {
-            Ok(key) => {
-                required_operator_key_ids.push(key_id(&key));
-                operator_trusted_keys.push(key);
-            }
-            Err(msg) => {
-                if json {
-                    let _ = print_bundle_import_infra_json_error("operator_key_error", msg, None);
-                } else {
-                    eprintln!("akmon: {label}: {msg}");
-                }
-                return ExitCode::from(3);
-            }
-        }
-    }
-    let op_report = verify_operator_attestations(&contents.manifest, &operator_trusted_keys);
-    let operator_ok =
-        operator_requirements_ok(&op_report, require_operator, &required_operator_key_ids);
-
+/// Reads a bundle for `sign`/`attest`/`prove-openssl` and refuses it unless it passes full AGEF
+/// integrity verification, so a key holder never signs (or proves) a head that does not commit to
+/// the bundle's contents. Returns `(category, message, exit_code)` on refusal.
+pub(crate) fn read_bundle_verified_for_signing(
+    bundle: &Path,
+) -> Result<BundleContents, (String, String, u8)> {
+    let mut file = std::fs::File::open(bundle).map_err(|err| {
+        (
+            "io_error".to_owned(),
+            format!("cannot open bundle {}: {err}", bundle.display()),
+            3,
+        )
+    })?;
+    let contents = read_bundle(&mut file, &ReadBundleOptions::default()).map_err(|err| {
+        (
+            bundle_read_error_category(&err).to_owned(),
+            err.to_string(),
+            bundle_read_exit_code(&err),
+        )
+    })?;
     let verification = verify_bundle(&contents);
-    let capture = otel_capture_info(&contents);
-    let require_capture_full = matches!(require_capture, Some(RequireCapture::Full));
-    let (passed, violations) = compute_passed_and_violations(
-        &verification,
-        &sig_report,
-        require_signature,
-        operator_ok,
-        capture.as_ref(),
-        require_capture_full,
-    );
-    let report = build_verify_report(
-        bundle_export_output_display(bundle.as_path()),
-        &contents,
-        passed,
-        violations,
-        signature_reports(&sig_report),
-        operator_reports(&op_report),
-        capture.as_ref(),
-    );
-
-    match format {
-        BundleImportFormat::Json => {
-            if let Err(err) = print_bundle_verify_json_report(&report) {
-                eprintln!("akmon: {label}: failed to render JSON output: {err}");
-                return ExitCode::from(3);
-            }
-        }
-        BundleImportFormat::Human => {
-            let bundle_disp = bundle_export_output_display(bundle.as_path());
-            let capture_suffix = capture_human_suffix(report.capture.as_ref());
-            if passed {
-                eprintln!("verified bundle (integrity + signature){capture_suffix}: {bundle_disp}");
-            } else {
-                eprintln!("bundle verification FAILED: {bundle_disp}");
-            }
-            eprintln!("  session_id: {}", contents.manifest.session.id);
-            eprintln!("  events: {}", contents.events.len());
-            eprintln!("  objects: {}", contents.objects.len());
-            if let Some(line) = capture_human_line(report.capture.as_ref()) {
-                eprintln!("  {line}");
-            }
-            if !report.violations.is_empty() {
-                eprintln!("  integrity violations:");
-                for v in &report.violations {
-                    eprintln!("    - [{}] {}", v.category, v.message);
-                }
-            }
-            if report.signatures.is_empty() {
-                eprintln!("  signatures: none");
-            } else {
-                eprintln!("  signatures:");
-                for s in &report.signatures {
-                    eprintln!("    - {} [{}] key_id={}", s.outcome, s.scheme, s.key_id);
-                }
-            }
-            print_operator_human_block(&report.operators, |line| eprintln!("  {line}"));
-        }
+    if let Some(first) = verification.violations.first() {
+        return Err((
+            "integrity_failed".to_owned(),
+            format!(
+                "refusing: bundle {} fails integrity verification ({} violation(s); first: [{}] {}); run `akmon bundle verify` for the full report",
+                bundle.display(),
+                verification.violations.len(),
+                first.category(),
+                first.message()
+            ),
+            1,
+        ));
     }
-
-    if passed {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
+    Ok(contents)
 }
 
 fn run_bundle_import(
@@ -983,14 +930,10 @@ fn run_bundle_import(
     if verify_only {
         return run_bundle_verify(
             bundle,
-            format,
+            format.into(),
             allow_extra_files,
-            Vec::new(),
-            false,
-            Vec::new(),
-            false,
-            Vec::new(),
-            None,
+            DEFAULT_MAX_BUNDLE_DECODED_BYTES,
+            VerifyPolicyInputs::default(),
             "bundle import",
         );
     }
@@ -1030,7 +973,7 @@ fn run_bundle_import(
 
     let options = ReadBundleOptions {
         allow_extra_files,
-        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
+        ..ReadBundleOptions::default()
     };
 
     let contents = match read_bundle(&mut file, &options) {
@@ -1112,10 +1055,10 @@ fn run_bundle_import(
         );
     }
 
-    let Some(algorithm) = manifest_hash_algorithm(&contents.manifest) else {
+    let Ok(algorithm) = parse_algorithm(&contents.manifest.hash_algorithm) else {
         let msg = format!(
             "unsupported hash algorithm in manifest: {}",
-            contents.manifest.hash_algorithm
+            sanitize_display(&contents.manifest.hash_algorithm)
         );
         if matches!(format, BundleImportFormat::Json) {
             let _ = print_bundle_import_infra_json_error(
@@ -1157,6 +1100,24 @@ fn run_bundle_import(
     let journal_db = journal_dir.join("journal.redb");
     let store = if journal_db.is_file() {
         match RedbObjectStore::open(journal_db.as_path()) {
+            // Refuse BEFORE writing anything: a store keyed by a different algorithm would file
+            // every object under the wrong digest and then fail re-verification (TC-11).
+            Ok(s) if s.algorithm() != algorithm => {
+                let msg = format!(
+                    "target journal uses hash algorithm {} but the bundle uses {algorithm}; import into a journal with a matching algorithm",
+                    s.algorithm()
+                );
+                if matches!(format, BundleImportFormat::Json) {
+                    let _ = print_bundle_import_infra_json_error(
+                        "hash_algorithm_mismatch",
+                        msg.clone(),
+                        None,
+                    );
+                } else {
+                    eprintln!("akmon: bundle import: {msg}");
+                }
+                return ExitCode::from(2);
+            }
             Ok(s) => Arc::new(s),
             Err(err) => {
                 let msg = format!("cannot open journal store {}: {err}", journal_db.display());
@@ -1395,6 +1356,16 @@ struct BundleSignReportV1 {
     signature_count: usize,
 }
 
+/// True when the manifest has no head signatures and no operator attestations, i.e. when
+/// re-stamping `agef_version` cannot invalidate anything already signed.
+pub(crate) fn manifest_unsigned_and_unattested(manifest: &Manifest) -> bool {
+    manifest.signatures.as_ref().is_none_or(Vec::is_empty)
+        && manifest
+            .operator_attestations
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+}
+
 /// Reads a bundle, signs its session head with an Ed25519 PKCS#8 key, and writes the signed bundle.
 fn run_bundle_sign(
     bundle: PathBuf,
@@ -1412,29 +1383,11 @@ fn run_bundle_sign(
         ExitCode::from(code)
     };
 
-    let mut file = match std::fs::File::open(&bundle) {
-        Ok(f) => f,
-        Err(err) => {
-            return fail(
-                "io_error",
-                format!("cannot open bundle {}: {err}", bundle.display()),
-                3,
-            );
-        }
-    };
-    let options = ReadBundleOptions {
-        allow_extra_files: false,
-        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
-    };
-    let mut contents = match read_bundle(&mut file, &options) {
+    // Refuse to sign a bundle whose head does not commit to its contents (TC-05).
+    let mut contents = match read_bundle_verified_for_signing(&bundle) {
         Ok(c) => c,
-        Err(err) => {
-            let category = bundle_read_error_category(&err);
-            let code = bundle_read_exit_code(&err);
-            return fail(category, err.to_string(), code);
-        }
+        Err((category, msg, code)) => return fail(&category, msg, code),
     };
-    drop(file);
 
     let pkcs8 = match std::fs::read(&key_path) {
         Ok(bytes) => bytes,
@@ -1457,9 +1410,13 @@ fn run_bundle_sign(
         }
     };
 
-    // A signed bundle is stamped with the current AGEF spec version (signatures[] were
-    // introduced in v0.1.2).
-    contents.manifest.agef_version = AGEF_SPEC_VERSION.to_owned();
+    // AGEF_VERSION rule (O9, shared with `attest`): stamp the current spec version ONLY on a
+    // bundle that carries neither head signatures nor operator attestations. Both statements
+    // include agef_version, so rewriting it would invalidate every existing signature and
+    // attestation; a co-signature is made over the bundle's existing agef_version instead.
+    if manifest_unsigned_and_unattested(&contents.manifest) {
+        contents.manifest.agef_version = AGEF_SPEC_VERSION.to_owned();
+    }
     let statement = {
         let m = &contents.manifest;
         signing_statement(
@@ -1586,12 +1543,15 @@ pub fn run_bundle(args: &BundleArgs) -> ExitCode {
             verify_args.bundle.clone(),
             verify_args.format,
             verify_args.allow_extra_files,
-            verify_args.verify_keys.clone(),
-            verify_args.require_signature,
-            verify_args.operator_keys.clone(),
-            verify_args.require_operator,
-            verify_args.require_operator_keys.clone(),
-            verify_args.require_capture,
+            verify_args.max_decoded_bytes,
+            VerifyPolicyInputs {
+                verify_keys: verify_args.verify_keys.clone(),
+                require_signature: verify_args.require_signature,
+                operator_keys: verify_args.operator_keys.clone(),
+                require_operator: verify_args.require_operator,
+                require_operator_keys: verify_args.require_operator_keys.clone(),
+                require_capture: verify_args.require_capture,
+            },
             "bundle verify",
         ),
         BundleCommands::Sign(sign_args) => run_bundle_sign(

@@ -5,21 +5,29 @@
 //! READ-ONLY on the bundle: it reconstructs the canonical `AGEF-SIG-v1` statement via the locked
 //! [`akmon_bundle::signing_statement`], extracts the already-present detached signature from
 //! `manifest.signatures[]`, and re-encodes the supplied public key as SPKI PEM. It signs nothing
-//! and writes nothing back into the bundle — it only writes three side files into `--out-dir`.
+//! and writes nothing back into the bundle — it only writes side files into `--out-dir`.
+//!
+//! Honesty contract (TC-01): the openssl check only proves that the key holder signed session head
+//! H. What ties H to the bundle's events and objects is the AGEF hash chain. So before writing ANY
+//! artifact this command (1) runs full bundle integrity verification and (2) verifies the selected
+//! signature (and, with `--operator-key`, the operator attestation) against the supplied key, and
+//! refuses with exit 1 if either fails. The emitted artifact bytes are unchanged for valid bundles.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use akmon_bundle::report::{bundle_read_error_category, bundle_read_exit_code};
+use akmon_bundle::report::ToolErrorV1;
 use akmon_bundle::{
-    DEFAULT_MAX_EVENT_FRAME_LEN, OPERATOR_STATEMENT_VERSION, ReadBundleOptions, SCHEME_ED25519,
-    SIG_STATEMENT_VERSION, ed25519_spki_pem, key_id, operator_statement, parse_public_key_hex,
-    read_bundle, signing_statement,
+    Manifest, OPERATOR_STATEMENT_VERSION, SCHEME_ED25519, SIG_STATEMENT_VERSION, ed25519_spki_pem,
+    key_id, operator_statement, parse_public_key_hex, sanitize_display, signing_statement,
+    verify_statement,
 };
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-use crate::bundle_cmd::{BundleImportFormat, bundle_export_output_display};
+use crate::bundle_cmd::{
+    BundleImportFormat, bundle_export_output_display, read_bundle_verified_for_signing,
+};
 
 /// File names of the three head-signature artifacts written into `--out-dir`.
 const STATEMENT_FILE: &str = "statement.bin";
@@ -34,6 +42,11 @@ const OPERATOR_PUBKEY_PEM_FILE: &str = "operator_pubkey.pem";
 
 /// Length in bytes of a raw Ed25519 detached signature.
 const ED25519_SIGNATURE_LEN: usize = 64;
+
+/// The one-sentence statement of what the emitted openssl command does and does not prove.
+const OPENSSL_PROVES: &str = "the openssl command proves that the holder of this key signed session head H; \
+the AGEF hash chain (checked by agef-verify or akmon bundle verify, and by this command before \
+writing the artifacts) is what ties H to the bundle's events and objects";
 
 /// Arguments for `akmon bundle prove-openssl`.
 #[derive(Args, Debug, Clone)]
@@ -81,9 +94,21 @@ pub struct BundleProveReportV1 {
     /// The exact `openssl` command a third party runs to verify, with real emitted paths.
     openssl_command: String,
     /// Operator-attestation artifacts. Present only when `--operator-key` was supplied; omitted
-    /// entirely otherwise so the head-signature-only JSON stays byte-identical.
+    /// entirely otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     operator: Option<OperatorProveFields>,
+    /// Always `true` in a success report: full AGEF integrity verification passed before writing.
+    #[serde(default)]
+    integrity_verified: bool,
+    /// Always `true` in a success report: the selected signature verified against `--verify-key`.
+    #[serde(default)]
+    signature_verified: bool,
+    /// The session head H that the signature (and the openssl command) covers.
+    #[serde(default)]
+    head: String,
+    /// What the openssl command proves, and what ties H to the bundle contents.
+    #[serde(default)]
+    openssl_proves: String,
 }
 
 /// The operator-attestation block of [`BundleProveReportV1`], emitted only with `--operator-key`.
@@ -106,346 +131,171 @@ pub struct OperatorProveFields {
     pubkey_pem_path: String,
     /// The exact `openssl` command a third party runs to verify the operator attestation.
     openssl_command: String,
+    /// Always `true` in a success report: the attestation verified against `--operator-key`.
+    #[serde(default)]
+    operator_key_verified: bool,
 }
 
-/// Emits `statement.bin`, `signature.bin`, and `pubkey.pem` for offline `openssl` verification.
-pub fn run_bundle_prove_openssl(args: &BundleProveArgs) -> ExitCode {
-    let json = matches!(args.format, BundleImportFormat::Json);
-    let fail = |category: &str, msg: String, code: u8| -> ExitCode {
-        if json {
-            let _ = print_prove_json_error(category, msg);
-        } else {
-            eprintln!("akmon: bundle prove-openssl: {msg}");
-        }
-        ExitCode::from(code)
-    };
+/// A refusal: `(category, message, exit_code)`.
+type Refusal = (String, String, u8);
 
-    // 1. Read the bundle (read-only; same path run_bundle_verify uses).
-    let mut file = match std::fs::File::open(&args.bundle) {
-        Ok(f) => f,
-        Err(err) => {
-            return fail(
-                "io_error",
-                format!("cannot open bundle {}: {err}", args.bundle.display()),
-                3,
-            );
-        }
-    };
-    let options = ReadBundleOptions {
-        allow_extra_files: false,
-        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
-    };
-    let contents = match read_bundle(&mut file, &options) {
-        Ok(c) => c,
-        Err(err) => {
-            let category = bundle_read_error_category(&err);
-            let code = bundle_read_exit_code(&err);
-            return fail(category, err.to_string(), code);
-        }
-    };
-    drop(file);
-    let manifest = &contents.manifest;
+fn refusal(category: &str, msg: String, code: u8) -> Refusal {
+    (category.to_owned(), msg, code)
+}
 
-    // 2. Parse the signer public key from --verify-key (same contract as bundle verify).
-    let pubkey = match std::fs::read_to_string(&args.verify_key) {
-        Ok(hex_str) => match parse_public_key_hex(&hex_str) {
-            Ok(pk) => pk,
-            Err(err) => {
-                return fail(
-                    "verify_key_error",
-                    format!("--verify-key {}: {err}", args.verify_key.display()),
-                    3,
-                );
-            }
-        },
-        Err(err) => {
-            return fail(
-                "verify_key_error",
-                format!(
-                    "cannot read --verify-key {}: {err}",
-                    args.verify_key.display()
-                ),
-                3,
-            );
-        }
-    };
-    let expected_key_id = key_id(&pubkey);
+/// One verified, ready-to-write proof: the statement bytes, raw signature, and SPKI PEM.
+struct PreparedProof {
+    key_id: String,
+    statement: String,
+    signature: Vec<u8>,
+    pubkey_pem: String,
+}
 
-    // 3. Select the manifest signature whose key_id matches the supplied public key.
+/// Paths of the three files a [`PreparedProof`] was written to, plus the openssl command.
+struct WrittenProof {
+    statement_path: String,
+    signature_path: String,
+    pubkey_pem_path: String,
+    openssl_command: String,
+}
+
+/// Reads and parses a public-key hex file; `category`/`flag` label the error.
+fn load_key(path: &std::path::Path, flag: &str, category: &str) -> Result<Vec<u8>, Refusal> {
+    let hex_str = std::fs::read_to_string(path).map_err(|err| {
+        refusal(
+            category,
+            format!("cannot read {flag} {}: {err}", path.display()),
+            3,
+        )
+    })?;
+    parse_public_key_hex(&hex_str)
+        .map_err(|err| refusal(category, format!("{flag} {}: {err}", path.display()), 3))
+}
+
+/// Decodes a 64-byte Ed25519 signature from hex.
+fn decode_signature(hex_sig: &str, what: &str, category: &str) -> Result<Vec<u8>, Refusal> {
+    let bytes = hex::decode(hex_sig)
+        .map_err(|err| refusal(category, format!("{what} is not valid hex: {err}"), 1))?;
+    if bytes.len() != ED25519_SIGNATURE_LEN {
+        return Err(refusal(
+            category,
+            format!(
+                "{what} is {} bytes; expected {ED25519_SIGNATURE_LEN}",
+                bytes.len()
+            ),
+            1,
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Selects and VERIFIES the head signature made by `pubkey`.
+fn prepare_head_proof(manifest: &Manifest, pubkey: &[u8]) -> Result<PreparedProof, Refusal> {
+    let kid = key_id(pubkey);
     let Some(signatures) = &manifest.signatures else {
-        return fail(
+        return Err(refusal(
+            "no_matching_signature",
+            format!("bundle has no signatures; cannot prove a signature for key_id {kid}"),
+            1,
+        ));
+    };
+    let Some(entry) = signatures.iter().find(|s| s.key_id == kid) else {
+        return Err(refusal(
             "no_matching_signature",
             format!(
-                "bundle has no signatures; cannot prove a signature for key_id {expected_key_id}"
+                "no manifest signature matches the supplied public key (expected key_id {kid})"
             ),
             1,
-        );
+        ));
     };
-    let Some(entry) = signatures.iter().find(|s| s.key_id == expected_key_id) else {
-        return fail(
-            "no_matching_signature",
-            format!(
-                "no manifest signature matches the supplied public key (expected key_id {expected_key_id})"
-            ),
-            1,
-        );
-    };
-
-    // 4. The selected entry must be an AGEF-SIG-v1 Ed25519 signature.
     if entry.scheme != SCHEME_ED25519 || entry.statement_version != SIG_STATEMENT_VERSION {
-        return fail(
+        return Err(refusal(
             "unsupported_signature",
             format!(
-                "signature for key_id {expected_key_id} is scheme={} statement_version={}; only ed25519/AGEF-SIG-v1 is supported",
-                entry.scheme, entry.statement_version
+                "signature for key_id {kid} is scheme={} statement_version={}; only ed25519/AGEF-SIG-v1 is supported",
+                sanitize_display(&entry.scheme),
+                sanitize_display(&entry.statement_version)
             ),
             1,
-        );
+        ));
     }
-
-    // 5. Decode the 64-byte raw detached signature.
-    let signature_bytes = match hex::decode(&entry.signature) {
-        Ok(b) => b,
-        Err(err) => {
-            return fail(
-                "malformed_signature",
-                format!("signature for key_id {expected_key_id} is not valid hex: {err}"),
-                1,
-            );
-        }
-    };
-    if signature_bytes.len() != ED25519_SIGNATURE_LEN {
-        return fail(
-            "malformed_signature",
-            format!(
-                "signature for key_id {expected_key_id} is {} bytes; expected {ED25519_SIGNATURE_LEN}",
-                signature_bytes.len()
-            ),
-            1,
-        );
-    }
-
-    // 6. Reconstruct the exact signed statement via the LOCKED library function.
+    let signature = decode_signature(
+        &entry.signature,
+        &format!("signature for key_id {kid}"),
+        "malformed_signature",
+    )?;
+    // Reconstruct the exact signed statement via the LOCKED library function, then check it.
     let statement = signing_statement(
         &manifest.agef_version,
         &manifest.hash_algorithm,
         &manifest.session.id,
         &manifest.session.head,
     );
-
-    // 7. Encode the supplied public key as SPKI PEM (the form stock openssl ingests).
-    let pubkey_pem = match ed25519_spki_pem(&pubkey) {
-        Ok(pem) => pem,
-        Err(err) => {
-            return fail(
-                "verify_key_error",
-                format!("cannot encode public key as PEM: {err}"),
-                3,
-            );
-        }
-    };
-
-    // 8. Write the three artifacts into --out-dir (raw bytes; no newline translation).
-    if let Err(err) = std::fs::create_dir_all(&args.out_dir) {
-        return fail(
-            "io_error",
-            format!("cannot create --out-dir {}: {err}", args.out_dir.display()),
+    if verify_statement(statement.as_bytes(), &signature, pubkey).is_err() {
+        return Err(refusal(
+            "signature_invalid",
+            format!(
+                "the signature for key_id {kid} does NOT verify over this bundle's AGEF-SIG-v1 statement; refusing to emit artifacts"
+            ),
+            1,
+        ));
+    }
+    let pubkey_pem = ed25519_spki_pem(pubkey).map_err(|err| {
+        refusal(
+            "verify_key_error",
+            format!("cannot encode public key as PEM: {err}"),
             3,
-        );
-    }
-    let statement_path = args.out_dir.join(STATEMENT_FILE);
-    let signature_path = args.out_dir.join(SIGNATURE_FILE);
-    let pubkey_pem_path = args.out_dir.join(PUBKEY_PEM_FILE);
-    if let Err(err) = std::fs::write(&statement_path, statement.as_bytes()) {
-        return fail(
-            "io_error",
-            format!("cannot write {}: {err}", statement_path.display()),
-            3,
-        );
-    }
-    if let Err(err) = std::fs::write(&signature_path, &signature_bytes) {
-        return fail(
-            "io_error",
-            format!("cannot write {}: {err}", signature_path.display()),
-            3,
-        );
-    }
-    if let Err(err) = std::fs::write(&pubkey_pem_path, pubkey_pem.as_bytes()) {
-        return fail(
-            "io_error",
-            format!("cannot write {}: {err}", pubkey_pem_path.display()),
-            3,
-        );
-    }
-
-    let pubkey_pem_disp = bundle_export_output_display(pubkey_pem_path.as_path());
-    let statement_disp = bundle_export_output_display(statement_path.as_path());
-    let signature_disp = bundle_export_output_display(signature_path.as_path());
-    let openssl_command = format!(
-        "openssl pkeyutl -verify -pubin -inkey {pubkey_pem_disp} -rawin -in {statement_disp} -sigfile {signature_disp}"
-    );
-
-    // 9. OPTIONALLY emit the operator-attestation artifacts. This runs ONLY when --operator-key is
-    //    supplied; the head-signature path above is untouched, so output is byte-identical without
-    //    the flag. On any error this returns early with the documented category/exit code.
-    let operator = match emit_operator_artifacts(args, manifest) {
-        Ok(op) => op,
-        Err((category, msg, code)) => return fail(&category, msg, code),
-    };
-
-    match args.format {
-        BundleImportFormat::Json => {
-            let report = BundleProveReportV1 {
-                tool: "akmon".to_owned(),
-                akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-                bundle_path: bundle_export_output_display(args.bundle.as_path()),
-                session_id: manifest.session.id.clone(),
-                key_id: expected_key_id,
-                statement_path: statement_disp,
-                signature_path: signature_disp,
-                pubkey_pem_path: pubkey_pem_disp,
-                openssl_command,
-                operator,
-            };
-            match serde_json::to_string_pretty(&report) {
-                Ok(s) => println!("{s}"),
-                Err(err) => {
-                    return fail(
-                        "io_error",
-                        format!("failed to render JSON output: {err}"),
-                        3,
-                    );
-                }
-            }
-        }
-        BundleImportFormat::Human => {
-            eprintln!(
-                "wrote openssl verification artifacts for: {}",
-                bundle_export_output_display(args.bundle.as_path())
-            );
-            eprintln!("  session_id: {}", manifest.session.id);
-            eprintln!("  key_id: {expected_key_id}");
-            eprintln!("  statement: {statement_disp}");
-            eprintln!("  signature: {signature_disp}");
-            eprintln!("  public key (PEM): {pubkey_pem_disp}");
-            eprintln!("  verify offline with OpenSSL 3.x (no Akmon binary):");
-            eprintln!("    {openssl_command}");
-            if let Some(op) = &operator {
-                eprintln!("operator attestation artifacts:");
-                eprintln!("  operator key_id: {}", op.key_id);
-                eprintln!("  operator_id (self-asserted): {}", op.operator_id);
-                eprintln!("  role (self-asserted): {}", op.role);
-                eprintln!("  operator statement: {}", op.statement_path);
-                eprintln!("  operator signature: {}", op.signature_path);
-                eprintln!("  operator public key (PEM): {}", op.pubkey_pem_path);
-                eprintln!("  verify the operator attestation offline with OpenSSL 3.x:");
-                eprintln!("    {}", op.openssl_command);
-            }
-        }
-    }
-    ExitCode::SUCCESS
+        )
+    })?;
+    Ok(PreparedProof {
+        key_id: kid,
+        statement,
+        signature,
+        pubkey_pem,
+    })
 }
 
-/// Emits the operator-attestation artifacts when `--operator-key` is supplied.
-///
-/// Returns `Ok(None)` when `--operator-key` is absent (the head-signature-only path, byte-identical
-/// to before). On success with the flag, writes `operator_statement.bin`, `operator_signature.bin`,
-/// and `operator_pubkey.pem` into `--out-dir` and returns the populated [`OperatorProveFields`].
-/// On failure returns `Err((category, message, exit_code))` for the caller to surface.
-///
-/// The signed statement is reconstructed ONLY via the locked [`operator_statement`] over the
-/// manifest's own fields and the matched attestation's identity — never hand-rolled — so a third
-/// party verifies it with stock `openssl` over a flat byte file.
-fn emit_operator_artifacts(
-    args: &BundleProveArgs,
-    manifest: &akmon_bundle::Manifest,
-) -> Result<Option<OperatorProveFields>, (String, String, u8)> {
-    let Some(operator_key_path) = &args.operator_key else {
-        return Ok(None);
-    };
-
-    // 1. Read + parse the operator public key (read/parse failure: operator_key_error, exit 3).
-    let operator_pubkey = match std::fs::read_to_string(operator_key_path) {
-        Ok(hex_str) => match parse_public_key_hex(&hex_str) {
-            Ok(pk) => pk,
-            Err(err) => {
-                return Err((
-                    "operator_key_error".to_owned(),
-                    format!("--operator-key {}: {err}", operator_key_path.display()),
-                    3,
-                ));
-            }
-        },
-        Err(err) => {
-            return Err((
-                "operator_key_error".to_owned(),
-                format!(
-                    "cannot read --operator-key {}: {err}",
-                    operator_key_path.display()
-                ),
-                3,
-            ));
-        }
-    };
-    let operator_key_id = key_id(&operator_pubkey);
-
-    // 2. Find the matching attestation by key_id.
+/// Selects and VERIFIES the operator attestation made by `operator_pubkey`. Returns the proof plus
+/// the attestation's self-asserted `(operator_id, role)`.
+fn prepare_operator_proof(
+    manifest: &Manifest,
+    operator_pubkey: &[u8],
+) -> Result<(PreparedProof, String, String), Refusal> {
+    let kid = key_id(operator_pubkey);
     let Some(attestations) = &manifest.operator_attestations else {
-        return Err((
-            "no_matching_operator_attestation".to_owned(),
+        return Err(refusal(
+            "no_matching_operator_attestation",
             format!(
-                "bundle has no operator attestations; cannot prove an attestation for key_id {operator_key_id}"
+                "bundle has no operator attestations; cannot prove an attestation for key_id {kid}"
             ),
             1,
         ));
     };
-    let Some(entry) = attestations.iter().find(|a| a.key_id == operator_key_id) else {
-        return Err((
-            "no_matching_operator_attestation".to_owned(),
+    let Some(entry) = attestations.iter().find(|a| a.key_id == kid) else {
+        return Err(refusal(
+            "no_matching_operator_attestation",
             format!(
-                "no operator attestation matches the supplied public key (expected key_id {operator_key_id})"
+                "no operator attestation matches the supplied public key (expected key_id {kid})"
             ),
             1,
         ));
     };
-
-    // 3. The matched entry must be an AGEF-OPERATOR-v1 Ed25519 attestation.
     if entry.scheme != SCHEME_ED25519 || entry.statement_version != OPERATOR_STATEMENT_VERSION {
-        return Err((
-            "unsupported_operator_attestation".to_owned(),
+        return Err(refusal(
+            "unsupported_operator_attestation",
             format!(
-                "operator attestation for key_id {operator_key_id} is scheme={} statement_version={}; only ed25519/{OPERATOR_STATEMENT_VERSION} is supported",
-                entry.scheme, entry.statement_version
+                "operator attestation for key_id {kid} is scheme={} statement_version={}; only ed25519/{OPERATOR_STATEMENT_VERSION} is supported",
+                sanitize_display(&entry.scheme),
+                sanitize_display(&entry.statement_version)
             ),
             1,
         ));
     }
-
-    // 4. Decode the 64-byte raw detached operator signature.
-    let signature_bytes = match hex::decode(&entry.signature) {
-        Ok(b) => b,
-        Err(err) => {
-            return Err((
-                "malformed_operator_signature".to_owned(),
-                format!(
-                    "operator attestation for key_id {operator_key_id} is not valid hex: {err}"
-                ),
-                1,
-            ));
-        }
-    };
-    if signature_bytes.len() != ED25519_SIGNATURE_LEN {
-        return Err((
-            "malformed_operator_signature".to_owned(),
-            format!(
-                "operator attestation for key_id {operator_key_id} is {} bytes; expected {ED25519_SIGNATURE_LEN}",
-                signature_bytes.len()
-            ),
-            1,
-        ));
-    }
-
-    // 5. Reconstruct the exact signed statement via the LOCKED library function.
+    let signature = decode_signature(
+        &entry.signature,
+        &format!("operator attestation for key_id {kid}"),
+        "malformed_operator_signature",
+    )?;
     let statement = operator_statement(
         &manifest.agef_version,
         &manifest.hash_algorithm,
@@ -456,86 +306,205 @@ fn emit_operator_artifacts(
         &entry.role,
         &entry.org,
     );
+    if verify_statement(statement.as_bytes(), &signature, operator_pubkey).is_err() {
+        return Err(refusal(
+            "operator_signature_invalid",
+            format!(
+                "the operator attestation for key_id {kid} does NOT verify over this bundle's AGEF-OPERATOR-v1 statement; refusing to emit artifacts"
+            ),
+            1,
+        ));
+    }
+    let pubkey_pem = ed25519_spki_pem(operator_pubkey).map_err(|err| {
+        refusal(
+            "operator_key_error",
+            format!("cannot encode operator public key as PEM: {err}"),
+            3,
+        )
+    })?;
+    Ok((
+        PreparedProof {
+            key_id: kid,
+            statement,
+            signature,
+            pubkey_pem,
+        },
+        entry.operator_id.clone(),
+        entry.role.clone(),
+    ))
+}
 
-    // 6. Encode the operator public key as SPKI PEM (the form stock openssl ingests).
-    let operator_pubkey_pem = match ed25519_spki_pem(&operator_pubkey) {
-        Ok(pem) => pem,
-        Err(err) => {
-            return Err((
-                "operator_key_error".to_owned(),
-                format!("cannot encode operator public key as PEM: {err}"),
+/// Writes one proof's three files (raw bytes; no newline translation) and builds its command.
+fn write_proof(
+    out_dir: &std::path::Path,
+    proof: &PreparedProof,
+    names: (&str, &str, &str),
+) -> Result<WrittenProof, Refusal> {
+    let statement_path = out_dir.join(names.0);
+    let signature_path = out_dir.join(names.1);
+    let pubkey_pem_path = out_dir.join(names.2);
+    let writes: [(&std::path::Path, &[u8]); 3] = [
+        (&statement_path, proof.statement.as_bytes()),
+        (&signature_path, &proof.signature),
+        (&pubkey_pem_path, proof.pubkey_pem.as_bytes()),
+    ];
+    for (path, bytes) in writes {
+        std::fs::write(path, bytes).map_err(|err| {
+            refusal(
+                "io_error",
+                format!("cannot write {}: {err}", path.display()),
                 3,
-            ));
-        }
-    };
-
-    // 7. Write the three operator artifacts into --out-dir (raw bytes; no newline translation).
-    let statement_path = args.out_dir.join(OPERATOR_STATEMENT_FILE);
-    let signature_path = args.out_dir.join(OPERATOR_SIGNATURE_FILE);
-    let pubkey_pem_path = args.out_dir.join(OPERATOR_PUBKEY_PEM_FILE);
-    if let Err(err) = std::fs::write(&statement_path, statement.as_bytes()) {
-        return Err((
-            "io_error".to_owned(),
-            format!("cannot write {}: {err}", statement_path.display()),
-            3,
-        ));
+            )
+        })?;
     }
-    if let Err(err) = std::fs::write(&signature_path, &signature_bytes) {
-        return Err((
-            "io_error".to_owned(),
-            format!("cannot write {}: {err}", signature_path.display()),
-            3,
-        ));
-    }
-    if let Err(err) = std::fs::write(&pubkey_pem_path, operator_pubkey_pem.as_bytes()) {
-        return Err((
-            "io_error".to_owned(),
-            format!("cannot write {}: {err}", pubkey_pem_path.display()),
-            3,
-        ));
-    }
-
-    // 8. Build the operator openssl command string from the emitted paths.
     let pubkey_pem_disp = bundle_export_output_display(pubkey_pem_path.as_path());
     let statement_disp = bundle_export_output_display(statement_path.as_path());
     let signature_disp = bundle_export_output_display(signature_path.as_path());
     let openssl_command = format!(
         "openssl pkeyutl -verify -pubin -inkey {pubkey_pem_disp} -rawin -in {statement_disp} -sigfile {signature_disp}"
     );
-
-    Ok(Some(OperatorProveFields {
-        key_id: operator_key_id,
-        operator_id: entry.operator_id.clone(),
-        role: entry.role.clone(),
+    Ok(WrittenProof {
         statement_path: statement_disp,
         signature_path: signature_disp,
         pubkey_pem_path: pubkey_pem_disp,
         openssl_command,
-    }))
+    })
 }
 
-/// JSON shape emitted when `prove-openssl` cannot complete.
-#[derive(Debug, Serialize, Deserialize)]
-struct BundleProveError {
-    /// Producer tool name.
-    tool: String,
-    /// Akmon crate version that produced this error object.
-    akmon_version: String,
-    /// Human-readable error description.
-    error: String,
-    /// Stable error category for automation.
-    category: String,
+/// Verifies the bundle and the signature(s), then emits the openssl verification artifacts.
+pub fn run_bundle_prove_openssl(args: &BundleProveArgs) -> ExitCode {
+    match prove(args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err((category, msg, code)) => {
+            if matches!(args.format, BundleImportFormat::Json) {
+                ToolErrorV1::new("akmon", &category, msg).print_json();
+            } else {
+                eprintln!("akmon: bundle prove-openssl: {}", sanitize_display(&msg));
+            }
+            ExitCode::from(code)
+        }
+    }
 }
 
-fn print_prove_json_error(category: &str, error: String) -> std::io::Result<()> {
-    let body = BundleProveError {
+fn prove(args: &BundleProveArgs) -> Result<(), Refusal> {
+    // 1. Read the bundle and run FULL integrity verification (refuse on any violation).
+    let contents = read_bundle_verified_for_signing(&args.bundle)?;
+    let manifest = &contents.manifest;
+
+    // 2. Load keys, then select and VERIFY every requested proof before writing anything.
+    let pubkey = load_key(&args.verify_key, "--verify-key", "verify_key_error")?;
+    let head_proof = prepare_head_proof(manifest, &pubkey)?;
+    let operator_proof = match &args.operator_key {
+        Some(path) => {
+            let operator_pubkey = load_key(path, "--operator-key", "operator_key_error")?;
+            Some(prepare_operator_proof(manifest, &operator_pubkey)?)
+        }
+        None => None,
+    };
+
+    // 3. Everything verified: write the artifacts into --out-dir.
+    std::fs::create_dir_all(&args.out_dir).map_err(|err| {
+        refusal(
+            "io_error",
+            format!("cannot create --out-dir {}: {err}", args.out_dir.display()),
+            3,
+        )
+    })?;
+    let head_written = write_proof(
+        &args.out_dir,
+        &head_proof,
+        (STATEMENT_FILE, SIGNATURE_FILE, PUBKEY_PEM_FILE),
+    )?;
+    let operator = match &operator_proof {
+        Some((proof, operator_id, role)) => {
+            let written = write_proof(
+                &args.out_dir,
+                proof,
+                (
+                    OPERATOR_STATEMENT_FILE,
+                    OPERATOR_SIGNATURE_FILE,
+                    OPERATOR_PUBKEY_PEM_FILE,
+                ),
+            )?;
+            Some(OperatorProveFields {
+                key_id: proof.key_id.clone(),
+                operator_id: operator_id.clone(),
+                role: role.clone(),
+                statement_path: written.statement_path,
+                signature_path: written.signature_path,
+                pubkey_pem_path: written.pubkey_pem_path,
+                openssl_command: written.openssl_command,
+                operator_key_verified: true,
+            })
+        }
+        None => None,
+    };
+
+    let report = BundleProveReportV1 {
         tool: "akmon".to_owned(),
         akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
-        error,
-        category: category.to_owned(),
+        bundle_path: bundle_export_output_display(args.bundle.as_path()),
+        session_id: manifest.session.id.clone(),
+        key_id: head_proof.key_id,
+        statement_path: head_written.statement_path,
+        signature_path: head_written.signature_path,
+        pubkey_pem_path: head_written.pubkey_pem_path,
+        openssl_command: head_written.openssl_command,
+        operator,
+        integrity_verified: true,
+        signature_verified: true,
+        head: manifest.session.head.clone(),
+        openssl_proves: OPENSSL_PROVES.to_owned(),
     };
-    let json =
-        serde_json::to_string_pretty(&body).map_err(|e| std::io::Error::other(e.to_string()))?;
-    println!("{json}");
+    match args.format {
+        BundleImportFormat::Json => {
+            let json = serde_json::to_string_pretty(&report).map_err(|err| {
+                refusal(
+                    "io_error",
+                    format!("failed to render JSON output: {err}"),
+                    3,
+                )
+            })?;
+            println!("{json}");
+        }
+        BundleImportFormat::Human => print_human(&report),
+    }
     Ok(())
+}
+
+fn print_human(report: &BundleProveReportV1) {
+    eprintln!(
+        "verified, then wrote openssl verification artifacts for: {}",
+        report.bundle_path
+    );
+    eprintln!("  integrity: OK (full AGEF verification passed)");
+    eprintln!(
+        "  signature: verified against the supplied key (key_id: {})",
+        report.key_id
+    );
+    eprintln!("  session_id: {}", report.session_id);
+    eprintln!("  head: {}", report.head);
+    eprintln!("  statement: {}", report.statement_path);
+    eprintln!("  signature: {}", report.signature_path);
+    eprintln!("  public key (PEM): {}", report.pubkey_pem_path);
+    eprintln!("  verify offline with OpenSSL 3.x (no Akmon binary):");
+    eprintln!("    {}", report.openssl_command);
+    eprintln!("  what this proves: the holder of this key signed session head H (above).");
+    eprintln!(
+        "  what ties H to the bundle contents: the AGEF hash chain — check it independently with `agef-verify`."
+    );
+    if let Some(op) = &report.operator {
+        eprintln!("operator attestation artifacts:");
+        eprintln!("  operator key_id (verified): {}", op.key_id);
+        eprintln!(
+            "  operator_id (self-asserted): {}",
+            sanitize_display(&op.operator_id)
+        );
+        eprintln!("  role (self-asserted): {}", sanitize_display(&op.role));
+        eprintln!("  operator statement: {}", op.statement_path);
+        eprintln!("  operator signature: {}", op.signature_path);
+        eprintln!("  operator public key (PEM): {}", op.pubkey_pem_path);
+        eprintln!("  verify the operator attestation offline with OpenSSL 3.x:");
+        eprintln!("    {}", op.openssl_command);
+    }
 }
