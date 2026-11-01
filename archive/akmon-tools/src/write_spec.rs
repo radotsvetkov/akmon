@@ -256,8 +256,7 @@ mod tests {
                         ..
                     }
                 ),
-                "name {:?} -> {out:?}",
-                name
+                "name {name:?} -> {out:?}"
             );
         }
     }

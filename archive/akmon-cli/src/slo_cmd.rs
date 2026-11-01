@@ -941,7 +941,7 @@ mod tests {
             write_evidence(
                 &p,
                 Some(healthy_metrics()),
-                &format!("2026-04-20T12:34:{:02}Z", i),
+                &format!("2026-04-20T12:34:{i:02}Z"),
             );
         }
         let global = AkmonGlobalConfig {
@@ -999,7 +999,7 @@ mod tests {
                     tool_latency_ms_avg: 20,
                     ..RunReliabilityMetrics::default()
                 }),
-                &format!("2026-04-20T12:35:{:02}Z", i),
+                &format!("2026-04-20T12:35:{i:02}Z"),
             );
         }
         let global = AkmonGlobalConfig {
@@ -1084,7 +1084,7 @@ mod tests {
             write_evidence(
                 &baseline_dir.join(format!("base-{i}.json")),
                 Some(healthy_metrics()),
-                &format!("2026-04-20T12:36:{:02}Z", i),
+                &format!("2026-04-20T12:36:{i:02}Z"),
             );
         }
         let global = AkmonGlobalConfig {
