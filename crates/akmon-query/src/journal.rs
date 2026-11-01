@@ -86,9 +86,11 @@ pub fn default_journal_dir() -> Result<PathBuf, AgentError> {
 }
 
 /// Resolves the journal database file path inside a journal directory.
+///
+/// Delegates to [`akmon_journal::journal_db_path`]; kept here for API compatibility.
 #[must_use]
 pub fn journal_db_path(journal_dir: &std::path::Path) -> PathBuf {
-    journal_dir.join("journal.redb")
+    akmon_journal::journal_db_path(journal_dir)
 }
 
 /// Opens the per-user default journal (D-04) and creates a new session graph for `session_id`.
@@ -133,31 +135,26 @@ pub fn open_or_resume_default_journal_handle(
 /// Opens an existing journal + session graph for read-only operations by `session_id`.
 ///
 /// This function never creates a journal or session. It returns an error when the database file is
-/// missing/unreadable or when `session_id` is not present in the session graph.
+/// missing/unreadable or when `session_id` is not present in the session graph. Delegates to
+/// [`akmon_journal::open_journal_read_only`].
 pub fn open_journal_read_only(
     journal_dir: &std::path::Path,
     session_id: Uuid,
 ) -> Result<JournalHandle<RedbObjectStore, RedbSessionGraph>, AgentError> {
-    let db_path = journal_db_path(journal_dir);
-    let store = Arc::new(RedbObjectStore::open(db_path.as_path()).map_err(journal_err)?);
-    let graph = RedbSessionGraph::reopen(Arc::clone(&store), session_id).map_err(journal_err)?;
+    let (store, graph) =
+        akmon_journal::open_journal_read_only(journal_dir, session_id).map_err(journal_err)?;
     Ok(JournalHandle::new(store, Arc::new(Mutex::new(graph))))
 }
 
 /// Returns whether `session_id` has a row in the journal database `session_heads` table.
 ///
-/// When `journal.redb` is missing, returns `Ok(false)` (no session can exist). Opens the database
-/// read-only and performs a single key probe.
+/// When `journal.redb` is missing, returns `Ok(false)` (no session can exist). Delegates to
+/// [`akmon_journal::journal_contains_session`].
 pub fn journal_contains_session(
     journal_dir: &std::path::Path,
     session_id: Uuid,
 ) -> Result<bool, AgentError> {
-    let db_path = journal_db_path(journal_dir);
-    if !db_path.is_file() {
-        return Ok(false);
-    }
-    let store = RedbObjectStore::open(db_path.as_path()).map_err(journal_err)?;
-    session_head_row_exists(&store, session_id).map_err(journal_err)
+    akmon_journal::journal_contains_session(journal_dir, session_id).map_err(journal_err)
 }
 
 fn journal_err(e: JournalError) -> AgentError {

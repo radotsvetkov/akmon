@@ -126,8 +126,6 @@ name = "akmon-diff"
 version = "2.2.1"
 dependencies = [
  "akmon-journal",
- "akmon-models",
- "akmon-query",
  "serde",
  "serde_json",
  "tempfile",

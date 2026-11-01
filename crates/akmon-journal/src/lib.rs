@@ -20,6 +20,7 @@ pub mod event;
 pub mod hash;
 mod journal_meta;
 pub mod object_store;
+pub mod open;
 pub mod prelude;
 pub mod session_graph;
 
@@ -36,6 +37,10 @@ pub use event::{
 pub use hash::{BLAKE3_LEN, Hash, HashAlgorithm, SHA256_LEN, WireHash, digest_bytes};
 pub use journal_meta::JournalMeta;
 pub use object_store::{MemoryObjectStore, ObjectStore, RedbObjectStore};
+pub use open::{
+    JOURNAL_DB_FILE_NAME, journal_contains_session, journal_db_path, open_journal_read_only,
+    same_journal_dir,
+};
 #[cfg(any(test, feature = "test-utils"))]
 pub use session_graph::MemorySessionGraph;
 pub use session_graph::{

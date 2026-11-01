@@ -9,9 +9,8 @@ use akmon_diff::{
 };
 use akmon_journal::{
     AttemptRecord, AttemptStatus, EventKind, Hash, HashAlgorithm, ObjectStore, RedbObjectStore,
-    RedbSessionGraph, SessionGraph,
+    RedbSessionGraph, SessionGraph, journal_db_path,
 };
-use akmon_query::{JournalHandle, journal_db_path};
 use tempfile::tempdir;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -20,17 +19,23 @@ fn put(store: &RedbObjectStore, bytes: &[u8]) -> Hash {
     store.put(bytes).expect("put object")
 }
 
-fn open_writable_journal(
-    dir: &Path,
-    session_id: Uuid,
-) -> JournalHandle<RedbObjectStore, RedbSessionGraph> {
+/// Minimal writable journal handle for fixtures (diff depends only on `akmon-journal`).
+struct JournalHandle {
+    store: Arc<RedbObjectStore>,
+    graph: Arc<Mutex<RedbSessionGraph>>,
+}
+
+fn open_writable_journal(dir: &Path, session_id: Uuid) -> JournalHandle {
     std::fs::create_dir_all(dir).expect("mkdir journal dir");
     let db_path = journal_db_path(dir);
     let store = Arc::new(
         RedbObjectStore::create(db_path.as_path(), HashAlgorithm::Sha256).expect("create store"),
     );
     let graph = RedbSessionGraph::open_new(Arc::clone(&store), session_id).expect("open graph");
-    JournalHandle::new(store, Arc::new(Mutex::new(graph)))
+    JournalHandle {
+        store,
+        graph: Arc::new(Mutex::new(graph)),
+    }
 }
 
 /// Builds event kinds in lockstep order; each builder sees the same store the graph appends to.
