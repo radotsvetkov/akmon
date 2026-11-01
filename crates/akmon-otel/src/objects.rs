@@ -8,17 +8,14 @@
 //! slots never collide on the same hash.
 
 use crate::canonical::canonical_json_bytes;
-use crate::semconv::CaptureLevel;
+use crate::semconv::{CaptureLevel, SEMCONV_VERSION};
 use serde_json::{Map, Value, json};
-
-/// Pinned OpenTelemetry semantic-conventions version this importer targets.
-pub const SOURCE_SEMCONV: &str = "1.37.0";
 
 /// Builds the canonical bytes of a metadata-envelope object (F3).
 ///
 /// Used when real content is absent but structural metadata exists. The object
 /// is self-describing: it records the slot (`field`), the capture level, the
-/// source semconv version, and the sorted `gen_ai.*` metadata for that slot.
+/// importer's supported semconv version, and the sorted metadata for that slot.
 #[must_use]
 pub fn metadata_envelope_bytes(field: &str, attributes: Map<String, Value>) -> Vec<u8> {
     let value = json!({
@@ -26,8 +23,31 @@ pub fn metadata_envelope_bytes(field: &str, attributes: Map<String, Value>) -> V
         "schema": "akmon-otel-meta-v1",
         "field": field,
         "capture_level": "structural",
-        "source_semconv": SOURCE_SEMCONV,
+        "source_semconv": SEMCONV_VERSION,
         "attributes": Value::Object(attributes),
+    });
+    encode(&value)
+}
+
+/// Builds the canonical bytes of a failed tool call's output object (OTEL-5).
+///
+/// `ToolCall` events carry no status field, so a failed tool execution records
+/// its failure in the output object: the error details plus the captured result
+/// (when the source telemetry captured one).
+#[must_use]
+pub fn tool_error_bytes(error: Map<String, Value>, result: Option<Value>) -> Vec<u8> {
+    let capture_level = if result.is_some() {
+        "full"
+    } else {
+        "structural"
+    };
+    let value = json!({
+        "akmon_otel_tool_error": true,
+        "schema": "akmon-otel-tool-error-v1",
+        "field": "tool_output",
+        "capture_level": capture_level,
+        "error": Value::Object(error),
+        "result": result.unwrap_or(Value::Null),
     });
     encode(&value)
 }
@@ -48,35 +68,70 @@ pub fn not_captured_bytes(field: &str, reason: &str) -> Vec<u8> {
     encode(&value)
 }
 
+/// Session-level facts recorded in the config object.
+#[derive(Debug, Default)]
+pub struct ConfigFacts {
+    /// Provider identity.
+    pub provider: Option<String>,
+    /// Request (or response) model.
+    pub model: Option<String>,
+    /// `gen_ai.conversation.id`.
+    pub conversation_id: Option<String>,
+    /// Span id of the root `invoke_agent` / `invoke_workflow` span.
+    pub agent: Option<String>,
+    /// `gen_ai.agent.name` / `.id` / `.version`, when present.
+    pub agent_identity: Map<String, Value>,
+    /// The (single) source trace id.
+    pub trace_id: Option<String>,
+    /// The producer-declared semconv version(s), or `"undeclared"`.
+    pub source_semconv: String,
+    /// Which content forms were found (`structured_attributes`,
+    /// `inference_details_event`, `legacy_events`), or `"none"`.
+    pub source_form: String,
+    /// Non-legacy `gen_ai.*` events recorded as structural metadata.
+    pub structural_events: Vec<Value>,
+}
+
 /// Builds the canonical bytes of the session config object (F9/F1).
 ///
 /// The `capture_level` is embedded here so it is signed into the session via the
 /// `SessionStart` head: tampering with the recorded capture level changes the
-/// config hash and therefore the session head.
+/// config hash and therefore the session head. `source_semconv` records what the
+/// producer *declared* (its `schemaUrl` version), never a hardcoded constant;
+/// `importer_semconv` records the version this importer supports.
 #[must_use]
-pub fn config_object_bytes(
-    capture_level: CaptureLevel,
-    provider: Option<&str>,
-    model: Option<&str>,
-    conversation_id: Option<&str>,
-    agent: Option<&str>,
-) -> Vec<u8> {
-    let value = json!({
+pub fn config_object_bytes(capture_level: CaptureLevel, facts: &ConfigFacts) -> Vec<u8> {
+    let mut value = json!({
         "akmon_otel_config": true,
         "schema": "akmon-otel-config-v1",
         "capture_level": capture_level.as_str(),
-        "source_semconv": SOURCE_SEMCONV,
-        "provider": opt(provider),
-        "model": opt(model),
-        "conversation_id": opt(conversation_id),
-        "agent": opt(agent),
+        "source_semconv": facts.source_semconv,
+        "source_form": facts.source_form,
+        "importer_semconv": SEMCONV_VERSION,
+        "provider": opt(facts.provider.as_deref()),
+        "model": opt(facts.model.as_deref()),
+        "conversation_id": opt(facts.conversation_id.as_deref()),
+        "agent": opt(facts.agent.as_deref()),
+        "trace_id": opt(facts.trace_id.as_deref()),
     });
+    if let Value::Object(obj) = &mut value {
+        if !facts.agent_identity.is_empty() {
+            obj.insert(
+                "agent_identity".to_owned(),
+                Value::Object(facts.agent_identity.clone()),
+            );
+        }
+        if !facts.structural_events.is_empty() {
+            obj.insert(
+                "structural_events".to_owned(),
+                Value::Array(facts.structural_events.clone()),
+            );
+        }
+    }
     encode(&value)
 }
 
 /// Wraps already-parsed real content into canonical bytes (F1/F2).
-///
-/// `content` is the actual message/tool JSON value extracted from the trace.
 #[must_use]
 pub fn real_content_bytes(content: &Value) -> Vec<u8> {
     encode(content)
@@ -84,10 +139,7 @@ pub fn real_content_bytes(content: &Value) -> Vec<u8> {
 
 /// Converts an optional string into a JSON value (`null` when absent).
 fn opt(value: Option<&str>) -> Value {
-    match value {
-        Some(v) => Value::String(v.to_owned()),
-        None => Value::Null,
-    }
+    value.map_or(Value::Null, |v| Value::String(v.to_owned()))
 }
 
 /// Canonicalizes a value, falling back to a stable error marker that still
@@ -100,7 +152,6 @@ fn encode(value: &Value) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn not_captured_field_distinction() {
@@ -120,21 +171,20 @@ mod tests {
     }
 
     #[test]
-    fn config_bakes_capture_level() {
-        let full = config_object_bytes(
-            CaptureLevel::Full,
-            Some("openai"),
-            Some("gpt-4o"),
-            None,
-            None,
-        );
-        let structural = config_object_bytes(
-            CaptureLevel::Structural,
-            Some("openai"),
-            Some("gpt-4o"),
-            None,
-            None,
-        );
+    fn config_bakes_capture_level_and_honest_semconv() {
+        let facts = ConfigFacts {
+            source_semconv: "undeclared".to_owned(),
+            ..ConfigFacts::default()
+        };
+        let full = config_object_bytes(CaptureLevel::Full, &facts);
+        let structural = config_object_bytes(CaptureLevel::Structural, &facts);
         assert_ne!(full, structural);
+        let parsed: Value = serde_json::from_slice(&full).unwrap_or_else(|_| unreachable!());
+        assert_eq!(parsed.get("source_semconv"), Some(&json!("undeclared")));
+        assert_eq!(
+            parsed.get("importer_semconv"),
+            Some(&json!(SEMCONV_VERSION))
+        );
+        assert!(parsed.get("structural_events").is_none());
     }
 }

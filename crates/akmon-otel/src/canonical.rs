@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 /// Returns an error string when `serde_json` fails to serialize the canonicalized
 /// value (for example, on a map with non-string keys, which cannot occur for
 /// values built from JSON input).
-pub fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
+pub(crate) fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
     let canonical = canonicalize(value);
     serde_json::to_vec(&canonical).map_err(|err| err.to_string())
 }

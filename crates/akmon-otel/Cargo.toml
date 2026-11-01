@@ -6,14 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Import OpenTelemetry GenAI (semconv v1.37.0) traces into AGEF sessions (Item 9.1)."
+description = "Import OpenTelemetry GenAI (semconv v1.37 .. v1.42.x structured form, plus legacy <= v1.36 events) traces into AGEF sessions (Item 9.1)."
 
 [dependencies]
 akmon-journal = { path = "../akmon-journal" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-hex = { workspace = true }
 time = { workspace = true }
 # Required only to name `ImportReport.session_id: Uuid`. `uuid` is already a
 # workspace dependency and a transitive requirement of `akmon-journal`'s public

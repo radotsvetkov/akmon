@@ -31,10 +31,10 @@ const FIXTURE_B: &str = r#"{"resourceSpans":[{"resource":{"attributes":[{"key":"
 // the event carries no real content, reports structural capture.
 const FIXTURE_LEGACY: &str = r#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"abcd","spanId":"1111","parentSpanId":"","name":"chat","kind":3,"startTimeUnixNano":"1","endTimeUnixNano":"2","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}},{"key":"gen_ai.system","value":{"stringValue":"openai"}}],"events":[{"name":"gen_ai.user.message","timeUnixNano":"1","attributes":[]}]}]}]}]}"#;
 
-// Unrecognized legacy form: a span carrying a `gen_ai.*` span event that is NOT
+// Unrecognized legacy form: a span carrying a legacy-shaped `gen_ai.<role>.message` event that is NOT
 // one of the five supported message-event forms, which the importer must reject
 // rather than silently drop (F8).
-const FIXTURE_UNKNOWN_LEGACY: &str = r#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"abcd","spanId":"1111","parentSpanId":"","name":"chat","kind":3,"startTimeUnixNano":"1","endTimeUnixNano":"2","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}}],"events":[{"name":"gen_ai.some_future.event","timeUnixNano":"1","attributes":[]}]}]}]}]}"#;
+const FIXTURE_UNKNOWN_LEGACY: &str = r#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"abcd","spanId":"1111","parentSpanId":"","name":"chat","kind":3,"startTimeUnixNano":"1","endTimeUnixNano":"2","attributes":[{"key":"gen_ai.operation.name","value":{"stringValue":"chat"}}],"events":[{"name":"gen_ai.developer.message","timeUnixNano":"1","attributes":[]}]}]}]}]}"#;
 
 /// Writes `contents` to `<dir>/<name>` and returns the path display string.
 fn write_fixture(dir: &std::path::Path, name: &str, contents: &str) -> String {
@@ -454,5 +454,127 @@ fn t_otel_import_rejects_unknown_legacy_event() {
         Some(2),
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Runs `akmon otel import <trace> --journal <journal> <extra...>`.
+fn run_import(trace: &str, journal: &std::path::Path, extra: &[&str]) -> std::process::Output {
+    let journal = journal.display().to_string();
+    let mut args = vec!["otel", "import", trace, "--journal", journal.as_str()];
+    args.extend_from_slice(extra);
+    akmon().args(&args).output().expect("run otel import")
+}
+
+/// A refused trace is validated before the journal is touched (OTEL-8): no
+/// journal directory, store or orphan session is created.
+#[test]
+fn t_otel_import_refused_trace_creates_no_journal() {
+    let dir = tempdir().expect("tempdir");
+    let journal_dir = dir.path().join("journal");
+    let http_only = r#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"traceId":"t1","spanId":"h1","name":"GET /","startTimeUnixNano":"1748000000000000000","endTimeUnixNano":"1748000001000000000"}]}]}]}"#;
+    let trace = write_fixture(dir.path(), "http.json", http_only);
+    let out = run_import(&trace, &journal_dir, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(2));
+    let v: Value = serde_json::from_slice(&out.stdout).expect("error json");
+    assert_eq!(
+        v.get("category").and_then(Value::as_str),
+        Some("no_genai_spans")
+    );
+    assert!(
+        !journal_dir.exists(),
+        "a refused import must not create the journal"
+    );
+}
+
+/// Multi-trace input needs --trace-id (OTEL-6); with it, only that trace imports.
+#[test]
+fn t_otel_import_multi_trace_requires_trace_id() {
+    let dir = tempdir().expect("tempdir");
+    let journal_dir = dir.path().join("journal");
+    let span = |trace: &str, id: &str| {
+        format!(
+            r#"{{"traceId":"{trace}","spanId":"{id}","startTimeUnixNano":"1748000000000000000","endTimeUnixNano":"1748000001000000000","attributes":[{{"key":"gen_ai.operation.name","value":{{"stringValue":"chat"}}}}]}}"#
+        )
+    };
+    let body = format!(
+        r#"{{"resourceSpans":[{{"scopeSpans":[{{"spans":[{},{}]}}]}}]}}"#,
+        span("aa", "1"),
+        span("bb", "2")
+    );
+    let trace = write_fixture(dir.path(), "multi.json", &body);
+
+    let refused = run_import(&trace, &journal_dir, &["--format", "json"]);
+    assert_eq!(refused.status.code(), Some(2));
+    let v: Value = serde_json::from_slice(&refused.stdout).expect("error json");
+    assert_eq!(
+        v.get("category").and_then(Value::as_str),
+        Some("multiple_traces")
+    );
+
+    let ok = run_import(
+        &trace,
+        &journal_dir,
+        &["--trace-id", "bb", "--format", "json"],
+    );
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let v: Value = serde_json::from_slice(&ok.stdout).expect("import json");
+    assert_eq!(v.get("trace_id").and_then(Value::as_str), Some("bb"));
+    assert_eq!(v.get("provider_calls").and_then(Value::as_u64), Some(1));
+}
+
+/// --max-bytes caps the input (OTEL-9).
+#[test]
+fn t_otel_import_max_bytes_refuses_large_input() {
+    let dir = tempdir().expect("tempdir");
+    let journal_dir = dir.path().join("journal");
+    let trace = write_fixture(dir.path(), "trace_a.json", FIXTURE_A);
+    let out = run_import(
+        &trace,
+        &journal_dir,
+        &["--max-bytes", "100", "--format", "json"],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let v: Value = serde_json::from_slice(&out.stdout).expect("error json");
+    assert_eq!(
+        v.get("category").and_then(Value::as_str),
+        Some("trace_too_large")
+    );
+}
+
+/// Human mode prints only the session id on stdout and the exact next command
+/// on stderr; JSON mode carries `next_command`.
+#[test]
+fn t_otel_import_prints_session_id_and_next_command() {
+    let dir = tempdir().expect("tempdir");
+    let journal_dir = dir.path().join("journal");
+    let trace = write_fixture(dir.path(), "trace_a.json", FIXTURE_A);
+
+    let human = run_import(&trace, &journal_dir, &[]);
+    assert_eq!(human.status.code(), Some(0));
+    let sid = String::from_utf8_lossy(&human.stdout).trim().to_owned();
+    assert!(uuid::Uuid::parse_str(&sid).is_ok(), "stdout={sid}");
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(
+        stderr.contains(&format!("next: akmon bundle export {sid} --journal ")),
+        "stderr={stderr}"
+    );
+
+    let json = run_import(&trace, &journal_dir, &["--format", "json"]);
+    let v: Value = serde_json::from_slice(&json.stdout).expect("import json");
+    let sid = v.get("session_id").and_then(Value::as_str).expect("sid");
+    let next = v
+        .get("next_command")
+        .and_then(Value::as_str)
+        .expect("next_command");
+    assert!(next.starts_with(&format!("akmon bundle export {sid} --journal ")));
+    assert_eq!(v.get("capture_level").and_then(Value::as_str), Some("full"));
+    assert_eq!(
+        v.get("content_slots_total").and_then(Value::as_u64),
+        Some(4)
     );
 }

@@ -1,12 +1,24 @@
-//! Pinned OpenTelemetry GenAI semantic-conventions keys and operation values
-//! (semconv v1.37.0 structured form).
+//! OpenTelemetry GenAI semantic-conventions keys, event names and operation
+//! values understood by the importer.
+//!
+//! The GenAI conventions lived in the core `open-telemetry/semantic-conventions`
+//! repository up to v1.41 and moved to `open-telemetry/semantic-conventions-genai`
+//! with v1.42 (still marked Development there). The importer understands the
+//! structured form introduced in v1.37 through the v1.42.x GenAI repository
+//! (attribute content, the `gen_ai.client.inference.operation.details` event,
+//! `gen_ai.evaluation.result`, and the current operation names), plus the legacy
+//! (<= v1.36) message-event form.
 
 use serde::{Deserialize, Serialize};
 
-/// The semconv version this importer pins to.
-pub const SEMCONV_VERSION: &str = "1.37.0";
+/// The newest GenAI semantic-conventions version this importer is tested
+/// against (structured form v1.37 .. v1.42.x).
+///
+/// This is the importer's *supported* version. What the producer actually
+/// declared (its `schemaUrl`) is recorded separately as `source_semconv`.
+pub const SEMCONV_VERSION: &str = "1.42.0";
 
-// --- Attribute keys (structured GenAI form, v1.37.0) ---
+// --- Attribute keys (structured GenAI form) ---
 
 /// `gen_ai.operation.name`.
 pub const OPERATION_NAME: &str = "gen_ai.operation.name";
@@ -26,12 +38,28 @@ pub const FINISH_REASONS: &str = "gen_ai.response.finish_reasons";
 pub const USAGE_INPUT_TOKENS: &str = "gen_ai.usage.input_tokens";
 /// `gen_ai.usage.output_tokens`.
 pub const USAGE_OUTPUT_TOKENS: &str = "gen_ai.usage.output_tokens";
+/// `gen_ai.usage.cache_read.input_tokens` (v1.40+).
+pub const USAGE_CACHE_READ_INPUT_TOKENS: &str = "gen_ai.usage.cache_read.input_tokens";
+/// `gen_ai.usage.cache_creation.input_tokens` (v1.40+).
+pub const USAGE_CACHE_CREATION_INPUT_TOKENS: &str = "gen_ai.usage.cache_creation.input_tokens";
+/// `gen_ai.usage.reasoning.output_tokens` (v1.41+).
+pub const USAGE_REASONING_OUTPUT_TOKENS: &str = "gen_ai.usage.reasoning.output_tokens";
 /// `gen_ai.request.temperature`.
 pub const REQUEST_TEMPERATURE: &str = "gen_ai.request.temperature";
 /// `gen_ai.request.max_tokens`.
 pub const REQUEST_MAX_TOKENS: &str = "gen_ai.request.max_tokens";
+/// `gen_ai.request.stream` (v1.41+).
+pub const REQUEST_STREAM: &str = "gen_ai.request.stream";
+/// `gen_ai.output.type`.
+pub const OUTPUT_TYPE: &str = "gen_ai.output.type";
 /// `gen_ai.conversation.id`.
 pub const CONVERSATION_ID: &str = "gen_ai.conversation.id";
+/// `gen_ai.agent.name`.
+pub const AGENT_NAME: &str = "gen_ai.agent.name";
+/// `gen_ai.agent.id`.
+pub const AGENT_ID: &str = "gen_ai.agent.id";
+/// `gen_ai.agent.version` (v1.40+).
+pub const AGENT_VERSION: &str = "gen_ai.agent.version";
 
 // --- Opt-in content keys (often absent) ---
 
@@ -45,6 +73,8 @@ pub const OUTPUT_MESSAGES: &str = "gen_ai.output.messages";
 pub const TOOL_CALL_ARGUMENTS: &str = "gen_ai.tool.call.arguments";
 /// `gen_ai.tool.call.result`.
 pub const TOOL_CALL_RESULT: &str = "gen_ai.tool.call.result";
+/// `gen_ai.tool.definitions` (v1.38+, opt-in).
+pub const TOOL_DEFINITIONS: &str = "gen_ai.tool.definitions";
 
 // --- Tool keys ---
 
@@ -52,15 +82,25 @@ pub const TOOL_CALL_RESULT: &str = "gen_ai.tool.call.result";
 pub const TOOL_NAME: &str = "gen_ai.tool.name";
 /// `gen_ai.tool.call.id`.
 pub const TOOL_CALL_ID: &str = "gen_ai.tool.call.id";
-/// `gen_ai.tool.type`.
-pub const TOOL_TYPE: &str = "gen_ai.tool.type";
-/// `gen_ai.tool.description`.
-pub const TOOL_DESCRIPTION: &str = "gen_ai.tool.description";
 
-// --- Error key ---
+// --- Error keys ---
 
 /// `error.type` (OTLP semconv): present when the span recorded an error.
 pub const ERROR_TYPE: &str = "error.type";
+/// Generic OTel `exception` span event (records a failure).
+pub const EVENT_EXCEPTION: &str = "exception";
+/// `exception.type` attribute of an exception event.
+pub const EXCEPTION_TYPE: &str = "exception.type";
+/// `exception.message` attribute of an exception event.
+pub const EXCEPTION_MESSAGE: &str = "exception.message";
+
+// --- Current (non-legacy) GenAI event names ---
+
+/// `gen_ai.client.inference.operation.details` (v1.37+): the event form of the
+/// input/output messages and system instructions. Imported as content.
+pub const EVENT_INFERENCE_DETAILS: &str = "gen_ai.client.inference.operation.details";
+/// `gen_ai.client.operation.exception` (v1.41+): records a failed operation.
+pub const EVENT_OPERATION_EXCEPTION: &str = "gen_ai.client.operation.exception";
 
 // --- Legacy (<= v1.36) span-event names ---
 //
@@ -105,6 +145,55 @@ pub const BODY_FINISH_REASON: &str = "finish_reason";
 /// Legacy event-body `message` attribute (a `gen_ai.choice` nested message JSON).
 pub const BODY_MESSAGE: &str = "message";
 
+/// Classification of a span event name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenAiEventClass {
+    /// One of the five supported legacy (<= v1.36) message events.
+    SupportedLegacy,
+    /// A legacy-shaped message event (`gen_ai.<role>.message`) we cannot reduce.
+    UnknownLegacy,
+    /// The inference-details content event.
+    InferenceDetails,
+    /// A failure-recording event (`exception`, `gen_ai.client.operation.exception`).
+    Exception,
+    /// Any other (current or future) non-legacy `gen_ai.*` event, for example
+    /// `gen_ai.evaluation.result`: recorded as structural metadata.
+    StructuralMetadata,
+    /// Not a GenAI event at all.
+    NotGenAi,
+}
+
+/// Classifies a span event name (OTEL-2).
+///
+/// Only legacy-*shaped* message events that are not among the five supported
+/// forms are refused: the legacy convention named its message events
+/// `gen_ai.<role>.message`, so an unknown `gen_ai.<x>.message` is an ambiguous
+/// legacy message body we cannot reduce. Every other unknown `gen_ai.*` event is
+/// treated as current-convention structural metadata and recorded, not refused.
+#[must_use]
+pub fn classify_event(name: &str) -> GenAiEventClass {
+    if name == EVENT_EXCEPTION || name == EVENT_OPERATION_EXCEPTION {
+        return GenAiEventClass::Exception;
+    }
+    let Some(rest) = name.strip_prefix("gen_ai.") else {
+        return GenAiEventClass::NotGenAi;
+    };
+    if SUPPORTED_LEGACY_EVENTS.contains(&name) {
+        return GenAiEventClass::SupportedLegacy;
+    }
+    if name == EVENT_INFERENCE_DETAILS {
+        return GenAiEventClass::InferenceDetails;
+    }
+    let legacy_shaped = rest
+        .strip_suffix(".message")
+        .is_some_and(|role| !role.is_empty() && !role.contains('.'));
+    if legacy_shaped {
+        GenAiEventClass::UnknownLegacy
+    } else {
+        GenAiEventClass::StructuralMetadata
+    }
+}
+
 /// The recognized GenAI operation kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
@@ -114,13 +203,13 @@ pub enum Operation {
     Embeddings,
     /// `execute_tool`: a tool execution.
     ExecuteTool,
-    /// `create_agent`: agent lifecycle (structural only in v1).
+    /// `create_agent`: agent lifecycle (structural only).
     CreateAgent,
     /// `invoke_agent`: an agent invocation (a candidate session root).
     InvokeAgent,
     /// `invoke_workflow`: a workflow invocation (a candidate session root).
     InvokeWorkflow,
-    /// `retrieval`: a retrieval call (structural only in v1).
+    /// `retrieval`: a retrieval call (structural only).
     Retrieval,
 }
 
@@ -145,15 +234,35 @@ impl Operation {
     pub fn is_session_root(self) -> bool {
         matches!(self, Self::InvokeAgent | Self::InvokeWorkflow)
     }
+
+    /// True when this operation produces an AGEF event (provider or tool call).
+    #[must_use]
+    pub fn emits_event(self) -> bool {
+        matches!(
+            self,
+            Self::ProviderCall | Self::Embeddings | Self::ExecuteTool
+        )
+    }
 }
 
-/// Whether real message/tool content was captured in the trace.
+/// Whether real message/tool content was captured for the session (OTEL-1).
+///
+/// The level is computed from what the importer actually *emitted*, slot by
+/// slot. The content slots are: each provider call's request and response
+/// objects, and each tool call's input and output objects. A slot counts as
+/// real content only when it was filled from captured message/tool content (a
+/// structured attribute, an inference-details event, or a legacy message body)
+/// that is non-empty; empty or whitespace-only strings, `null`, `[]` and `{}`
+/// count as absent. Content on spans that emit no event (for example an
+/// `invoke_agent` span) does not count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureLevel {
-    /// At least one real message/tool content field was present.
+    /// Every content slot of every emitted provider/tool call holds real content.
     Full,
-    /// Only structural metadata was present (content opt-in was off).
+    /// Some, but not all, content slots hold real content.
+    Partial,
+    /// No content slot holds real content (metadata only; content opt-in was off).
     Structural,
 }
 
@@ -163,7 +272,90 @@ impl CaptureLevel {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Full => "full",
+            Self::Partial => "partial",
             Self::Structural => "structural",
         }
+    }
+
+    /// Derives the level from the number of real-content slots out of all slots.
+    #[must_use]
+    pub fn from_slots(real: u64, total: u64) -> Self {
+        if real == 0 {
+            Self::Structural
+        } else if real >= total {
+            Self::Full
+        } else {
+            Self::Partial
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_classification() {
+        assert_eq!(
+            classify_event("gen_ai.user.message"),
+            GenAiEventClass::SupportedLegacy
+        );
+        assert_eq!(
+            classify_event("gen_ai.developer.message"),
+            GenAiEventClass::UnknownLegacy
+        );
+        assert_eq!(
+            classify_event("gen_ai.client.inference.operation.details"),
+            GenAiEventClass::InferenceDetails
+        );
+        assert_eq!(
+            classify_event("gen_ai.evaluation.result"),
+            GenAiEventClass::StructuralMetadata
+        );
+        assert_eq!(
+            classify_event("gen_ai.some_future.event"),
+            GenAiEventClass::StructuralMetadata
+        );
+        assert_eq!(classify_event("exception"), GenAiEventClass::Exception);
+        assert_eq!(
+            classify_event("gen_ai.client.operation.exception"),
+            GenAiEventClass::Exception
+        );
+        assert_eq!(classify_event("http.request"), GenAiEventClass::NotGenAi);
+    }
+
+    #[test]
+    fn operation_names() {
+        for name in ["chat", "text_completion", "generate_content"] {
+            assert_eq!(Operation::from_name(name), Some(Operation::ProviderCall));
+        }
+        assert_eq!(
+            Operation::from_name("embeddings"),
+            Some(Operation::Embeddings)
+        );
+        assert_eq!(
+            Operation::from_name("execute_tool"),
+            Some(Operation::ExecuteTool)
+        );
+        assert_eq!(
+            Operation::from_name("invoke_agent"),
+            Some(Operation::InvokeAgent)
+        );
+        assert_eq!(
+            Operation::from_name("create_agent"),
+            Some(Operation::CreateAgent)
+        );
+        assert_eq!(
+            Operation::from_name("invoke_workflow"),
+            Some(Operation::InvokeWorkflow)
+        );
+        assert_eq!(Operation::from_name("bogus"), None);
+    }
+
+    #[test]
+    fn capture_from_slots() {
+        assert_eq!(CaptureLevel::from_slots(0, 4), CaptureLevel::Structural);
+        assert_eq!(CaptureLevel::from_slots(2, 4), CaptureLevel::Partial);
+        assert_eq!(CaptureLevel::from_slots(4, 4), CaptureLevel::Full);
     }
 }

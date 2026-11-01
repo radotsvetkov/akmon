@@ -1,352 +1,574 @@
 //! OTLP/JSON trace types and a typed attribute normalization layer (F7).
 //!
 //! These types model the subset of the OTLP `ExportTraceServiceRequest` JSON
-//! shape that Akmon needs to map GenAI spans into AGEF events. Per the OTLP/JSON
-//! encoding, 64-bit integers (timestamps, `intValue`) are transported as JSON
-//! strings; the helpers in this module parse them back into typed values.
+//! shape that Akmon needs to map GenAI spans into AGEF events. They follow the
+//! OTLP/JSON (protobuf JSON mapping) rules leniently but explicitly (OTEL-4):
+//!
+//! - 64-bit integers (`intValue`, `startTimeUnixNano`, `endTimeUnixNano`) are
+//!   accepted either as JSON strings or as JSON numbers;
+//! - `doubleValue` accepts JSON numbers, numeric strings, and the proto-JSON
+//!   spellings `"NaN"`, `"Infinity"`, `"-Infinity"`;
+//! - `bytesValue` (base64) is accepted;
+//! - an empty `AnyValue` (`{}`) or a JSON `null` value is accepted as "no value".
+//!
+//! A malformed scalar inside one attribute (for example a non-numeric
+//! `intValue`) degrades that one value to [`AnyValue::Invalid`] instead of
+//! failing the whole import, so one odd attribute on an unrelated span cannot
+//! reject an otherwise valid trace.
 
 use crate::error::OtelImportError;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use serde::de::{self, Deserializer, IgnoredAny, MapAccess, Visitor};
+use serde_json::{Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 /// Top-level OTLP/JSON `ExportTraceServiceRequest`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExportTraceServiceRequest {
-    /// Resource-grouped span batches.
+struct ExportTraceServiceRequest {
     #[serde(default)]
-    pub resource_spans: Vec<ResourceSpans>,
+    resource_spans: Vec<ResourceSpans>,
 }
 
 /// One resource and its scoped span batches.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResourceSpans {
-    /// Resource-level attributes (service.name, etc.).
+struct ResourceSpans {
     #[serde(default)]
-    pub resource: Resource,
-    /// Scope-grouped span batches.
+    scope_spans: Vec<ScopeSpans>,
+    /// Producer-declared semconv schema URL for the resource.
     #[serde(default)]
-    pub scope_spans: Vec<ScopeSpans>,
-}
-
-/// Resource-level attribute container.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Resource {
-    /// Resource attributes.
-    #[serde(default)]
-    pub attributes: Vec<KeyValue>,
+    schema_url: Option<String>,
 }
 
 /// One instrumentation scope and its spans.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ScopeSpans {
-    /// Spans emitted under this scope.
+struct ScopeSpans {
     #[serde(default)]
-    pub spans: Vec<Span>,
+    spans: Vec<Span>,
+    /// Producer-declared semconv schema URL for the scope.
+    #[serde(default)]
+    schema_url: Option<String>,
 }
 
 /// A single OTLP span.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Span {
-    /// Hex-encoded trace identifier.
+struct Span {
     #[serde(default)]
-    pub trace_id: String,
-    /// Hex-encoded span identifier.
+    trace_id: String,
     #[serde(default)]
-    pub span_id: String,
-    /// Hex-encoded parent span identifier; empty/absent for root spans.
+    span_id: String,
     #[serde(default)]
-    pub parent_span_id: String,
-    /// Span name.
+    parent_span_id: String,
     #[serde(default)]
-    pub name: String,
-    /// Span kind (OTLP enum as i32); defaults to 0 (unspecified).
+    start_time_unix_nano: IntLike,
     #[serde(default)]
-    pub kind: i32,
-    /// Start time in unix nanoseconds, transported as a JSON string.
+    end_time_unix_nano: IntLike,
     #[serde(default)]
-    pub start_time_unix_nano: String,
-    /// End time in unix nanoseconds, transported as a JSON string.
+    attributes: Vec<KeyValue>,
     #[serde(default)]
-    pub end_time_unix_nano: String,
-    /// Span attributes.
+    events: Vec<SpanEvent>,
     #[serde(default)]
-    pub attributes: Vec<KeyValue>,
-    /// Span events (used for legacy-form detection).
+    status: Option<Status>,
+}
+
+/// OTLP span status.
+#[derive(Debug, Deserialize)]
+struct Status {
     #[serde(default)]
-    pub events: Vec<SpanEvent>,
+    code: StatusCode,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 /// A timestamped span event.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SpanEvent {
-    /// Event name (legacy GenAI message events start with `gen_ai.`).
+#[derive(Debug, Deserialize)]
+struct SpanEvent {
     #[serde(default)]
-    pub name: String,
-    /// Event attributes. For legacy (<= v1.36) GenAI message events these carry
-    /// the message body (`role`, `content`, `id`, `tool_calls`, `index`,
-    /// `finish_reason`, `message`).
+    name: String,
     #[serde(default)]
-    pub attributes: Vec<KeyValue>,
+    attributes: Vec<KeyValue>,
 }
 
 /// A single attribute key/value pair.
-#[derive(Debug, Clone, Deserialize)]
-pub struct KeyValue {
-    /// Attribute key.
-    pub key: String,
-    /// Attribute value.
-    pub value: AnyValue,
-}
-
-/// OTLP `AnyValue` tagged union.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum AnyValue {
-    /// UTF-8 string value.
-    StringValue(String),
-    /// 64-bit integer value, transported as a JSON string.
-    IntValue(String),
-    /// Double-precision floating-point value.
-    DoubleValue(f64),
-    /// Boolean value.
-    BoolValue(bool),
-    /// Homogeneous array of values.
-    ArrayValue(ArrayValue),
-    /// Nested key/value list.
-    KvlistValue(KvList),
+#[derive(Debug, Deserialize)]
+struct KeyValue {
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    value: AnyValue,
 }
 
 /// OTLP `ArrayValue` wrapper.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ArrayValue {
-    /// Array elements.
+#[derive(Debug, Default, Deserialize)]
+struct ArrayValue {
     #[serde(default)]
-    pub values: Vec<AnyValue>,
+    values: Vec<AnyValue>,
 }
 
 /// OTLP `KvlistValue` wrapper.
-#[derive(Debug, Clone, Deserialize)]
-pub struct KvList {
-    /// List entries.
+#[derive(Debug, Default, Deserialize)]
+struct KvList {
     #[serde(default)]
-    pub values: Vec<KeyValue>,
+    values: Vec<KeyValue>,
+}
+
+/// A 64-bit OTLP integer transported as a JSON string or number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum IntLike {
+    /// Absent or `null`.
+    #[default]
+    Missing,
+    /// A well-formed integer.
+    Valid(i128),
+    /// Present but not an integer (non-numeric string, fractional number, ...).
+    Invalid,
+}
+
+impl<'de> Deserialize<'de> for IntLike {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = IntLike;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an int64 as a JSON number or decimal string")
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<IntLike, E> {
+                Ok(IntLike::Valid(i128::from(v)))
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<IntLike, E> {
+                Ok(IntLike::Valid(i128::from(v)))
+            }
+            fn visit_f64<E: de::Error>(self, _v: f64) -> Result<IntLike, E> {
+                Ok(IntLike::Invalid)
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<IntLike, E> {
+                Ok(v.trim()
+                    .parse::<i128>()
+                    .map_or(IntLike::Invalid, IntLike::Valid))
+            }
+            fn visit_bool<E: de::Error>(self, _v: bool) -> Result<IntLike, E> {
+                Ok(IntLike::Invalid)
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<IntLike, E> {
+                Ok(IntLike::Missing)
+            }
+            fn visit_none<E: de::Error>(self) -> Result<IntLike, E> {
+                Ok(IntLike::Missing)
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+/// An OTLP status code given as an integer or as its enum name.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StatusCode(i64);
+
+impl<'de> Deserialize<'de> for StatusCode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = StatusCode;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an OTLP status code (integer or STATUS_CODE_* name)")
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<StatusCode, E> {
+                Ok(StatusCode(v))
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<StatusCode, E> {
+                Ok(StatusCode(i64::try_from(v).unwrap_or(-1)))
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<StatusCode, E> {
+                Ok(StatusCode(match v {
+                    "STATUS_CODE_UNSET" => 0,
+                    "STATUS_CODE_OK" => 1,
+                    "STATUS_CODE_ERROR" => 2,
+                    other => other.parse::<i64>().unwrap_or(-1),
+                }))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<StatusCode, E> {
+                Ok(StatusCode(0))
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+/// A `doubleValue` payload: number, numeric string, or NaN/Infinity spelling.
+struct DoubleLike(Option<f64>);
+
+impl<'de> Deserialize<'de> for DoubleLike {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = DoubleLike;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a double as a JSON number or proto-JSON string")
+            }
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<DoubleLike, E> {
+                Ok(DoubleLike(Some(v)))
+            }
+            #[allow(clippy::cast_precision_loss)]
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<DoubleLike, E> {
+                Ok(DoubleLike(Some(v as f64)))
+            }
+            #[allow(clippy::cast_precision_loss)]
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<DoubleLike, E> {
+                Ok(DoubleLike(Some(v as f64)))
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<DoubleLike, E> {
+                Ok(DoubleLike(match v {
+                    "NaN" => Some(f64::NAN),
+                    "Infinity" => Some(f64::INFINITY),
+                    "-Infinity" => Some(f64::NEG_INFINITY),
+                    other => other.trim().parse::<f64>().ok(),
+                }))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<DoubleLike, E> {
+                Ok(DoubleLike(None))
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+/// OTLP `AnyValue`, normalized.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) enum AnyValue {
+    /// UTF-8 string value.
+    String(String),
+    /// Boolean value.
+    Bool(bool),
+    /// 64-bit integer value.
+    Int(i64),
+    /// Double value (may be non-finite).
+    Double(f64),
+    /// Base64-encoded bytes value, kept verbatim.
+    Bytes(String),
+    /// Array of values.
+    Array(Vec<AnyValue>),
+    /// Nested key/value list, in source order.
+    Kvlist(Vec<(String, AnyValue)>),
+    /// No value set (`{}` or `null`).
+    #[default]
+    Empty,
+    /// A value whose scalar payload was malformed.
+    Invalid,
+}
+
+impl<'de> Deserialize<'de> for AnyValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = AnyValue;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an OTLP AnyValue object")
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<AnyValue, E> {
+                Ok(AnyValue::Empty)
+            }
+            fn visit_none<E: de::Error>(self) -> Result<AnyValue, E> {
+                Ok(AnyValue::Empty)
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<AnyValue, A::Error> {
+                let mut out = AnyValue::Empty;
+                while let Some(key) = map.next_key::<String>()? {
+                    let value = match key.as_str() {
+                        "stringValue" => map
+                            .next_value::<Option<String>>()?
+                            .map_or(AnyValue::Empty, AnyValue::String),
+                        "boolValue" => map
+                            .next_value::<Option<bool>>()?
+                            .map_or(AnyValue::Empty, AnyValue::Bool),
+                        "intValue" => match map.next_value::<IntLike>()? {
+                            IntLike::Missing => AnyValue::Empty,
+                            IntLike::Invalid => AnyValue::Invalid,
+                            IntLike::Valid(v) => {
+                                i64::try_from(v).map_or(AnyValue::Invalid, AnyValue::Int)
+                            }
+                        },
+                        "doubleValue" => match map.next_value::<DoubleLike>()? {
+                            DoubleLike(Some(d)) => AnyValue::Double(d),
+                            DoubleLike(None) => AnyValue::Invalid,
+                        },
+                        "bytesValue" => map
+                            .next_value::<Option<String>>()?
+                            .map_or(AnyValue::Empty, AnyValue::Bytes),
+                        "arrayValue" => {
+                            let arr = map.next_value::<Option<ArrayValue>>()?.unwrap_or_default();
+                            AnyValue::Array(arr.values)
+                        }
+                        "kvlistValue" => {
+                            let kv = map.next_value::<Option<KvList>>()?.unwrap_or_default();
+                            AnyValue::Kvlist(
+                                kv.values.into_iter().map(|e| (e.key, e.value)).collect(),
+                            )
+                        }
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                            continue;
+                        }
+                    };
+                    if !matches!(value, AnyValue::Empty) {
+                        out = value;
+                    }
+                }
+                Ok(out)
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
 }
 
 impl AnyValue {
     /// Returns the string payload when this value is a `stringValue`.
     #[must_use]
-    pub fn as_str(&self) -> Option<&str> {
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match self {
-            Self::StringValue(s) => Some(s.as_str()),
+            Self::String(s) => Some(s.as_str()),
             _ => None,
         }
     }
 
-    /// Returns the integer payload, parsing the OTLP int-string when present.
+    /// Returns the integer payload.
     #[must_use]
-    pub fn as_i64(&self) -> Option<i64> {
+    pub(crate) fn as_i64(&self) -> Option<i64> {
         match self {
-            Self::IntValue(s) => s.parse::<i64>().ok(),
+            Self::Int(v) => Some(*v),
             _ => None,
         }
     }
 
-    /// Returns the floating-point payload, accepting either a `doubleValue` or a
-    /// numeric `intValue` string.
+    /// Returns a floating-point payload from a `doubleValue` or `intValue`.
     #[must_use]
-    pub fn as_f64(&self) -> Option<f64> {
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn as_f64(&self) -> Option<f64> {
         match self {
-            Self::DoubleValue(d) => Some(*d),
-            Self::IntValue(s) => s.parse::<f64>().ok(),
+            Self::Double(d) => Some(*d),
+            Self::Int(v) => Some(*v as f64),
             _ => None,
         }
     }
 
     /// Returns the array elements when this value is an `arrayValue`.
     #[must_use]
-    pub fn as_array(&self) -> Option<&[AnyValue]> {
+    pub(crate) fn as_array(&self) -> Option<&[AnyValue]> {
         match self {
-            Self::ArrayValue(arr) => Some(arr.values.as_slice()),
+            Self::Array(values) => Some(values.as_slice()),
             _ => None,
+        }
+    }
+
+    /// Converts this value into plain JSON (structured OTLP attributes such as an
+    /// `arrayValue` of `kvlistValue` messages become JSON arrays of objects).
+    ///
+    /// Non-finite doubles use the proto-JSON spellings as strings, bytes become
+    /// `{"bytes_base64": "..."}`, and empty/invalid values become `null`.
+    #[must_use]
+    pub(crate) fn to_json(&self) -> Value {
+        match self {
+            Self::String(s) => Value::String(s.clone()),
+            Self::Bool(b) => Value::Bool(*b),
+            Self::Int(v) => Value::from(*v),
+            Self::Double(d) => json_double(*d),
+            Self::Bytes(b) => {
+                let mut obj = Map::new();
+                obj.insert("bytes_base64".to_owned(), Value::String(b.clone()));
+                Value::Object(obj)
+            }
+            Self::Array(values) => Value::Array(values.iter().map(Self::to_json).collect()),
+            Self::Kvlist(entries) => {
+                let mut obj = Map::new();
+                for (k, v) in entries {
+                    obj.insert(k.clone(), v.to_json());
+                }
+                Value::Object(obj)
+            }
+            Self::Empty | Self::Invalid => Value::Null,
         }
     }
 }
 
+/// Encodes a double as JSON, using proto-JSON strings for non-finite values.
+pub(crate) fn json_double(d: f64) -> Value {
+    if d.is_nan() {
+        Value::String("NaN".to_owned())
+    } else if d.is_infinite() {
+        Value::String(if d > 0.0 { "Infinity" } else { "-Infinity" }.to_owned())
+    } else {
+        serde_json::Number::from_f64(d).map_or(Value::Null, Value::Number)
+    }
+}
+
+/// Normalized span status (OTEL-5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SpanStatus {
+    /// True when the span status code is ERROR (2).
+    pub(crate) is_error: bool,
+    /// The status message, when present and non-empty.
+    pub(crate) message: Option<String>,
+}
+
 /// A span with its attributes flattened into a sorted, typed map (F7).
-#[derive(Debug, Clone)]
-pub struct NormalizedSpan {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NormalizedSpan {
     /// Source span identifier.
-    pub span_id: String,
+    pub(crate) span_id: String,
     /// Source parent span identifier (empty for root spans).
-    pub parent_span_id: String,
+    pub(crate) parent_span_id: String,
     /// Source trace identifier.
-    pub trace_id: String,
-    /// Start time in unix nanoseconds (parsed; defaults to 0 when absent/invalid).
-    pub start_unix_nano: i128,
-    /// End time in unix nanoseconds (parsed; defaults to `start_unix_nano`).
-    pub end_unix_nano: i128,
-    /// Whether any span event name begins with `gen_ai.` (legacy-form signal, F8).
-    pub has_legacy_genai_event: bool,
+    pub(crate) trace_id: String,
+    /// Start time in unix nanoseconds as transported.
+    pub(crate) start: IntLike,
+    /// End time in unix nanoseconds as transported.
+    pub(crate) end: IntLike,
+    /// Span status.
+    pub(crate) status: SpanStatus,
     /// Flattened attribute map keyed by attribute name.
-    pub attributes: BTreeMap<String, AnyValue>,
-    /// Span events, each with its own flattened attribute map. Legacy (<= v1.36)
-    /// GenAI message bodies are carried here in OTLP source order.
-    pub events: Vec<NormalizedEvent>,
+    pub(crate) attributes: BTreeMap<String, AnyValue>,
+    /// Span events in OTLP source order.
+    pub(crate) events: Vec<NormalizedEvent>,
 }
 
 /// A span event with its attributes flattened into a sorted, typed map.
-///
-/// Legacy (<= v1.36) GenAI message events (`gen_ai.user.message`,
-/// `gen_ai.system.message`, `gen_ai.assistant.message`, `gen_ai.tool.message`,
-/// `gen_ai.choice`) carry the message body as event attributes; this type exposes
-/// them with the same typed accessors as [`NormalizedSpan`].
-#[derive(Debug, Clone)]
-pub struct NormalizedEvent {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NormalizedEvent {
     /// Event name.
-    pub name: String,
+    pub(crate) name: String,
     /// Flattened event-attribute map keyed by attribute name.
-    pub attributes: BTreeMap<String, AnyValue>,
+    pub(crate) attributes: BTreeMap<String, AnyValue>,
 }
 
 impl NormalizedEvent {
     /// Reads a string-typed event attribute by key.
     #[must_use]
-    pub fn attr_str(&self, key: &str) -> Option<&str> {
+    pub(crate) fn attr_str(&self, key: &str) -> Option<&str> {
         self.attributes.get(key).and_then(AnyValue::as_str)
     }
 
-    /// Reads an integer-typed event attribute by key (parsing the OTLP int-string).
+    /// Reads an integer-typed event attribute by key.
     #[must_use]
-    pub fn attr_i64(&self, key: &str) -> Option<i64> {
+    pub(crate) fn attr_i64(&self, key: &str) -> Option<i64> {
         self.attributes.get(key).and_then(AnyValue::as_i64)
     }
 
-    /// True when this event carries the given attribute key.
+    /// Converts all event attributes into a JSON object (sorted by key).
     #[must_use]
-    pub fn has_attr(&self, key: &str) -> bool {
-        self.attributes.contains_key(key)
+    pub(crate) fn attributes_json(&self) -> Map<String, Value> {
+        self.attributes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_json()))
+            .collect()
     }
 }
 
 impl NormalizedSpan {
     /// Reads a string-typed attribute by key.
     #[must_use]
-    pub fn attr_str(&self, key: &str) -> Option<&str> {
+    pub(crate) fn attr_str(&self, key: &str) -> Option<&str> {
         self.attributes.get(key).and_then(AnyValue::as_str)
     }
 
-    /// Reads an integer-typed attribute by key (parsing the OTLP int-string).
+    /// Reads an integer-typed attribute by key.
     #[must_use]
-    pub fn attr_i64(&self, key: &str) -> Option<i64> {
+    pub(crate) fn attr_i64(&self, key: &str) -> Option<i64> {
         self.attributes.get(key).and_then(AnyValue::as_i64)
     }
 
     /// Reads a float-typed attribute by key.
     #[must_use]
-    pub fn attr_f64(&self, key: &str) -> Option<f64> {
+    pub(crate) fn attr_f64(&self, key: &str) -> Option<f64> {
         self.attributes.get(key).and_then(AnyValue::as_f64)
     }
 
     /// Reads an array-typed attribute by key.
     #[must_use]
-    pub fn attr_array(&self, key: &str) -> Option<&[AnyValue]> {
+    pub(crate) fn attr_array(&self, key: &str) -> Option<&[AnyValue]> {
         self.attributes.get(key).and_then(AnyValue::as_array)
     }
 
-    /// True when this span carries the given attribute key.
-    #[must_use]
-    pub fn has_attr(&self, key: &str) -> bool {
-        self.attributes.contains_key(key)
-    }
-
-    /// Iterates over this span's events whose name equals `name`, in OTLP source
-    /// order.
-    pub fn events_named<'a>(
+    /// Iterates over this span's events whose name equals `name`, in source order.
+    pub(crate) fn events_named<'a>(
         &'a self,
-        name: &'static str,
+        name: &'a str,
     ) -> impl Iterator<Item = &'a NormalizedEvent> {
         self.events.iter().filter(move |e| e.name == name)
     }
 }
 
+/// A parsed, normalized trace.
+#[derive(Debug)]
+pub(crate) struct ParsedTrace {
+    /// Every span, flattened across resource/scope batches, in source order.
+    pub(crate) spans: Vec<NormalizedSpan>,
+    /// Distinct non-empty producer-declared schema URLs (resource and scope).
+    pub(crate) schema_urls: BTreeSet<String>,
+}
+
 /// Parses OTLP/JSON bytes and flattens every span into a [`NormalizedSpan`].
+///
+/// Values are moved (not cloned) out of the deserialized request (OTEL-9).
 ///
 /// # Errors
 ///
 /// Returns [`OtelImportError::Parse`] when the bytes are not a valid OTLP/JSON
 /// `ExportTraceServiceRequest`.
-pub fn parse_and_normalize(trace_json: &[u8]) -> Result<Vec<NormalizedSpan>, OtelImportError> {
+pub(crate) fn parse_and_normalize(trace_json: &[u8]) -> Result<ParsedTrace, OtelImportError> {
     let request: ExportTraceServiceRequest = serde_json::from_slice(trace_json)
         .map_err(|err| OtelImportError::Parse(err.to_string()))?;
 
-    let mut normalized = Vec::new();
-    for resource_spans in &request.resource_spans {
-        for scope_spans in &resource_spans.scope_spans {
-            for span in &scope_spans.spans {
-                normalized.push(normalize_span(span));
+    let mut spans = Vec::new();
+    let mut schema_urls = BTreeSet::new();
+    for resource_spans in request.resource_spans {
+        if let Some(url) = resource_spans.schema_url.filter(|u| !u.trim().is_empty()) {
+            schema_urls.insert(url);
+        }
+        for scope_spans in resource_spans.scope_spans {
+            if let Some(url) = scope_spans.schema_url.filter(|u| !u.trim().is_empty()) {
+                schema_urls.insert(url);
             }
+            spans.extend(scope_spans.spans.into_iter().map(normalize_span));
         }
     }
-    Ok(normalized)
+    Ok(ParsedTrace { spans, schema_urls })
 }
 
-/// Parses a unix-nanosecond string; returns `None` for empty or non-numeric input.
-fn parse_unix_nano(raw: &str) -> Option<i128> {
-    if raw.is_empty() {
-        return None;
-    }
-    raw.parse::<i128>().ok()
+/// Flattens attributes into a map (last-writer-wins on malformed duplicate keys).
+fn flatten(attributes: Vec<KeyValue>) -> BTreeMap<String, AnyValue> {
+    attributes
+        .into_iter()
+        .map(|kv| (kv.key, kv.value))
+        .collect()
 }
 
-/// Flattens one [`Span`] into a [`NormalizedSpan`].
-fn normalize_span(span: &Span) -> NormalizedSpan {
-    let mut attributes = BTreeMap::new();
-    for kv in &span.attributes {
-        // Last-writer-wins on duplicate keys; OTLP attribute sets are unique by
-        // contract, so this only matters for malformed input.
-        attributes.insert(kv.key.clone(), kv.value.clone());
-    }
-
-    let start = parse_unix_nano(&span.start_time_unix_nano).unwrap_or(0);
-    let end = parse_unix_nano(&span.end_time_unix_nano).unwrap_or(start);
-
-    let has_legacy_genai_event = span
-        .events
-        .iter()
-        .any(|event| event.name.starts_with("gen_ai."));
-
-    // Flatten each event's attributes, preserving OTLP source order between events
-    // (intra-span event order is load-bearing for multi-message legacy bodies).
+/// Flattens one [`Span`] into a [`NormalizedSpan`], moving its values.
+fn normalize_span(span: Span) -> NormalizedSpan {
+    let status = span
+        .status
+        .map_or_else(SpanStatus::default, |s| SpanStatus {
+            is_error: s.code.0 == 2,
+            message: s.message.filter(|m| !m.trim().is_empty()),
+        });
     let events = span
         .events
-        .iter()
-        .map(|event| {
-            let mut event_attributes = BTreeMap::new();
-            for kv in &event.attributes {
-                // Last-writer-wins on duplicate keys, matching span-attr handling.
-                event_attributes.insert(kv.key.clone(), kv.value.clone());
-            }
-            NormalizedEvent {
-                name: event.name.clone(),
-                attributes: event_attributes,
-            }
+        .into_iter()
+        .map(|event| NormalizedEvent {
+            name: event.name,
+            attributes: flatten(event.attributes),
         })
         .collect();
-
     NormalizedSpan {
-        span_id: span.span_id.clone(),
-        parent_span_id: span.parent_span_id.clone(),
-        trace_id: span.trace_id.clone(),
-        start_unix_nano: start,
-        end_unix_nano: end,
-        has_legacy_genai_event,
-        attributes,
+        span_id: span.span_id,
+        parent_span_id: span.parent_span_id,
+        trace_id: span.trace_id,
+        start: span.start_time_unix_nano,
+        end: span.end_time_unix_nano,
+        status,
+        attributes: flatten(span.attributes),
         events,
     }
 }
@@ -355,55 +577,108 @@ fn normalize_span(span: &Span) -> NormalizedSpan {
 mod tests {
     use super::*;
 
-    #[test]
-    fn int_string_parses_to_i64_and_f64() {
-        let v = AnyValue::IntValue("512".to_owned());
-        assert_eq!(v.as_i64(), Some(512));
-        assert_eq!(v.as_f64(), Some(512.0));
-        assert_eq!(v.as_str(), None);
+    fn one_span(span_json: &str) -> NormalizedSpan {
+        let json = format!(r#"{{"resourceSpans":[{{"scopeSpans":[{{"spans":[{span_json}]}}]}}]}}"#);
+        let mut parsed = parse_and_normalize(json.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+        parsed.spans.remove(0)
+    }
+
+    fn attr(span: &NormalizedSpan, key: &str) -> AnyValue {
+        span.attributes
+            .get(key)
+            .cloned()
+            .unwrap_or(AnyValue::Invalid)
     }
 
     #[test]
-    fn double_value_parses_to_f64_only() {
-        let v = AnyValue::DoubleValue(0.2);
-        assert_eq!(v.as_f64(), Some(0.2));
-        assert_eq!(v.as_i64(), None);
+    fn int_value_accepts_string_and_number() {
+        let s = one_span(
+            r#"{"attributes":[{"key":"a","value":{"intValue":"512"}},{"key":"b","value":{"intValue":31}}]}"#,
+        );
+        assert_eq!(attr(&s, "a"), AnyValue::Int(512));
+        assert_eq!(attr(&s, "b"), AnyValue::Int(31));
+        assert_eq!(attr(&s, "a").as_f64(), Some(512.0));
     }
 
     #[test]
-    fn missing_fields_are_robust() {
-        let json = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"x"}]}]}]}"#;
-        let spans = parse_and_normalize(json).unwrap_or_else(|_| unreachable!());
-        assert_eq!(spans.len(), 1);
-        let span = &spans[0];
-        assert_eq!(span.start_unix_nano, 0);
-        assert_eq!(span.end_unix_nano, 0);
-        assert!(span.span_id.is_empty());
-        assert!(!span.has_legacy_genai_event);
+    fn timestamps_accept_string_and_number() {
+        let s = one_span(
+            r#"{"startTimeUnixNano":1748000000000000000,"endTimeUnixNano":"1748000001000000000"}"#,
+        );
+        assert_eq!(s.start, IntLike::Valid(1_748_000_000_000_000_000));
+        assert_eq!(s.end, IntLike::Valid(1_748_000_001_000_000_000));
     }
 
     #[test]
-    fn legacy_event_detected() {
-        let json = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"x","events":[{"name":"gen_ai.user.message"}]}]}]}]}"#;
-        let spans = parse_and_normalize(json).unwrap_or_else(|_| unreachable!());
-        assert!(spans[0].has_legacy_genai_event);
+    fn missing_and_invalid_timestamps_are_distinguished() {
+        let s = one_span(r#"{"name":"x","endTimeUnixNano":"abc"}"#);
+        assert_eq!(s.start, IntLike::Missing);
+        assert_eq!(s.end, IntLike::Invalid);
+    }
+
+    #[test]
+    fn bytes_empty_null_and_nonfinite_doubles_are_accepted() {
+        let s = one_span(
+            r#"{"attributes":[
+                {"key":"bytes","value":{"bytesValue":"aGVsbG8="}},
+                {"key":"empty","value":{}},
+                {"key":"null","value":null},
+                {"key":"nan","value":{"doubleValue":"NaN"}},
+                {"key":"inf","value":{"doubleValue":"Infinity"}},
+                {"key":"ninf","value":{"doubleValue":"-Infinity"}},
+                {"key":"badint","value":{"intValue":"twelve"}}
+            ]}"#,
+        );
+        assert_eq!(attr(&s, "bytes"), AnyValue::Bytes("aGVsbG8=".to_owned()));
+        assert_eq!(attr(&s, "empty"), AnyValue::Empty);
+        assert_eq!(attr(&s, "null"), AnyValue::Empty);
+        assert!(matches!(attr(&s, "nan"), AnyValue::Double(d) if d.is_nan()));
+        assert_eq!(attr(&s, "inf"), AnyValue::Double(f64::INFINITY));
+        assert_eq!(attr(&s, "ninf"), AnyValue::Double(f64::NEG_INFINITY));
+        assert_eq!(attr(&s, "badint"), AnyValue::Invalid);
+        assert_eq!(attr(&s, "nan").to_json(), Value::String("NaN".to_owned()));
+    }
+
+    #[test]
+    fn structured_any_value_converts_to_json() {
+        let s = one_span(
+            r#"{"attributes":[{"key":"m","value":{"arrayValue":{"values":[{"kvlistValue":{"values":[{"key":"role","value":{"stringValue":"user"}},{"key":"n","value":{"intValue":"2"}}]}}]}}}]}"#,
+        );
+        assert_eq!(
+            attr(&s, "m").to_json(),
+            serde_json::json!([{"role": "user", "n": 2}])
+        );
+    }
+
+    #[test]
+    fn status_code_parses_int_and_name() {
+        let a = one_span(r#"{"status":{"code":2,"message":"boom"}}"#);
+        assert!(a.status.is_error);
+        assert_eq!(a.status.message.as_deref(), Some("boom"));
+        let b = one_span(r#"{"status":{"code":"STATUS_CODE_ERROR"}}"#);
+        assert!(b.status.is_error);
+        let c = one_span(r#"{"status":{"code":1}}"#);
+        assert!(!c.status.is_error);
+    }
+
+    #[test]
+    fn schema_urls_are_collected() {
+        let json = br#"{"resourceSpans":[{"schemaUrl":"https://opentelemetry.io/schemas/1.40.0","scopeSpans":[{"schemaUrl":"","spans":[]}]}]}"#;
+        let parsed = parse_and_normalize(json).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(parsed.schema_urls.len(), 1);
     }
 
     #[test]
     fn event_attributes_round_trip_into_normalized_event() {
-        let json = br#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"x","events":[{"name":"gen_ai.user.message","attributes":[{"key":"role","value":{"stringValue":"user"}},{"key":"content","value":{"stringValue":"hi"}},{"key":"index","value":{"intValue":"0"}}]}]}]}]}]}"#;
-        let spans = parse_and_normalize(json).unwrap_or_else(|_| unreachable!());
-        let span = &spans[0];
-        assert_eq!(span.events.len(), 1);
-        let event = span
+        let s = one_span(
+            r#"{"events":[{"name":"gen_ai.user.message","attributes":[{"key":"role","value":{"stringValue":"user"}},{"key":"index","value":{"intValue":"0"}}]}]}"#,
+        );
+        let event = s
             .events_named("gen_ai.user.message")
             .next()
             .unwrap_or_else(|| unreachable!());
         assert_eq!(event.attr_str("role"), Some("user"));
-        assert_eq!(event.attr_str("content"), Some("hi"));
         assert_eq!(event.attr_i64("index"), Some(0));
-        assert!(event.has_attr("content"));
-        assert!(!event.has_attr("missing"));
     }
 
     #[test]
