@@ -102,7 +102,10 @@ impl PolicyConfig {
     pub fn evaluate_permission(&self, permission: &Permission) -> (PolicyVerdict, String) {
         match permission {
             Permission::ReadFile { path } | Permission::ListDirectory { path } => {
-                let subject = normalize_path_for_policy(path);
+                let subject = match normalize_path_for_policy(path) {
+                    Ok(s) => s,
+                    Err(why) => return deny_unnormalizable_path("filesystem.read", path, why),
+                };
                 evaluate_pattern_rules(
                     "filesystem.read",
                     "path",
@@ -112,7 +115,10 @@ impl PolicyConfig {
                 )
             }
             Permission::WriteFile { path } => {
-                let subject = normalize_path_for_policy(path);
+                let subject = match normalize_path_for_policy(path) {
+                    Ok(s) => s,
+                    Err(why) => return deny_unnormalizable_path("filesystem.write", path, why),
+                };
                 evaluate_pattern_rules(
                     "filesystem.write",
                     "path",
@@ -328,8 +334,79 @@ fn pattern_specificity(pattern: &str) -> usize {
         .count()
 }
 
-fn normalize_path_for_policy(path: &std::path::Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+/// Why a filesystem path could not be turned into a project-relative policy subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathNormalizeError {
+    /// `/abs/...`, `\\server\...` or a `C:` drive path: relative rules cannot be applied.
+    Absolute,
+    /// A `..` component climbs above the project root.
+    EscapesRoot,
+}
+
+impl PathNormalizeError {
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Absolute => {
+                "absolute paths are not matched against project-relative rules; use a path relative to the project root"
+            }
+            Self::EscapesRoot => "path climbs above the project root via `..`",
+        }
+    }
+}
+
+fn deny_unnormalizable_path(
+    scope: &str,
+    path: &std::path::Path,
+    why: PathNormalizeError,
+) -> (PolicyVerdict, String) {
+    (
+        PolicyVerdict::Deny,
+        format!(
+            "denied: {scope} path `{}`: {}",
+            path.to_string_lossy(),
+            why.describe()
+        ),
+    )
+}
+
+/// Lexically normalizes a model-supplied path into the canonical project-relative form that
+/// policy globs are written against, **before** any allow/deny matching.
+///
+/// Backslashes become `/`; empty and `.` segments are dropped; `..` pops the previous
+/// segment. A `..` that would climb above the root, or an absolute / drive-qualified path,
+/// is rejected (callers deny), so `src/../.github/x` is evaluated as `.github/x` and
+/// `./.git/config` as `.git/config`. The project root itself normalizes to `.`.
+fn normalize_path_for_policy(path: &std::path::Path) -> Result<String, PathNormalizeError> {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    if raw.starts_with('/') {
+        return Err(PathNormalizeError::Absolute);
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for (idx, seg) in raw.split('/').enumerate() {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(PathNormalizeError::EscapesRoot);
+                }
+            }
+            s => {
+                // Windows drive prefix (`C:`) or drive-relative `C:foo`.
+                if idx == 0
+                    && let [drive, b':', ..] = s.as_bytes()
+                    && drive.is_ascii_alphabetic()
+                {
+                    return Err(PathNormalizeError::Absolute);
+                }
+                parts.push(s);
+            }
+        }
+    }
+    if parts.is_empty() {
+        Ok(".".to_string())
+    } else {
+        Ok(parts.join("/"))
+    }
 }
 
 fn extract_domain(url: &str) -> Option<String> {
@@ -1214,5 +1291,106 @@ mod tests {
         assert!(json.contains("\"mcp_server\":\"github\""));
         assert!(json.contains("\"mcp_tool\":\"search_issues\""));
         assert!(json.contains("decision_reason"));
+    }
+
+    // ---- AGT-03: paths are normalized before glob matching ----
+
+    fn dev_cfg() -> PolicyConfig {
+        crate::policy_profiles::built_in_policy_profile(
+            crate::policy_profiles::PolicyProfileName::Dev,
+        )
+    }
+
+    fn write(cfg: &PolicyConfig, p: &str) -> (PolicyVerdict, String) {
+        cfg.evaluate_permission(&Permission::WriteFile {
+            path: PathBuf::from(p),
+        })
+    }
+
+    fn read(cfg: &PolicyConfig, p: &str) -> (PolicyVerdict, String) {
+        cfg.evaluate_permission(&Permission::ReadFile {
+            path: PathBuf::from(p),
+        })
+    }
+
+    #[test]
+    fn normalize_resolves_dot_and_dotdot_lexically() {
+        let n = |p: &str| normalize_path_for_policy(std::path::Path::new(p));
+        assert_eq!(n("src/../X"), Ok("X".to_string()));
+        assert_eq!(n("./.git/config"), Ok(".git/config".to_string()));
+        assert_eq!(n("src//a/./b/"), Ok("src/a/b".to_string()));
+        assert_eq!(n("src\\..\\.git\\HEAD"), Ok(".git/HEAD".to_string()));
+        assert_eq!(n("."), Ok(".".to_string()));
+        assert_eq!(n(""), Ok(".".to_string()));
+        assert_eq!(n("src/.."), Ok(".".to_string()));
+        assert_eq!(n("../x"), Err(PathNormalizeError::EscapesRoot));
+        assert_eq!(n("src/../../x"), Err(PathNormalizeError::EscapesRoot));
+        assert_eq!(n("/etc/passwd"), Err(PathNormalizeError::Absolute));
+        assert_eq!(n("C:/Windows"), Err(PathNormalizeError::Absolute));
+        assert_eq!(n("c:foo"), Err(PathNormalizeError::Absolute));
+        assert_eq!(n("\\\\server\\share"), Err(PathNormalizeError::Absolute));
+    }
+
+    #[test]
+    fn dotdot_cannot_widen_write_allowlist() {
+        let cfg = dev_cfg();
+        // `src/**` used to match these raw strings and auto-allow root-level writes.
+        for p in [
+            "src/../.github/workflows/ci.yml",
+            "src/../build.rs",
+            "src/../X",
+        ] {
+            let (v, reason) = write(&cfg, p);
+            assert_eq!(v, PolicyVerdict::Deny, "{p}: {reason}");
+        }
+        // The normalized form is what gets reported.
+        let (_, reason) = write(&cfg, "src/../build.rs");
+        assert!(reason.contains("`build.rs`"), "{reason}");
+        // A legitimate in-allowlist path still passes, also after normalization.
+        assert_eq!(write(&cfg, "src/lib.rs").0, PolicyVerdict::Allow);
+        assert_eq!(write(&cfg, "./src/lib.rs").0, PolicyVerdict::Allow);
+        assert_eq!(write(&cfg, "tests/../src/lib.rs").0, PolicyVerdict::Allow);
+    }
+
+    #[test]
+    fn dot_prefix_and_dotdot_cannot_evade_git_deny() {
+        let cfg = dev_cfg();
+        for p in [
+            "./.git/config",
+            "src/../.git/config",
+            ".//.git/hooks/pre-commit",
+        ] {
+            let (wv, wr) = write(&cfg, p);
+            assert_eq!(wv, PolicyVerdict::Deny, "write {p}: {wr}");
+            assert!(wr.contains("deny rule `.git/**`"), "write {p}: {wr}");
+            let (rv, rr) = read(&cfg, p);
+            assert_eq!(rv, PolicyVerdict::Deny, "read {p}: {rr}");
+            assert!(rr.contains("deny rule `.git/**`"), "read {p}: {rr}");
+        }
+    }
+
+    #[test]
+    fn absolute_and_escaping_paths_are_denied_even_with_catch_all_allow() {
+        let cfg = dev_cfg(); // read.allow = ["**"]
+        for p in ["/etc/passwd", "/repo/src/lib.rs", "../outside.txt"] {
+            let (rv, rr) = read(&cfg, p);
+            assert_eq!(rv, PolicyVerdict::Deny, "read {p}: {rr}");
+            let (wv, wr) = write(&cfg, p);
+            assert_eq!(wv, PolicyVerdict::Deny, "write {p}: {wr}");
+        }
+        let (_, reason) = read(&cfg, "/etc/passwd");
+        assert!(reason.contains("absolute paths"), "{reason}");
+        let (_, reason) = read(&cfg, "../outside.txt");
+        assert!(reason.contains("above the project root"), "{reason}");
+    }
+
+    #[test]
+    fn project_root_still_matches_catch_all_read() {
+        let cfg = dev_cfg();
+        assert_eq!(read(&cfg, ".").0, PolicyVerdict::Allow);
+        let list = cfg.evaluate_permission(&Permission::ListDirectory {
+            path: PathBuf::from("./src/.."),
+        });
+        assert_eq!(list.0, PolicyVerdict::Allow, "{}", list.1);
     }
 }

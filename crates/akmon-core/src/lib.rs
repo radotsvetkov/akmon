@@ -35,6 +35,7 @@ pub mod reliability;
 pub mod replay;
 pub mod sandbox;
 pub mod secret;
+pub mod text;
 
 pub use audit::{
     AUDIT_CHAIN_SCHEMA_VERSION, AuditChainError, AuditChainRecord, AuditChainSummary, AuditEvent,
@@ -79,6 +80,7 @@ pub use policy_profiles::{
 };
 pub use sandbox::{Sandbox, SandboxError};
 pub use secret::Secret;
+pub use text::{truncate_at_char_boundary, truncate_string_at_char_boundary};
 
 pub use project::{ensure_dot_akmon_layout, save_plan_markdown, task_slug_for_plan_filename};
 pub use reliability::RunReliabilityMetrics;

@@ -11,11 +11,11 @@ use serde_json::Value as JsonValue;
 use tokio::fs;
 
 use crate::Tool;
+use crate::atomic_write::atomic_write_in_sandbox;
 use crate::context::ToolContext;
 use crate::diff_render::unified_diff_text;
 use crate::file_change_set::{ChangeSetMode, FileChange, FileChangeSet, diff_stats_from_unified};
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::write_file::atomic_write_utf8;
 
 fn patch_file_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
@@ -296,7 +296,7 @@ impl Tool for PatchTool {
             };
 
             if !dry_run {
-                match atomic_write_utf8(&resolved, new_content.as_bytes()).await {
+                match atomic_write_in_sandbox(ctx, &resolved, new_content.as_bytes()).await {
                     Ok(_) => {}
                     Err(e) => {
                         return ToolOutput::Error {

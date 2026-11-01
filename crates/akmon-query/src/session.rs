@@ -491,7 +491,7 @@ where
         self.last_assistant_snippet = if s.is_empty() {
             None
         } else if s.len() > 2000 {
-            Some(s[..2000].to_string())
+            Some(akmon_core::truncate_at_char_boundary(s, 2000).to_string())
         } else {
             Some(s.to_string())
         };
@@ -5348,6 +5348,44 @@ mod tests {
             .await
             .expect("run");
         assert_eq!(session.result_text(), "hello");
+    }
+
+    /// AGT-04 regression: a multibyte char straddling byte 2000 must not panic.
+    #[tokio::test]
+    async fn assistant_snippet_truncation_is_char_boundary_safe() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let text = format!("{}€{}", "a".repeat(1999), "b".repeat(10));
+        let seq = SeqProvider::new(vec![vec![
+            Ok(StreamEvent::TextDelta { text }),
+            Ok(StreamEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+            }),
+        ]]);
+        let config = AgentConfig {
+            session_id: Uuid::nil(),
+            ..AgentConfig::default()
+        };
+        let policy = Arc::new(PolicyEngine::new(PolicyEngineMode::DenyAll));
+        let sandbox = test_sandbox(dir.path());
+        let mut session = AgentSession::new(
+            config,
+            policy,
+            Arc::new(seq),
+            vec![],
+            sandbox,
+            None,
+            false,
+            test_journal(),
+        )
+        .unwrap();
+        let (tx, _rx) = mpsc::channel(64);
+        session
+            .run("t".into(), tx, &mut None, &mut None, None)
+            .await
+            .expect("run");
+        let snippet = session.last_assistant_snippet.as_deref().unwrap_or("");
+        assert_eq!(snippet, "a".repeat(1999));
     }
 
     #[tokio::test]

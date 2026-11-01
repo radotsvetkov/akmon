@@ -2,7 +2,6 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use akmon_core::{Permission, SandboxError};
 use async_trait::async_trait;
@@ -10,12 +9,11 @@ use serde_json::Value as JsonValue;
 use tokio::fs;
 
 use crate::Tool;
+use crate::atomic_write::atomic_write_in_sandbox;
 use crate::context::ToolContext;
 use crate::diff_render::unified_diff_text;
 use crate::file_change_set::{ChangeSetMode, FileChange, FileChangeSet, diff_stats_from_unified};
 use crate::output::{ToolErrorCode, ToolOutput};
-
-static WRITE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn write_file_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
@@ -29,7 +27,12 @@ fn write_file_permissions() -> &'static [Permission] {
 
 /// Writes or overwrites a UTF-8 text file atomically (temp file + rename in the target directory).
 ///
-/// The sandbox resolves the **parent** directory of `path` (the final path segment must be a normal file name), because [`akmon_core::Sandbox::resolve`] requires the resolved path to exist; missing parents are created before the atomic write.
+/// The sandbox resolves the **parent** directory of `path` (the final path segment must be a normal file name), because [`akmon_core::Sandbox::resolve`] requires the resolved path to exist; the parent directory must already exist.
+///
+/// A final-component symlink is followed only when its target also resolves inside the
+/// sandbox (the real file is then read and replaced); a symlink pointing outside the sandbox,
+/// or a dangling one, is refused **before** anything is read, so outside contents can never
+/// leak into the returned diff (even with `dry_run`).
 pub struct WriteFileTool;
 
 impl WriteFileTool {
@@ -91,28 +94,59 @@ fn split_write_path(path_str: &str) -> Result<(&str, &str), ToolOutput> {
     }
 }
 
-/// Writes `content` to `path` via a unique temp file in the same directory, then renames into place.
-pub(crate) async fn atomic_write_utf8(path: &Path, content: &[u8]) -> std::io::Result<usize> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path has no parent directory",
-        )
-    })?;
-
-    fs::create_dir_all(parent).await?;
-
-    let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
-    })?;
-
-    let n = WRITE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".akmon-w-{n}-{}", file_name.to_string_lossy());
-    let tmp_path = parent.join(tmp_name);
-
-    fs::write(&tmp_path, content).await?;
-    fs::rename(&tmp_path, path).await?;
-    Ok(content.len())
+/// Resolves the final path component under the already-sandboxed `resolved_parent`.
+///
+/// - missing entry: returned as-is (new file);
+/// - regular file: returned as-is;
+/// - symlink: its target must resolve inside the sandbox, and the canonical target is
+///   returned so the real file is read and atomically replaced; an outside or dangling
+///   target is refused without reading it;
+/// - anything else (directory, socket, ...): refused.
+async fn resolve_final_component(
+    ctx: &ToolContext,
+    resolved_parent: &Path,
+    file_name: &str,
+    path_str: &str,
+) -> Result<PathBuf, ToolOutput> {
+    let candidate = resolved_parent.join(file_name);
+    let meta = match fs::symlink_metadata(&candidate).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+        Err(e) => {
+            return Err(ToolOutput::Error {
+                code: ToolErrorCode::PermissionDenied,
+                message: format!("could not stat path: {e}"),
+            });
+        }
+    };
+    let target = if meta.file_type().is_symlink() {
+        match ctx.resolve_path(&candidate) {
+            Ok(t) => t,
+            Err(SandboxError::PathEscape { .. }) => {
+                return Err(ToolOutput::Error {
+                    code: ToolErrorCode::PathEscape,
+                    message: format!("symlink target escapes sandbox: {path_str}"),
+                });
+            }
+            Err(SandboxError::Canonicalize(_)) => {
+                return Err(ToolOutput::Error {
+                    code: ToolErrorCode::PathEscape,
+                    message: format!(
+                        "refusing to write through a dangling or unresolvable symlink: {path_str}"
+                    ),
+                });
+            }
+        }
+    } else {
+        candidate
+    };
+    match fs::metadata(&target).await {
+        Ok(m) if !m.is_file() => Err(ToolOutput::Error {
+            code: ToolErrorCode::NotAFile,
+            message: format!("not a regular file: {path_str}"),
+        }),
+        _ => Ok(target),
+    }
 }
 
 #[async_trait]
@@ -205,7 +239,11 @@ impl Tool for WriteFileTool {
             }
         };
 
-        let resolved = resolved_parent.join(file_name);
+        let resolved =
+            match resolve_final_component(ctx, &resolved_parent, file_name, path_str).await {
+                Ok(p) => p,
+                Err(out) => return out,
+            };
         let old_content = match fs::read(&resolved).await {
             Ok(existing) => std::str::from_utf8(&existing).ok().map(ToOwned::to_owned),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -213,7 +251,7 @@ impl Tool for WriteFileTool {
         };
 
         if !dry_run {
-            match atomic_write_utf8(&resolved, bytes).await {
+            match atomic_write_in_sandbox(ctx, &resolved, bytes).await {
                 Ok(_) => {}
                 Err(e) => {
                     return ToolOutput::Error {
@@ -327,6 +365,142 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// AGT-02 regression: a final-component symlink to an outside file must be refused
+    /// before reading, so the outside content never reaches the diff (dry run included).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn outside_symlink_is_refused_without_leaking_contents() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(repo.join("src")).expect("mkdir");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        let secret = outside.join("credentials");
+        std::fs::write(&secret, "AWS_SECRET=hunter2\n").expect("w");
+        symlink(&secret, repo.join("src/notes.txt")).expect("symlink");
+        let w = WriteFileTool::new();
+        for dry_run in [true, false] {
+            let out = w
+                .execute(
+                    json!({ "path": "src/notes.txt", "content": "x", "dry_run": dry_run }),
+                    &ctx(&repo),
+                )
+                .await;
+            let ToolOutput::Error { code, message } = out else {
+                panic!("expected refusal, got {out:?}");
+            };
+            assert_eq!(code, ToolErrorCode::PathEscape);
+            assert!(!message.contains("hunter2"));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&secret).expect("r"),
+            "AWS_SECRET=hunter2\n"
+        );
+        assert!(
+            std::fs::symlink_metadata(repo.join("src/notes.txt"))
+                .expect("meta")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_symlink_is_refused() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        symlink(dir.path().join("missing"), dir.path().join("link.txt")).expect("symlink");
+        let out = WriteFileTool::new()
+            .execute(
+                json!({ "path": "link.txt", "content": "x" }),
+                &ctx(dir.path()),
+            )
+            .await;
+        assert!(matches!(
+            out,
+            ToolOutput::Error {
+                code: ToolErrorCode::PathEscape,
+                ..
+            }
+        ));
+        assert!(!dir.path().join("missing").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inside_symlink_replaces_real_target_and_keeps_link() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("real.txt"), "old\n").expect("w");
+        symlink(dir.path().join("real.txt"), dir.path().join("alias.txt")).expect("symlink");
+        let out = WriteFileTool::new()
+            .execute(
+                json!({ "path": "alias.txt", "content": "new\n" }),
+                &ctx(dir.path()),
+            )
+            .await;
+        let ToolOutput::Success { content } = out else {
+            panic!("expected success, got {out:?}");
+        };
+        assert!(content.contains("-old") && content.contains("+new"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("real.txt")).expect("r"),
+            "new\n"
+        );
+        assert!(
+            std::fs::symlink_metadata(dir.path().join("alias.txt"))
+                .expect("meta")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_target_is_not_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("d")).expect("mkdir");
+        let out = WriteFileTool::new()
+            .execute(json!({ "path": "d", "content": "x" }), &ctx(dir.path()))
+            .await;
+        assert!(matches!(
+            out,
+            ToolOutput::Error {
+                code: ToolErrorCode::NotAFile,
+                ..
+            }
+        ));
+    }
+
+    /// AGT-01 regression through the tool surface: planted temp-name symlinks are ignored.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn planted_temp_symlink_does_not_redirect_write() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(repo.join("src")).expect("mkdir");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        let victim = outside.join("bashrc");
+        std::fs::write(&victim, "safe\n").expect("w");
+        for n in 0..16 {
+            symlink(&victim, repo.join(format!("src/.akmon-w-{n}-main.rs"))).expect("symlink");
+        }
+        let out = WriteFileTool::new()
+            .execute(
+                json!({ "path": "src/main.rs", "content": "pwned\n" }),
+                &ctx(&repo),
+            )
+            .await;
+        assert!(matches!(out, ToolOutput::Success { .. }), "{out:?}");
+        assert_eq!(std::fs::read_to_string(&victim).expect("r"), "safe\n");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("src/main.rs")).expect("r"),
+            "pwned\n"
+        );
     }
 
     #[tokio::test]

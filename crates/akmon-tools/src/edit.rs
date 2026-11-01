@@ -9,11 +9,11 @@ use serde_json::Value as JsonValue;
 use tokio::fs;
 
 use crate::Tool;
+use crate::atomic_write::atomic_write_in_sandbox;
 use crate::context::ToolContext;
 use crate::diff_render::unified_diff_text;
 use crate::file_change_set::{ChangeSetMode, FileChange, FileChangeSet, diff_stats_from_unified};
 use crate::output::{ToolErrorCode, ToolOutput};
-use crate::write_file::atomic_write_utf8;
 
 fn edit_file_permissions() -> &'static [Permission] {
     static CELL: OnceLock<[Permission; 1]> = OnceLock::new();
@@ -227,8 +227,8 @@ impl Tool for EditTool {
 
         let n = count_occurrences(content, old_str);
         if n == 0 {
-            let preview_len = old_str.len().min(200);
-            let searched = &old_str[..preview_len];
+            // `old_str` is model-controlled: never slice it at a raw byte offset.
+            let searched = akmon_core::truncate_at_char_boundary(old_str, 200);
             let hint = find_closest_line_hint(content, old_str);
             return ToolOutput::Error {
                 code: ToolErrorCode::NotFound,
@@ -269,7 +269,7 @@ impl Tool for EditTool {
         let (lines_added, lines_removed, lines_changed) = diff_stats_from_unified(&unified);
 
         if !dry_run {
-            match atomic_write_utf8(&resolved, updated.as_bytes()).await {
+            match atomic_write_in_sandbox(ctx, &resolved, updated.as_bytes()).await {
                 Ok(_) => {}
                 Err(e) => {
                     return ToolOutput::Error {
@@ -407,6 +407,30 @@ mod tests {
         assert!(
             message.contains("not found") && message.contains("searched for"),
             "message={message:?}"
+        );
+    }
+
+    /// AGT-05 regression: a multibyte char straddling byte 200 of a not-found `old_str`
+    /// must not panic while building the preview.
+    #[tokio::test]
+    async fn not_found_preview_is_char_boundary_safe() {
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(dir.path().join("f.txt"), "only this").expect("w");
+        let old_str = format!("{}€ tail", "a".repeat(199));
+        let out = EditTool::new()
+            .execute(
+                json!({ "path": "f.txt", "old_str": old_str, "new_str": "q" }),
+                &ctx(dir.path()),
+            )
+            .await;
+        let ToolOutput::Error { code, message } = out else {
+            panic!("expected error");
+        };
+        assert_eq!(code, ToolErrorCode::NotFound);
+        assert!(message.contains(&"a".repeat(199)), "message={message:?}");
+        assert!(
+            !message.contains('€'),
+            "preview must stop before the split char"
         );
     }
 

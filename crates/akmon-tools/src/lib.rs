@@ -5,6 +5,7 @@
 
 mod apply_patch;
 mod ask_followup;
+mod atomic_write;
 mod context;
 mod diff_render;
 mod edit;

@@ -428,7 +428,7 @@ impl Tool for GitTool {
                 };
                 let truncated = diff.len() > MAX_DIFF_CHARS;
                 if truncated {
-                    diff.truncate(MAX_DIFF_CHARS);
+                    akmon_core::truncate_string_at_char_boundary(&mut diff, MAX_DIFF_CHARS);
                     diff.push_str("\n[diff truncated — use args to narrow scope]");
                 }
                 let (fc, ins, del) = stat;
@@ -736,7 +736,7 @@ impl Tool for GitTool {
                 };
                 let truncated = stat_text.len() > MAX_DIFF_CHARS;
                 if truncated {
-                    stat_text.truncate(MAX_DIFF_CHARS);
+                    akmon_core::truncate_string_at_char_boundary(&mut stat_text, MAX_DIFF_CHARS);
                     stat_text.push_str("\n[diff truncated — use args to narrow scope]");
                 }
                 let commit = argv.first().cloned().unwrap_or_else(|| "HEAD".into());
@@ -858,6 +858,26 @@ mod tests {
             panic!("expected success");
         };
         assert!(content.contains("\"diff\""));
+    }
+
+    /// Truncating a large non-ASCII diff at MAX_DIFF_CHARS must not panic. Shifting the
+    /// content by 0..4 ASCII bytes guarantees the cut lands inside a 4-byte emoji at least
+    /// three times.
+    #[tokio::test]
+    async fn git_diff_truncation_is_char_boundary_safe() {
+        let dir = repo_with_commit().await;
+        let t = GitTool::new();
+        for pad in 0..4 {
+            let body = format!("{}{}\n", "x".repeat(pad), "😀".repeat(4000));
+            std::fs::write(dir.path().join("f.txt"), body).expect("w");
+            let out = t
+                .execute(json!({"subcommand": "diff"}), &ctx(dir.path()))
+                .await;
+            let ToolOutput::Success { content } = out else {
+                panic!("expected success, got {out:?}");
+            };
+            assert!(content.contains("diff truncated"), "pad={pad}");
+        }
     }
 
     #[tokio::test]

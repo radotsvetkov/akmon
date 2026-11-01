@@ -45,7 +45,7 @@ impl SemanticSearchTool {
         if s.len() <= max {
             s.to_string()
         } else {
-            let prefix = &s[..max];
+            let prefix = akmon_core::truncate_at_char_boundary(s, max);
             format!("{prefix}…")
         }
     }
