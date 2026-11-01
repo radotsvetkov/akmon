@@ -244,9 +244,10 @@ pub(crate) fn import_trace_into_journal(
     let journal_db = journal_db_path(journal_dir.as_path());
     let store = if journal_db.is_file() {
         RedbObjectStore::open(journal_db.as_path()).map_err(|err| {
+            let msg = format!("cannot open journal store {}: {err}", journal_db.display());
             OtelImportFailure::env(
-                "journal_access",
-                format!("cannot open journal store {}: {err}", journal_db.display()),
+                crate::journal_errors::journal_access_category(&msg),
+                crate::journal_errors::with_journal_lock_hint(msg),
             )
         })?
     } else {
@@ -284,7 +285,7 @@ fn otel_path_display(path: &Path) -> String {
 }
 
 /// Quotes a string for a POSIX shell when it contains special characters.
-fn shell_quote(raw: &str) -> String {
+pub(crate) fn shell_quote(raw: &str) -> String {
     let safe = !raw.is_empty()
         && raw
             .chars()

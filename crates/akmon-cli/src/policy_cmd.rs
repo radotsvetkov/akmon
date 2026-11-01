@@ -89,6 +89,15 @@ impl PolicyResolutionOptions {
     }
 }
 
+/// The CLI spelling of a profile name (`dev`, `staging`, `prod`), as accepted by the flags.
+fn profile_cli_name(profile: PolicyProfileName) -> &'static str {
+    match profile {
+        PolicyProfileName::Dev => "dev",
+        PolicyProfileName::Staging => "staging",
+        PolicyProfileName::Prod => "prod",
+    }
+}
+
 /// Merges `policy show-effective`'s own flags with the global `--policy-*` flags (F-9).
 ///
 /// The subcommand flags shadow the global ones of the same name, so both are honoured: packs are
@@ -103,7 +112,9 @@ fn merge_show_effective_options(
     let profile = match (global_flags.profile, profile) {
         (Some(g), Some(l)) if g != l => {
             return Err(format!(
-                "conflicting policy profiles: --policy-profile {g:?} and --profile {l:?}"
+                "conflicting policy profiles: --policy-profile {} and --profile {}",
+                profile_cli_name(g),
+                profile_cli_name(l)
             ));
         }
         (g, l) => l.or(g),
@@ -158,7 +169,10 @@ pub fn run_policy(
                 Ok(o) => o.with_cli_paths_relative_to(cwd),
                 Err(message) => {
                     if json_output {
-                        println!("{}", json!({ "ok": false, "error": message }));
+                        println!(
+                            "{}",
+                            json!({ "ok": false, "category": "usage", "error": message })
+                        );
                     } else {
                         eprintln!("policy show-effective: {message}");
                     }
@@ -517,6 +531,10 @@ deny = ["shell"]
             merge_show_effective_options(&global, Some(PolicyProfileArg::Dev), Vec::new(), None)
                 .expect_err("profile conflict");
         assert!(err.contains("conflicting policy profiles"));
+        assert!(
+            err.contains("--policy-profile prod and --profile dev"),
+            "CLI spelling, not Debug: {err}"
+        );
         let err =
             merge_show_effective_options(&global, None, Vec::new(), Some(PathBuf::from("b.toml")))
                 .expect_err("override conflict");

@@ -33,6 +33,16 @@ pub(crate) fn journal_open_category(msg: &str) -> Option<&'static str> {
     }
 }
 
+/// Category for a failure to open or create a writable journal: `journal_locked` for a lock
+/// conflict, otherwise `journal_access`.
+pub(crate) fn journal_access_category(msg: &str) -> &'static str {
+    if is_journal_locked(msg) {
+        JOURNAL_LOCKED
+    } else {
+        "journal_access"
+    }
+}
+
 /// Appends an operator hint to `error` when it is a journal lock conflict.
 pub(crate) fn with_journal_lock_hint(error: String) -> String {
     if is_journal_locked(&error) {
@@ -64,6 +74,15 @@ failed: redb open failed: Database already open. Cannot acquire lock.";
             Some(JOURNAL_NOT_FOUND)
         );
         assert_eq!(journal_open_category("session not found"), None);
+    }
+
+    #[test]
+    fn access_category_distinguishes_lock_conflicts() {
+        assert_eq!(journal_access_category(LOCKED), JOURNAL_LOCKED);
+        assert_eq!(
+            journal_access_category("cannot open journal store: permission denied"),
+            "journal_access"
+        );
     }
 
     #[test]

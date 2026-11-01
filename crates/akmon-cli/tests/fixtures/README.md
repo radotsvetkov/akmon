@@ -50,14 +50,13 @@ The OpenTelemetry GenAI **events** specification at v1.36.0 permits `gen_ai.choi
 Do **not** read this fixture as a claim that real emitters never include a `message` map with
 tool-call metadata — some do; this one is the conservative content-off case.
 
-### Cosmetic `source_semconv` quirk (disclosed, not fixed)
+### `source_semconv` vs `importer_semconv` (fixed in v3.0)
 
-Akmon's importer records `source_semconv=1.37.0` in the signed session config object for **all**
-imports, regardless of the source FORM (this is a hardcoded constant, `SOURCE_SEMCONV`, in
-`crates/akmon-otel/src/objects.rs`). This fixture's **source form is the legacy `<= v1.36`
-message-event convention**, so the recorded `source_semconv` value does not describe the form.
-This is cosmetic and out of scope to change here (it would alter signed config-object bytes,
-i.e. substrate). It is disclosed so the value is never mistaken for an accurate form descriptor.
+Earlier importers recorded a hardcoded `source_semconv=1.37.0` for every import. Since v3.0 the
+signed session config object records `source_semconv` as what the trace itself declared (from its
+`schemaUrl`, or `undeclared`) and `importer_semconv` as the version the importer supports; the
+per-slot metadata envelopes record only `importer_semconv`. The source FORM (structured attributes,
+inference-details event, or legacy message events) is recorded separately as `source_form`.
 
 ### Grounding sources
 

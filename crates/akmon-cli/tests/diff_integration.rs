@@ -556,7 +556,7 @@ fn t_diff_json_error_object_on_missing_journal() {
     );
     assert_eq!(out.status.code(), Some(3));
     let v = parse_json_stdout(&out);
-    assert_eq!(v["category"], "session_not_found");
+    assert_eq!(v["category"], "journal_not_found");
 }
 
 #[test]
@@ -576,8 +576,10 @@ fn t_diff_json_error_object_on_missing_referenced_object() {
     assert_eq!(v["category"], "store_access_failed");
 }
 
+/// Request hashes differ between a source and its replay by design (replay scope P11), so a
+/// request-hash difference is reported as informational and does not fail the diff.
 #[test]
-fn t_diff_provider_request_hash_difference_diverges() {
+fn t_diff_provider_request_hash_difference_is_informational() {
     let tmp = tempdir().expect("tempdir");
     let sid_a = Uuid::new_v4();
     let sid_b = Uuid::new_v4();
@@ -586,14 +588,20 @@ fn t_diff_provider_request_hash_difference_diverges() {
     append_provider_session_detail(&store, sid_b, b"sys: verbose", AttemptStatus::Success, None);
     drop(store);
     let out = run_diff_with(tmp.path(), sid_a, sid_b, &["--format", "json"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(0));
     let report: DiffReportV1 = serde_json::from_slice(&out.stdout).expect("report");
-    assert!(!report.matches);
+    assert!(report.matches);
     assert_eq!(report.divergence_count, 1);
+    assert_eq!(report.informational_divergence_count, 1);
     assert_eq!(
         report.divergences[0].field.as_deref(),
         Some("attempts[0].request_hash")
     );
+    let out = run_diff_with(tmp.path(), sid_a, sid_b, &[]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("matches: yes"), "{stdout}");
+    assert!(stdout.contains("[informational]"), "{stdout}");
 }
 
 #[test]

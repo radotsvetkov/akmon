@@ -26,6 +26,9 @@ pub enum ToolErrorCode {
     PatchFailed,
     /// Allowlisted subprocess could not be spawned, waited on, or hit the configured timeout.
     SubprocessFailed,
+    /// The path's final component is a symbolic link; file-modifying tools never write through
+    /// one (policy is evaluated on the link path, so following it could bypass deny rules).
+    SymlinkRefused,
 }
 
 /// Outcome of a single tool invocation (serializable for audit logs and headless JSON).

@@ -349,3 +349,108 @@ fn t_markdown_report_for_failed_bundle() {
     assert!(md.contains("## VERDICT: FAILED"), "{md}");
     assert!(md.contains("manifest\\_event\\_count\\_mismatch"), "{md}");
 }
+
+/// A valid two-event bundle whose `SessionStart` config object is `config_bytes`.
+fn bundle_with_config(config_bytes: &[u8]) -> BundleContents {
+    let mut c = valid_bundle();
+    let config_hash = digest_bytes(HashAlgorithm::Sha256, config_bytes);
+    let EventKind::SessionStart {
+        config_hash: old, ..
+    } = &mut c.events[0].kind
+    else {
+        panic!("first event is SessionStart");
+    };
+    let old_hash = old.clone();
+    *old = config_hash.clone();
+    c.objects.remove(&old_hash);
+    c.objects.insert(config_hash, config_bytes.to_vec());
+    let start_hash = c.events[0]
+        .content_hash(HashAlgorithm::Sha256)
+        .expect("hash");
+    c.events[1].parents = vec![start_hash];
+    let end_hash = c.events[1]
+        .content_hash(HashAlgorithm::Sha256)
+        .expect("hash");
+    c.manifest.session.head = end_hash.to_hex();
+    c
+}
+
+#[test]
+fn t_partial_capture_is_surfaced_honestly() {
+    let dir = tempdir().expect("tempdir");
+    let c = bundle_with_config(
+        br#"{"akmon_otel_config":true,"capture_level":"partial","source_semconv":"1.37.0"}"#,
+    );
+    let bundle = dir.path().join("b.akmon");
+    write_file(&bundle, &c);
+
+    let out = agef_verify().arg(&bundle).output().expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first = stderr.lines().next().unwrap_or_default();
+    assert!(first.contains("capture: PARTIAL"), "{stderr}");
+    assert!(stderr.contains("NOT full capture"), "{stderr}");
+
+    let out = agef_verify()
+        .arg(&bundle)
+        .args(["--format", "markdown"])
+        .output()
+        .expect("run");
+    let md = String::from_utf8_lossy(&out.stdout);
+    assert!(md.contains("PARTIAL (OTEL import)"), "{md}");
+
+    let out = agef_verify()
+        .arg(&bundle)
+        .args(["--require-capture", "full", "--format", "json"])
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(1));
+    let v = json_of(&out);
+    assert_eq!(v["capture"]["level"], "partial");
+    let msg = v["violations"]
+        .as_array()
+        .expect("violations")
+        .iter()
+        .find(|x| x["category"] == "capture_requirement_unmet")
+        .expect("capture violation")["message"]
+        .as_str()
+        .expect("message")
+        .to_owned();
+    assert!(msg.contains("partial OTEL import"), "{msg}");
+    assert!(!msg.contains("metadata-only"), "{msg}");
+}
+
+#[test]
+fn t_signature_flag_is_false_when_integrity_fails() {
+    let dir = tempdir().expect("tempdir");
+    let mut c = valid_bundle();
+    let pk = sign(&mut c);
+    // event_count is not covered by the signed statement: the signature still verifies, but
+    // integrity fails.
+    c.manifest.event_count = 7;
+    let bundle = dir.path().join("b.akmon");
+    write_file(&bundle, &c);
+    let pk_file = dir.path().join("pk.hex");
+    std::fs::write(&pk_file, hex::encode(&pk)).expect("write pk");
+    let out = agef_verify()
+        .arg(&bundle)
+        .arg("--verify-key")
+        .arg(&pk_file)
+        .args(["--format", "json"])
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(1));
+    let v = json_of(&out);
+    assert_eq!(v["integrity_ok"], false);
+    assert_eq!(v["passed"], false);
+    assert_eq!(v["signature_verified"], false);
+    assert_eq!(v["operator_key_verified"], false);
+    assert!(
+        v["signatures"]
+            .as_array()
+            .expect("signatures")
+            .iter()
+            .any(|s| s["outcome"] == "verified"),
+        "{v}"
+    );
+}

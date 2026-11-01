@@ -211,6 +211,11 @@ impl Tool for PatchTool {
                 }
             };
 
+            if let Err(out) =
+                crate::write_file::refuse_final_component_symlink(ctx, rel_str.as_str()).await
+            {
+                return out;
+            }
             let resolved = match ctx.resolve_path(rel_str.as_str()) {
                 Ok(p) => p,
                 Err(SandboxError::PathEscape { .. }) => {

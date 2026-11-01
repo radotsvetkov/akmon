@@ -154,6 +154,9 @@ impl Tool for EditTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        if let Err(out) = crate::write_file::refuse_final_component_symlink(ctx, path_str).await {
+            return out;
+        }
         let resolved = match ctx.resolve_path(path_str) {
             Ok(p) => p,
             Err(SandboxError::PathEscape { .. }) => {

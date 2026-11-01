@@ -14,6 +14,7 @@ mod journal_errors;
 mod otel_cmd;
 mod policy_cmd;
 mod redact_cmd;
+mod seal_cmd;
 mod session_index;
 mod session_transcript;
 
@@ -1324,15 +1325,17 @@ const AGENT_OPTIONS: &str = "Agent options";
     about = "Seal AI agent sessions into signed, tamper-evident evidence anyone can verify offline",
     long_about = "Seal AI agent sessions into signed, tamper-evident evidence anyone can verify \
 offline.\n\n\
-Akmon records an agent session as a hash-linked AGEF journal, exports it as a portable bundle, \
-signs it with Ed25519, and lets a third party verify it with `akmon bundle verify`, the standalone \
-`agef-verify` binary, or stock `openssl` (`akmon bundle prove-openssl`).\n\n\
-Typical flow:\n\
-  akmon otel import trace.json                 # any OTel GenAI trace -> AGEF session\n\
-  akmon bundle keygen --out signer.key --public-out signer.pub\n\
-  akmon bundle export <SESSION_ID> --output s.akmon\n\
-  akmon bundle sign s.akmon --key signer.key\n\
-  akmon bundle verify s.akmon --verify-key signer.pub --require-signature\n\n\
+Akmon turns an agent session (any OpenTelemetry GenAI trace, or a session recorded by the \
+reference agent) into a hash-linked AGEF bundle signed with Ed25519, which a third party verifies \
+offline with the standalone `agef-verify` binary, `akmon bundle verify`, or stock `openssl`.\n\n\
+Quickstart:\n\
+  akmon bundle keygen --out signer.pk8 --public-out signer.pub\n\
+  akmon seal trace.json --key signer.pk8 --output audit.akmon\n\
+  agef-verify audit.akmon --verify-key signer.pub --require-signature   # the auditor, offline\n\n\
+Send signer.pub to the auditor over a separate trusted channel. `akmon seal` also accepts an \
+existing session id, adds an operator attestation with --operator-key, and writes stock-OpenSSL \
+proof artifacts with --proof-dir. The step-by-step commands live under `akmon otel` and \
+`akmon bundle`.\n\n\
 The bundled coding agent (`akmon chat`, `akmon --task ...`) is the full-capture reference \
 producer; its flags are listed under \"Agent options\"."
 )]
@@ -1515,6 +1518,35 @@ pub(crate) struct Cli {
 /// Top-level `akmon` subcommands.
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
+    /// Seal a session or OTEL trace into a signed bundle a stranger can verify offline.
+    #[command(
+        long_about = "Seal a session or OTEL trace into a signed bundle a stranger can verify offline.\n\n\
+INPUT is an OTLP/JSON OpenTelemetry GenAI trace file (imported into the journal; the capture level \
+- structural, partial, or full - is recorded honestly in the signed session) or an existing \
+journal session id (UUID). In one step `seal` imports or selects the session, exports the bundle, \
+checks its integrity, signs the session head with Ed25519 (AGEF-SIG-v1), optionally adds an \
+operator attestation (AGEF-OPERATOR-v1), re-verifies the result with the derived public key(s) \
+using the same policy as `akmon bundle verify --require-signature`, and optionally writes the \
+`prove-openssl` artifacts.\n\n\
+Outputs (written atomically; nothing is left behind on failure):\n\
+  <OUTPUT>                the signed bundle (default ./<session-id>.akmon)\n\
+  <OUTPUT>.pub            signer public key, 64 hex chars (same format as keygen --public-out)\n\
+  <OUTPUT>.operator.pub   operator public key, when --operator-key is given\n\n\
+Example:\n\
+  akmon bundle keygen --out signer.pk8 --public-out signer.pub\n\
+  akmon seal trace.json --key signer.pk8 --output audit.akmon\n\
+  agef-verify audit.akmon --verify-key signer.pub --require-signature   # the auditor\n\
+  agef-verify audit.akmon --verify-key signer.pub --require-signature --format markdown > report.md\n\n\
+Send the public key to the auditor over a separate trusted channel. An existing output is never \
+overwritten without --force. AGEF signatures do not cover a trusted time; see the handbook for \
+an RFC 3161 timestamp recipe over the --proof-dir statement.\n\n\
+Exit codes:\n\
+  0 - sealed and self-verified\n\
+  1 - integrity or verification failure\n\
+  2 - usage error or bad input (unknown input, unparseable trace, invalid key, output exists)\n\
+  3 - I/O or environment error"
+    )]
+    Seal(seal_cmd::SealArgs),
     /// Seal, sign, attest, and verify AGEF evidence bundles.
     #[command(
         long_about = "Seal, sign, attest, and verify AGEF evidence bundles.\n\n\
@@ -1773,6 +1805,18 @@ fn render_replay_human_report(
     lines.join("\n")
 }
 
+/// A journal held open by another process is `journal_locked` (with an operator hint), never
+/// `journal_not_found` or a generic infrastructure error.
+fn classify_replay_journal_lock(
+    mut error: akmon_replay::ReplayInfraError,
+) -> akmon_replay::ReplayInfraError {
+    if journal_errors::is_journal_locked(&error.error) {
+        error.category = journal_errors::JOURNAL_LOCKED.to_owned();
+        error.error = journal_errors::with_journal_lock_hint(error.error);
+    }
+    error
+}
+
 fn render_replay_human_error(error: &akmon_replay::ReplayInfraError) -> String {
     let sid = error
         .source_session_id
@@ -1947,7 +1991,9 @@ async fn run_replay(args: ReplayArgs) -> ExitCode {
         };
     }
 
-    let result = run_replay_result(args, source_journal_dir, persist_journal_dir.clone()).await;
+    let result = run_replay_result(args, source_journal_dir, persist_journal_dir.clone())
+        .await
+        .map_err(classify_replay_journal_lock);
     match result {
         Ok(report) => match format {
             ReplayFormat::Json => match print_replay_json_report(&report) {
@@ -3659,6 +3705,7 @@ async fn main() -> ExitCode {
     // Trust-path commands never touch the project sandbox: dispatch them before resolving the
     // working directory, so offline verification prints no git/sandbox noise (F-15).
     match &cli.command {
+        Some(Commands::Seal(seal_args)) => return seal_cmd::run_seal(seal_args),
         Some(Commands::Bundle(bundle_args)) => return bundle_cmd::run_bundle(bundle_args),
         Some(Commands::Otel(otel_args)) => return otel_cmd::run_otel(otel_args),
         Some(Commands::Verify {
@@ -3763,7 +3810,8 @@ async fn main() -> ExitCode {
         }
         // Dispatched above; listed so this match stays exhaustive.
         Some(
-            Commands::Bundle(_)
+            Commands::Seal(_)
+            | Commands::Bundle(_)
             | Commands::Otel(_)
             | Commands::Verify { .. }
             | Commands::Inspect { .. }

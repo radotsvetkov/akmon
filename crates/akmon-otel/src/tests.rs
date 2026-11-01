@@ -496,3 +496,168 @@ fn fixture_c_legacy_full_capture_emits_all_turns_and_verifies() {
     let verify = graph.verify().unwrap_or_else(|_| unreachable!());
     assert!(verify.is_clean(), "session must verify clean: {verify:?}");
 }
+
+/// Builds a one-trace OTLP/JSON document from raw span JSON objects.
+fn trace_doc(spans: &[String]) -> Vec<u8> {
+    format!(
+        r#"{{"resourceSpans":[{{"scopeSpans":[{{"spans":[{}]}}]}}]}}"#,
+        spans.join(",")
+    )
+    .into_bytes()
+}
+
+/// A span JSON object with the given ids, times and `(key, stringValue)` attributes.
+fn span_json(trace: &str, span: &str, start: u64, attrs: &[(&str, &str)], events: &str) -> String {
+    let attrs: Vec<String> = attrs
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                r#"{{"key":{},"value":{{"stringValue":{}}}}}"#,
+                serde_json::to_string(k).unwrap_or_default(),
+                serde_json::to_string(v).unwrap_or_default()
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"traceId":"{trace}","spanId":"{span}","parentSpanId":"","name":"s","kind":3,"startTimeUnixNano":"{start}","endTimeUnixNano":"{}","attributes":[{}],"events":[{events}]}}"#,
+        start + 1,
+        attrs.join(",")
+    )
+}
+
+const USER_IN: &str = r#"[{"role":"user","parts":[{"type":"text","content":"hi"}]}]"#;
+const ASSISTANT_OUT: &str = r#"[{"role":"assistant","parts":[{"type":"text","content":"hello"}]}]"#;
+
+#[test]
+fn embeddings_spans_add_no_content_slots() {
+    let doc = trace_doc(&[
+        span_json(
+            "aa",
+            "01",
+            10,
+            &[
+                ("gen_ai.operation.name", "chat"),
+                ("gen_ai.input.messages", USER_IN),
+                ("gen_ai.output.messages", ASSISTANT_OUT),
+            ],
+            "",
+        ),
+        span_json(
+            "aa",
+            "02",
+            20,
+            &[("gen_ai.operation.name", "embeddings")],
+            "",
+        ),
+    ]);
+    let plan = plan_otel_import(&doc, &ImportOptions::default()).expect("plan");
+    assert_eq!(plan.provider_calls(), 2);
+    assert_eq!(plan.capture_level(), CaptureLevel::Full);
+
+    let only_embeddings = trace_doc(&[span_json(
+        "aa",
+        "02",
+        20,
+        &[("gen_ai.operation.name", "embeddings")],
+        "",
+    )]);
+    let plan = plan_otel_import(&only_embeddings, &ImportOptions::default()).expect("plan");
+    assert_eq!(plan.capture_level(), CaptureLevel::Structural);
+}
+
+#[test]
+fn system_instructions_alone_do_not_make_the_request_slot_real() {
+    let doc = trace_doc(&[span_json(
+        "aa",
+        "01",
+        10,
+        &[
+            ("gen_ai.operation.name", "chat"),
+            (
+                "gen_ai.system_instructions",
+                r#"[{"type":"text","content":"be terse"}]"#,
+            ),
+            ("gen_ai.output.messages", ASSISTANT_OUT),
+        ],
+        "",
+    )]);
+    let plan = plan_otel_import(&doc, &ImportOptions::default()).expect("plan");
+    assert_eq!(plan.capture_level(), CaptureLevel::Partial);
+}
+
+#[test]
+fn assistant_choice_without_text_or_tool_calls_is_suppressed() {
+    let doc = trace_doc(&[span_json(
+        "aa",
+        "01",
+        10,
+        &[
+            ("gen_ai.operation.name", "chat"),
+            ("gen_ai.input.messages", USER_IN),
+            (
+                "gen_ai.output.messages",
+                r#"[{"role":"assistant","parts":[{"type":"reasoning","content":"thinking"}]}]"#,
+            ),
+        ],
+        "",
+    )]);
+    let (store, mut graph) = stores();
+    let report = import_otel_genai(&doc, store.as_ref(), &mut graph).expect("import");
+    assert_eq!(report.turns_suppressed_no_content, 1);
+    let history = graph.history().unwrap_or_else(|_| unreachable!());
+    assert!(
+        !kinds(&history)
+            .iter()
+            .any(|k| matches!(k, EventKind::AssistantTurn { .. })),
+        "no AssistantTurn for a reasoning-only choice"
+    );
+}
+
+#[test]
+fn trace_selection_happens_before_unknown_legacy_refusal() {
+    let doc = trace_doc(&[
+        span_json(
+            "aa",
+            "01",
+            10,
+            &[
+                ("gen_ai.operation.name", "chat"),
+                ("gen_ai.input.messages", USER_IN),
+                ("gen_ai.output.messages", ASSISTANT_OUT),
+            ],
+            "",
+        ),
+        span_json(
+            "bb",
+            "02",
+            20,
+            &[("gen_ai.operation.name", "chat")],
+            r#"{"name":"gen_ai.developer.message"}"#,
+        ),
+    ]);
+    let options = ImportOptions {
+        trace_id: Some("aa".to_owned()),
+        ..ImportOptions::default()
+    };
+    let plan = plan_otel_import(&doc, &options).expect("unselected trace must not refuse");
+    assert_eq!(plan.provider_calls(), 1);
+    let options = ImportOptions {
+        trace_id: Some("bb".to_owned()),
+        ..ImportOptions::default()
+    };
+    assert!(matches!(
+        plan_otel_import(&doc, &options),
+        Err(OtelImportError::LegacySemconvUnsupported(_))
+    ));
+}
+
+#[test]
+fn metadata_envelope_records_importer_semconv_not_source() {
+    let bytes = objects::metadata_envelope_bytes("request", serde_json::Map::new());
+    let value: Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(value.get("source_semconv"), None);
+    assert_eq!(
+        value.get("importer_semconv").and_then(Value::as_str),
+        Some(SEMCONV_VERSION)
+    );
+}

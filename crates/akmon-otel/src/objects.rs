@@ -15,7 +15,9 @@ use serde_json::{Map, Value, json};
 ///
 /// Used when real content is absent but structural metadata exists. The object
 /// is self-describing: it records the slot (`field`), the capture level, the
-/// importer's supported semconv version, and the sorted metadata for that slot.
+/// importer's supported semconv version (`importer_semconv` — NOT what the source
+/// telemetry declared; that is recorded once, as `source_semconv`, in the session
+/// config object), and the sorted metadata for that slot.
 #[must_use]
 pub fn metadata_envelope_bytes(field: &str, attributes: Map<String, Value>) -> Vec<u8> {
     let value = json!({
@@ -23,7 +25,7 @@ pub fn metadata_envelope_bytes(field: &str, attributes: Map<String, Value>) -> V
         "schema": "akmon-otel-meta-v1",
         "field": field,
         "capture_level": "structural",
-        "source_semconv": SEMCONV_VERSION,
+        "importer_semconv": SEMCONV_VERSION,
         "attributes": Value::Object(attributes),
     });
     encode(&value)

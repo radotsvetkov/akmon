@@ -128,6 +128,9 @@ history and visible to other users via `ps`; prefer `printf %s \"$KEY\" | akmon 
 
 /// Resolves the key for `config key set` (F-10): argv (warned) → piped stdin → environment
 /// variable → interactive prompt. Blank input is rejected.
+///
+/// When stdin is not a terminal but yields nothing (for example `/dev/null` in CI, or an empty
+/// pipe), the `<PROVIDER>_API_KEY` environment variable is used instead of failing.
 fn resolve_key_input(
     provider: KeyProvider,
     argv_key: Option<&str>,
@@ -135,14 +138,16 @@ fn resolve_key_input(
     env_lookup: impl Fn(&str) -> Option<String>,
     mut read_line: impl FnMut(Option<&str>) -> io::Result<String>,
 ) -> Result<(String, KeySource), String> {
+    let env_key = || env_lookup(provider.env_var()).filter(|k| !k.trim().is_empty());
     let (raw, source) = if let Some(k) = argv_key {
         (k.to_owned(), KeySource::Argv)
     } else if !stdin_is_terminal {
-        (
-            read_line(None).map_err(|e| format!("cannot read key from stdin: {e}"))?,
-            KeySource::Stdin,
-        )
-    } else if let Some(k) = env_lookup(provider.env_var()).filter(|k| !k.trim().is_empty()) {
+        let piped = read_line(None).map_err(|e| format!("cannot read key from stdin: {e}"))?;
+        match env_key() {
+            Some(k) if piped.trim().is_empty() => (k, KeySource::Env),
+            _ => (piped, KeySource::Stdin),
+        }
+    } else if let Some(k) = env_key() {
         (k, KeySource::Env)
     } else {
         let prompt = format!(
@@ -322,6 +327,13 @@ async fn run_config_inner(args: ConfigArgs, cli: &crate::Cli) -> Result<(), Stri
                 }
             }
             let (path, _) = load_user_config().map_err(|e| e.to_string())?;
+            // A reset is a clean slate: remove the old file first so save_config_to does not
+            // carry over unknown/legacy sections it would otherwise preserve.
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+            }
             save_config_to(&path, &AkmonGlobalConfig::default()).map_err(|e| e.to_string())?;
             if args.json {
                 let j = json!({ "ok": true });
@@ -1219,6 +1231,25 @@ mod tests {
         })
         .expect("prompt");
         assert_eq!((k.as_str(), src), ("sk-typed", KeySource::Prompt));
+    }
+
+    #[test]
+    fn key_input_falls_back_to_env_when_piped_stdin_is_blank() {
+        let env = |name: &str| (name == "ANTHROPIC_API_KEY").then(|| "sk-env".to_owned());
+        for blank in ["", "\n", "   \n"] {
+            let (k, src) = resolve_key_input(KeyProvider::Anthropic, None, false, env, |p| {
+                assert!(p.is_none(), "piped stdin must not prompt");
+                Ok(blank.to_owned())
+            })
+            .expect("env fallback");
+            assert_eq!((k.as_str(), src), ("sk-env", KeySource::Env), "{blank:?}");
+        }
+        // Non-blank stdin still wins over the environment.
+        let (k, src) = resolve_key_input(KeyProvider::Anthropic, None, false, env, |_| {
+            Ok("sk-piped\n".into())
+        })
+        .expect("stdin");
+        assert_eq!((k.as_str(), src), ("sk-piped", KeySource::Stdin));
     }
 
     #[test]

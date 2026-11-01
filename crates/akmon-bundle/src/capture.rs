@@ -26,9 +26,10 @@ use akmon_journal::EventKind;
 /// `akmon_otel_config == true`). See [`otel_capture_info`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OtelCaptureInfo {
-    /// Recorded capture level: `"full"` (real message content present) or `"structural"`
-    /// (metadata only — content was not captured by the source telemetry). `"unknown"` if the
-    /// config object omits the field.
+    /// Recorded capture level: `"full"` (real message content present for every provider call),
+    /// `"partial"` (content present for some provider calls only), or `"structural"` (metadata
+    /// only — content was not captured by the source telemetry). `"unknown"` if the config object
+    /// omits the field.
     pub capture_level: String,
     /// Pinned OpenTelemetry semantic-conventions version the importer targeted (for example
     /// `"1.37.0"`). Empty string if the config object omits the field.

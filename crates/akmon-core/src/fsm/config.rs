@@ -28,7 +28,9 @@ pub struct AgentConfig {
     pub auto_commit: bool,
     /// When set, overrides the default completion `max_tokens` for this session (subagents, tests).
     pub max_completion_tokens: Option<u32>,
-    /// Use compact nested-agent prompts (`spawn_subagent`) instead of the full project context block.
+    /// Use compact nested-agent prompts instead of the full project context block. (The
+    /// `spawn_subagent` tool that set this was archived in v3.0; the flag remains for embedders
+    /// and tests that drive a nested session directly.)
     pub subagent_style: bool,
     /// When set in headless mode, stop after estimated cumulative spend reaches this USD amount (ignored for free local models).
     pub max_budget_usd: Option<f64>,

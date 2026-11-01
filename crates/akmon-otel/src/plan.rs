@@ -137,9 +137,11 @@ pub(crate) fn build_plan(
     if parsed.spans.is_empty() {
         return Err(OtelImportError::EmptyTrace);
     }
-    refuse_unknown_legacy(&parsed.spans)?;
-    let (spans, duplicates) = dedupe_spans(parsed.spans)?;
-    let (spans, trace_id) = select_trace(spans, options.trace_id.as_deref())?;
+    // Select the trace FIRST, so content in a trace the user did not ask for (an
+    // unknown legacy event, a conflicting duplicate span) cannot refuse the import.
+    let (spans, trace_id) = select_trace(parsed.spans, options.trace_id.as_deref())?;
+    let (spans, duplicates) = dedupe_spans(spans)?;
+    refuse_unknown_legacy(&spans)?;
     let conversation_id = resolve_conversation(&spans)?;
 
     let emitting_count = spans
@@ -184,7 +186,7 @@ pub(crate) fn build_plan(
         if *op == Operation::ExecuteTool {
             builder.tool_span(span);
         } else {
-            builder.provider_span(span, times.start, times.end);
+            builder.provider_span(span, *op, times.start, times.end);
         }
     }
 
@@ -248,19 +250,29 @@ struct Builder {
 
 impl Builder {
     /// Plans a provider call (plus its user and assistant turns).
+    ///
+    /// Embeddings spans emit a provider call but add NO content slots: the semantic
+    /// conventions define no input/output message content for embeddings, so such
+    /// slots could never be filled and would pin every RAG trace at `partial`.
     fn provider_span(
         &mut self,
         span: &NormalizedSpan,
+        op: Operation,
         started_at: OffsetDateTime,
         ended_at: OffsetDateTime,
     ) {
+        let is_embeddings = op == Operation::Embeddings;
         let content = content::span_content(span);
         merge_sources(&mut self.sources, content.sources);
         self.user_turns(&content);
 
         let request = content.request();
-        self.count_slot(request.is_some());
-        self.count_slot(content.output_messages.is_some());
+        if !is_embeddings {
+            // System instructions alone do not make the request slot real: the
+            // user/input side of the conversation must have been captured.
+            self.count_slot(content.input_messages.is_some());
+            self.count_slot(content.output_messages.is_some());
+        }
         let request = request.map_or_else(|| request_envelope(span), |v| real_content_bytes(&v));
         let response = content
             .output_messages
@@ -290,7 +302,18 @@ impl Builder {
         });
         self.stats.provider_calls += 1;
 
-        let turns = assistant_contents(content.output_messages.as_ref());
+        if is_embeddings {
+            return;
+        }
+        let (turns, empty): (Vec<_>, Vec<_>) = assistant_contents(content.output_messages.as_ref())
+            .into_iter()
+            .partition(content::AssistantContent::has_real_content);
+        // A choice with no text and no tool calls (only reasoning/uri/blob/file
+        // parts, or nothing) is not emitted as an AssistantTurn; its parts stay in
+        // the provider call's response object.
+        for turn in &empty {
+            self.stats.non_text_parts_omitted += turn.parts_not_in_turn;
+        }
         if turns.is_empty() {
             self.stats.turns_suppressed_no_content += 1;
         }
@@ -434,8 +457,16 @@ fn refuse_unknown_legacy(spans: &[NormalizedSpan]) -> Result<(), OtelImportError
     }
 }
 
-/// Drops byte-identical duplicate spans (OTLP retries re-export batches) and
-/// rejects differing spans sharing a `(trace_id, span_id)` (OTEL-6).
+/// Drops duplicate spans (OTLP retries re-export batches) and rejects differing
+/// spans sharing a `(trace_id, span_id)` (OTEL-6).
+///
+/// "Duplicate" means *normalized-equal*, not byte-identical: two spans compare
+/// equal when every field the importer parses (ids, parent, times, status,
+/// attributes, events) is equal. Fields the importer does not parse (for example
+/// dropped-attribute counts) are ignored, so spans differing only there are
+/// treated as duplicates. Because attribute values compare with `f64` equality, a
+/// retried span carrying a `doubleValue` of NaN never equals itself and is
+/// rejected as [`OtelImportError::DuplicateSpanId`] rather than dropped.
 fn dedupe_spans(spans: Vec<NormalizedSpan>) -> Result<(Vec<NormalizedSpan>, u64), OtelImportError> {
     let mut seen: HashMap<(String, String), usize> = HashMap::new();
     let mut out: Vec<NormalizedSpan> = Vec::with_capacity(spans.len());

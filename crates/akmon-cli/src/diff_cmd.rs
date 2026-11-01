@@ -146,11 +146,24 @@ fn render_diff_human_report(report: &DiffReportV1) -> String {
         format!("  events compared: {}", report.events_compared),
         format!("  session A events: {}", report.session_a_event_count),
         format!("  session B events: {}", report.session_b_event_count),
-        format!("  divergence count: {}", report.divergence_count),
+        if report.informational_divergence_count > 0 {
+            format!(
+                "  divergence count: {} ({} informational)",
+                report.divergence_count, report.informational_divergence_count
+            )
+        } else {
+            format!("  divergence count: {}", report.divergence_count)
+        },
         format!("  matches: {}", if report.matches { "yes" } else { "no" }),
     ];
+    if report.informational_divergence_count > 0 {
+        lines.push(
+            "  note: provider request hashes differ (informational; request payloads carry runtime context a replay does not reproduce, so they do not affect matches)"
+                .to_owned(),
+        );
+    }
 
-    if !report.matches {
+    if !report.matches || !report.divergences.is_empty() {
         if let Some(sb) = &report.structural_break {
             lines.push("  structural break:".to_owned());
             lines.push(format!("    position: {}", sb.position));
@@ -166,7 +179,14 @@ fn render_diff_human_report(report: &DiffReportV1) -> String {
                     .position
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "unknown".to_owned());
-                let kind = divergence_kind_label(&divergence.kind);
+                let kind = if divergence.kind.is_informational() {
+                    format!(
+                        "{} [informational]",
+                        divergence_kind_label(&divergence.kind)
+                    )
+                } else {
+                    divergence_kind_label(&divergence.kind)
+                };
                 let field_suffix = divergence
                     .field
                     .as_deref()
@@ -250,6 +270,19 @@ pub fn run_diff(args: DiffArgs) -> ExitCode {
         }
     };
 
+    // A missing journal is `journal_not_found` (as for `akmon replay`), not a missing session.
+    if !akmon_query::journal_db_path(&journal_dir).is_file() {
+        report_diff_failure(
+            format,
+            crate::journal_errors::JOURNAL_NOT_FOUND,
+            format!(
+                "journal not found: {} (no journal.redb; pass --journal <DIR>)",
+                journal_dir.display()
+            ),
+        );
+        return ExitCode::from(3);
+    }
+
     match run_diff_engine(&journal_dir, &args) {
         Ok(report) => {
             if let Err(err) = print_diff_report(&report, format) {
@@ -264,7 +297,17 @@ pub fn run_diff(args: DiffArgs) -> ExitCode {
             }
         }
         Err(err) => {
-            report_diff_failure(format, diff_error_category(&err), err.to_string());
+            let message = err.to_string();
+            let category = if crate::journal_errors::is_journal_locked(&message) {
+                crate::journal_errors::JOURNAL_LOCKED
+            } else {
+                diff_error_category(&err)
+            };
+            report_diff_failure(
+                format,
+                category,
+                crate::journal_errors::with_journal_lock_hint(message),
+            );
             diff_error_exit_code(&err)
         }
     }

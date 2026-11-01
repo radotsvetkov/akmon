@@ -608,3 +608,51 @@ fn t_import_refuses_hash_algorithm_mismatch_before_writing() {
     assert_eq!(v["category"], "hash_algorithm_mismatch");
     assert_eq!(v["passed"], false);
 }
+
+#[test]
+fn t_human_error_paths_sanitize_manifest_text() {
+    let dir = tempdir().expect("tempdir");
+    let (sk_path, _, _, _) = keypair(dir.path(), "signer");
+    let c = valid_bundle(HashAlgorithm::Sha256, "9\u{1b}[2J\u{202e}x");
+    let bundle = dir.path().join("b.akmon");
+    write_file(&bundle, &c);
+    let journal = dir.path().join("journal");
+    let runs: Vec<Vec<String>> = vec![
+        vec![
+            "bundle".into(),
+            "sign".into(),
+            s(&bundle),
+            "--key".into(),
+            s(&sk_path),
+        ],
+        vec![
+            "bundle".into(),
+            "attest".into(),
+            s(&bundle),
+            "--key".into(),
+            s(&sk_path),
+            "--operator-id".into(),
+            "alice".into(),
+        ],
+        vec![
+            "bundle".into(),
+            "import".into(),
+            s(&bundle),
+            "--journal".into(),
+            s(&journal),
+        ],
+    ];
+    for args in runs {
+        let out = akmon().args(&args).output().expect("run akmon");
+        assert_ne!(out.status.code(), Some(0), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains('\u{1b}'),
+            "{args:?}: raw ESC in {stderr:?}"
+        );
+        assert!(
+            !stderr.contains('\u{202e}'),
+            "{args:?}: raw bidi in {stderr:?}"
+        );
+    }
+}

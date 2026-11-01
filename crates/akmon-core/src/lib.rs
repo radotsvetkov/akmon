@@ -72,7 +72,7 @@ pub use permission::Permission;
 pub use policy::{
     FilesystemPolicyConfig, McpPolicyConfig, NetworkPolicyConfig, PatternRuleSet, PolicyConfig,
     PolicyDecision, PolicyEngine, PolicyEngineError, PolicyEngineMode, ShellPolicyConfig,
-    ToolPolicyConfig,
+    ToolPolicyConfig, policy_subject_path,
 };
 pub use policy_profiles::{
     PolicyPackError, PolicyProfileName, built_in_policy_profile, merge_policy_config,

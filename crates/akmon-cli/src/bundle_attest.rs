@@ -19,16 +19,16 @@ use std::process::ExitCode;
 
 use akmon_bundle::report::ToolErrorV1;
 use akmon_bundle::{
-    OperatorIdentity, SigningError, WriteBundleOptions, build_operator_attestation, key_id,
-    public_key_from_pkcs8, write_bundle,
+    Manifest, OperatorIdentity, SigningError, WriteBundleOptions, build_operator_attestation,
+    key_id, public_key_from_pkcs8, sanitize_display, write_bundle,
 };
 use akmon_journal::AGEF_SPEC_VERSION;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
 use crate::bundle_cmd::{
-    BundleImportFormat, bundle_export_output_display, manifest_unsigned_and_unattested,
-    read_bundle_verified_for_signing,
+    BundleImportFormat, BundleStepError, bundle_export_output_display,
+    manifest_unsigned_and_unattested, read_bundle_verified_for_signing,
 };
 
 /// Arguments for `akmon bundle attest`.
@@ -84,6 +84,46 @@ pub struct BundleAttestReportV1 {
     output_path: String,
 }
 
+/// Builds a signed `AGEF-OPERATOR-v1` attestation over the manifest's current head + `identity`
+/// and appends it to `manifest.operator_attestations[]`. Shared by `akmon bundle attest` and
+/// `akmon seal`. `key_label` names the key in error messages (e.g. `--key <path>`).
+///
+/// AGEF_VERSION rule (O9): stamp the current spec version ONLY when there is no head signature
+/// and no operator attestation to invalidate. Otherwise leave agef_version untouched so every
+/// already-present statement stays valid. The attestation is built from the manifest's current
+/// agef_version either way, so it is self-consistent.
+pub(crate) fn add_operator_attestation(
+    manifest: &mut Manifest,
+    identity: &OperatorIdentity,
+    pkcs8: &[u8],
+    key_label: &str,
+) -> Result<(), BundleStepError> {
+    if manifest_unsigned_and_unattested(manifest) {
+        manifest.agef_version = AGEF_SPEC_VERSION.to_owned();
+    }
+    let created_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let attestation = match build_operator_attestation(manifest, identity, pkcs8, &created_at) {
+        Ok(att) => att,
+        Err(SigningError::IllegalOperatorField) => {
+            return Err((
+                "invalid_operator_field",
+                "operator identity field is empty (operator-id) or contains a newline/carriage \
+                 return; such values are rejected to prevent statement injection"
+                    .to_owned(),
+                2,
+            ));
+        }
+        Err(err) => return Err(("invalid_key", format!("{key_label}: {err}"), 2)),
+    };
+    manifest
+        .operator_attestations
+        .get_or_insert_with(Vec::new)
+        .push(attestation);
+    Ok(())
+}
+
 /// Reads a bundle, builds a signed operator attestation, appends it, and writes the bundle back.
 pub fn run_bundle_attest(args: &BundleAttestArgs) -> ExitCode {
     let json = matches!(args.format, BundleImportFormat::Json);
@@ -91,7 +131,7 @@ pub fn run_bundle_attest(args: &BundleAttestArgs) -> ExitCode {
         if json {
             ToolErrorV1::new("akmon", category, msg).print_json();
         } else {
-            eprintln!("akmon: bundle attest: {msg}");
+            eprintln!("akmon: bundle attest: {}", sanitize_display(&msg));
         }
         ExitCode::from(code)
     };
@@ -125,56 +165,27 @@ pub fn run_bundle_attest(args: &BundleAttestArgs) -> ExitCode {
         }
     };
 
-    // 3. AGEF_VERSION rule (O9): stamp the current spec version ONLY when there is no head
-    //    signature and no operator attestation to invalidate. Otherwise leave agef_version untouched
-    //    so every already-present statement stays valid. The attestation is built from the
-    //    manifest's current agef_version either way, so it is self-consistent.
-    if manifest_unsigned_and_unattested(&contents.manifest) {
-        contents.manifest.agef_version = AGEF_SPEC_VERSION.to_owned();
-    }
-
-    // 4. Build the signed operator attestation over the manifest's current head + identity.
-    let created_at = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default();
+    // 3. Build the signed operator attestation over the manifest's current head + identity and
+    //    append it to manifest.operator_attestations[] (O9 rule applied inside).
     let identity = OperatorIdentity {
         operator_id: args.operator_id.clone(),
         display_name: args.display_name.clone(),
         role: args.role.clone(),
         org: args.org.clone(),
     };
-    let attestation =
-        match build_operator_attestation(&contents.manifest, &identity, &pkcs8, &created_at) {
-            Ok(att) => att,
-            Err(SigningError::IllegalOperatorField) => {
-                return fail(
-                    "invalid_operator_field",
-                    "operator identity field is empty (operator-id) or contains a newline/carriage \
-                     return; such values are rejected to prevent statement injection"
-                        .to_owned(),
-                    2,
-                );
-            }
-            Err(err) => {
-                return fail(
-                    "invalid_key",
-                    format!("--key {}: {err}", args.key.display()),
-                    2,
-                );
-            }
-        };
+    if let Err((category, msg, code)) = add_operator_attestation(
+        &mut contents.manifest,
+        &identity,
+        &pkcs8,
+        &format!("--key {}", args.key.display()),
+    ) {
+        return fail(category, msg, code);
+    }
 
     let kid = key_id(&public_key);
     let public_key_hex = hex::encode(&public_key);
 
-    // 5. Append the attestation to manifest.operator_attestations[].
-    contents
-        .manifest
-        .operator_attestations
-        .get_or_insert_with(Vec::new)
-        .push(attestation);
-
-    // 6. Write atomically (temp + rename) so a failed write never clobbers the input bundle.
+    // 5. Write atomically (temp + rename) so a failed write never clobbers the input bundle.
     let out_path = args.output.clone().unwrap_or_else(|| args.bundle.clone());
     let tmp_path = out_path.with_extension("akmon-attest-tmp");
     let mut out_file = match std::fs::File::create(&tmp_path) {
@@ -211,7 +222,7 @@ pub fn run_bundle_attest(args: &BundleAttestArgs) -> ExitCode {
         );
     }
 
-    // 7. Surface the result (files now exist, so paths can be canonicalized).
+    // 6. Surface the result (files now exist, so paths can be canonicalized).
     let output_display = bundle_export_output_display(out_path.as_path());
     match args.format {
         BundleImportFormat::Json => {
@@ -239,7 +250,10 @@ pub fn run_bundle_attest(args: &BundleAttestArgs) -> ExitCode {
         }
         BundleImportFormat::Human => {
             eprintln!("attested bundle: {output_display}");
-            eprintln!("  session_id: {}", contents.manifest.session.id);
+            eprintln!(
+                "  session_id: {}",
+                sanitize_display(&contents.manifest.session.id)
+            );
             eprintln!("  operator_id: {}", args.operator_id);
             eprintln!("  role: {}", args.role);
             eprintln!("  key_id: {kid}");

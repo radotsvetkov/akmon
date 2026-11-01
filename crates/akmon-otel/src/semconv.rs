@@ -248,13 +248,25 @@ impl Operation {
 /// Whether real message/tool content was captured for the session (OTEL-1).
 ///
 /// The level is computed from what the importer actually *emitted*, slot by
-/// slot. The content slots are: each provider call's request and response
-/// objects, and each tool call's input and output objects. A slot counts as
-/// real content only when it was filled from captured message/tool content (a
+/// slot. The content slots are exactly:
+///
+/// - per chat / text-completion / generate-content provider call: the **request**
+///   slot, real only when **input messages** were captured
+///   (`gen_ai.input.messages` or its details-event / legacy equivalent) — captured
+///   `gen_ai.system_instructions` alone do NOT make it real, because the
+///   user/input side of the conversation is still missing; and the **response**
+///   slot, real when output messages were captured;
+/// - per `execute_tool` call: the **input** slot (`gen_ai.tool.call.arguments`)
+///   and the **output** slot (`gen_ai.tool.call.result`).
+///
+/// Embeddings calls emit a provider-call event but contribute NO slots (the
+/// semantic conventions define no message content for embeddings). A slot counts
+/// as real content only when it was filled from captured message/tool content (a
 /// structured attribute, an inference-details event, or a legacy message body)
 /// that is non-empty; empty or whitespace-only strings, `null`, `[]` and `{}`
 /// count as absent. Content on spans that emit no event (for example an
-/// `invoke_agent` span) does not count.
+/// `invoke_agent` span) does not count. A session with no slots at all (for
+/// example embeddings only) is `structural`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptureLevel {

@@ -23,11 +23,16 @@ pub struct DiffReportV1 {
     pub session_b_event_count: usize,
     /// Structural break metadata, if comparison stopped early.
     pub structural_break: Option<StructuralBreak>,
-    /// Total number of divergences.
+    /// Total number of divergences (material plus informational).
     pub divergence_count: usize,
+    /// Number of informational divergences (currently `provider_call_request_difference`):
+    /// reported in `divergences` but not counted against `matches`.
+    #[serde(default)]
+    pub informational_divergence_count: usize,
     /// Divergence list in emitted order.
     pub divergences: Vec<DiffDivergence>,
-    /// True when no divergences and no structural break occurred.
+    /// True when no material divergence and no structural break occurred. Informational
+    /// divergences (see `informational_divergence_count`) do not make this `false`.
     pub matches: bool,
 }
 
@@ -40,7 +45,13 @@ impl DiffReportV1 {
         session_b_event_count: usize,
     ) -> Self {
         let divergence_count = comparison.divergences.len();
-        let matches = divergence_count == 0 && comparison.structural_break.is_none();
+        let informational_divergence_count = comparison
+            .divergences
+            .iter()
+            .filter(|d| d.kind.is_informational())
+            .count();
+        let matches = divergence_count == informational_divergence_count
+            && comparison.structural_break.is_none();
         Self {
             akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
             agef_version: akmon_journal::AGEF_SPEC_VERSION.to_owned(),
@@ -52,6 +63,7 @@ impl DiffReportV1 {
             session_b_event_count,
             structural_break: comparison.structural_break,
             divergence_count,
+            informational_divergence_count,
             divergences: comparison.divergences,
             matches,
         }
@@ -108,6 +120,37 @@ mod tests {
             value.get("matches").and_then(serde_json::Value::as_bool),
             Some(true)
         );
+    }
+
+    #[test]
+    fn t_request_difference_is_informational() {
+        let mut comparison = sample_comparison(false);
+        comparison.divergences.push(crate::DiffDivergence {
+            position: Some(1),
+            kind: DiffDivergenceKind::ProviderCallRequestDifference,
+            field: Some("attempts[0].request_hash".to_owned()),
+            expected: "aa".to_owned(),
+            actual: "bb".to_owned(),
+            resolved: None,
+            resolved_skip_reason: None,
+        });
+        let report = DiffReportV1::from_comparison(comparison.clone(), 2, 2);
+        assert!(report.matches, "request difference alone must not fail");
+        assert_eq!(report.divergence_count, 1);
+        assert_eq!(report.informational_divergence_count, 1);
+        comparison.divergences.push(crate::DiffDivergence {
+            position: Some(1),
+            kind: DiffDivergenceKind::ProviderCallResponseDifference,
+            field: Some("response_hash".to_owned()),
+            expected: "cc".to_owned(),
+            actual: "dd".to_owned(),
+            resolved: None,
+            resolved_skip_reason: None,
+        });
+        let report = DiffReportV1::from_comparison(comparison, 2, 2);
+        assert!(!report.matches);
+        assert_eq!(report.divergence_count, 2);
+        assert_eq!(report.informational_divergence_count, 1);
     }
 
     #[test]

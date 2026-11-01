@@ -158,6 +158,24 @@ pub(crate) struct AssistantContent {
     pub(crate) parts_not_in_turn: u64,
 }
 
+impl AssistantContent {
+    /// True when the turn carries real assistant content: at least one non-empty
+    /// text part, or at least one tool call. A choice holding only reasoning, uri,
+    /// blob or file parts (or nothing) is not a real assistant turn.
+    pub(crate) fn has_real_content(&self) -> bool {
+        if self.tool_calls.is_some() {
+            return true;
+        }
+        self.message.as_array().is_some_and(|parts| {
+            parts.iter().any(|p| match p.get("content") {
+                Some(Value::String(text)) => !text.trim().is_empty(),
+                Some(Value::Null) | None => false,
+                Some(_) => true,
+            })
+        })
+    }
+}
+
 /// Extracts one [`AssistantContent`] per assistant message (choice) in the output.
 ///
 /// Only `text` parts (and untyped parts) become the turn's message; `tool_call`

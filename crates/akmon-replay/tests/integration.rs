@@ -444,3 +444,65 @@ async fn t_replay_persist_into_source_journal_is_rejected_clearly() {
         "{err:?}"
     );
 }
+
+/// Pins the design fact behind `akmon diff`'s informational `provider_call_request_difference`:
+/// a faithful replay of a native session does NOT reproduce the per-attempt `request_hash`
+/// (request payloads carry runtime context; replay comparison scope P11 excludes it), while the
+/// replay itself still matches. If this ever starts failing because the hashes became equal,
+/// `akmon diff` could make request differences material again.
+#[tokio::test]
+async fn t_replay_request_hashes_differ_from_source_by_design() {
+    let tmp = tempdir().expect("source tempdir");
+    let persist_tmp = tempdir().expect("persist tempdir");
+    let sid = Uuid::new_v4();
+    write_source_session(
+        tmp.path(),
+        sid,
+        &["run one turn with tool"],
+        one_turn_with_tool_sequences(),
+    )
+    .await;
+    let source = load_source_session_from_journal(tmp.path(), sid).expect("source");
+    let engine = ReplayEngine::new(
+        source,
+        ReplayEngineConfig {
+            mode: ReplayMode::Default,
+            persist: true,
+            persist_journal_dir: Some(persist_tmp.path().to_path_buf()),
+        },
+    )
+    .expect("engine");
+    let output = engine.drive_replay().await.expect("drive");
+    let request_hashes = |history: &[(Hash, akmon_journal::Event)]| -> Vec<Vec<Hash>> {
+        history
+            .iter()
+            .filter_map(|(_, e)| match &e.kind {
+                EventKind::ProviderCall { attempts, .. } => Some(
+                    attempts
+                        .iter()
+                        .map(|a| a.request_hash.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .collect()
+    };
+    let src = open_journal_read_only(tmp.path(), sid).expect("reopen source");
+    let src_history = src
+        .graph
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .history()
+        .expect("history");
+    let a = request_hashes(&src_history);
+    let b = request_hashes(&output.replay_history);
+    assert_eq!(a.len(), b.len());
+    assert!(!a.is_empty());
+    assert_ne!(
+        a, b,
+        "replay request hashes differ from the source by design (P11)"
+    );
+    let engine_divergences = compare(&output);
+    let report = assemble_report(output, engine_divergences);
+    assert!(report.passed, "{report:?}");
+}

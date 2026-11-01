@@ -30,6 +30,11 @@ pub enum DiffDivergenceKind {
     /// Provider final response differs.
     ProviderCallResponseDifference,
     /// Provider request payload hash differs for an attempt present in both sessions.
+    ///
+    /// INFORMATIONAL: reported, but does not make a diff fail ([`Self::is_informational`]).
+    /// Request payloads carry runtime-variable context, and a replay deliberately does not
+    /// reproduce them (replay comparison scope P11), so `akmon diff <source> <persisted replay>`
+    /// always shows this for native sessions even when the replay was faithful.
     ProviderCallRequestDifference,
     /// Number of provider attempts (retries) differs.
     ProviderCallAttemptCountDifference,
@@ -49,6 +54,16 @@ pub enum DiffDivergenceKind {
     SessionEndDifference,
     /// Generic hash/reference mismatch for a specific field.
     ContentReferenceDifference,
+}
+
+impl DiffDivergenceKind {
+    /// True for divergence kinds that are reported but do not count against
+    /// [`crate::DiffReportV1::matches`]. Currently only
+    /// [`Self::ProviderCallRequestDifference`].
+    #[must_use]
+    pub fn is_informational(&self) -> bool {
+        matches!(self, Self::ProviderCallRequestDifference)
+    }
 }
 
 /// One diff divergence record with expected/actual summaries.

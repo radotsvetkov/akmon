@@ -8,7 +8,6 @@ description = "Ratatui-based interactive terminal UI for Akmon."
 authors.workspace = true
 repository.workspace = true
 
-
 [dependencies]
 akmon-config = { path = "../akmon-config" }
 akmon-core = { path = "../akmon-core" }

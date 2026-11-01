@@ -130,14 +130,14 @@ pub struct OperatorProveFields {
     /// Path of the emitted operator SPKI PEM public key.
     pubkey_pem_path: String,
     /// The exact `openssl` command a third party runs to verify the operator attestation.
-    openssl_command: String,
+    pub(crate) openssl_command: String,
     /// Always `true` in a success report: the attestation verified against `--operator-key`.
     #[serde(default)]
     operator_key_verified: bool,
 }
 
 /// A refusal: `(category, message, exit_code)`.
-type Refusal = (String, String, u8);
+pub(crate) type Refusal = (String, String, u8);
 
 fn refusal(category: &str, msg: String, code: u8) -> Refusal {
     (category.to_owned(), msg, code)
@@ -152,11 +152,12 @@ struct PreparedProof {
 }
 
 /// Paths of the three files a [`PreparedProof`] was written to, plus the openssl command.
-struct WrittenProof {
+pub(crate) struct WrittenProof {
     statement_path: String,
     signature_path: String,
     pubkey_pem_path: String,
-    openssl_command: String,
+    /// The exact `openssl pkeyutl -verify` command with the real emitted paths.
+    pub(crate) openssl_command: String,
 }
 
 /// Reads and parses a public-key hex file; `category`/`flag` label the error.
@@ -371,6 +372,98 @@ fn write_proof(
     })
 }
 
+/// The artifacts [`write_verified_proofs`] wrote, ready for a report.
+pub(crate) struct EmittedProofs {
+    /// Signer key id the head signature was matched on.
+    pub(crate) head_key_id: String,
+    /// The three head-signature files plus the openssl command.
+    pub(crate) head: WrittenProof,
+    /// The operator-attestation block, when an operator proof was requested.
+    pub(crate) operator: Option<OperatorProveFields>,
+}
+
+/// File names [`write_verified_proofs`] may create in its output directory.
+pub(crate) fn proof_file_names(with_operator: bool) -> Vec<&'static str> {
+    let mut names = vec![STATEMENT_FILE, SIGNATURE_FILE, PUBKEY_PEM_FILE];
+    if with_operator {
+        names.extend([
+            OPERATOR_STATEMENT_FILE,
+            OPERATOR_SIGNATURE_FILE,
+            OPERATOR_PUBKEY_PEM_FILE,
+        ]);
+    }
+    names
+}
+
+/// Selects and VERIFIES the head signature (and, with `operator_pubkey`, the operator
+/// attestation), then writes the openssl artifacts into `out_dir`. Shared by
+/// `akmon bundle prove-openssl` and `akmon seal --proof-dir`, so both emit identical bytes.
+/// The caller must already have run full integrity verification on the bundle.
+pub(crate) fn emit_openssl_artifacts(
+    manifest: &Manifest,
+    pubkey: &[u8],
+    operator_pubkey: Option<&[u8]>,
+    out_dir: &std::path::Path,
+    out_dir_flag: &str,
+) -> Result<EmittedProofs, Refusal> {
+    let head_proof = prepare_head_proof(manifest, pubkey)?;
+    let operator_proof = match operator_pubkey {
+        Some(key) => Some(prepare_operator_proof(manifest, key)?),
+        None => None,
+    };
+    write_verified_proofs(out_dir, head_proof, operator_proof, out_dir_flag)
+}
+
+/// Writes already-verified proofs into `out_dir` (created if missing).
+fn write_verified_proofs(
+    out_dir: &std::path::Path,
+    head_proof: PreparedProof,
+    operator_proof: Option<(PreparedProof, String, String)>,
+    out_dir_flag: &str,
+) -> Result<EmittedProofs, Refusal> {
+    std::fs::create_dir_all(out_dir).map_err(|err| {
+        refusal(
+            "io_error",
+            format!("cannot create {out_dir_flag} {}: {err}", out_dir.display()),
+            3,
+        )
+    })?;
+    let head = write_proof(
+        out_dir,
+        &head_proof,
+        (STATEMENT_FILE, SIGNATURE_FILE, PUBKEY_PEM_FILE),
+    )?;
+    let operator = match operator_proof {
+        Some((proof, operator_id, role)) => {
+            let written = write_proof(
+                out_dir,
+                &proof,
+                (
+                    OPERATOR_STATEMENT_FILE,
+                    OPERATOR_SIGNATURE_FILE,
+                    OPERATOR_PUBKEY_PEM_FILE,
+                ),
+            )?;
+            Some(OperatorProveFields {
+                key_id: proof.key_id,
+                operator_id,
+                role,
+                statement_path: written.statement_path,
+                signature_path: written.signature_path,
+                pubkey_pem_path: written.pubkey_pem_path,
+                openssl_command: written.openssl_command,
+                operator_key_verified: true,
+            })
+        }
+        None => None,
+    };
+    Ok(EmittedProofs {
+        head_key_id: head_proof.key_id,
+        head,
+        operator,
+    })
+}
+
 /// Verifies the bundle and the signature(s), then emits the openssl verification artifacts.
 pub fn run_bundle_prove_openssl(args: &BundleProveArgs) -> ExitCode {
     match prove(args) {
@@ -403,49 +496,18 @@ fn prove(args: &BundleProveArgs) -> Result<(), Refusal> {
     };
 
     // 3. Everything verified: write the artifacts into --out-dir.
-    std::fs::create_dir_all(&args.out_dir).map_err(|err| {
-        refusal(
-            "io_error",
-            format!("cannot create --out-dir {}: {err}", args.out_dir.display()),
-            3,
-        )
-    })?;
-    let head_written = write_proof(
-        &args.out_dir,
-        &head_proof,
-        (STATEMENT_FILE, SIGNATURE_FILE, PUBKEY_PEM_FILE),
-    )?;
-    let operator = match &operator_proof {
-        Some((proof, operator_id, role)) => {
-            let written = write_proof(
-                &args.out_dir,
-                proof,
-                (
-                    OPERATOR_STATEMENT_FILE,
-                    OPERATOR_SIGNATURE_FILE,
-                    OPERATOR_PUBKEY_PEM_FILE,
-                ),
-            )?;
-            Some(OperatorProveFields {
-                key_id: proof.key_id.clone(),
-                operator_id: operator_id.clone(),
-                role: role.clone(),
-                statement_path: written.statement_path,
-                signature_path: written.signature_path,
-                pubkey_pem_path: written.pubkey_pem_path,
-                openssl_command: written.openssl_command,
-                operator_key_verified: true,
-            })
-        }
-        None => None,
-    };
+    let EmittedProofs {
+        head_key_id,
+        head: head_written,
+        operator,
+    } = write_verified_proofs(&args.out_dir, head_proof, operator_proof, "--out-dir")?;
 
     let report = BundleProveReportV1 {
         tool: "akmon".to_owned(),
         akmon_version: env!("CARGO_PKG_VERSION").to_owned(),
         bundle_path: bundle_export_output_display(args.bundle.as_path()),
         session_id: manifest.session.id.clone(),
-        key_id: head_proof.key_id,
+        key_id: head_key_id,
         statement_path: head_written.statement_path,
         signature_path: head_written.signature_path,
         pubkey_pem_path: head_written.pubkey_pem_path,
@@ -482,8 +544,8 @@ fn print_human(report: &BundleProveReportV1) {
         "  signature: verified against the supplied key (key_id: {})",
         report.key_id
     );
-    eprintln!("  session_id: {}", report.session_id);
-    eprintln!("  head: {}", report.head);
+    eprintln!("  session_id: {}", sanitize_display(&report.session_id));
+    eprintln!("  head: {}", sanitize_display(&report.head));
     eprintln!("  statement: {}", report.statement_path);
     eprintln!("  signature: {}", report.signature_path);
     eprintln!("  public key (PEM): {}", report.pubkey_pem_path);

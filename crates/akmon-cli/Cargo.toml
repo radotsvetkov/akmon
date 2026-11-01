@@ -12,7 +12,6 @@ repository.workspace = true
 name = "akmon"
 path = "src/main.rs"
 
-
 [dependencies]
 akmon-bundle = { path = "../akmon-bundle" }
 akmon-config = { path = "../akmon-config" }

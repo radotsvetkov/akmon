@@ -61,15 +61,19 @@ pub struct BundleVerifyReportV1 {
     pub operators: Vec<OperatorReport>,
     /// OTEL-import capture level, or `null` for native (non-OTEL) bundles. A native bundle is
     /// full-fidelity by construction; an OTEL import with `level == "structural"` carries metadata
-    /// only (the source telemetry did not capture message content).
+    /// only (the source telemetry did not capture message content), and `level == "partial"`
+    /// carries message content for only some provider calls.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureField>,
     /// `true` when the AGEF integrity checks (hash chain, objects, head, counts) found nothing.
     pub integrity_ok: bool,
-    /// `true` ONLY when at least one head signature verified against a trusted `--verify-key`.
+    /// `true` ONLY when integrity is OK AND at least one head signature verified against a trusted
+    /// `--verify-key`. Always `false` when [`Self::integrity_ok`] is `false` (a signature over a head
+    /// the contents do not hash to authenticates nothing); see `signatures` for per-entry outcomes.
     pub signature_verified: bool,
-    /// `true` ONLY when at least one operator attestation verified against a trusted operator key.
-    /// The operator identity strings stay self-asserted; it is the KEY that is verified.
+    /// `true` ONLY when integrity is OK AND at least one operator attestation verified against a
+    /// trusted operator key. Always `false` when [`Self::integrity_ok`] is `false`. The operator
+    /// identity strings stay self-asserted; it is the KEY that is verified.
     pub operator_key_verified: bool,
     /// Manifest hash algorithm (`sha256` or `blake3`).
     pub hash_algorithm: String,
@@ -112,7 +116,8 @@ pub struct UnsignedMetadata {
 /// OTEL-import capture metadata for JSON output (F1).
 #[derive(Debug, Serialize)]
 pub struct CaptureField {
-    /// Capture level: `full` (message content captured) or `structural` (metadata only).
+    /// Capture level: `full` (message content captured for every provider call), `partial`
+    /// (content captured for some provider calls only), or `structural` (metadata only).
     pub level: String,
     /// Source OpenTelemetry semantic-conventions version (for example `1.37.0`).
     pub source_semconv: String,
@@ -401,10 +406,21 @@ pub fn capture_requirement_unmet(
     match capture {
         None => None,
         Some(info) if info.capture_level == "full" => None,
-        Some(info) => Some(format!(
-            "--require-capture full: session capture level is '{}', not 'full' (metadata-only OTEL import; source telemetry did not capture message content)",
-            sanitize_display(&info.capture_level)
-        )),
+        Some(info) => {
+            let why = match info.capture_level.as_str() {
+                "structural" => {
+                    "metadata-only OTEL import; source telemetry did not capture message content"
+                }
+                "partial" => {
+                    "partial OTEL import; the source telemetry captured message content for only some provider calls"
+                }
+                _ => "unrecognized OTEL capture level; message content capture is not established",
+            };
+            Some(format!(
+                "--require-capture full: session capture level is '{}', not 'full' ({why})",
+                sanitize_display(&info.capture_level)
+            ))
+        }
     }
 }
 
@@ -513,8 +529,12 @@ pub fn build_verify_report(
     let integrity_ok = violations
         .iter()
         .all(|v| v.category == CAPTURE_REQUIREMENT_CATEGORY);
-    let signature_verified = signatures.iter().any(|s| s.outcome == "verified");
-    let operator_key_verified = operators.iter().any(|o| o.operator_key_verified);
+    // A signature or attestation over a head the contents do not hash to authenticates nothing:
+    // the top-level flags are gated on integrity so a JSON consumer reading only them cannot
+    // mistake a tampered bundle for an authenticated one. The per-entry outcomes in
+    // `signatures`/`operators` still show what each signature check found.
+    let signature_verified = integrity_ok && signatures.iter().any(|s| s.outcome == "verified");
+    let operator_key_verified = integrity_ok && operators.iter().any(|o| o.operator_key_verified);
     let session_window = match (contents.events.first(), contents.events.last()) {
         (Some(first), Some(last)) => Some(SessionWindow {
             first_event_at: rfc3339(first.emitted_at),

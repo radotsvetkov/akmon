@@ -42,13 +42,22 @@ pub fn headline(report: &BundleVerifyReportV1) -> String {
     format!("verified bundle: integrity OK; {signature_part}{capture_suffix}")
 }
 
-/// Short suffix appended to the headline so a structural import never reads as a bare
-/// "verified bundle". Native bundles (`None`) and full OTEL imports add nothing.
+/// Short suffix appended to the headline so a structural or partial import never reads as a bare
+/// "verified bundle". Native bundles (`None`) and full OTEL imports add nothing; any other
+/// (unrecognized) level is flagged too.
 #[must_use]
 pub fn capture_human_suffix(capture: Option<&CaptureField>) -> String {
     match capture {
+        None => String::new(),
+        Some(c) if c.level == "full" => String::new(),
         Some(c) if c.level == "structural" => " — capture: STRUCTURAL (metadata only)".to_owned(),
-        _ => String::new(),
+        Some(c) if c.level == "partial" => {
+            " — capture: PARTIAL (message content for some provider calls only)".to_owned()
+        }
+        Some(c) => format!(
+            " — capture: {} (unrecognized capture level)",
+            sanitize_display(&c.level.to_uppercase())
+        ),
     }
 }
 
@@ -60,6 +69,9 @@ pub fn capture_human_line(capture: Option<&CaptureField>) -> Option<String> {
     match c.level.as_str() {
         "structural" => Some(format!(
             "capture: STRUCTURAL (metadata only — message content was NOT captured by the source telemetry; source semconv {semconv})"
+        )),
+        "partial" => Some(format!(
+            "capture: PARTIAL (OTEL import; message content was captured for only some provider calls — this is NOT full capture and not a full replay; source semconv {semconv})"
         )),
         "full" => Some("capture: FULL (OTEL import; message content captured)".to_owned()),
         other => Some(format!(
@@ -186,18 +198,28 @@ pub fn human_lines(report: &BundleVerifyReportV1) -> Vec<String> {
 /// backslash-escapes the Markdown metacharacters that matter inline (emphasis, code, links, HTML,
 /// strikethrough, and `|` so table cells stay intact). Values are always rendered after a fixed
 /// prefix, never at the start of a line, so block-level markers need no escaping.
+///
+/// A literal backslash in the value renders as ONE backslash in the rendered Markdown (source
+/// `\\`); it is not first doubled by [`sanitize_display`] and then escaped again. An escaped
+/// control character renders as its visible escape (for example `\x1b`).
 #[must_use]
 pub fn markdown_escape(value: &str) -> String {
-    let sanitized = sanitize_display(value);
-    let mut out = String::with_capacity(sanitized.len());
-    for ch in sanitized.chars() {
-        if matches!(
-            ch,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '~' | '&'
-        ) {
-            out.push('\\');
+    let mut out = String::with_capacity(value.len());
+    let mut buf = [0u8; 4];
+    for ch in value.chars() {
+        if ch == '\\' {
+            out.push_str("\\\\");
+            continue;
         }
-        out.push(ch);
+        for c in sanitize_display(ch.encode_utf8(&mut buf)).chars() {
+            if matches!(
+                c,
+                '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '|' | '~' | '&'
+            ) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
     }
     out
 }
@@ -283,6 +305,10 @@ fn markdown_capture_cell(report: &BundleVerifyReportV1) -> (String, String) {
             "STRUCTURAL (metadata only)".to_owned(),
             "The source telemetry did not capture message content; only structure and metadata are evidenced. This is not a full replay.".to_owned(),
         ),
+        Some(c) if c.level == "partial" => (
+            "PARTIAL (OTEL import)".to_owned(),
+            "The source telemetry captured message content for only some provider calls; the rest are evidenced by structure and metadata only. This is not full capture and not a full replay.".to_owned(),
+        ),
         Some(c) => (
             markdown_escape(&c.level.to_uppercase()),
             "Unrecognized capture level recorded by the importer.".to_owned(),
@@ -318,8 +344,10 @@ pub fn markdown(report: &BundleVerifyReportV1) -> String {
     line(&format!(
         "| Integrity (hash chain, objects, head, counts) | {} | {} |",
         if report.integrity_ok { "OK" } else { "FAILED" },
-        if report.integrity_ok {
-            "Every event and object is consistent with the session head; nothing was altered, added, or removed since the head was computed."
+        if report.integrity_ok && report.signature_verified {
+            "Every event and object is consistent with the signed session head; nothing was altered, added, or removed since that head was computed and signed."
+        } else if report.integrity_ok {
+            "Every event and object is internally consistent with the session head shown below. Without a verified signature this does not show the contents are unaltered: anyone can edit an unsigned bundle and recompute a consistent head."
         } else {
             "The bundle is internally inconsistent: content was altered, added, removed, or corrupted."
         }
@@ -408,10 +436,15 @@ pub fn markdown(report: &BundleVerifyReportV1) -> String {
     line("");
     line("## What this proves");
     line("");
-    if report.integrity_ok {
+    if report.integrity_ok && report.signature_verified {
         line(
-            "- The events and objects in this bundle are exactly the ones the session head commits to: nothing was changed, added, or removed after the head was computed.",
+            "- The events and objects in this bundle are exactly the ones the signed session head commits to: nothing was changed, added, or removed after that head was computed and signed by the trusted key.",
         );
+    } else if report.integrity_ok {
+        line(&format!(
+            "- The events and objects in this bundle are internally consistent with session head {}. That is all integrity shows on its own: no signature was verified against a trusted key, so anyone could have edited the contents and recomputed a matching head.",
+            markdown_escape(&report.head)
+        ));
     } else {
         line(
             "- Nothing: integrity verification failed, so the contents cannot be tied to the session head.",
@@ -444,10 +477,14 @@ pub fn markdown(report: &BundleVerifyReportV1) -> String {
     line(
         "- Operator identity. The operator_id, name, role, and organization are self-asserted text; only the key that signed them can be verified.",
     );
-    if report.capture.as_ref().is_some_and(|c| c.level != "full") {
-        line(
+    match report.capture.as_ref().map(|c| c.level.as_str()) {
+        None | Some("full") => {}
+        Some("partial") => line(
+            "- Everything that was said. Partial capture records message content for only some provider calls; the rest is metadata only. It is not a full replay of the session.",
+        ),
+        Some(_) => line(
             "- What was said. Structural capture records metadata only, not message content; it is not a full replay of the session.",
-        );
+        ),
     }
     line(
         "- That the agent behaved correctly or that any obligation was met. This report covers evidence integrity and provenance only.",
@@ -529,6 +566,58 @@ mod tests {
         assert_eq!(markdown_escape("<img>"), "\\<img\\>");
         assert_eq!(markdown_escape("*x*_y_`z`"), "\\*x\\*\\_y\\_\\`z\\`");
         assert_eq!(markdown_escape("line\nbreak"), "line\\\\x0abreak");
+        // A literal backslash is escaped once (renders as a single backslash), not twice.
+        assert_eq!(markdown_escape("a\\b"), "a\\\\b");
+        assert_eq!(markdown_escape("\u{202e}"), "\\\\u{202e}");
+    }
+
+    fn with_capture(mut r: BundleVerifyReportV1, level: &str) -> BundleVerifyReportV1 {
+        r.capture = Some(CaptureField {
+            level: level.to_owned(),
+            source_semconv: "1.37.0".to_owned(),
+        });
+        r
+    }
+
+    #[test]
+    fn t_partial_capture_is_surfaced_everywhere() {
+        let r = with_capture(report(true, vec![sig("verified", "kid1")]), "partial");
+        let h = headline(&r);
+        assert!(h.contains("capture: PARTIAL"), "{h}");
+        let line = capture_human_line(r.capture.as_ref()).expect("line");
+        assert!(
+            line.contains("PARTIAL") && line.contains("NOT full"),
+            "{line}"
+        );
+        assert!(!line.contains("metadata only —"), "{line}");
+        let md = markdown(&r);
+        assert!(
+            md.contains("| Capture level | PARTIAL (OTEL import) |"),
+            "{md}"
+        );
+        assert!(md.contains("Partial capture records"), "{md}");
+        assert!(!md.contains("Structural capture records"), "{md}");
+    }
+
+    #[test]
+    fn t_full_capture_has_no_suffix_and_unknown_is_flagged() {
+        let full = with_capture(report(true, vec![]), "full");
+        assert!(!headline(&full).contains("capture:"));
+        let odd = with_capture(report(true, vec![]), "weird");
+        assert!(headline(&odd).contains("capture: WEIRD"));
+    }
+
+    #[test]
+    fn t_markdown_unchanged_claim_requires_verified_signature() {
+        let unsigned = markdown(&report(true, vec![]));
+        assert!(!unsigned.contains("nothing was changed"), "{unsigned}");
+        assert!(!unsigned.contains("nothing was altered"), "{unsigned}");
+        assert!(unsigned.contains("internally consistent with session head"));
+        let unverified = markdown(&report(true, vec![sig("unverified_no_key", "k")]));
+        assert!(!unverified.contains("nothing was changed"));
+        assert!(!unverified.contains("nothing was altered"));
+        let signed = markdown(&report(true, vec![sig("verified", "kid1")]));
+        assert!(signed.contains("signed session head"));
     }
 
     #[test]

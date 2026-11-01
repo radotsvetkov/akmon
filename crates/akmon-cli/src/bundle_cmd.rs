@@ -446,101 +446,51 @@ fn bundle_export_error_category(msg: &str) -> &'static str {
     }
 }
 
-fn run_bundle_export(
+/// A refusal from a shared bundle step: `(category, message, exit_code)`.
+pub(crate) type BundleStepError = (&'static str, String, u8);
+
+/// An unsigned AGEF bundle assembled in memory from one journal session.
+pub(crate) struct SessionBundle {
+    /// The unsigned manifest (no signatures, no operator attestations).
+    pub(crate) manifest: Manifest,
+    /// Every event of the session, in journal order.
+    pub(crate) events: Vec<Event>,
+    /// Every object referenced by those events.
+    pub(crate) objects: HashMap<Hash, Vec<u8>>,
+}
+
+/// Reads one session from the journal at `journal_dir` and assembles its unsigned bundle
+/// (manifest + events + referenced objects). Shared by `akmon bundle export` and `akmon seal`.
+pub(crate) fn assemble_session_bundle(
     session_id: uuid::Uuid,
-    output: Option<PathBuf>,
-    journal: Option<PathBuf>,
-    format: BundleExportFormat,
-) -> ExitCode {
-    let journal_dir = match journal {
-        Some(path) => path,
-        None => match default_journal_dir() {
-            Ok(path) => path,
-            Err(err) => {
-                let msg = format!("cannot resolve default journal directory: {err}");
-                if matches!(format, BundleExportFormat::Json) {
-                    let _ = print_bundle_export_json_error("journal_not_found", msg);
-                } else {
-                    eprintln!("akmon: bundle export: {msg}");
-                }
-                return ExitCode::from(3);
-            }
-        },
-    };
-
-    let output_path =
-        output.unwrap_or_else(|| PathBuf::from(format!("{}.akmon", session_id.as_hyphenated())));
-
-    if output_path.exists() {
+    journal_dir: &Path,
+) -> Result<SessionBundle, BundleStepError> {
+    let handle = open_journal_read_only(journal_dir, session_id).map_err(|err| {
         let msg = format!(
-            "error: output path already exists: {}\nuse a different --output path or remove the existing file",
-            output_path.display()
+            "cannot open journal {} for session {}: {err}",
+            journal_dir.display(),
+            session_id
         );
-        if matches!(format, BundleExportFormat::Json) {
-            let _ = print_bundle_export_json_error(
-                "output_exists",
-                format!("output path already exists: {}", output_path.display()),
-            );
-        } else {
-            eprintln!("{msg}");
-        }
-        return ExitCode::from(2);
-    }
-
-    let handle = match open_journal_read_only(journal_dir.as_path(), session_id) {
-        Ok(h) => h,
-        Err(err) => {
-            let msg = format!(
-                "cannot open journal {} for session {}: {err}",
-                journal_dir.display(),
-                session_id
-            );
-            if matches!(format, BundleExportFormat::Json) {
-                let _ = print_bundle_export_json_error(bundle_export_error_category(&msg), msg);
-            } else {
-                eprintln!("akmon: bundle export: {msg}");
-            }
-            return ExitCode::from(3);
-        }
-    };
+        (bundle_export_error_category(&msg), msg, 3)
+    })?;
 
     let (history, head_hash) = {
         let graph = handle
             .graph
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let history = match graph.history() {
-            Ok(h) => h,
-            Err(err) => {
-                let msg = format!("cannot read session history: {err}");
-                if matches!(format, BundleExportFormat::Json) {
-                    let _ = print_bundle_export_json_error("io_error", msg);
-                } else {
-                    eprintln!("akmon: bundle export: {msg}");
-                }
-                return ExitCode::from(3);
-            }
-        };
-        let head = match graph.head() {
-            Ok(h) => h,
-            Err(err) => {
-                let msg = format!("cannot read session head: {err}");
-                if matches!(format, BundleExportFormat::Json) {
-                    let _ = print_bundle_export_json_error("io_error", msg);
-                } else {
-                    eprintln!("akmon: bundle export: {msg}");
-                }
-                return ExitCode::from(3);
-            }
-        };
+        let history = graph
+            .history()
+            .map_err(|err| ("io_error", format!("cannot read session history: {err}"), 3))?;
+        let head = graph
+            .head()
+            .map_err(|err| ("io_error", format!("cannot read session head: {err}"), 3))?;
         let Some(head_hash) = head else {
-            let msg = "malformed session: empty event graph (no head)".to_owned();
-            if matches!(format, BundleExportFormat::Json) {
-                let _ = print_bundle_export_json_error("malformed_journal", msg.clone());
-            } else {
-                eprintln!("akmon: bundle export: {msg}");
-            }
-            return ExitCode::from(3);
+            return Err((
+                "malformed_journal",
+                "malformed session: empty event graph (no head)".to_owned(),
+                3,
+            ));
         };
         (history, head_hash)
     };
@@ -549,14 +499,11 @@ fn run_bundle_export(
         .iter()
         .find(|(_, e)| matches!(e.kind, EventKind::SessionStart { .. }))
     else {
-        let msg =
-            "malformed session: journal has no SessionStart event (cannot build bundle)".to_owned();
-        if matches!(format, BundleExportFormat::Json) {
-            let _ = print_bundle_export_json_error("malformed_journal", msg.clone());
-        } else {
-            eprintln!("akmon: bundle export: {msg}");
-        }
-        return ExitCode::from(3);
+        return Err((
+            "malformed_journal",
+            "malformed session: journal has no SessionStart event (cannot build bundle)".to_owned(),
+            3,
+        ));
     };
 
     let Some((_, end_event)) = history
@@ -564,19 +511,16 @@ fn run_bundle_export(
         .rev()
         .find(|(_, e)| matches!(e.kind, EventKind::SessionEnd { .. }))
     else {
-        let msg =
-            "malformed session: journal has no SessionEnd event (cannot build bundle)".to_owned();
-        if matches!(format, BundleExportFormat::Json) {
-            let _ = print_bundle_export_json_error("malformed_journal", msg.clone());
-        } else {
-            eprintln!("akmon: bundle export: {msg}");
-        }
-        return ExitCode::from(3);
+        return Err((
+            "malformed_journal",
+            "malformed session: journal has no SessionEnd event (cannot build bundle)".to_owned(),
+            3,
+        ));
     };
 
-    let events: Vec<akmon_journal::Event> = history.iter().map(|(_, e)| e.clone()).collect();
+    let events: Vec<Event> = history.iter().map(|(_, e)| e.clone()).collect();
 
-    let mut objects: HashMap<akmon_journal::Hash, Vec<u8>> = HashMap::new();
+    let mut objects: HashMap<Hash, Vec<u8>> = HashMap::new();
     for (_, ev) in &history {
         for h in referenced_object_hashes_for_kind(&ev.kind) {
             if objects.contains_key(&h) {
@@ -587,25 +531,21 @@ fn run_bundle_export(
                     objects.insert(h, bytes.to_vec());
                 }
                 Ok(None) => {
-                    let msg = format!(
-                        "referenced object {} is missing from the object store; journal is incomplete",
-                        h.to_hex()
-                    );
-                    if matches!(format, BundleExportFormat::Json) {
-                        let _ = print_bundle_export_json_error("missing_object", msg.clone());
-                    } else {
-                        eprintln!("akmon: bundle export: {msg}");
-                    }
-                    return ExitCode::from(3);
+                    return Err((
+                        "missing_object",
+                        format!(
+                            "referenced object {} is missing from the object store; journal is incomplete",
+                            h.to_hex()
+                        ),
+                        3,
+                    ));
                 }
                 Err(err) => {
-                    let msg = format!("object store read failed for {}: {err}", h.to_hex());
-                    if matches!(format, BundleExportFormat::Json) {
-                        let _ = print_bundle_export_json_error("io_error", msg.clone());
-                    } else {
-                        eprintln!("akmon: bundle export: {msg}");
-                    }
-                    return ExitCode::from(3);
+                    return Err((
+                        "io_error",
+                        format!("object store read failed for {}: {err}", h.to_hex()),
+                        3,
+                    ));
                 }
             }
         }
@@ -639,7 +579,69 @@ fn run_bundle_export(
         operator_attestations: None,
         extra: BTreeMap::new(),
     };
+    Ok(SessionBundle {
+        manifest,
+        events,
+        objects,
+    })
+}
 
+fn run_bundle_export(
+    session_id: uuid::Uuid,
+    output: Option<PathBuf>,
+    journal: Option<PathBuf>,
+    format: BundleExportFormat,
+) -> ExitCode {
+    let journal_dir = match journal {
+        Some(path) => path,
+        None => match default_journal_dir() {
+            Ok(path) => path,
+            Err(err) => {
+                let msg = format!("cannot resolve default journal directory: {err}");
+                if matches!(format, BundleExportFormat::Json) {
+                    let _ = print_bundle_export_json_error("journal_not_found", msg);
+                } else {
+                    eprintln!("akmon: bundle export: {}", sanitize_display(&msg));
+                }
+                return ExitCode::from(3);
+            }
+        },
+    };
+
+    let output_path =
+        output.unwrap_or_else(|| PathBuf::from(format!("{}.akmon", session_id.as_hyphenated())));
+
+    if output_path.exists() {
+        let msg = format!(
+            "error: output path already exists: {}\nuse a different --output path or remove the existing file",
+            output_path.display()
+        );
+        if matches!(format, BundleExportFormat::Json) {
+            let _ = print_bundle_export_json_error(
+                "output_exists",
+                format!("output path already exists: {}", output_path.display()),
+            );
+        } else {
+            eprintln!("{msg}");
+        }
+        return ExitCode::from(2);
+    }
+
+    let SessionBundle {
+        manifest,
+        events,
+        objects,
+    } = match assemble_session_bundle(session_id, journal_dir.as_path()) {
+        Ok(assembled) => assembled,
+        Err((category, msg, code)) => {
+            if matches!(format, BundleExportFormat::Json) {
+                let _ = print_bundle_export_json_error(category, msg);
+            } else {
+                eprintln!("akmon: bundle export: {}", sanitize_display(&msg));
+            }
+            return ExitCode::from(code);
+        }
+    };
     let mut file = match std::fs::File::create(&output_path) {
         Ok(f) => f,
         Err(err) => {
@@ -647,7 +649,7 @@ fn run_bundle_export(
             if matches!(format, BundleExportFormat::Json) {
                 let _ = print_bundle_export_json_error("io_error", msg.clone());
             } else {
-                eprintln!("akmon: bundle export: {msg}");
+                eprintln!("akmon: bundle export: {}", sanitize_display(&msg));
             }
             return ExitCode::from(3);
         }
@@ -668,7 +670,7 @@ fn run_bundle_export(
         if matches!(format, BundleExportFormat::Json) {
             let _ = print_bundle_export_json_error("bundle_error", msg.clone());
         } else {
-            eprintln!("akmon: bundle export: {msg}");
+            eprintln!("akmon: bundle export: {}", sanitize_display(&msg));
         }
         return ExitCode::from(3);
     }
@@ -680,7 +682,7 @@ fn run_bundle_export(
             if matches!(format, BundleExportFormat::Json) {
                 let _ = print_bundle_export_json_error("io_error", msg.clone());
             } else {
-                eprintln!("akmon: bundle export: {msg}");
+                eprintln!("akmon: bundle export: {}", sanitize_display(&msg));
             }
             return ExitCode::from(3);
         }
@@ -820,34 +822,11 @@ fn run_bundle_verify(
         Err(err) => return fail(err.category, err.message, 3),
     };
 
-    let mut file = match std::fs::File::open(&bundle) {
-        Ok(f) => f,
-        Err(err) => {
-            return fail(
-                "io_error",
-                format!("cannot open bundle {}: {err}", bundle.display()),
-                3,
-            );
-        }
-    };
-    let options = ReadBundleOptions {
-        allow_extra_files,
-        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
-    };
-    let contents = match read_bundle_limited(&mut file, &options, max_decoded_bytes) {
-        Ok(c) => c,
-        Err(err) => {
-            let category = bundle_read_error_category(&err);
-            let code = bundle_read_exit_code(&err);
-            return fail(category, err.to_string(), code);
-        }
-    };
-
-    let report = evaluate_bundle(
-        bundle_export_output_display(bundle.as_path()),
-        &contents,
-        &policy,
-    );
+    let report =
+        match read_and_evaluate_bundle(&bundle, allow_extra_files, max_decoded_bytes, &policy) {
+            Ok(report) => report,
+            Err((category, msg, code)) => return fail(category, msg, code),
+        };
 
     match format {
         BundleVerifyFormat::Json => {
@@ -869,6 +848,40 @@ fn run_bundle_verify(
     } else {
         ExitCode::from(1)
     }
+}
+
+/// Reads `bundle` under the decoded-size cap and runs the full verification decision
+/// ([`evaluate_bundle`]) against `policy`. Shared by `akmon bundle verify` and `akmon seal`'s
+/// self-verification, so both apply exactly the same policy code.
+pub(crate) fn read_and_evaluate_bundle(
+    bundle: &Path,
+    allow_extra_files: bool,
+    max_decoded_bytes: u64,
+    policy: &VerifyPolicy,
+) -> Result<BundleVerifyReportV1, BundleStepError> {
+    let mut file = std::fs::File::open(bundle).map_err(|err| {
+        (
+            "io_error",
+            format!("cannot open bundle {}: {err}", bundle.display()),
+            3,
+        )
+    })?;
+    let options = ReadBundleOptions {
+        allow_extra_files,
+        max_event_frame_len: DEFAULT_MAX_EVENT_FRAME_LEN,
+    };
+    let contents = read_bundle_limited(&mut file, &options, max_decoded_bytes).map_err(|err| {
+        (
+            bundle_read_error_category(&err),
+            err.to_string(),
+            bundle_read_exit_code(&err),
+        )
+    })?;
+    Ok(evaluate_bundle(
+        bundle_export_output_display(bundle),
+        &contents,
+        policy,
+    ))
 }
 
 /// Key files and `--require-*` flags for [`run_bundle_verify`] (loaded via `VerifyPolicy::load`).
@@ -951,7 +964,7 @@ fn run_bundle_import(
                         None,
                     );
                 } else {
-                    eprintln!("akmon: bundle import: {msg}");
+                    eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
                 }
                 return ExitCode::from(3);
             }
@@ -965,7 +978,7 @@ fn run_bundle_import(
             if matches!(format, BundleImportFormat::Json) {
                 let _ = print_bundle_import_infra_json_error("io_error", msg.clone(), None);
             } else {
-                eprintln!("akmon: bundle import: {msg}");
+                eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
             }
             return ExitCode::from(3);
         }
@@ -985,7 +998,7 @@ fn run_bundle_import(
             if matches!(format, BundleImportFormat::Json) {
                 let _ = print_bundle_import_infra_json_error(category, msg.clone(), None);
             } else {
-                eprintln!("akmon: bundle import: {msg}");
+                eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
             }
             return ExitCode::from(code);
         }
@@ -1002,7 +1015,7 @@ fn run_bundle_import(
                     None,
                 );
             } else {
-                eprintln!("akmon: bundle import: {msg}");
+                eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
             }
             return ExitCode::from(1);
         }
@@ -1020,7 +1033,7 @@ fn run_bundle_import(
                     Some(target_session_id),
                 );
             } else {
-                eprintln!("akmon: bundle import: error: {msg}");
+                eprintln!("akmon: bundle import: error: {}", sanitize_display(&msg));
                 if rename_to.is_none() {
                     eprintln!(
                         "akmon: bundle import: hint: use --rename-to <NEW_UUID> to import as a different session"
@@ -1037,9 +1050,13 @@ fn run_bundle_import(
         Err(err) => {
             let msg = err.to_string();
             if matches!(format, BundleImportFormat::Json) {
-                let _ = print_bundle_import_infra_json_error("journal_access", msg.clone(), None);
+                let _ = print_bundle_import_infra_json_error(
+                    crate::journal_errors::journal_access_category(&msg),
+                    crate::journal_errors::with_journal_lock_hint(msg.clone()),
+                    None,
+                );
             } else {
-                eprintln!("akmon: bundle import: {msg}");
+                eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
             }
             return ExitCode::from(3);
         }
@@ -1067,7 +1084,7 @@ fn run_bundle_import(
                 None,
             );
         } else {
-            eprintln!("akmon: bundle import: {msg}");
+            eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
         }
         return ExitCode::from(1);
     };
@@ -1079,7 +1096,7 @@ fn run_bundle_import(
                 let _ =
                     print_bundle_import_infra_json_error("verification_error", msg.clone(), None);
             } else {
-                eprintln!("akmon: bundle import: {msg}");
+                eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
             }
             return ExitCode::from(1);
         }
@@ -1091,9 +1108,13 @@ fn run_bundle_import(
             journal_dir.display()
         );
         if matches!(format, BundleImportFormat::Json) {
-            let _ = print_bundle_import_infra_json_error("journal_access", msg.clone(), None);
+            let _ = print_bundle_import_infra_json_error(
+                crate::journal_errors::journal_access_category(&msg),
+                crate::journal_errors::with_journal_lock_hint(msg.clone()),
+                None,
+            );
         } else {
-            eprintln!("akmon: bundle import: {msg}");
+            eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
         }
         return ExitCode::from(3);
     }
@@ -1114,7 +1135,7 @@ fn run_bundle_import(
                         None,
                     );
                 } else {
-                    eprintln!("akmon: bundle import: {msg}");
+                    eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
                 }
                 return ExitCode::from(2);
             }
@@ -1122,10 +1143,13 @@ fn run_bundle_import(
             Err(err) => {
                 let msg = format!("cannot open journal store {}: {err}", journal_db.display());
                 if matches!(format, BundleImportFormat::Json) {
-                    let _ =
-                        print_bundle_import_infra_json_error("journal_access", msg.clone(), None);
+                    let _ = print_bundle_import_infra_json_error(
+                        crate::journal_errors::journal_access_category(&msg),
+                        crate::journal_errors::with_journal_lock_hint(msg.clone()),
+                        None,
+                    );
                 } else {
-                    eprintln!("akmon: bundle import: {msg}");
+                    eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
                 }
                 return ExitCode::from(3);
             }
@@ -1139,10 +1163,13 @@ fn run_bundle_import(
                     journal_db.display()
                 );
                 if matches!(format, BundleImportFormat::Json) {
-                    let _ =
-                        print_bundle_import_infra_json_error("journal_access", msg.clone(), None);
+                    let _ = print_bundle_import_infra_json_error(
+                        crate::journal_errors::journal_access_category(&msg),
+                        crate::journal_errors::with_journal_lock_hint(msg.clone()),
+                        None,
+                    );
                 } else {
-                    eprintln!("akmon: bundle import: {msg}");
+                    eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
                 }
                 return ExitCode::from(3);
             }
@@ -1168,7 +1195,7 @@ fn run_bundle_import(
                                 None,
                             );
                         } else {
-                            eprintln!("akmon: bundle import: {msg}");
+                            eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
                         }
                         return ExitCode::from(3);
                     }
@@ -1176,12 +1203,12 @@ fn run_bundle_import(
                         let msg = format!("cannot read existing object {}: {err}", hash.to_hex());
                         if matches!(format, BundleImportFormat::Json) {
                             let _ = print_bundle_import_infra_json_error(
-                                "journal_access",
-                                msg.clone(),
+                                crate::journal_errors::journal_access_category(&msg),
+                                crate::journal_errors::with_journal_lock_hint(msg.clone()),
                                 None,
                             );
                         } else {
-                            eprintln!("akmon: bundle import: {msg}");
+                            eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
                         }
                         return ExitCode::from(3);
                     }
@@ -1198,7 +1225,7 @@ fn run_bundle_import(
                             None,
                         );
                     } else {
-                        eprintln!("akmon: bundle import: {msg}");
+                        eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
                     }
                     return ExitCode::from(3);
                 }
@@ -1209,12 +1236,12 @@ fn run_bundle_import(
                     let msg = format!("cannot write object {}: {err}", hash.to_hex());
                     if matches!(format, BundleImportFormat::Json) {
                         let _ = print_bundle_import_infra_json_error(
-                            "journal_access",
-                            msg.clone(),
+                            crate::journal_errors::journal_access_category(&msg),
+                            crate::journal_errors::with_journal_lock_hint(msg.clone()),
                             None,
                         );
                     } else {
-                        eprintln!("akmon: bundle import: {msg}");
+                        eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
                     }
                     return ExitCode::from(3);
                 }
@@ -1223,10 +1250,13 @@ fn run_bundle_import(
             Err(err) => {
                 let msg = format!("cannot probe existing object {}: {err}", hash.to_hex());
                 if matches!(format, BundleImportFormat::Json) {
-                    let _ =
-                        print_bundle_import_infra_json_error("journal_access", msg.clone(), None);
+                    let _ = print_bundle_import_infra_json_error(
+                        crate::journal_errors::journal_access_category(&msg),
+                        crate::journal_errors::with_journal_lock_hint(msg.clone()),
+                        None,
+                    );
                 } else {
-                    eprintln!("akmon: bundle import: {msg}");
+                    eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
                 }
                 return ExitCode::from(3);
             }
@@ -1244,7 +1274,7 @@ fn run_bundle_import(
                 let _ =
                     print_bundle_import_infra_json_error("session_open_failed", msg.clone(), None);
             } else {
-                eprintln!("akmon: bundle import: {msg}");
+                eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
             }
             return ExitCode::from(3);
         }
@@ -1254,7 +1284,7 @@ fn run_bundle_import(
         if matches!(format, BundleImportFormat::Json) {
             let _ = print_bundle_import_infra_json_error("import_failed", msg.clone(), None);
         } else {
-            eprintln!("akmon: bundle import: {msg}");
+            eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
         }
         return ExitCode::from(3);
     }
@@ -1272,7 +1302,7 @@ fn run_bundle_import(
                     Some(target_session_id),
                 );
             } else {
-                eprintln!("akmon: bundle import: {msg}");
+                eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
             }
             return ExitCode::from(3);
         }
@@ -1288,7 +1318,7 @@ fn run_bundle_import(
                 Some(target_session_id),
             );
         } else {
-            eprintln!("akmon: bundle import: {msg}");
+            eprintln!("akmon: bundle import: {}", sanitize_display(&msg));
         }
         return ExitCode::from(3);
     }
@@ -1314,7 +1344,10 @@ fn run_bundle_import(
         }
         BundleImportFormat::Human => {
             eprintln!("imported bundle: {}", report.bundle_path);
-            eprintln!("  original session: {}", report.original_session_id);
+            eprintln!(
+                "  original session: {}",
+                sanitize_display(&report.original_session_id)
+            );
             if report.original_session_id == report.imported_session_id {
                 eprintln!(
                     "  imported as: {} (same as original)",
@@ -1366,6 +1399,46 @@ pub(crate) fn manifest_unsigned_and_unattested(manifest: &Manifest) -> bool {
             .is_none_or(Vec::is_empty)
 }
 
+/// Signs the manifest's session head (`AGEF-SIG-v1`) with the PKCS#8 Ed25519 key and appends the
+/// signature to `manifest.signatures[]`. Shared by `akmon bundle sign` and `akmon seal`.
+///
+/// AGEF_VERSION rule (O9, shared with `attest`): stamp the current spec version ONLY on a bundle
+/// that carries neither head signatures nor operator attestations. Both statements include
+/// agef_version, so rewriting it would invalidate every existing signature and attestation; a
+/// co-signature is made over the bundle's existing agef_version instead.
+pub(crate) fn add_head_signature(
+    manifest: &mut Manifest,
+    pkcs8: &[u8],
+) -> Result<(), BundleStepError> {
+    let public_key = public_key_from_pkcs8(pkcs8)
+        .map_err(|err| ("invalid_key", format!("signing failed: {err}"), 2))?;
+    if manifest_unsigned_and_unattested(manifest) {
+        manifest.agef_version = AGEF_SPEC_VERSION.to_owned();
+    }
+    let statement = signing_statement(
+        &manifest.agef_version,
+        &manifest.hash_algorithm,
+        &manifest.session.id,
+        &manifest.session.head,
+    );
+    let signature = sign_statement(statement.as_bytes(), pkcs8)
+        .map_err(|err| ("invalid_key", format!("signing failed: {err}"), 2))?;
+    let created_at = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    manifest
+        .signatures
+        .get_or_insert_with(Vec::new)
+        .push(ManifestSignature {
+            scheme: SCHEME_ED25519.to_owned(),
+            key_id: key_id(&public_key),
+            statement_version: SIG_STATEMENT_VERSION.to_owned(),
+            signature: hex::encode(&signature),
+            created_at,
+        });
+    Ok(())
+}
+
 /// Reads a bundle, signs its session head with an Ed25519 PKCS#8 key, and writes the signed bundle.
 fn run_bundle_sign(
     bundle: PathBuf,
@@ -1378,7 +1451,7 @@ fn run_bundle_sign(
         if json {
             let _ = print_bundle_import_infra_json_error(category, msg, None);
         } else {
-            eprintln!("akmon: bundle sign: {msg}");
+            eprintln!("akmon: bundle sign: {}", sanitize_display(&msg));
         }
         ExitCode::from(code)
     };
@@ -1410,42 +1483,11 @@ fn run_bundle_sign(
         }
     };
 
-    // AGEF_VERSION rule (O9, shared with `attest`): stamp the current spec version ONLY on a
-    // bundle that carries neither head signatures nor operator attestations. Both statements
-    // include agef_version, so rewriting it would invalidate every existing signature and
-    // attestation; a co-signature is made over the bundle's existing agef_version instead.
-    if manifest_unsigned_and_unattested(&contents.manifest) {
-        contents.manifest.agef_version = AGEF_SPEC_VERSION.to_owned();
+    if let Err((category, msg, code)) = add_head_signature(&mut contents.manifest, &pkcs8) {
+        return fail(category, msg, code);
     }
-    let statement = {
-        let m = &contents.manifest;
-        signing_statement(
-            &m.agef_version,
-            &m.hash_algorithm,
-            &m.session.id,
-            &m.session.head,
-        )
-    };
-    let signature = match sign_statement(statement.as_bytes(), &pkcs8) {
-        Ok(sig) => sig,
-        Err(err) => return fail("invalid_key", format!("signing failed: {err}"), 2),
-    };
-    let created_at = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default();
     let public_key_hex = hex::encode(&public_key);
     let kid = key_id(&public_key);
-    contents
-        .manifest
-        .signatures
-        .get_or_insert_with(Vec::new)
-        .push(ManifestSignature {
-            scheme: SCHEME_ED25519.to_owned(),
-            key_id: kid.clone(),
-            statement_version: SIG_STATEMENT_VERSION.to_owned(),
-            signature: hex::encode(&signature),
-            created_at,
-        });
 
     // Write atomically (temp + rename) so a failed write never clobbers the input bundle.
     let out_path = output.unwrap_or_else(|| bundle.clone());
@@ -1511,7 +1553,10 @@ fn run_bundle_sign(
         BundleImportFormat::Human => {
             let disp = bundle_export_output_display(out_path.as_path());
             eprintln!("signed bundle: {disp}");
-            eprintln!("  session_id: {}", contents.manifest.session.id);
+            eprintln!(
+                "  session_id: {}",
+                sanitize_display(&contents.manifest.session.id)
+            );
             eprintln!("  scheme: {SCHEME_ED25519}");
             eprintln!("  key_id: {kid}");
             eprintln!("  public key (hex): {public_key_hex}");

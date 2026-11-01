@@ -334,22 +334,21 @@ fn pattern_specificity(pattern: &str) -> usize {
         .count()
 }
 
-/// Why a filesystem path could not be turned into a project-relative policy subject.
+/// Why a filesystem path could not be turned into a policy subject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PathNormalizeError {
-    /// `/abs/...`, `\\server\...` or a `C:` drive path: relative rules cannot be applied.
-    Absolute,
-    /// A `..` component climbs above the project root.
+    /// A relative path whose `..` components climb above the project root, evaluated without a
+    /// workspace root to resolve it against (see [`policy_subject_path`], which the agent session
+    /// applies first so this only happens on direct, root-less evaluation).
     EscapesRoot,
 }
 
 impl PathNormalizeError {
     fn describe(self) -> &'static str {
         match self {
-            Self::Absolute => {
-                "absolute paths are not matched against project-relative rules; use a path relative to the project root"
+            Self::EscapesRoot => {
+                "path climbs above the project root via `..` and no workspace root is known to resolve it"
             }
-            Self::EscapesRoot => "path climbs above the project root via `..`",
         }
     }
 }
@@ -369,44 +368,122 @@ fn deny_unnormalizable_path(
     )
 }
 
-/// Lexically normalizes a model-supplied path into the canonical project-relative form that
-/// policy globs are written against, **before** any allow/deny matching.
+/// Splits a `/`-separated absolute path into its root prefix (`/`, `//server/share/`, `C:/`) and
+/// the rest, or returns `None` for a relative path.
+fn split_absolute_prefix(raw: &str) -> Option<(String, &str)> {
+    if let Some(rest) = raw.strip_prefix("//") {
+        // UNC: `//server/share/...`
+        let mut it = rest.splitn(3, '/');
+        let server = it.next().unwrap_or_default();
+        let share = it.next().unwrap_or_default();
+        let tail = it.next().unwrap_or_default();
+        return Some((format!("//{server}/{share}/"), tail));
+    }
+    if let Some(rest) = raw.strip_prefix('/') {
+        return Some(("/".to_string(), rest));
+    }
+    if let [drive, b':', ..] = raw.as_bytes()
+        && drive.is_ascii_alphabetic()
+    {
+        // `C:/x` and drive-relative `C:x` are both treated as absolute on that drive.
+        let rest = raw[2..].trim_start_matches('/');
+        return Some((format!("{}:/", char::from(*drive)), rest));
+    }
+    None
+}
+
+/// Lexically normalizes a model-supplied path into the canonical form that policy globs are
+/// matched against, **before** any allow/deny matching.
 ///
-/// Backslashes become `/`; empty and `.` segments are dropped; `..` pops the previous
-/// segment. A `..` that would climb above the root, or an absolute / drive-qualified path,
-/// is rejected (callers deny), so `src/../.github/x` is evaluated as `.github/x` and
-/// `./.git/config` as `.git/config`. The project root itself normalizes to `.`.
+/// Backslashes become `/`; empty and `.` segments are dropped; `..` pops the previous segment.
+///
+/// - A relative path stays relative to the project root: `src/../.github/x` is evaluated as
+///   `.github/x`, `./.git/config` as `.git/config`, and the root itself (including the empty
+///   path, which tools use as their static placeholder permission) as `.`.
+/// - An absolute path (`/abs/x`, `//server/share/x`, `C:/x`) stays absolute and normalized
+///   (`..` at the filesystem root is a no-op); it is matched against the globs as-is, so
+///   `allow = ["**"]` or an explicit absolute glob can allow it and deny globs still apply.
+///   Callers that know the workspace root run [`policy_subject_path`] first, which turns an
+///   absolute path INSIDE the root back into a relative one.
+/// - A relative path whose `..` climbs above the root is an error (callers deny) because it
+///   cannot be resolved without a root; [`policy_subject_path`] resolves it to an absolute path.
 fn normalize_path_for_policy(path: &std::path::Path) -> Result<String, PathNormalizeError> {
     let raw = path.to_string_lossy().replace('\\', "/");
-    if raw.starts_with('/') {
-        return Err(PathNormalizeError::Absolute);
-    }
+    let (prefix, rest) = match split_absolute_prefix(&raw) {
+        Some((prefix, rest)) => (Some(prefix), rest),
+        None => (None, raw.as_str()),
+    };
     let mut parts: Vec<&str> = Vec::new();
-    for (idx, seg) in raw.split('/').enumerate() {
+    for seg in rest.split('/') {
         match seg {
             "" | "." => {}
             ".." => {
-                if parts.pop().is_none() {
+                if parts.pop().is_none() && prefix.is_none() {
                     return Err(PathNormalizeError::EscapesRoot);
                 }
             }
-            s => {
-                // Windows drive prefix (`C:`) or drive-relative `C:foo`.
-                if idx == 0
-                    && let [drive, b':', ..] = s.as_bytes()
-                    && drive.is_ascii_alphabetic()
-                {
-                    return Err(PathNormalizeError::Absolute);
-                }
-                parts.push(s);
-            }
+            s => parts.push(s),
         }
     }
-    if parts.is_empty() {
-        Ok(".".to_string())
-    } else {
-        Ok(parts.join("/"))
+    Ok(match prefix {
+        Some(prefix) => format!("{prefix}{}", parts.join("/")),
+        None if parts.is_empty() => ".".to_string(),
+        None => parts.join("/"),
+    })
+}
+
+/// Maps a model-supplied path to the policy subject for a workspace rooted at `workspace_root`.
+///
+/// - A relative path that stays inside the root is returned unchanged (the policy normalizes it
+///   lexically when evaluating, so `src/../X` is still matched as `X`).
+/// - An absolute path inside the root (lexically, or under the root's canonical form, so
+///   `/private/var/...` vs `/var/...` both work) is relativized: `/repo/src/lib.rs` becomes
+///   `src/lib.rs`, and the root itself becomes `.`.
+/// - Anything outside the root — an absolute path into an `--add-dir` root, or a relative path
+///   whose `..` escapes the root (resolved lexically against the root) — becomes a normalized
+///   absolute path, which [`PolicyConfig::evaluate_permission`] matches against the globs as-is.
+///
+/// Purely lexical apart from canonicalizing `workspace_root` itself; symlinks inside `path` are
+/// not resolved (the sandbox handles containment separately).
+#[must_use]
+pub fn policy_subject_path(
+    path: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> std::path::PathBuf {
+    let subject = match normalize_path_for_policy(path) {
+        Ok(s) if split_absolute_prefix(&s).is_none() => return path.to_path_buf(),
+        Ok(abs) => abs,
+        Err(PathNormalizeError::EscapesRoot) => {
+            match normalize_path_for_policy(&workspace_root.join(path)) {
+                Ok(s) => s,
+                Err(_) => return path.to_path_buf(),
+            }
+        }
+    };
+    let mut roots: Vec<String> = Vec::with_capacity(2);
+    if let Ok(r) = normalize_path_for_policy(workspace_root) {
+        roots.push(r);
     }
+    if let Ok(canonical) = std::fs::canonicalize(workspace_root)
+        && let Ok(r) = normalize_path_for_policy(&canonical)
+        && !roots.contains(&r)
+    {
+        roots.push(r);
+    }
+    for root in roots.iter().filter(|r| split_absolute_prefix(r).is_some()) {
+        if subject == *root {
+            return std::path::PathBuf::from(".");
+        }
+        let with_sep = if root.ends_with('/') {
+            root.clone()
+        } else {
+            format!("{root}/")
+        };
+        if let Some(rel) = subject.strip_prefix(with_sep.as_str()) {
+            return std::path::PathBuf::from(if rel.is_empty() { "." } else { rel });
+        }
+    }
+    std::path::PathBuf::from(subject)
 }
 
 fn extract_domain(url: &str) -> Option<String> {
@@ -1325,10 +1402,63 @@ mod tests {
         assert_eq!(n("src/.."), Ok(".".to_string()));
         assert_eq!(n("../x"), Err(PathNormalizeError::EscapesRoot));
         assert_eq!(n("src/../../x"), Err(PathNormalizeError::EscapesRoot));
-        assert_eq!(n("/etc/passwd"), Err(PathNormalizeError::Absolute));
-        assert_eq!(n("C:/Windows"), Err(PathNormalizeError::Absolute));
-        assert_eq!(n("c:foo"), Err(PathNormalizeError::Absolute));
-        assert_eq!(n("\\\\server\\share"), Err(PathNormalizeError::Absolute));
+        assert_eq!(n("/etc/passwd"), Ok("/etc/passwd".to_string()));
+        assert_eq!(n("/a/./b/../c"), Ok("/a/c".to_string()));
+        assert_eq!(n("/.."), Ok("/".to_string()));
+        assert_eq!(n("C:/Windows"), Ok("C:/Windows".to_string()));
+        assert_eq!(n("c:foo"), Ok("c:/foo".to_string()));
+        assert_eq!(
+            n("\\\\server\\share\\x"),
+            Ok("//server/share/x".to_string())
+        );
+    }
+
+    /// Tools declare `PathBuf::new()` as their static placeholder permission; it is evaluated as
+    /// the project root `.` (so `**`-style allow rules match it and `src/**` does not).
+    #[test]
+    fn empty_placeholder_path_is_evaluated_as_project_root() {
+        let cfg = dev_cfg();
+        let (rv, rr) = cfg.evaluate_permission(&Permission::ReadFile {
+            path: PathBuf::new(),
+        });
+        assert_eq!(rv, PolicyVerdict::Allow, "{rr}");
+        assert!(rr.contains("path `.`"), "{rr}");
+        let (wv, wr) = cfg.evaluate_permission(&Permission::WriteFile {
+            path: PathBuf::new(),
+        });
+        assert_eq!(wv, PolicyVerdict::Deny, "{wr}");
+        assert!(wr.contains("path `.`"), "{wr}");
+    }
+
+    #[test]
+    fn policy_subject_relativizes_inside_and_absolutizes_outside() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let root_s = root.to_string_lossy().replace('\\', "/");
+        let sub = |p: &str| {
+            policy_subject_path(std::path::Path::new(p), &root)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+        assert_eq!(sub("src/lib.rs"), "src/lib.rs");
+        assert_eq!(sub("./src/../.git/config"), "./src/../.git/config");
+        assert_eq!(sub(&format!("{root_s}/src/lib.rs")), "src/lib.rs");
+        assert_eq!(sub(&format!("{root_s}/./src/../.git/HEAD")), ".git/HEAD");
+        assert_eq!(sub(&root_s), ".");
+        let canonical = std::fs::canonicalize(&root)
+            .expect("canonical")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert_eq!(sub(&format!("{canonical}/src/a.rs")), "src/a.rs");
+        let parent = root_s
+            .rsplit_once('/')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_default();
+        assert_eq!(sub("../sibling/x.txt"), format!("{parent}/sibling/x.txt"));
+        assert_eq!(sub("/etc/passwd"), "/etc/passwd");
+        // A sibling directory sharing the root's name as a prefix is NOT inside the root.
+        assert_eq!(sub(&format!("{root_s}2/x")), format!("{root_s}2/x"));
     }
 
     #[test]
@@ -1370,18 +1500,61 @@ mod tests {
     }
 
     #[test]
-    fn absolute_and_escaping_paths_are_denied_even_with_catch_all_allow() {
-        let cfg = dev_cfg(); // read.allow = ["**"]
-        for p in ["/etc/passwd", "/repo/src/lib.rs", "../outside.txt"] {
+    fn absolute_paths_match_globs_and_unresolved_escapes_are_denied() {
+        let cfg = dev_cfg(); // read.allow = ["**"]; write.allow = project-relative globs
+        // Absolute paths are no longer hard-denied: a catch-all allow matches them ...
+        for p in ["/etc/passwd", "/repo/src/lib.rs"] {
             let (rv, rr) = read(&cfg, p);
-            assert_eq!(rv, PolicyVerdict::Deny, "read {p}: {rr}");
+            assert_eq!(rv, PolicyVerdict::Allow, "read {p}: {rr}");
+            // ... while project-relative write globs (`src/**`) do not.
             let (wv, wr) = write(&cfg, p);
             assert_eq!(wv, PolicyVerdict::Deny, "write {p}: {wr}");
         }
-        let (_, reason) = read(&cfg, "/etc/passwd");
-        assert!(reason.contains("absolute paths"), "{reason}");
-        let (_, reason) = read(&cfg, "../outside.txt");
-        assert!(reason.contains("above the project root"), "{reason}");
+        // Deny globs still apply to absolute subjects.
+        let (rv, rr) = read(&cfg, "/elsewhere/.env.local");
+        assert_eq!(rv, PolicyVerdict::Deny, "{rr}");
+        // A root-less `..` escape cannot be resolved and is denied.
+        let (rv, rr) = read(&cfg, "../outside.txt");
+        assert_eq!(rv, PolicyVerdict::Deny, "{rr}");
+        assert!(rr.contains("above the project root"), "{rr}");
+    }
+
+    /// `--add-dir` style: a policy profile combined with an additional root outside the
+    /// workspace. Paths into the extra root are evaluated as absolute subjects, so an explicit
+    /// absolute glob (or `**`) can allow them while deny globs still bite.
+    #[test]
+    fn additional_root_paths_are_matchable_with_absolute_globs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repo");
+        let extra = dir.path().join("shared");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::create_dir_all(&extra).expect("mkdir");
+        let extra_s = extra.to_string_lossy().replace('\\', "/");
+        let mut cfg = dev_cfg();
+        cfg.filesystem.write.allow.push(format!("{extra_s}/**"));
+        cfg.filesystem.write.deny.push("**/secrets/**".to_string());
+        let eval_write = |p: &str| {
+            let subject = policy_subject_path(std::path::Path::new(p), &root);
+            cfg.evaluate_permission(&Permission::WriteFile { path: subject })
+        };
+        // Absolute path into the extra root.
+        let (v, r) = eval_write(&format!("{extra_s}/notes.md"));
+        assert_eq!(v, PolicyVerdict::Allow, "{r}");
+        // Relative `../shared/...` resolves to the same absolute subject.
+        let (v, r) = eval_write("../shared/notes.md");
+        assert_eq!(v, PolicyVerdict::Allow, "{r}");
+        // Deny globs still apply inside the extra root.
+        let (v, r) = eval_write(&format!("{extra_s}/secrets/key.txt"));
+        assert_eq!(v, PolicyVerdict::Deny, "{r}");
+        // An absolute path inside the workspace is matched as its relative form.
+        let root_s = root.to_string_lossy().replace('\\', "/");
+        let (v, r) = eval_write(&format!("{root_s}/src/lib.rs"));
+        assert_eq!(v, PolicyVerdict::Allow, "{r}");
+        let (v, r) = eval_write(&format!("{root_s}/.git/hooks/pre-commit"));
+        assert_eq!(v, PolicyVerdict::Deny, "{r}");
+        // Without an explicit allow, other outside paths stay denied for writes.
+        let (v, r) = eval_write("/etc/hosts");
+        assert_eq!(v, PolicyVerdict::Deny, "{r}");
     }
 
     #[test]

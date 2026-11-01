@@ -78,8 +78,9 @@ fn help_leads_with_evidence_positioning_and_hides_deprecated_commands() {
             "`{hidden}` must not be listed in --help: {commands:?}"
         );
     }
+    assert_eq!(commands.first(), Some(&"seal"), "trust commands come first");
     assert_eq!(
-        commands.first(),
+        commands.get(1),
         Some(&"bundle"),
         "trust commands come first"
     );
@@ -200,6 +201,131 @@ fn locked_journal_is_reported_as_journal_locked() {
             &journal_arg,
             "--output",
             &out_path,
+            "--format",
+            "json",
+        ],
+    ] {
+        let out = akmon(cwd.path(), &args);
+        assert_eq!(out.status.code(), Some(3), "{args:?}");
+        let v = stdout_json(&out);
+        assert_eq!(v["category"], "journal_locked", "{args:?}: {v}");
+    }
+}
+
+#[test]
+fn policy_show_effective_conflicting_profiles_is_a_usage_error() {
+    let tmp = tempdir().expect("tmp");
+    let out = akmon(
+        tmp.path(),
+        &[
+            "--policy-profile",
+            "prod",
+            "policy",
+            "show-effective",
+            "--profile",
+            "dev",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--policy-profile prod and --profile dev"),
+        "{stderr}"
+    );
+
+    let out = akmon(
+        tmp.path(),
+        &[
+            "--output",
+            "json",
+            "--policy-profile",
+            "prod",
+            "policy",
+            "show-effective",
+            "--profile",
+            "dev",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let v = stdout_json(&out);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["category"], "usage");
+    assert!(
+        v["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("--policy-profile prod and --profile dev")),
+        "{v}"
+    );
+}
+
+#[test]
+fn locked_journal_is_journal_locked_for_replay_diff_and_imports() {
+    let journal = tempdir().expect("journal");
+    let sid = Uuid::new_v4();
+    create_clean_session(journal.path(), sid);
+    let cwd = tempdir().expect("cwd");
+    let journal_arg = journal.path().display().to_string();
+    let sid_arg = sid.to_string();
+    let other_sid = Uuid::new_v4().to_string();
+    let bundle = cwd.path().join("b.akmon").display().to_string();
+    let export = akmon(
+        cwd.path(),
+        &[
+            "bundle",
+            "export",
+            &sid_arg,
+            "--journal",
+            &journal_arg,
+            "--output",
+            &bundle,
+        ],
+    );
+    assert_eq!(
+        export.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
+    let trace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/openai_v2_weather_legacy.otlp.json")
+        .display()
+        .to_string();
+    let _held = RedbObjectStore::open(&journal_db_path(journal.path())).expect("hold journal");
+    for args in [
+        vec![
+            "replay",
+            &sid_arg,
+            "--journal",
+            &journal_arg,
+            "--format",
+            "json",
+        ],
+        vec![
+            "diff",
+            &sid_arg,
+            &other_sid,
+            "--journal",
+            &journal_arg,
+            "--format",
+            "json",
+        ],
+        vec![
+            "bundle",
+            "import",
+            &bundle,
+            "--journal",
+            &journal_arg,
+            "--rename-to",
+            &other_sid,
+            "--format",
+            "json",
+        ],
+        vec![
+            "otel",
+            "import",
+            &trace,
+            "--journal",
+            &journal_arg,
             "--format",
             "json",
         ],

@@ -219,7 +219,7 @@ fn create_private_key_file(path: &std::path::Path, force: bool) -> std::io::Resu
 
 /// Writes the public-key hex to `path` (exactly the 64 hex chars, no trailing newline). The public
 /// key is not secret, so no special perms; `create_new` gives atomic no-clobber unless `force`.
-fn write_public_key_file(
+pub(crate) fn write_public_key_file(
     path: &std::path::Path,
     public_key_hex: &str,
     force: bool,

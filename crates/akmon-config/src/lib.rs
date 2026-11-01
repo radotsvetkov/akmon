@@ -195,11 +195,14 @@ impl AkmonGlobalConfig {
     }
 }
 
+/// Masks an API key for display: the first 8 characters (not bytes, so a non-ASCII key never
+/// panics on a char boundary) followed by `****`, or just `****` for keys of 8 chars or fewer.
 fn mask_api_key(k: &str) -> String {
-    if k.len() <= 8 {
+    if k.chars().count() <= 8 {
         "****".into()
     } else {
-        format!("{}****", &k[..8])
+        let prefix: String = k.chars().take(8).collect();
+        format!("{prefix}****")
     }
 }
 
@@ -225,12 +228,35 @@ pub fn akmon_config_path() -> Option<PathBuf> {
 }
 
 /// Reads config from `path`, or returns defaults if missing.
+///
+/// When the file contains archived top-level sections ([`LEGACY_IGNORED_SECTIONS`]), ONE stderr
+/// warning per process names them (they are ignored, but kept on disk by [`save_config_to`]).
 pub fn load_config_from(path: &Path) -> Result<AkmonGlobalConfig, ConfigError> {
     if !path.is_file() {
         return Ok(AkmonGlobalConfig::default());
     }
     let raw = fs::read_to_string(path)?;
-    toml::from_str(&raw).map_err(|e| ConfigError::Toml(e.to_string()))
+    let cfg = toml::from_str(&raw).map_err(|e| ConfigError::Toml(e.to_string()))?;
+    if let Some(warning) = legacy_sections_warning(&raw, path) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| eprintln!("{warning}"));
+    }
+    Ok(cfg)
+}
+
+/// The one-line warning for archived sections in `raw`, or `None` when there are none.
+#[must_use]
+pub fn legacy_sections_warning(raw: &str, path: &Path) -> Option<String> {
+    let found = legacy_sections_in(raw);
+    if found.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = found.iter().map(|s| format!("[{s}]")).collect();
+    Some(format!(
+        "akmon: warning: {} contains section(s) {} archived in v3.0 and now IGNORED ([slo]: the archived `akmon slo` command; [signing]: the archived post-run signing hook — sign bundles with `akmon bundle sign` or `akmon seal`). They are left in the file untouched.",
+        path.display(),
+        names.join(", ")
+    ))
 }
 
 /// Top-level config sections that earlier releases understood and v3.0 ignores.
@@ -257,12 +283,44 @@ pub fn legacy_sections_in(raw: &str) -> Vec<&'static str> {
 /// The file can hold API keys: on unix the temporary file is created with mode `0600` (and
 /// forced to `0600` if a stale temporary file already existed) before it is renamed over
 /// `path`, so a write never widens permissions.
+///
+/// Top-level keys of the existing file that this version does not understand (for example the
+/// archived `[slo]` / `[signing]` sections, or settings from a newer release) are preserved: they
+/// are merged back into the written file instead of being silently dropped.
 pub fn save_config_to(path: &Path, cfg: &AkmonGlobalConfig) -> Result<(), ConfigError> {
-    let raw = toml::to_string_pretty(cfg).map_err(|e| ConfigError::Toml(e.to_string()))?;
+    let mut table = toml::Table::try_from(cfg).map_err(|e| ConfigError::Toml(e.to_string()))?;
+    if let Ok(existing) = fs::read_to_string(path) {
+        for (key, value) in unknown_top_level_entries(&existing) {
+            table.entry(key).or_insert(value);
+        }
+    }
+    let raw = toml::to_string_pretty(&table).map_err(|e| ConfigError::Toml(e.to_string()))?;
     let tmp = path.with_extension("toml.tmp");
     write_private_file(&tmp, raw.as_bytes())?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Top-level entries of `raw` that [`AkmonGlobalConfig`] does not model.
+///
+/// Computed as the keys of `raw` that do not survive a parse/re-serialize round trip through
+/// [`AkmonGlobalConfig`]. A known field written with its default value can also land here; it is
+/// only re-inserted when the new config omits that key, which carries the same meaning. Returns
+/// nothing when `raw` is not valid TOML or not a valid config.
+fn unknown_top_level_entries(raw: &str) -> Vec<(String, toml::Value)> {
+    let Ok(existing) = raw.parse::<toml::Table>() else {
+        return Vec::new();
+    };
+    let Ok(parsed) = toml::from_str::<AkmonGlobalConfig>(raw) else {
+        return Vec::new();
+    };
+    let Ok(known) = toml::Table::try_from(&parsed) else {
+        return Vec::new();
+    };
+    existing
+        .into_iter()
+        .filter(|(key, _)| !known.contains_key(key))
+        .collect()
 }
 
 /// Writes `bytes` to `path`, truncating it, with owner-only permissions on unix.
@@ -445,6 +503,60 @@ min_baseline_samples = 5
         assert_eq!(legacy_sections_in(raw), vec!["slo", "signing"]);
         assert!(legacy_sections_in("default_model = \"x\"\n").is_empty());
         assert!(legacy_sections_in("not [valid toml").is_empty());
+    }
+
+    #[test]
+    fn save_preserves_legacy_and_unknown_top_level_sections() {
+        let dir = tempdir().expect("tmp");
+        let path = dir.path().join("config.toml");
+        let raw = r#"default_model = "llama3.2"
+anthropic_api_key = "sk-old"
+future_flag = true
+
+[signing]
+command = ["/usr/local/bin/akmon-sign.sh"]
+
+[slo]
+min_tool_success_rate = 0.95
+"#;
+        fs::write(&path, raw).expect("write");
+        let warning = legacy_sections_warning(raw, &path).expect("warning");
+        assert!(warning.contains("[slo], [signing]"), "{warning}");
+        assert!(legacy_sections_warning("default_model = \"x\"\n", &path).is_none());
+
+        let mut cfg = load_config_from(&path).expect("load");
+        cfg.default_model = Some("qwen".into());
+        cfg.anthropic_api_key = None; // a known key the user cleared must stay cleared
+        save_config_to(&path, &cfg).expect("save");
+
+        let written = fs::read_to_string(&path).expect("read");
+        let table: toml::Table = written.parse().expect("toml");
+        assert_eq!(
+            table.get("default_model").and_then(toml::Value::as_str),
+            Some("qwen")
+        );
+        assert!(table.get("anthropic_api_key").is_none(), "{written}");
+        assert_eq!(
+            table.get("future_flag").and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            table.get("signing").is_some_and(toml::Value::is_table),
+            "{written}"
+        );
+        assert!(
+            table.get("slo").is_some_and(toml::Value::is_table),
+            "{written}"
+        );
+        assert_eq!(legacy_sections_in(&written), vec!["slo", "signing"]);
+    }
+
+    #[test]
+    fn mask_api_key_is_char_boundary_safe() {
+        assert_eq!(mask_api_key("short"), "****");
+        assert_eq!(mask_api_key("ключ-ключ-ключ"), "ключ-клю****");
+        assert_eq!(mask_api_key("ééééééééé"), "éééééééé****");
+        assert_eq!(mask_api_key("sk-ant-api03-x"), "sk-ant-a****");
     }
 
     #[cfg(unix)]

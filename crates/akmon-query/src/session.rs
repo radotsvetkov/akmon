@@ -3162,7 +3162,35 @@ fn git_concrete_permissions(args: &Value) -> Vec<Permission> {
 }
 
 /// Builds concrete [`Permission`] values for policy checks (paths from args when known).
+///
+/// Filesystem paths are mapped through [`akmon_core::policy_subject_path`] against the primary
+/// sandbox root: absolute paths inside the workspace are relativized, and paths outside it (for
+/// example into an `--add-dir` root, or a `..` that escapes the workspace) become normalized
+/// absolute paths that policy globs can match explicitly.
 fn concrete_permissions(
+    tool: &dyn Tool,
+    name: &str,
+    args: &Value,
+    sandbox_root: &Path,
+) -> Vec<Permission> {
+    raw_concrete_permissions(tool, name, args, sandbox_root)
+        .into_iter()
+        .map(|permission| match permission {
+            Permission::ReadFile { path } => Permission::ReadFile {
+                path: akmon_core::policy_subject_path(&path, sandbox_root),
+            },
+            Permission::ListDirectory { path } => Permission::ListDirectory {
+                path: akmon_core::policy_subject_path(&path, sandbox_root),
+            },
+            Permission::WriteFile { path } => Permission::WriteFile {
+                path: akmon_core::policy_subject_path(&path, sandbox_root),
+            },
+            other => other,
+        })
+        .collect()
+}
+
+fn raw_concrete_permissions(
     tool: &dyn Tool,
     name: &str,
     args: &Value,
@@ -5549,6 +5577,38 @@ mod tests {
             let p = concrete_permissions(&tool, name, &json!({ "name": "x" }), root);
             assert_eq!(p, tool.required_permissions().to_vec(), "{name}");
         }
+    }
+
+    #[test]
+    fn concrete_permissions_relativize_in_root_and_absolutize_outside() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let tool = akmon_tools::WriteFileTool::new();
+        let abs_in = root.join("src").join("lib.rs");
+        let p = concrete_permissions(
+            &tool,
+            "write_file",
+            &json!({ "path": abs_in.to_string_lossy(), "content": "x" }),
+            &root,
+        );
+        assert_eq!(
+            p,
+            vec![Permission::WriteFile {
+                path: PathBuf::from("src/lib.rs")
+            }]
+        );
+        let p = concrete_permissions(
+            &tool,
+            "write_file",
+            &json!({ "path": "../shared/notes.md", "content": "x" }),
+            &root,
+        );
+        let [Permission::WriteFile { path }] = p.as_slice() else {
+            panic!("expected one write permission: {p:?}");
+        };
+        assert!(path.is_absolute(), "{path:?}");
+        assert!(path.ends_with("shared/notes.md"), "{path:?}");
     }
 
     #[test]
