@@ -26,7 +26,7 @@ The formulas are bumped by hand after each release. The release workflow's run s
 
 4. Commit the change here, then copy `Formula/*.rb` into the tap repository and push it.
 
-Until step 4 is done, `brew upgrade` keeps users on the previous version. The prebuilt binaries and `cargo install` paths in the main README always have the latest release.
+Until step 4 is done, `brew upgrade` keeps users on the previous version, so treat it as a release-checklist step: a release is not finished until the tap serves it. (The formulas can only be bumped after the release, because the new checksums don't exist before it; the user docs say Homebrew may lag a new release briefly.) The prebuilt binaries and `cargo install` paths in the main README always have the latest release.
 
 ## Bootstrapping the tap (one-time)
 

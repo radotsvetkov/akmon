@@ -80,6 +80,13 @@ Redacted objects are replaced by canonical-CBOR sentinel objects with this paylo
 }
 ```
 
+## Personal data: what redaction does and does not do
+
+`akmon redact` produces a redacted **derivative** bundle. It can support data-minimisation or erasure handling, for example sharing a copy with personal data removed. It does not by itself make you GDPR compliant:
+
+- The source journal session and the original bundle are unchanged and still hold the data. Any copies already handed out do too. Handle them separately under your own retention and erasure process.
+- Each sentinel keeps the original object's `original_hash` and `original_size`. A hash of personal data may itself still be personal data, so treat the derivative bundle accordingly.
+
 ## Troubleshooting
 
 - If output path exists, choose a new `--output` target.

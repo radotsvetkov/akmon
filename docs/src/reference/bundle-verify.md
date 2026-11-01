@@ -50,7 +50,7 @@ The human headline states exactly what was established:
 | `verified bundle: integrity OK; UNSIGNED (integrity only)` | No signature at all. |
 | `bundle verification FAILED` | Something does not match. The violations list says what. |
 
-The body shows the head, the session window (first and last event timestamps, from the producer's clock), capture level, signatures, operators, and the **unsigned metadata** (`created_at`, `ended_at`, producer). That metadata is not covered by any signature. If it disagrees with the event timestamps you get a warning, not a failure.
+The body shows the head, the session window (first and last event timestamps, from the producer's clock; for an OTEL import this is the import time, see [otel import](./otel-import.md#timestamps)), capture level, signatures, operators, and the **unsigned metadata** (`created_at`, `ended_at`, producer). That metadata is not covered by any signature. If it disagrees with the event timestamps you get a warning, not a failure.
 
 `--format markdown` writes the same result as a report with a verdict, a checks table, and "What this proves" and "What this does not prove" sections. Untrusted values from the bundle are escaped.
 

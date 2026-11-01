@@ -64,7 +64,8 @@ agef-verify audit.akmon --verify-key signer.pub --require-signature
 | Code | Meaning |
 | --- | --- |
 | `0` | Key written; public key hex and key_id surfaced |
-| `3` | I/O error, refuse-to-clobber (pass `--force` to replace), or key generation failure |
+| `2` | Refuse-to-clobber: `--out` or `--public-out` already exists (category `output_exists`; pass `--force` to replace) |
+| `3` | I/O error or key generation failure |
 
 Errors in `--format json` use the shared error object `{tool, akmon_version, passed: false, error, category}`.
 

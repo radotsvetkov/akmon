@@ -29,7 +29,7 @@ akmon seal trace.json --key signer.pk8 --output audit.akmon
 `akmon seal` imports the trace, exports it as a bundle, checks its integrity, signs the session head, and verifies the result with the derived public key before it reports success. It writes:
 
 - `audit.akmon`: the sealed bundle.
-- `audit.akmon.pub`: the signer's public key in hex, the same content as `signer.pub`.
+- `audit.akmon.pub`: the signer's public key in hex, the same content as `signer.pub`. It is a convenience copy for you to send to the verifier over a separate channel (step 3); the verifier should never trust a `.pub` that arrived with the bundle.
 
 It also prints the exact commands to hand to your verifier. The input can be a session id instead of a trace file, for example a session recorded by the bundled reference agent: `akmon seal <session-id> --key signer.pk8`.
 
@@ -69,7 +69,7 @@ openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem -rawin \
 - Proved: the bundle has not been altered since it was sealed, and the holder of `signer.pk8` sealed it.
 - Not proved: when it was sealed, who holds the key, or that the agent was right. See [What verification proves](../concepts/verifying-evidence.md) and [Trusted timestamps](../guides/trusted-timestamps.md).
 
-The capture level tells the verifier how much of the session was recorded. A trace with message content is `full`; a metadata-only trace is `structural`. See [Capture levels](../concepts/capture-levels.md).
+The capture level tells the verifier how much of the session was recorded. A trace is `full` only when every content slot (each request, response, tool input and output) holds real content; a trace with some content is `partial`, and a metadata-only trace is `structural`. See [Capture levels](../concepts/capture-levels.md).
 
 ## Next steps
 

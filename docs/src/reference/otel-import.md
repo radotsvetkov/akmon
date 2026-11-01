@@ -49,6 +49,10 @@ GenAI message content is opt-in in OpenTelemetry, so many traces carry metadata 
 
 The level is part of the signed session record. `akmon bundle verify --require-capture full` and `agef-verify --require-capture full` reject anything below `full`. Embeddings calls never count as full, because their output is not message content. See [Capture levels](../concepts/capture-levels.md).
 
+## Timestamps
+
+Each AGEF event is stamped with the time it was written to the journal, which for an import is the import time. The original span start and end times from the trace are kept on each provider call's attempts. So the "session window" that `bundle verify` and `agef-verify` report for an imported session shows when it was imported, not when the agent ran. Neither set of times is covered by a signature. To prove when evidence existed, add an RFC 3161 timestamp ([trusted timestamps](../guides/trusted-timestamps.md)).
+
 ## Input rules
 
 - One trace per import. Use `--trace-id` when the file holds several.

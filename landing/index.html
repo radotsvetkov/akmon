@@ -1011,9 +1011,9 @@ akmon seal trace.json --key signer.pk8 \
       <div class="step">
         <span class="step-num" aria-hidden="true">02</span>
         <h3>Hand over one file</h3>
-        <p>Send <code>audit.akmon</code> however you like. Send the public key over a <em>separate, trusted</em> channel. Add <code>--operator-key</code> to record a signed sign-off by an accountable person, and <code>--proof-dir</code> for OpenSSL artifacts.</p>
+        <p>Send <code>audit.akmon</code> however you like. Send the public key over a <em>separate, trusted</em> channel: the <code>.pub</code> file is a convenience copy to send that way, and the auditor verifies with the key they received out-of-band, never one that travelled with the bundle. Add <code>--operator-key</code> to record a signed sign-off by an accountable person, and <code>--proof-dir</code> for OpenSSL artifacts.</p>
         <pre>audit.akmon       # the evidence
-audit.akmon.pub   # signer public key (hex)</pre>
+audit.akmon.pub   # signer public key (hex), send separately</pre>
       </div>
       <div class="step">
         <span class="step-num" aria-hidden="true">03</span>
@@ -1041,7 +1041,7 @@ openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem \
           <li><strong>Integrity.</strong> Every event and content object hashes into the session head. Nothing was changed, added, removed or reordered since then.</li>
           <li><strong>Who signed.</strong> The holder of the trusted Ed25519 key signed that exact head, under the domain-separated <code>AGEF-SIG-v1</code> statement.</li>
           <li><strong>Operator sign-off</strong> (optional). A second key signed an <code>AGEF-OPERATOR-v1</code> attestation naming an accountable person and role.</li>
-          <li><strong>Capture honesty.</strong> Whether the record is <code>full</code>, <code>partial</code> or <code>structural</code> is part of the signed record. An imported trace is never presented as a full recording.</li>
+          <li><strong>Capture honesty.</strong> Whether the record is <code>full</code>, <code>partial</code> or <code>structural</code> is part of the signed record. An imported trace is labelled <code>full</code> only when every content slot is real; otherwise it is <code>partial</code> or <code>structural</code>, and it is never replayable.</li>
         </ul>
       </div>
       <div class="proves no">
@@ -1072,9 +1072,9 @@ openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem \
         <li class="next"><span class="when">2 AUG 2028</span><span class="what"><strong>High-risk, Annex I</strong> (AI embedded in regulated products): the same Chapter III duties.</span></li>
       </ol>
       <div class="eu-note">
-        <p><strong>Where a sealed bundle fits:</strong> tamper-evident session logs for Art. 12-style record-keeping, kept under your own retention policy. It also fits Annex IV point 2(g), <em>"test logs and all test reports dated and signed by the responsible persons"</em>: a signed test session plus an operator attestation, with a trusted timestamp added for the "dated" part. And it fits Art. 73 incident reporting, where a frozen, signed record helps show the evidence wasn't altered.</p>
+        <p><strong>Where a sealed bundle fits:</strong> tamper-evident session logs for Art. 12-style record-keeping, kept under your own retention policy. It also fits Annex IV point 2(g), <em>"test logs and all test reports dated and signed by the responsible persons"</em>: a signed test session plus an operator attestation, with a trusted timestamp added for the "dated" part. And it fits Art. 73 incident reporting, where a bundle sealed at the time, plus an RFC 3161 timestamp taken at the time, helps show the records were preserved. A signature alone does not prove when a bundle was sealed.</p>
         <p><strong>What it doesn't do:</strong> an operator attestation helps you <em>evidence</em> human oversight. It does not by itself satisfy Art. 14. The Art. 12(3) minimum fields apply only to remote biometric identification. No harmonised logging standard (ISO/IEC 24970, prEN 18229-1) gives a presumption of conformity yet.</p>
-        <p><strong>Already in force elsewhere:</strong> DORA's tamper-protected ICT logs, NIS2 logging requirements, and Cyber Resilience Act incident reporting (since 11 Sep 2026).</p>
+        <p><strong>Already in force elsewhere:</strong> DORA's tamper-protected ICT logs, NIS2 logging requirements (Implementing Regulation 2024/2690 for the digital-infrastructure and ICT-service entity types it covers), and Cyber Resilience Act incident reporting (since 11 Sep 2026).</p>
         <p class="eu-fine">Not legal advice. Check the mapping with your own counsel. Details and sources are on the <a href="./docs/concepts/compliance.html">compliance page</a>.</p>
       </div>
     </div>
@@ -1105,6 +1105,7 @@ openssl pkeyutl -verify -pubin -inkey proof/pubkey.pem \
         brew <span class="keyword">tap</span> radotsvetkov/akmon<br>
         brew <span class="keyword">install</span> akmon agef-verify<br>
         akmon <span class="keyword">--version</span> <span class="comment">  # akmon 3.0.0</span><br>
+        <span class="comment"># the tap is updated by hand, so it may lag a new release briefly</span><br>
         <span class="comment"># openssl proofs need OpenSSL 3.x (macOS ships LibreSSL): brew install openssl@3</span>
       </div>
     </div>

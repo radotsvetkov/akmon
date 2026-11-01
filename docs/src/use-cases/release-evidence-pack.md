@@ -36,9 +36,11 @@ SESSION_ID="$(jq -r '.session_id' run.json)"
 
 For work done by another agent that is OpenTelemetry-instrumented, export its trace as OTLP/JSON. Its capture level (`full`, `partial`, or `structural`) depends on whether the instrumentation recorded message content.
 
-2. Seal each session with the signing key and the approver's operator key. `akmon seal` exports, signs, attests, and verifies in one step, and writes the public keys next to the bundle.
+2. Seal each session with the signing key and the approver's operator key. `akmon seal` exports, signs, attests, and verifies in one step, and writes the public keys next to the bundle. `akmon seal` does not create parent directories, so create the output directory first.
 
 ```bash
+mkdir -p release
+
 akmon seal "${SESSION_ID}" \
   --key signer.pk8 \
   --operator-key operator.pk8 --operator-id approver@example.com --role approver \
@@ -57,7 +59,7 @@ See [Record who approved an AI change](./operator-sign-off.md) for the operator 
 4. Verify the pack with the requirements the obligation needs. Require a present, valid signature, and require full capture only where the obligation calls for a complete recording.
 
 ```bash
-akmon bundle verify "${SESSION_ID}.akmon" \
+akmon bundle verify "release/${SESSION_ID}.akmon" \
   --verify-key signer.pub --require-signature \
   --operator-key operator.pub --require-operator-key operator.pub \
   --require-capture full
@@ -67,7 +69,7 @@ A reference-agent session passes `--require-capture full`. An imported trace pas
 
 ## What the reviewer receives and how they check it
 
-Hand the reviewer the signed `.akmon` bundles and the public keys (`signer.pub`, and `operator.pub` if accountability matters). The reviewer establishes key trust through their own process and then verifies independently, with no need to trust your machine:
+Hand the reviewer the signed `.akmon` bundles and the public keys (`signer.pub`, and `operator.pub` if accountability matters). Send the public keys over a separate, trusted channel, not in the same package as the bundles: the `.pub` files `akmon seal` writes next to each bundle are convenience copies for you to send that way. The reviewer establishes key trust through their own process, verifies with the keys they received out-of-band (never a `.pub` that arrived with the bundle), and so verifies independently, with no need to trust your machine:
 
 - With Akmon: `akmon bundle verify <bundle> --verify-key signer.pub --require-signature`.
 - Without the full agent: `agef-verify <bundle> --verify-key signer.pub --require-signature`.

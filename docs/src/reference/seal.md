@@ -29,6 +29,8 @@ akmon seal <INPUT> --key <signer.pk8>
 6. Verifies the bundle again with the public key(s) derived from the private key(s) it just used.
 7. With `--proof-dir`, writes the [OpenSSL proof artifacts](./bundle-prove-openssl.md).
 
+Before step 1, `akmon seal` checks that the output's directory exists and is writable, that `--proof-dir` exists or can be created, and that no output it would write already exists (unless `--force`). So the common failures happen before a trace is imported. `akmon seal` does **not** create the output's parent directory; create it first (`mkdir -p evidence`). A successful trace import is the one step that persists: if a later step fails, the imported session stays in the journal, and a retry imports the trace again.
+
 ## Outputs
 
 | File | Content |
@@ -36,7 +38,9 @@ akmon seal <INPUT> --key <signer.pk8>
 | `<OUTPUT>` | The sealed bundle. Defaults to `./<session-id>.akmon`. Written atomically, and nothing is left behind on failure; an existing file is not overwritten without `--force`. |
 | `<OUTPUT>.pub` | The signer's public key as 64 hex characters, the same format as `akmon bundle keygen --public-out`. |
 | `<OUTPUT>.operator.pub` | The operator's public key, only when attesting. |
-| `<proof-dir>/statement.bin`, `signature.bin`, `pubkey.pem` | OpenSSL proof artifacts, only with `--proof-dir`. |
+| `<proof-dir>/statement.bin`, `signature.bin`, `pubkey.pem` | OpenSSL proof artifacts, only with `--proof-dir` (plus the `operator_*` files when attesting). The directory is created if missing; existing artifacts in it are not replaced without `--force`. |
+
+Every file is written to a temp file and renamed into place only after self-verification passes. On failure nothing is left behind, and seal never removes a file it did not create.
 
 The command prints the exact hand-over commands, for example:
 
@@ -46,6 +50,8 @@ agef-verify audit.akmon --verify-key audit.akmon.pub --require-signature --forma
 ```
 
 When attesting, the printed commands also pass `--require-operator-key <OUTPUT>.operator.pub`. With `--proof-dir` it adds the `openssl` command(s), and it always ends with a reminder to send the public key file(s) over a separate trusted channel.
+
+The `.pub` files are a convenience: they are what you **send** to the verifier over that separate channel. The printed commands name them by path so they are easy to copy, but the verifier should run them with the key they received out-of-band, not with a `.pub` file that arrived in the same package as the bundle or is stored next to it. Anyone who can replace the bundle can replace a key stored beside it.
 
 ## Options
 
@@ -58,8 +64,8 @@ When attesting, the printed commands also pass `--require-operator-key <OUTPUT>.
 | `--operator-key <FILE>` | Operator private key. Requires `--operator-id`. |
 | `--operator-id <ID>` | Stable operator identifier (email, employee id, service account). Signed. |
 | `--display-name`, `--role`, `--org` | Optional operator identity fields. Signed. |
-| `--proof-dir <DIR>` | Also write OpenSSL proof artifacts here. |
-| `--force` | Overwrite an existing output file. |
+| `--proof-dir <DIR>` | Also write OpenSSL proof artifacts here (created if missing). |
+| `--force` | Overwrite an existing output bundle, its `.pub` file(s) and existing `--proof-dir` artifacts. A `--force` reseal without `--operator-key` removes a stale `<OUTPUT>.operator.pub` from an earlier attested seal. |
 | `--format human\|json` | Output format. Default `human`. |
 
 ## Exit codes
@@ -68,8 +74,8 @@ When attesting, the printed commands also pass `--require-operator-key <OUTPUT>.
 | --- | --- |
 | `0` | Sealed and self-verified. |
 | `1` | Integrity or verification failure. |
-| `2` | Usage error or bad input (for example a refused trace, or an output that exists without `--force`). |
-| `3` | I/O or environment error. |
+| `2` | Usage error or bad input (for example a refused trace, an output that exists without `--force`, or an output path that is a directory). |
+| `3` | I/O or environment error (for example a missing or unwritable output directory). |
 
 ## JSON output
 
@@ -89,7 +95,7 @@ On success, `--format json` prints one object on stdout:
 }
 ```
 
-`bundle` is an absolute path. `operator_public_key` is added when attesting and `proof_dir` when `--proof-dir` is given. Errors use the shared error object `{tool, akmon_version, passed: false, error, category}`, for example category `output_exists` (exit `2`) when the output exists without `--force`, or `input_not_found` (exit `2`) when the input is neither a file nor a session id.
+`bundle` is an absolute path. `operator_public_key` is added when attesting, `proof_dir` when `--proof-dir` is given, and `removed_stale_operator_pub` when a `--force` reseal removed a stale operator key file. Errors use the shared error object `{tool, akmon_version, passed: false, error, category}`, for example category `output_exists` (exit `2`) when an output exists without `--force`, `invalid_output` (exit `2`) when an output path is a directory, `io_error` (exit `3`) when the output directory is missing or not writable, or `input_not_found` (exit `2`) when the input is neither a file nor a session id.
 
 ## Example: seal with operator sign-off and an OpenSSL proof
 

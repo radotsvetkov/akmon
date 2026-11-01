@@ -47,6 +47,12 @@ message bodies. See `crates/akmon-cli/tests/fixtures/README.md` for the full pro
 1. `akmon` installed and on `PATH`.
 2. **OpenSSL 3.x** for the final verification step. Stock LibreSSL (the macOS `/usr/bin/openssl`)
    cannot verify Ed25519: it lacks `-rawin` and cannot load Ed25519 keys.
+3. A signing key pair. The steps below and the one-command equivalent use `signer.pk8` and
+   `signer.pub`; create them once with:
+
+```bash
+akmon bundle keygen --out signer.pk8 --public-out signer.pub
+```
 
 ## Steps
 

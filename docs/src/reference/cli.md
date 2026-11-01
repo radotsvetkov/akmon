@@ -47,7 +47,7 @@ The standalone verifier is a separate binary: [`agef-verify`](./agef-verify.md).
 
 ## Flag placement
 
-`--output text|json` is **not** global. It must come before the subcommand, because `redact` and `bundle export` have their own `--output <PATH>`:
+`--output text|json` is **not** global. It must come before the subcommand, because `seal`, `redact`, `bundle export`, `bundle sign` and `bundle attest` have their own `--output <PATH>`:
 
 ```bash
 akmon --output json policy show-effective --profile staging

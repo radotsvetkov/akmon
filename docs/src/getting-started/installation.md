@@ -27,7 +27,7 @@ If you only receive signed bundles to verify, install `agef-verify` (or use plai
 
 ## Option 1: Homebrew tap (recommended)
 
-The tap is live. It installs both binaries and keeps them updated through `brew upgrade`.
+The tap installs both binaries and keeps them updated through `brew upgrade`. It is updated by hand after each GitHub release, so it may lag a new release briefly. Check `akmon --version` after installing; if you need the newest release right away, use the prebuilt binaries (Option 2).
 
 ```bash
 brew tap radotsvetkov/akmon
@@ -135,11 +135,11 @@ cp target/release/akmon ~/bin/
 cp target/release/agef-verify ~/bin/
 ```
 
-Or install directly with cargo:
+Or install directly with cargo. The CLI's package is `akmon-cli`, which installs the `akmon` binary:
 
 ```bash
-cargo install --git https://github.com/radotsvetkov/akmon akmon
-cargo install --git https://github.com/radotsvetkov/akmon agef-verify
+cargo install --locked --git https://github.com/radotsvetkov/akmon akmon-cli
+cargo install --locked --git https://github.com/radotsvetkov/akmon agef-verify
 ```
 
 ## Verification

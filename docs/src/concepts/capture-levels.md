@@ -20,7 +20,8 @@ Embeddings calls never count as full, because their output is a vector, not mess
 
 ## Where to see it
 
-- `akmon otel import` and `akmon seal` print the level and the slot count, for example `capture level: full (4/4 content slots captured)`.
+- `akmon otel import` prints the level and the slot count, for example `capture level: full (4/4 content slots captured)`.
+- `akmon seal` prints the level only, for example `capture level: full` (with a note when it is `structural`). Its `--format json` output has it as `capture_level`.
 - `agef-verify` and `akmon bundle verify` show it in the human output (`capture: FULL …`), in JSON (`capture.level`), and in the Markdown report.
 
 ## Requiring a level

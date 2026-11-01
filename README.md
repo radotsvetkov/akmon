@@ -48,8 +48,9 @@ akmon seal trace.json --key signer.pk8 --output audit.akmon
 # sealed: audit.akmon
 #   capture level: full
 #   integrity: OK | signature: verified | self-verify: passed
-# It also writes audit.akmon.pub (the signer public key, hex) and prints the exact
-# agef-verify commands to hand over. Add --proof-dir proof for OpenSSL artifacts.
+# It also writes audit.akmon.pub (a convenience copy of the signer public key, hex, to
+# send to the verifier over a separate channel) and prints the exact agef-verify
+# commands to hand over. Add --proof-dir proof for OpenSSL artifacts.
 ```
 
 Verify: the auditor, on their own machine, with no Akmon install.
@@ -64,7 +65,7 @@ agef-verify audit.akmon --verify-key signer.pub --require-signature
 agef-verify audit.akmon --verify-key signer.pub --require-signature --format markdown > report.md
 ```
 
-Send the public key over a **separate, trusted channel** (not next to the bundle). If an attacker can swap both the bundle and the key, a signature proves nothing.
+Send the public key over a **separate, trusted channel** (not next to the bundle). If an attacker can swap both the bundle and the key, a signature proves nothing. The `audit.akmon.pub` file that `akmon seal` writes is a convenience copy for you to send that way; an auditor should verify with the key they received out-of-band, never with a `.pub` file that arrived with, or is stored next to, the bundle.
 
 **No Akmon at all? Use OpenSSL.** Add `--proof-dir proof` to `akmon seal`, or run `akmon bundle prove-openssl audit.akmon --verify-key signer.pub --out-dir proof` on a bundle you already have. The verifier then runs:
 
@@ -87,6 +88,8 @@ brew tap radotsvetkov/akmon
 brew install akmon          # the CLI
 brew install agef-verify    # the standalone verifier, which is all an auditor needs
 ```
+
+The tap is updated by hand after each release, so Homebrew may lag a new GitHub release briefly. Check with `akmon --version`; if you need the newest release right away, use the prebuilt binaries below.
 
 **Prebuilt binaries + checksums.** Every GitHub release ships `akmon` and `agef-verify` for Linux x86_64 and macOS (arm64, x86_64), plus `SHA256SUMS` and a CycloneDX SBOM (`akmon.cdx.json`):
 
@@ -139,7 +142,7 @@ Akmon records how complete a session is and signs that level into the record:
 
 | Level | Meaning | Typical source |
 | --- | --- | --- |
-| `full` | Every content slot is real: request and response for each provider call, input and output for each tool call. | Akmon's reference agent; OTEL traces with content capture enabled |
+| `full` | Every content slot is real: request and response for each provider call, input and output for each tool call. | Akmon's reference agent; OTEL traces in which every content slot was captured |
 | `partial` | Some content slots are real, others are missing. | OTEL traces with partial content capture. Embeddings calls never count as `full`, because their output is not a message. |
 | `structural` | No content, only the shape: provider calls, tool calls, timings, token counts, errors. | OTEL traces with content capture off (the common default) |
 
@@ -161,9 +164,9 @@ Akmon records how complete a session is and signs that level into the record:
 | `akmon inspect <session-id>` | Read a session's events and resolve content objects. |
 | `akmon diff <a> <b>` | Structural and field-level comparison of two sessions, including provider requests and retry attempts. |
 | `akmon replay <session-id>` | Deterministic playback of a full-capture reference-agent session. |
-| `akmon redact <session-id> --object <hash> --reason "…" --output r.akmon` | Derivative bundle with chosen objects replaced by redaction sentinels (for example to honour GDPR erasure without breaking verification). |
+| `akmon redact <session-id> --object <hash> --reason "…" --output r.akmon` | Derivative bundle with chosen objects replaced by redaction sentinels that still verifies. It can support data-minimisation or erasure handling, for example sharing a copy with personal data removed. It does not by itself make you GDPR compliant: the source journal, the original bundle and any copies already handed out still hold the data and must be handled separately. |
 
-The trust commands share one exit-code convention: `0` passed, `1` verification failed or was refused (including corrupt, truncated or oversized archives), `2` usage or bad input, `3` I/O or environment. They also take `--format json`. `akmon seal`, the `bundle` subcommands and `agef-verify` report errors as one `ToolErrorV1` object `{tool, akmon_version, passed:false, error, category}`.
+The trust commands share one exit-code convention: `0` passed, `1` verification failed or was refused (including corrupt, truncated or oversized archives), `2` usage or bad input (including an output file that already exists without `--force`, category `output_exists`), `3` I/O or environment. They also take `--format json`. `akmon seal`, the `bundle` subcommands and `agef-verify` report errors as one `ToolErrorV1` object `{tool, akmon_version, passed:false, error, category}`.
 
 ## EU AI Act: where this fits (as of 1 Nov 2026)
 
@@ -171,10 +174,10 @@ Akmon **helps you produce evidence**. It does not make a system compliant, it is
 
 - **High-risk obligations are deferred, not cancelled.** Chapter III duties, including **Art. 12** (automatic logging), **Art. 19** (providers keep logs for at least 6 months) and **Art. 26(6)** (deployers keep logs for at least 6 months), apply from **2 December 2027** for Annex III systems and **2 August 2028** for Annex I (product-embedded) systems.
 - **Already applicable:** prohibitions and AI literacy (Feb 2025), general-purpose AI model obligations (Aug 2025, with Commission enforcement powers from 2 Aug 2026), Art. 50 transparency (2 Aug 2026; machine-readable marking has a grace period to 2 Dec 2026 for systems already on the market), and the penalties regime.
-- **Where a sealed bundle helps:** tamper-evident session logs for Art. 12-style record-keeping, retained under your own Art. 19/26(6) retention (pair bundles with WORM or object-lock storage); **Annex IV point 2(g)**, *"test logs and all test reports dated and signed by the responsible persons"*, where a signed test-session bundle plus an operator attestation is a good fit (for the "dated" part, add a trusted timestamp as described above); and **Art. 73** serious-incident reporting, where a frozen, signed bundle helps show records were not altered before the authorities were informed (Art. 73(6)). Commission guidance on Art. 73 is still a draft.
+- **Where a sealed bundle helps:** tamper-evident session logs for Art. 12-style record-keeping, retained under your own Art. 19/26(6) retention (pair bundles with WORM or object-lock storage); **Annex IV point 2(g)**, *"test logs and all test reports dated and signed by the responsible persons"*, where a signed test-session bundle plus an operator attestation is a good fit (for the "dated" part, add a trusted timestamp as described above); and **Art. 73** serious-incident reporting, where a bundle sealed at the time, plus an RFC 3161 timestamp taken at the time, helps show the session records were preserved. A signature alone does not prove *when* a bundle was sealed. (Art. 73(6) itself is about not altering the AI system in a way that could affect later evaluation of the incident's causes before informing the authorities.) Commission guidance on Art. 73 is still a draft.
 - **What it does not do:** operator attestation helps you **evidence** human oversight and sign-off. It does not by itself satisfy Art. 14. The Art. 12(3) minimum log fields apply only to remote biometric identification systems (Annex III point 1(a)). AI agents are not a separate category under the Act (AI Office FAQ, preliminary).
 - **Standards are not there yet:** ISO/IEC 24970 (AI system logging) is at FDIS, prEN 18229-1 (AI trustworthiness, logging) is at CEN enquiry, and EN 18286 (QMS) was published in 2026. None gives a presumption of conformity for Art. 12 today.
-- **Adjacent rules that already apply:** DORA RTS (EU) 2024/1774 Art. 12 (tamper-protected, time-synchronised, retained ICT logs), NIS2 Implementing Regulation (EU) 2024/2690 §3.2, and Cyber Resilience Act vulnerability and incident reporting (since 11 Sep 2026).
+- **Adjacent rules that already apply:** DORA RTS (EU) 2024/1774 Art. 12 (tamper-protected, time-synchronised, retained ICT logs), NIS2 Implementing Regulation (EU) 2024/2690 §3.2 (for the digital-infrastructure and ICT-service entity types it lists, such as cloud, data-centre, DNS and managed service providers; other NIS2 entities get logging duties through national Art. 21 measures), and Cyber Resilience Act vulnerability and incident reporting (since 11 Sep 2026).
 
 The handbook's [compliance page](docs/src/concepts/compliance.md) has the details, sources and caveats. Check the mapping with your own legal and compliance teams.
 
@@ -182,9 +185,9 @@ The handbook's [compliance page](docs/src/concepts/compliance.md) has the detail
 
 Akmon does not replace your agent or your governance platform. It adds a portable, asymmetrically signed record that a stranger can verify offline.
 
-- **Microsoft Agent Governance Toolkit**: a governance runtime whose documentation now describes a Merkle-chained, tamper-evident audit log. That is real tamper-evidence, but it is not an asymmetric signature a stranger can check with only a public key, and there is no standalone third-party verifier or openssl-checkable proof.
+- **Microsoft Agent Governance Toolkit**: a governance runtime whose documentation describes a Merkle-chained, tamper-evident audit log. That is real tamper-evidence. As of Nov 2026 we found no documented per-entry asymmetric signature that a stranger can check with only a public key, and no standalone third-party verifier or openssl-checkable proof; check its current documentation.
 - **Azure Confidential Ledger**: genuinely strong signed receipts, but tied to the Azure service and not agent-aware.
-- **Vendor tracing (for example Microsoft Foundry)**: built for live observability. Microsoft's own docs say Foundry traces cannot support full replay.
+- **Vendor tracing (for example Microsoft Foundry)**: built for observability inside the vendor's service. As of Nov 2026 we found no documented way to export a Foundry trace as an asymmetrically signed record that a third party can verify offline.
 - **Plain OpenTelemetry**: the right way to *emit* agent telemetry, and Akmon imports it. But spans are unsigned and mutable once exported.
 
 Where those tools lead: distribution, ecosystem integration and standards presence. The realistic stack is layered: produce and govern in your platform, then seal the session into a record that can leave that trust domain. There is a longer, sourced comparison in the [handbook](docs/src/comparison.md).
@@ -213,7 +216,7 @@ Akmon implements the [AGEF specification](https://github.com/radotsvetkov/agef) 
 
 ## What changed in 3.0
 
-v3.0.0 is the **focus** release. It adds `akmon seal`, an auditor Markdown report (`--format markdown`) and hardened verification (stricter archive parsing, terminal-escape sanitizing, explicit integrity-only vs. signature-verified verdicts). It also archives everything that wasn't evidence: `akmon import/export/spec/scout/slo/sign`, the semantic index, and subagents. Some JSON and CLI changes are breaking. See the [CHANGELOG](CHANGELOG.md) and the [v3.0.0 release notes](docs/src/releases/v3.0.0.md). Archived code is under [`archive/`](archive/README.md) and the tag `archive/pre-focus-v2.2.1`.
+v3.0.0 is the **focus** release. It adds `akmon seal`, an auditor Markdown report (`--format markdown`) and hardened verification (stricter archive parsing, terminal-escape sanitizing, explicit integrity-only vs. signature-verified verdicts). It also archives everything that wasn't evidence: `akmon import/export/spec/scout/slo/sign`, the semantic index, and subagents. Some JSON and CLI changes are breaking. See the [CHANGELOG](CHANGELOG.md) and the [v3.0.0 release notes](docs/src/releases/v3.0.0.md). Archived code is under [`archive/`](archive/README.md) and the tag `archive/pre-focus-v2.2.1` (equivalently `v2.2.1`, the same commit).
 
 ## Contributing, security, license
 

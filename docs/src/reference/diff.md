@@ -75,7 +75,9 @@ When diff cannot run, `--format json` prints a `DiffErrorV1` object on stdout an
 }
 ```
 
-Categories: `invalid_session_id`, `session_not_found` (also when the journal is missing), `session_load_failed`, `source_precondition_violated`, `store_access_failed`, `diff_infrastructure_error`.
+Categories: `session_not_found` (also when the journal is missing), `session_load_failed`, `source_precondition_violated`, `store_access_failed`, `diff_infrastructure_error`.
+
+A malformed session id (not a UUID) is a usage error caught by argument parsing before diff runs: it prints a plain error on stderr, no JSON, and exits `2`.
 
 ## Provider-call divergences
 

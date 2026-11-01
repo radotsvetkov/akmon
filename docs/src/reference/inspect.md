@@ -23,7 +23,7 @@ akmon inspect <session-id> \
 
 Use it when you need to review what happened in a session, debug tool/model behavior, or prepare audit evidence review. A reviewer can use inspect to see exactly what was said, what provider attempts occurred, what tools ran, and which hashes connect each step.
 
-`akmon inspect` and `akmon verify` are complementary. `inspect` shows contents; `verify` checks integrity and tamper evidence. In v2.0.0 both are substrate-only commands and both target one session by UUID.
+`akmon inspect` and `akmon verify` are complementary. `inspect` shows contents; `verify` checks integrity and tamper evidence. Both are substrate-only commands and both target one session by UUID.
 
 ## Arguments
 
@@ -284,7 +284,7 @@ $ akmon inspect 550e8400-e29b-41d4-a716-446655440000 --journal /tmp/my-journal
 - `SessionEnd`
 - `RetrievalCall` (if present in journal; reserved for future Akmon emission)
 
-`RetrievalCall` support is included for forward compatibility with AGEF and v2.0 planning; Akmon v2.0.0 does not emit it in normal runs.
+`RetrievalCall` support is included for forward compatibility with AGEF; Akmon does not emit it in normal runs.
 
 ## What inspect does not do
 

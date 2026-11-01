@@ -33,7 +33,7 @@ The verifier does not have to trust the machine that produced the bundle, the ag
 Akmon never overstates what a record contains.
 
 - A reference-agent session, run by Akmon's own bundled agent, records `full` capture. It captured the events it claims to have captured, and it can be replayed deterministically.
-- An OpenTelemetry import (`akmon otel import`) records `structural` capture. It is a faithful transcription of what the trace carried, not a full recording. `akmon bundle verify --require-capture full` fails on it, and `akmon replay` refuses it.
+- An OpenTelemetry import (`akmon otel import` or `akmon seal <trace.json>`) is a faithful transcription of what the trace carried. It is labelled `full` only when every content slot is real; otherwise it is `partial` or `structural`, and `akmon bundle verify --require-capture full` fails on it. `akmon replay` refuses an import at any level: it is a record, not a replayable execution.
 
 `--require-capture full` is the gate to use when a workflow must reject anything weaker than a full recording. Capture level is part of the record, so a verifier sees the honest level and decides whether it meets their bar.
 

@@ -32,23 +32,26 @@ akmon bundle keygen --out signer.pk8 --public-out signer.pub   # once
 akmon seal trace.json --key signer.pk8 --output audit.akmon
 ```
 
-`akmon seal` prints the capture level, writes `audit.akmon` and `audit.akmon.pub`, and prints the commands to give your verifier. Add `--proof-dir proof` if the verifier wants to check the signature with OpenSSL alone, and `--operator-key … --operator-id …` to record who approved the session.
+`akmon seal` prints the capture level, writes `audit.akmon` and `audit.akmon.pub`, and prints the commands to give your verifier. `audit.akmon.pub` is a convenience copy of the signer public key: send it (or `signer.pub`) to the verifier over a separate, trusted channel, and tell them to verify with the key they received that way, never with a `.pub` that arrived next to the bundle. Add `--proof-dir proof` if the verifier wants to check the signature with OpenSSL alone, and `--operator-key … --operator-id …` to record who approved the session.
 
 To keep the imported session in a specific journal (for example one per project), pass `--journal <DIR>`.
 
 ## 4. Check what you sealed
 
 ```bash
-agef-verify audit.akmon --verify-key audit.akmon.pub --require-signature
+agef-verify audit.akmon --verify-key signer.pub --require-signature
 ```
+
+Check against `signer.pub`, the public key you generated and hold, rather than the copy written next to the bundle.
 
 Read the `capture:` line. If it says `STRUCTURAL` and you expected content, the instrumentation did not record it.
 
 ## Automating it
 
-In CI or a collector-side job, seal each trace as it is exported:
+In CI or a collector-side job, seal each trace as it is exported. `akmon seal` does not create parent directories, so create the output directory first:
 
 ```bash
+mkdir -p evidence
 akmon seal "$TRACE" --key "$SIGNER_KEY" --output "evidence/$(basename "$TRACE" .json).akmon" --format json
 ```
 

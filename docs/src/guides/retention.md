@@ -10,7 +10,7 @@ Akmon cannot tell you your retention period. Some reference points:
 
 - **EU AI Act, high-risk systems.** Providers (Art. 19) and deployers (Art. 26(6)) must keep automatically generated logs for **at least six months**, unless other Union or national law requires otherwise. These obligations apply from 2 December 2027 for Annex III systems and 2 August 2028 for Annex I systems.
 - **DORA** (financial entities). The ICT logging rules in RTS (EU) 2024/1774 require you to define and apply a retention period for logs. Sector rules and supervisors often expect several years.
-- **Incidents.** Keep everything related to a serious incident until the investigation and any reporting are closed. Under the AI Act (Art. 73(6)), a provider must not alter the system in a way that could affect later evaluation of the incident's causes before informing the authorities; keeping the records sealed and untouched is part of that.
+- **Incidents.** Keep everything related to a serious incident until the investigation and any reporting are closed. Under the AI Act (Art. 73(6)), a provider must not alter the system in a way that could affect later evaluation of the incident's causes before informing the authorities. Separately, sealing the session records at the time, with an RFC 3161 timestamp taken at the time (see [Trusted timestamps](./trusted-timestamps.md)), helps show they were preserved; a signature alone does not prove when a bundle was sealed.
 - **Contracts and audits** may require longer.
 
 Do not delete agent logs on a short default schedule (for example 30 days) just because a tool does so by default. Decide the period with your legal and compliance teams, write it down, and apply it.
@@ -20,7 +20,7 @@ Do not delete agent logs on a short default schedule (for example 30 days) just 
 For each sealed session:
 
 - the bundle (`audit.akmon`),
-- the signer public key (`audit.akmon.pub`) and any operator public key,
+- a copy of the signer public key (`audit.akmon.pub`) and any operator public key, for reference only (see below: never verify against the copy stored with the bundle),
 - the `proof/` directory and any timestamp token (`.tsr`), if you made them,
 - a copy of the exact `agef-verify` binary version and its `SHA256SUMS`, so the evidence can be checked years later without depending on a download.
 
@@ -69,14 +69,17 @@ Use WORM-capable storage (an appliance, object store with retention lock, or WOR
 
 ## Check the archive regularly
 
-Verification is cheap and offline. Re-verify archived bundles on a schedule, and before you hand any of them over:
+Verification is cheap and offline. Re-verify archived bundles on a schedule, and before you hand any of them over. Verify against signer public keys you hold **independently** of the archive, for example in a key register or a separately controlled location:
 
 ```bash
+# /secure/keys/signer.pub comes from your key register, not from the archive.
 for b in archive/*.akmon; do
-  agef-verify "$b" --verify-key "$b.pub" --require-signature --format json > "$b.verify.json" \
+  agef-verify "$b" --verify-key /secure/keys/signer.pub --require-signature --format json > "$b.verify.json" \
     || echo "FAILED: $b"
 done
 ```
+
+Do not verify against the `<bundle>.pub` stored next to each bundle. Anyone who can rewrite the archive can replace both the bundle and its `.pub`, and the check would still pass. If you used several signing keys over time, pass each bundle the key your register says was in use for it (`agef-verify` accepts `--verify-key` more than once).
 
 ## Keys over time
 

@@ -7,7 +7,10 @@ binary. Nothing in this directory is compiled: the workspace sets
 `exclude = ["archive"]` and no crate depends on these files.
 
 The files keep their git history (`git log --follow archive/<path>`). The
-complete pre-archive tree is tagged **`archive/pre-focus-v2.2.1`**.
+complete pre-archive tree is tagged **`archive/pre-focus-v2.2.1`**. That tag
+points at the same commit as the `v2.2.1` release tag, so `v2.2.1` works
+equivalently in every command below (use it if your clone does not have the
+`archive/` tag; fetch tags with `git fetch --tags`).
 
 ## How to restore an item
 
