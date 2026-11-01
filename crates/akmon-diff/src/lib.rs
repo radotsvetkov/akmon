@@ -9,6 +9,7 @@ mod error;
 mod mode;
 mod report;
 mod resolve;
+mod sanitize;
 
 pub use comparison::{
     DiffComparison, StructuralBreak, compare_assistant_turn, compare_permission_gate,
@@ -27,3 +28,4 @@ pub use resolve::{
     RESOLVE_READ_CAP_BYTES, RESOLVE_SKIP_EXCEEDS_CAP, RESOLVE_SKIP_NOT_DEREFERENCABLE,
     RESOLVE_SKIP_OBJECT_MISSING, ResolveContext,
 };
+pub use sanitize::sanitize_for_terminal;

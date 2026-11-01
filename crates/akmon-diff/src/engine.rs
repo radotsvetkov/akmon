@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use akmon_journal::{
     Event, EventKind, Hash, ObjectStore, RedbObjectStore, RedbSessionGraph, SessionGraph,
+    journal_contains_session, journal_db_path, open_journal_read_only,
     referenced_object_hashes_for_kind,
 };
-use akmon_query::{journal_contains_session, journal_db_path, open_journal_read_only};
 use uuid::Uuid;
 
 use crate::resolve::ResolveContext;
@@ -80,25 +80,15 @@ pub fn load_source_session_from_journal(
             session_id: session_id.to_string(),
         });
     }
-    let handle = open_journal_read_only(journal_dir, session_id).map_err(|err| {
-        DiffError::SourceSessionLoadFailed {
-            session_id: session_id.to_string(),
-            source: Box::new(std::io::Error::other(err.to_string())),
-        }
-    })?;
-    let history = {
-        let guard = handle.graph.lock().unwrap_or_else(|p| p.into_inner());
-        guard
-            .history()
-            .map_err(|err| DiffError::SourceSessionLoadFailed {
-                session_id: session_id.to_string(),
-                source: Box::new(std::io::Error::other(err.to_string())),
-            })?
-    };
+    let (store, graph) = open_journal_read_only(journal_dir, session_id)
+        .map_err(|err| source_session_load_failed(session_id, err))?;
+    let history = graph
+        .history()
+        .map_err(|err| source_session_load_failed(session_id, err))?;
     Ok(SourceSession::new(
         session_id,
-        Arc::clone(&handle.store),
-        Arc::clone(&handle.graph),
+        store,
+        Arc::new(Mutex::new(graph)),
         history,
     ))
 }
@@ -391,7 +381,8 @@ where
                     });
                     break;
                 }
-                (None, None) => unreachable!(),
+                // Not reachable while `position < max_len`; stop defensively instead of panicking.
+                (None, None) => break,
             }
         }
         Ok(comparison)
@@ -1976,5 +1967,53 @@ mod tests {
             .expect("report");
         assert_eq!(report.session_a_event_count, 4);
         assert_eq!(report.session_b_event_count, 3);
+    }
+
+    #[test]
+    fn t_run_to_report_provider_status_difference_does_not_match() {
+        let build = |status: AttemptStatus, error: Option<&str>| {
+            let store = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+            let cwd_hash = store.put(b"/tmp").expect("cwd");
+            let config_hash = store.put(b"cfg").expect("cfg");
+            let request_hash = store.put(b"provider-request").expect("request");
+            let response_hash = store.put(b"provider-response").expect("response");
+            setup_source_with_history(
+                Arc::clone(&store),
+                &[
+                    EventKind::SessionStart {
+                        cwd_hash,
+                        config_hash,
+                    },
+                    EventKind::ProviderCall {
+                        provider_id: "anthropic".to_owned(),
+                        attempts: vec![AttemptRecord {
+                            attempt_number: 1,
+                            started_at: OffsetDateTime::UNIX_EPOCH,
+                            ended_at: OffsetDateTime::UNIX_EPOCH,
+                            status,
+                            request_hash,
+                            response_hash: Some(response_hash),
+                            stream_hash: None,
+                            error_message: error.map(str::to_owned),
+                        }],
+                        stream_hash: None,
+                    },
+                    EventKind::SessionEnd { summary_hash: None },
+                ],
+            )
+        };
+        let report = DiffEngine::new(
+            build(AttemptStatus::Success, None),
+            build(AttemptStatus::ServerError, Some("503")),
+        )
+        .expect("valid")
+        .run_to_report()
+        .expect("report");
+        assert!(!report.matches);
+        assert_eq!(report.divergence_count, 2);
+        assert_eq!(
+            report.divergences[0].kind,
+            DiffDivergenceKind::ProviderCallAttemptStatusDifference
+        );
     }
 }

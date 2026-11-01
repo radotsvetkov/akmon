@@ -4,7 +4,11 @@ use akmon_journal::{Hash, ObjectStore};
 
 use crate::{DiffDivergence, DiffError, ResolvedContent};
 
-/// Maximum bytes loaded per object in resolve mode (diff-specific cap).
+/// Maximum object size whose bytes are attached in resolve mode (diff-specific cap).
+///
+/// This bounds what resolve mode copies and renders, not what the store reads:
+/// [`ObjectStore`] has no size-only query, so [`resolve_object_capped`] still asks the store
+/// for the object before comparing its length against this cap.
 pub const RESOLVE_READ_CAP_BYTES: usize = 10 * 1024 * 1024;
 
 // Mirror akmon-cli/src/main.rs RESOLVE_* constants for preview consistency between `akmon inspect --resolve`
@@ -35,17 +39,13 @@ pub struct ResolveContext<'a> {
 pub enum ResolveOutcome {
     /// Bytes loaded successfully (length ≤ cap).
     Loaded(Vec<u8>),
-    /// Object exists but is larger than the read cap.
-    ExceedsCap {
-        /// Size reported by the store payload (diagnostics; skip reason stays a stable string).
-        #[allow(dead_code)]
-        actual_size: usize,
-    },
+    /// Object exists but is larger than the cap; its bytes are not copied or rendered.
+    ExceedsCap,
     /// No object at this hash.
     ObjectMissing,
 }
 
-/// Loads object bytes, applying [`RESOLVE_READ_CAP_BYTES`].
+/// Loads object bytes, applying [`RESOLVE_READ_CAP_BYTES`] to what is copied out of the store.
 pub fn resolve_object_capped(
     store: &dyn ObjectStore,
     hash: &Hash,
@@ -53,9 +53,8 @@ pub fn resolve_object_capped(
     match store.get(hash) {
         Ok(None) => Ok(ResolveOutcome::ObjectMissing),
         Ok(Some(bytes)) => {
-            let len = bytes.len();
-            if len > RESOLVE_READ_CAP_BYTES {
-                Ok(ResolveOutcome::ExceedsCap { actual_size: len })
+            if bytes.len() > RESOLVE_READ_CAP_BYTES {
+                Ok(ResolveOutcome::ExceedsCap)
             } else {
                 Ok(ResolveOutcome::Loaded(bytes.to_vec()))
             }
@@ -119,7 +118,12 @@ fn render_text_preview(text: &str) -> String {
             .collect::<Vec<_>>()
             .join("\n");
         let more = lines.len().saturating_sub(RESOLVE_TEXT_PREVIEW_MAX_LINES);
-        format!("{shown}\n... ({more} more lines)")
+        if more > 0 {
+            format!("{shown}\n... ({more} more lines)")
+        } else {
+            // Byte-truncated only: every over-long line already carries its own truncation note.
+            shown
+        }
     } else {
         lines
             .iter()
@@ -167,7 +171,7 @@ pub fn attach_resolved_content_pair(
             });
             div.resolved_skip_reason = None;
         }
-        (ResolveOutcome::ExceedsCap { .. }, _) | (_, ResolveOutcome::ExceedsCap { .. }) => {
+        (ResolveOutcome::ExceedsCap, _) | (_, ResolveOutcome::ExceedsCap) => {
             div.resolved = None;
             div.resolved_skip_reason = Some(RESOLVE_SKIP_EXCEEDS_CAP.to_owned());
         }
@@ -218,9 +222,7 @@ mod tests {
         let bytes = vec![0u8; RESOLVE_READ_CAP_BYTES + 1];
         let h = store.put(&bytes).expect("put");
         match resolve_object_capped(&store, &h).expect("ok") {
-            ResolveOutcome::ExceedsCap { actual_size } => {
-                assert_eq!(actual_size, RESOLVE_READ_CAP_BYTES + 1);
-            }
+            ResolveOutcome::ExceedsCap => {}
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -278,5 +280,27 @@ mod tests {
         let s = render_preview(text.as_bytes()).expect("preview");
         assert!(!s.is_empty());
         assert!(s.contains("truncated line"));
+    }
+
+    #[test]
+    fn t_render_preview_byte_truncated_few_lines_has_no_zero_more_lines() {
+        // > 10 KiB of text in 3 lines: the preview is byte-truncated per line, not line-truncated.
+        let long = "x".repeat(5000);
+        let text = format!("{long}\n{long}\n{long}");
+        assert!(text.len() > RESOLVE_TEXT_MAX_BYTES);
+        let s = render_preview(text.as_bytes()).expect("preview");
+        assert!(!s.contains("(0 more lines)"), "bogus trailer: {s}");
+        assert!(!s.contains("more lines"));
+        assert_eq!(s.matches("truncated line").count(), 3);
+    }
+
+    #[test]
+    fn t_render_preview_many_lines_still_reports_more_lines() {
+        let text = (0..8)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let s = render_preview(text.as_bytes()).expect("preview");
+        assert!(s.ends_with("... (3 more lines)"), "{s}");
     }
 }

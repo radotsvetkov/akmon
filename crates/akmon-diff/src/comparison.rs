@@ -1,7 +1,7 @@
-use akmon_journal::{Event, EventKind, Hash};
+use akmon_journal::{AttemptRecord, AttemptStatus, Event, EventKind, Hash};
 use serde::{Deserialize, Serialize};
 
-use crate::resolve::ResolveContext;
+use crate::resolve::{ResolveContext, attach_resolved_content_pair, mark_not_dereferenceable};
 use crate::{DiffDivergence, DiffDivergenceKind, DiffError, DiffMode};
 
 /// Structural break details for lockstep diff.
@@ -51,17 +51,21 @@ fn hash_hex(hash: &Hash) -> String {
     hash.to_hex()
 }
 
+fn opt_hash_hex(hash: Option<&Hash>) -> String {
+    hash.map_or_else(|| "none".to_owned(), hash_hex)
+}
+
 fn divergence(
-    position: Option<u64>,
+    position: u64,
     kind: DiffDivergenceKind,
-    field: Option<String>,
+    field: &str,
     expected: String,
     actual: String,
 ) -> DiffDivergence {
     DiffDivergence {
-        position,
+        position: Some(position),
         kind,
-        field,
+        field: Some(field.to_owned()),
         expected,
         actual,
         resolved: None,
@@ -69,19 +73,47 @@ fn divergence(
     }
 }
 
-fn content_ref_diff(
-    position: u64,
-    field: &str,
-    expected: String,
-    actual: String,
-) -> DiffDivergence {
-    divergence(
-        Some(position),
-        DiffDivergenceKind::ContentReferenceDifference,
-        Some(field.to_owned()),
-        expected,
-        actual,
-    )
+/// Pushes a divergence for a hash-backed field; in resolve mode loads both objects when present.
+fn push_hash_field(
+    out: &mut Vec<DiffDivergence>,
+    mut div: DiffDivergence,
+    resolve: Option<ResolveContext<'_>>,
+    a: Option<&Hash>,
+    b: Option<&Hash>,
+) -> Result<(), DiffError> {
+    if let Some(ctx) = resolve {
+        match (a, b) {
+            (Some(ha), Some(hb)) => attach_resolved_content_pair(&mut div, ctx, ha, hb)?,
+            _ => mark_not_dereferenceable(&mut div),
+        }
+    }
+    out.push(div);
+    Ok(())
+}
+
+/// Pushes a divergence for a scalar (non-hash) field; resolve mode marks it not dereferenceable.
+fn push_scalar_field(
+    out: &mut Vec<DiffDivergence>,
+    mut div: DiffDivergence,
+    resolve: Option<ResolveContext<'_>>,
+) {
+    if resolve.is_some() {
+        mark_not_dereferenceable(&mut div);
+    }
+    out.push(div);
+}
+
+/// Stable snake_case label for an attempt status (used in divergence expected/actual).
+fn attempt_status_label(status: &AttemptStatus) -> String {
+    match status {
+        AttemptStatus::Success => "success".to_owned(),
+        AttemptStatus::RateLimited => "rate_limited".to_owned(),
+        AttemptStatus::NetworkError => "network_error".to_owned(),
+        AttemptStatus::ServerError => "server_error".to_owned(),
+        AttemptStatus::ClientError => "client_error".to_owned(),
+        AttemptStatus::Cancelled => "cancelled".to_owned(),
+        AttemptStatus::Other(other) => format!("other:{other}"),
+    }
 }
 
 /// Compares `SessionStart` events at one lockstep position.
@@ -90,8 +122,6 @@ pub fn compare_session_start(
     b: &Event,
     resolve: Option<ResolveContext<'_>>,
 ) -> Result<Vec<DiffDivergence>, DiffError> {
-    use crate::resolve::attach_resolved_content_pair;
-
     let mut out = Vec::new();
     if let (
         EventKind::SessionStart {
@@ -105,27 +135,24 @@ pub fn compare_session_start(
     ) = (&a.kind, &b.kind)
     {
         if a_cwd != b_cwd {
-            out.push(divergence(
-                Some(a.sequence),
+            let div = divergence(
+                a.sequence,
                 DiffDivergenceKind::SessionStartCwdDifference,
-                Some("cwd_hash".to_owned()),
+                "cwd_hash",
                 hash_hex(a_cwd),
                 hash_hex(b_cwd),
-            ));
-            if let Some(ctx) = resolve {
-                attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, a_cwd, b_cwd)?;
-            }
+            );
+            push_hash_field(&mut out, div, resolve, Some(a_cwd), Some(b_cwd))?;
         }
         if a_cfg != b_cfg {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "config_hash",
                 hash_hex(a_cfg),
                 hash_hex(b_cfg),
-            ));
-            if let Some(ctx) = resolve {
-                attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, a_cfg, b_cfg)?;
-            }
+            );
+            push_hash_field(&mut out, div, resolve, Some(a_cfg), Some(b_cfg))?;
         }
     }
     Ok(out)
@@ -137,35 +164,81 @@ pub fn compare_user_turn(
     b: &Event,
     resolve: Option<ResolveContext<'_>>,
 ) -> Result<Vec<DiffDivergence>, DiffError> {
-    use crate::resolve::attach_resolved_content_pair;
-
-    match (&a.kind, &b.kind) {
-        (EventKind::UserTurn { prompt_hash: p1 }, EventKind::UserTurn { prompt_hash: p2 })
-            if p1 != p2 =>
-        {
-            let mut out = vec![content_ref_diff(
-                a.sequence,
-                "prompt_hash",
-                hash_hex(p1),
-                hash_hex(p2),
-            )];
-            if let Some(ctx) = resolve {
-                attach_resolved_content_pair(&mut out[0], ctx, p1, p2)?;
-            }
-            Ok(out)
-        }
-        _ => Ok(Vec::new()),
+    let mut out = Vec::new();
+    if let (EventKind::UserTurn { prompt_hash: p1 }, EventKind::UserTurn { prompt_hash: p2 }) =
+        (&a.kind, &b.kind)
+        && p1 != p2
+    {
+        let div = divergence(
+            a.sequence,
+            DiffDivergenceKind::ContentReferenceDifference,
+            "prompt_hash",
+            hash_hex(p1),
+            hash_hex(p2),
+        );
+        push_hash_field(&mut out, div, resolve, Some(p1), Some(p2))?;
     }
+    Ok(out)
+}
+
+/// Compares the per-attempt request hash, status and error message of two attempts at `index`.
+fn compare_attempt_pair(
+    out: &mut Vec<DiffDivergence>,
+    position: u64,
+    index: usize,
+    a: &AttemptRecord,
+    b: &AttemptRecord,
+    resolve: Option<ResolveContext<'_>>,
+) -> Result<(), DiffError> {
+    if a.request_hash != b.request_hash {
+        let div = divergence(
+            position,
+            DiffDivergenceKind::ProviderCallRequestDifference,
+            &format!("attempts[{index}].request_hash"),
+            hash_hex(&a.request_hash),
+            hash_hex(&b.request_hash),
+        );
+        push_hash_field(
+            out,
+            div,
+            resolve,
+            Some(&a.request_hash),
+            Some(&b.request_hash),
+        )?;
+    }
+    if a.status != b.status {
+        let div = divergence(
+            position,
+            DiffDivergenceKind::ProviderCallAttemptStatusDifference,
+            &format!("attempts[{index}].status"),
+            attempt_status_label(&a.status),
+            attempt_status_label(&b.status),
+        );
+        push_scalar_field(out, div, resolve);
+    }
+    if a.error_message != b.error_message {
+        let div = divergence(
+            position,
+            DiffDivergenceKind::ProviderCallAttemptErrorDifference,
+            &format!("attempts[{index}].error_message"),
+            a.error_message.clone().unwrap_or_else(|| "none".to_owned()),
+            b.error_message.clone().unwrap_or_else(|| "none".to_owned()),
+        );
+        push_scalar_field(out, div, resolve);
+    }
+    Ok(())
 }
 
 /// Compares `ProviderCall` events at one lockstep position.
+///
+/// Compared fields, in emitted order: `provider_id`, attempt count, then for every attempt index
+/// present in both events its `request_hash`, `status` and `error_message`, then the final
+/// attempt's `response_hash` and the event-level `stream_hash`.
 pub fn compare_provider_call(
     a: &Event,
     b: &Event,
     resolve: Option<ResolveContext<'_>>,
 ) -> Result<Vec<DiffDivergence>, DiffError> {
-    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
-
     let mut out = Vec::new();
     if let (
         EventKind::ProviderCall {
@@ -181,16 +254,28 @@ pub fn compare_provider_call(
     ) = (&a.kind, &b.kind)
     {
         if a_id != b_id {
-            out.push(divergence(
-                Some(a.sequence),
+            let div = divergence(
+                a.sequence,
                 DiffDivergenceKind::ContentReferenceDifference,
-                Some("provider_id".to_owned()),
+                "provider_id",
                 a_id.clone(),
                 b_id.clone(),
-            ));
-            if resolve.is_some() {
-                mark_not_dereferenceable(out.last_mut().expect("pushed"));
-            }
+            );
+            push_scalar_field(&mut out, div, resolve);
+        }
+        if a_attempts.len() != b_attempts.len() {
+            let div = divergence(
+                a.sequence,
+                DiffDivergenceKind::ProviderCallAttemptCountDifference,
+                "attempts.len",
+                a_attempts.len().to_string(),
+                b_attempts.len().to_string(),
+            );
+            push_scalar_field(&mut out, div, resolve);
+        }
+        for (index, (attempt_a, attempt_b)) in a_attempts.iter().zip(b_attempts.iter()).enumerate()
+        {
+            compare_attempt_pair(&mut out, a.sequence, index, attempt_a, attempt_b, resolve)?;
         }
         let a_final = a_attempts
             .last()
@@ -199,41 +284,24 @@ pub fn compare_provider_call(
             .last()
             .and_then(|attempt| attempt.response_hash.as_ref());
         if a_final != b_final {
-            out.push(divergence(
-                Some(a.sequence),
+            let div = divergence(
+                a.sequence,
                 DiffDivergenceKind::ProviderCallResponseDifference,
-                Some("attempts[-1].response_hash".to_owned()),
-                a_final.map_or_else(|| "none".to_owned(), hash_hex),
-                b_final.map_or_else(|| "none".to_owned(), hash_hex),
-            ));
-            if let Some(ctx) = resolve {
-                match (a_final, b_final) {
-                    (Some(ha), Some(hb)) => {
-                        attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, ha, hb)?;
-                    }
-                    _ => mark_not_dereferenceable(out.last_mut().expect("pushed")),
-                }
-            }
+                "attempts[-1].response_hash",
+                opt_hash_hex(a_final),
+                opt_hash_hex(b_final),
+            );
+            push_hash_field(&mut out, div, resolve, a_final, b_final)?;
         }
         if a_stream != b_stream {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "stream_hash",
-                a_stream
-                    .as_ref()
-                    .map_or_else(|| "none".to_owned(), hash_hex),
-                b_stream
-                    .as_ref()
-                    .map_or_else(|| "none".to_owned(), hash_hex),
-            ));
-            if let Some(ctx) = resolve {
-                match (a_stream.as_ref(), b_stream.as_ref()) {
-                    (Some(ha), Some(hb)) => {
-                        attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, ha, hb)?;
-                    }
-                    _ => mark_not_dereferenceable(out.last_mut().expect("pushed")),
-                }
-            }
+                opt_hash_hex(a_stream.as_ref()),
+                opt_hash_hex(b_stream.as_ref()),
+            );
+            push_hash_field(&mut out, div, resolve, a_stream.as_ref(), b_stream.as_ref())?;
         }
     }
     Ok(out)
@@ -245,8 +313,6 @@ pub fn compare_assistant_turn(
     b: &Event,
     resolve: Option<ResolveContext<'_>>,
 ) -> Result<Vec<DiffDivergence>, DiffError> {
-    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
-
     let mut out = Vec::new();
     if let (
         EventKind::AssistantTurn {
@@ -260,37 +326,24 @@ pub fn compare_assistant_turn(
     ) = (&a.kind, &b.kind)
     {
         if a_message != b_message {
-            out.push(divergence(
-                Some(a.sequence),
+            let div = divergence(
+                a.sequence,
                 DiffDivergenceKind::AssistantContentDifference,
-                Some("message_hash".to_owned()),
+                "message_hash",
                 hash_hex(a_message),
                 hash_hex(b_message),
-            ));
-            if let Some(ctx) = resolve {
-                attach_resolved_content_pair(
-                    out.last_mut().expect("pushed"),
-                    ctx,
-                    a_message,
-                    b_message,
-                )?;
-            }
+            );
+            push_hash_field(&mut out, div, resolve, Some(a_message), Some(b_message))?;
         }
         if a_tools != b_tools {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "tool_calls_hash",
-                a_tools.as_ref().map_or_else(|| "none".to_owned(), hash_hex),
-                b_tools.as_ref().map_or_else(|| "none".to_owned(), hash_hex),
-            ));
-            if let Some(ctx) = resolve {
-                match (a_tools.as_ref(), b_tools.as_ref()) {
-                    (Some(ha), Some(hb)) => {
-                        attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, ha, hb)?;
-                    }
-                    _ => mark_not_dereferenceable(out.last_mut().expect("pushed")),
-                }
-            }
+                opt_hash_hex(a_tools.as_ref()),
+                opt_hash_hex(b_tools.as_ref()),
+            );
+            push_hash_field(&mut out, div, resolve, a_tools.as_ref(), b_tools.as_ref())?;
         }
     }
     Ok(out)
@@ -302,8 +355,6 @@ pub fn compare_tool_call(
     b: &Event,
     resolve: Option<ResolveContext<'_>>,
 ) -> Result<Vec<DiffDivergence>, DiffError> {
-    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
-
     let mut out = Vec::new();
     if let (
         EventKind::ToolCall {
@@ -321,69 +372,50 @@ pub fn compare_tool_call(
     ) = (&a.kind, &b.kind)
     {
         if a_id != b_id {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "tool_id",
                 a_id.clone(),
                 b_id.clone(),
-            ));
-            if resolve.is_some() {
-                mark_not_dereferenceable(out.last_mut().expect("pushed"));
-            }
+            );
+            push_scalar_field(&mut out, div, resolve);
         }
         if a_input != b_input {
-            out.push(divergence(
-                Some(a.sequence),
+            let div = divergence(
+                a.sequence,
                 DiffDivergenceKind::ToolCallInputDifference,
-                Some("input_hash".to_owned()),
+                "input_hash",
                 hash_hex(a_input),
                 hash_hex(b_input),
-            ));
-            if let Some(ctx) = resolve {
-                attach_resolved_content_pair(
-                    out.last_mut().expect("pushed"),
-                    ctx,
-                    a_input,
-                    b_input,
-                )?;
-            }
+            );
+            push_hash_field(&mut out, div, resolve, Some(a_input), Some(b_input))?;
         }
         if a_output != b_output {
-            out.push(divergence(
-                Some(a.sequence),
+            let div = divergence(
+                a.sequence,
                 DiffDivergenceKind::ToolCallOutputDifference,
-                Some("output_hash".to_owned()),
+                "output_hash",
                 hash_hex(a_output),
                 hash_hex(b_output),
-            ));
-            if let Some(ctx) = resolve {
-                attach_resolved_content_pair(
-                    out.last_mut().expect("pushed"),
-                    ctx,
-                    a_output,
-                    b_output,
-                )?;
-            }
+            );
+            push_hash_field(&mut out, div, resolve, Some(a_output), Some(b_output))?;
         }
         if a_side_effects != b_side_effects {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "side_effects_hash",
-                a_side_effects
-                    .as_ref()
-                    .map_or_else(|| "none".to_owned(), hash_hex),
-                b_side_effects
-                    .as_ref()
-                    .map_or_else(|| "none".to_owned(), hash_hex),
-            ));
-            if let Some(ctx) = resolve {
-                match (a_side_effects.as_ref(), b_side_effects.as_ref()) {
-                    (Some(ha), Some(hb)) => {
-                        attach_resolved_content_pair(out.last_mut().expect("pushed"), ctx, ha, hb)?;
-                    }
-                    _ => mark_not_dereferenceable(out.last_mut().expect("pushed")),
-                }
-            }
+                opt_hash_hex(a_side_effects.as_ref()),
+                opt_hash_hex(b_side_effects.as_ref()),
+            );
+            push_hash_field(
+                &mut out,
+                div,
+                resolve,
+                a_side_effects.as_ref(),
+                b_side_effects.as_ref(),
+            )?;
         }
     }
     Ok(out)
@@ -395,8 +427,6 @@ pub fn compare_retrieval_call(
     b: &Event,
     resolve: Option<ResolveContext<'_>>,
 ) -> Result<Vec<DiffDivergence>, DiffError> {
-    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
-
     let mut out = Vec::new();
     if let (
         EventKind::RetrievalCall {
@@ -412,47 +442,34 @@ pub fn compare_retrieval_call(
     ) = (&a.kind, &b.kind)
     {
         if a_index != b_index {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "index_id",
                 a_index.clone(),
                 b_index.clone(),
-            ));
-            if resolve.is_some() {
-                mark_not_dereferenceable(out.last_mut().expect("pushed"));
-            }
+            );
+            push_scalar_field(&mut out, div, resolve);
         }
         if a_query != b_query {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "query_hash",
                 hash_hex(a_query),
                 hash_hex(b_query),
-            ));
-            if let Some(ctx) = resolve {
-                attach_resolved_content_pair(
-                    out.last_mut().expect("pushed"),
-                    ctx,
-                    a_query,
-                    b_query,
-                )?;
-            }
+            );
+            push_hash_field(&mut out, div, resolve, Some(a_query), Some(b_query))?;
         }
         if a_results != b_results {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "results_hash",
                 hash_hex(a_results),
                 hash_hex(b_results),
-            ));
-            if let Some(ctx) = resolve {
-                attach_resolved_content_pair(
-                    out.last_mut().expect("pushed"),
-                    ctx,
-                    a_results,
-                    b_results,
-                )?;
-            }
+            );
+            push_hash_field(&mut out, div, resolve, Some(a_results), Some(b_results))?;
         }
     }
     Ok(out)
@@ -464,8 +481,6 @@ pub fn compare_permission_gate(
     b: &Event,
     resolve: Option<ResolveContext<'_>>,
 ) -> Result<Vec<DiffDivergence>, DiffError> {
-    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
-
     let mut out = Vec::new();
     if let (
         EventKind::PermissionGate {
@@ -481,43 +496,34 @@ pub fn compare_permission_gate(
     ) = (&a.kind, &b.kind)
     {
         if a_policy != b_policy {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "policy_id",
                 a_policy.clone(),
                 b_policy.clone(),
-            ));
-            if resolve.is_some() {
-                mark_not_dereferenceable(out.last_mut().expect("pushed"));
-            }
+            );
+            push_scalar_field(&mut out, div, resolve);
         }
         if a_decision != b_decision {
-            out.push(divergence(
-                Some(a.sequence),
+            let div = divergence(
+                a.sequence,
                 DiffDivergenceKind::PermissionGateDecisionDifference,
-                Some("decision".to_owned()),
+                "decision",
                 a_decision.clone(),
                 b_decision.clone(),
-            ));
-            if resolve.is_some() {
-                mark_not_dereferenceable(out.last_mut().expect("pushed"));
-            }
+            );
+            push_scalar_field(&mut out, div, resolve);
         }
         if a_context != b_context {
-            out.push(content_ref_diff(
+            let div = divergence(
                 a.sequence,
+                DiffDivergenceKind::ContentReferenceDifference,
                 "context_hash",
                 hash_hex(a_context),
                 hash_hex(b_context),
-            ));
-            if let Some(ctx) = resolve {
-                attach_resolved_content_pair(
-                    out.last_mut().expect("pushed"),
-                    ctx,
-                    a_context,
-                    b_context,
-                )?;
-            }
+            );
+            push_hash_field(&mut out, div, resolve, Some(a_context), Some(b_context))?;
         }
     }
     Ok(out)
@@ -529,8 +535,7 @@ pub fn compare_session_end(
     b: &Event,
     resolve: Option<ResolveContext<'_>>,
 ) -> Result<Vec<DiffDivergence>, DiffError> {
-    use crate::resolve::{attach_resolved_content_pair, mark_not_dereferenceable};
-
+    let mut out = Vec::new();
     if let (
         EventKind::SessionEnd {
             summary_hash: a_summary,
@@ -541,37 +546,29 @@ pub fn compare_session_end(
     ) = (&a.kind, &b.kind)
         && a_summary != b_summary
     {
-        let mut out = vec![divergence(
-            Some(a.sequence),
+        let div = divergence(
+            a.sequence,
             DiffDivergenceKind::SessionEndDifference,
-            Some("summary_hash".to_owned()),
-            a_summary
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), hash_hex),
-            b_summary
-                .as_ref()
-                .map_or_else(|| "none".to_owned(), hash_hex),
-        )];
-        if let Some(ctx) = resolve {
-            match (a_summary.as_ref(), b_summary.as_ref()) {
-                (Some(ha), Some(hb)) => {
-                    attach_resolved_content_pair(&mut out[0], ctx, ha, hb)?;
-                }
-                _ => mark_not_dereferenceable(&mut out[0]),
-            }
-        }
-        return Ok(out);
+            "summary_hash",
+            opt_hash_hex(a_summary.as_ref()),
+            opt_hash_hex(b_summary.as_ref()),
+        );
+        push_hash_field(
+            &mut out,
+            div,
+            resolve,
+            a_summary.as_ref(),
+            b_summary.as_ref(),
+        )?;
     }
-    Ok(Vec::new())
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use akmon_journal::{
-        AttemptRecord, AttemptStatus, HashAlgorithm, MemoryObjectStore, ObjectStore,
-    };
+    use akmon_journal::{HashAlgorithm, MemoryObjectStore, ObjectStore};
     use time::OffsetDateTime;
 
     use crate::resolve::{
@@ -1202,5 +1199,126 @@ mod tests {
         let diffs = compare_assistant_turn(&a, &b, Some(ctx)).expect("compare");
         assert_eq!(diffs.len(), 1);
         assert!(diffs[0].resolved.as_ref().is_some_and(|r| !r.bytes_match));
+    }
+
+    fn provider_event(attempts: Vec<AttemptRecord>) -> Event {
+        event(
+            2,
+            EventKind::ProviderCall {
+                provider_id: "otel".to_owned(),
+                attempts,
+                stream_hash: None,
+            },
+        )
+    }
+
+    #[test]
+    fn t_provider_call_request_hash_difference_is_reported() {
+        // Same output, different request (e.g. OTEL system instructions live only in request_hash).
+        let mut a_attempt = attempt(1, Some(hash(7)));
+        let mut b_attempt = attempt(1, Some(hash(7)));
+        a_attempt.request_hash = hash(40);
+        b_attempt.request_hash = hash(41);
+        let diffs = compare_provider_call(
+            &provider_event(vec![a_attempt]),
+            &provider_event(vec![b_attempt]),
+            None,
+        )
+        .expect("compare");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(
+            diffs[0].kind,
+            DiffDivergenceKind::ProviderCallRequestDifference
+        );
+        assert_eq!(diffs[0].field.as_deref(), Some("attempts[0].request_hash"));
+        assert_eq!(diffs[0].expected, hash(40).to_hex());
+        assert_eq!(diffs[0].actual, hash(41).to_hex());
+    }
+
+    #[test]
+    fn t_provider_call_request_hash_resolves_bytes() {
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let sb = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let mut a_attempt = attempt(1, Some(hash(7)));
+        let mut b_attempt = attempt(1, Some(hash(7)));
+        a_attempt.request_hash = sa.put(b"system: be terse").expect("put");
+        b_attempt.request_hash = sb.put(b"system: be verbose").expect("put");
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sb.as_ref(),
+        };
+        let diffs = compare_provider_call(
+            &provider_event(vec![a_attempt]),
+            &provider_event(vec![b_attempt]),
+            Some(ctx),
+        )
+        .expect("compare");
+        assert_eq!(diffs.len(), 1);
+        let resolved = diffs[0].resolved.as_ref().expect("resolved");
+        assert_eq!(resolved.a_preview.as_deref(), Some("system: be terse"));
+        assert!(!resolved.bytes_match);
+    }
+
+    #[test]
+    fn t_provider_call_attempt_count_difference_is_reported() {
+        // A retried call and a single-shot call with the same final response must not match.
+        let mut retry = attempt(1, None);
+        retry.status = AttemptStatus::RateLimited;
+        retry.error_message = Some("429".to_owned());
+        let a = provider_event(vec![retry, attempt(2, Some(hash(7)))]);
+        let mut only = attempt(1, Some(hash(7)));
+        only.request_hash = hash(12);
+        let b = provider_event(vec![only]);
+        let diffs = compare_provider_call(&a, &b, None).expect("compare");
+        let kinds: Vec<_> = diffs.iter().map(|d| d.kind.clone()).collect();
+        assert_eq!(
+            diffs[0].kind,
+            DiffDivergenceKind::ProviderCallAttemptCountDifference
+        );
+        assert_eq!(diffs[0].field.as_deref(), Some("attempts.len"));
+        assert_eq!(diffs[0].expected, "2");
+        assert_eq!(diffs[0].actual, "1");
+        assert!(kinds.contains(&DiffDivergenceKind::ProviderCallAttemptStatusDifference));
+        assert!(kinds.contains(&DiffDivergenceKind::ProviderCallAttemptErrorDifference));
+        assert!(!kinds.contains(&DiffDivergenceKind::ProviderCallResponseDifference));
+    }
+
+    #[test]
+    fn t_provider_call_status_and_error_difference_is_reported() {
+        // Failed vs succeeded call with identical response hash (OTEL always sets response_hash).
+        let ok = attempt(1, Some(hash(7)));
+        let mut failed = attempt(1, Some(hash(7)));
+        failed.status = AttemptStatus::Other("rate_limit".to_owned());
+        failed.error_message = Some("quota exceeded".to_owned());
+        let sa = Arc::new(MemoryObjectStore::new(HashAlgorithm::Sha256));
+        let ctx = ResolveContext {
+            store_a: sa.as_ref(),
+            store_b: sa.as_ref(),
+        };
+        let diffs = compare_provider_call(
+            &provider_event(vec![ok]),
+            &provider_event(vec![failed]),
+            Some(ctx),
+        )
+        .expect("compare");
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(
+            diffs[0].kind,
+            DiffDivergenceKind::ProviderCallAttemptStatusDifference
+        );
+        assert_eq!(diffs[0].field.as_deref(), Some("attempts[0].status"));
+        assert_eq!(diffs[0].expected, "success");
+        assert_eq!(diffs[0].actual, "other:rate_limit");
+        assert_eq!(
+            diffs[0].resolved_skip_reason.as_deref(),
+            Some(RESOLVE_SKIP_NOT_DEREFERENCABLE)
+        );
+        assert_eq!(
+            diffs[1].kind,
+            DiffDivergenceKind::ProviderCallAttemptErrorDifference
+        );
+        assert_eq!(diffs[1].field.as_deref(), Some("attempts[0].error_message"));
+        assert_eq!(diffs[1].expected, "none");
+        assert_eq!(diffs[1].actual, "quota exceeded");
     }
 }

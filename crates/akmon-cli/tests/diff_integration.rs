@@ -489,3 +489,181 @@ async fn t_diff_journal_flag_overrides_default() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Like [`append_provider_session`] but with explicit request bytes and attempt status/error.
+fn append_provider_session_detail(
+    store: &Arc<RedbObjectStore>,
+    session_id: Uuid,
+    request: &[u8],
+    status: AttemptStatus,
+    error_message: Option<&str>,
+) {
+    let mut graph = RedbSessionGraph::open_new(Arc::clone(store), session_id).expect("graph");
+    graph
+        .append(EventKind::SessionStart {
+            cwd_hash: put_bytes(store.as_ref(), b"/workspace"),
+            config_hash: put_bytes(store.as_ref(), br#"{"model":"x"}"#),
+        })
+        .expect("SessionStart");
+    let mut attempt = attempt_record(store, request, b"resp");
+    attempt.status = status;
+    attempt.error_message = error_message.map(str::to_owned);
+    graph
+        .append(EventKind::ProviderCall {
+            provider_id: "otel".to_owned(),
+            attempts: vec![attempt],
+            stream_hash: None,
+        })
+        .expect("ProviderCall");
+    graph
+        .append(EventKind::SessionEnd { summary_hash: None })
+        .expect("SessionEnd");
+}
+
+fn parse_json_stdout(out: &std::process::Output) -> serde_json::Value {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("stdout not JSON ({e}): {stdout}"))
+}
+
+#[test]
+fn t_diff_json_error_object_on_missing_session() {
+    let tmp = tempdir().expect("tempdir");
+    let sid_a = Uuid::new_v4();
+    let missing = Uuid::new_v4();
+    write_single_minimal_session(tmp.path(), sid_a, b"x");
+    let out = run_diff_with(tmp.path(), sid_a, missing, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(3));
+    let v = parse_json_stdout(&out);
+    assert_eq!(v["category"], "session_not_found");
+    assert!(v["akmon_version"].is_string());
+    assert!(
+        v["error"]
+            .as_str()
+            .is_some_and(|e| e.contains(&missing.to_string())),
+        "{v}"
+    );
+}
+
+#[test]
+fn t_diff_json_error_object_on_missing_journal() {
+    let tmp = tempdir().expect("tempdir");
+    let nowhere = tmp.path().join("no-journal-here");
+    let out = run_diff_with(
+        nowhere.as_path(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        &["--format", "json"],
+    );
+    assert_eq!(out.status.code(), Some(3));
+    let v = parse_json_stdout(&out);
+    assert_eq!(v["category"], "session_not_found");
+}
+
+#[test]
+fn t_diff_json_error_object_on_missing_referenced_object() {
+    let tmp = tempdir().expect("tempdir");
+    let sid_a = Uuid::new_v4();
+    let sid_b = Uuid::new_v4();
+    let store = open_store(tmp.path());
+    append_minimal_session(&store, sid_a, b"ok-a");
+    append_minimal_session(&store, sid_b, b"ok-b");
+    let removed = put_bytes(store.as_ref(), b"ok-b");
+    store.remove_object_for_testing(&removed).expect("remove");
+    drop(store);
+    let out = run_diff_with(tmp.path(), sid_a, sid_b, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(3));
+    let v = parse_json_stdout(&out);
+    assert_eq!(v["category"], "store_access_failed");
+}
+
+#[test]
+fn t_diff_provider_request_hash_difference_diverges() {
+    let tmp = tempdir().expect("tempdir");
+    let sid_a = Uuid::new_v4();
+    let sid_b = Uuid::new_v4();
+    let store = open_store(tmp.path());
+    append_provider_session_detail(&store, sid_a, b"sys: terse", AttemptStatus::Success, None);
+    append_provider_session_detail(&store, sid_b, b"sys: verbose", AttemptStatus::Success, None);
+    drop(store);
+    let out = run_diff_with(tmp.path(), sid_a, sid_b, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let report: DiffReportV1 = serde_json::from_slice(&out.stdout).expect("report");
+    assert!(!report.matches);
+    assert_eq!(report.divergence_count, 1);
+    assert_eq!(
+        report.divergences[0].field.as_deref(),
+        Some("attempts[0].request_hash")
+    );
+}
+
+#[test]
+fn t_diff_provider_status_difference_diverges() {
+    let tmp = tempdir().expect("tempdir");
+    let sid_a = Uuid::new_v4();
+    let sid_b = Uuid::new_v4();
+    let store = open_store(tmp.path());
+    append_provider_session_detail(&store, sid_a, b"req", AttemptStatus::Success, None);
+    append_provider_session_detail(
+        &store,
+        sid_b,
+        b"req",
+        AttemptStatus::Other("rate_limit".to_owned()),
+        Some("quota"),
+    );
+    drop(store);
+    let out = run_diff_with(tmp.path(), sid_a, sid_b, &["--format", "json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v = parse_json_stdout(&out);
+    let kinds: Vec<&str> = v["divergences"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|d| d["kind"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "provider_call_attempt_status_difference",
+            "provider_call_attempt_error_difference"
+        ]
+    );
+}
+
+#[test]
+fn t_diff_human_resolve_escapes_terminal_control_sequences() {
+    let tmp = tempdir().expect("tempdir");
+    let sid_a = Uuid::new_v4();
+    let sid_b = Uuid::new_v4();
+    let store = open_store(tmp.path());
+    append_minimal_session(&store, sid_a, b"benign");
+    append_minimal_session(
+        &store,
+        sid_b,
+        b"\x1b[2K\rmatches: yes\n  matches: yes\x1b]52;c;ZXZpbA==\x07",
+    );
+    drop(store);
+    let out = run_diff_with(tmp.path(), sid_a, sid_b, &["--resolve"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains('\x1b'),
+        "raw ESC reached the terminal: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\x07'),
+        "raw BEL reached the terminal: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\r'),
+        "raw CR reached the terminal: {stdout:?}"
+    );
+    assert!(stdout.contains("\\u{1b}[2K"), "{stdout}");
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| l.trim_start().starts_with("matches:"))
+            .count(),
+        1,
+        "preview must not be able to forge a report line: {stdout}"
+    );
+}

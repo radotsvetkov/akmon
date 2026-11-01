@@ -29,6 +29,14 @@ pub enum DiffDivergenceKind {
     AssistantContentDifference,
     /// Provider final response differs.
     ProviderCallResponseDifference,
+    /// Provider request payload hash differs for an attempt present in both sessions.
+    ProviderCallRequestDifference,
+    /// Number of provider attempts (retries) differs.
+    ProviderCallAttemptCountDifference,
+    /// Provider attempt status (success, rate_limited, ...) differs.
+    ProviderCallAttemptStatusDifference,
+    /// Provider attempt error message differs.
+    ProviderCallAttemptErrorDifference,
     /// Tool input differs.
     ToolCallInputDifference,
     /// Tool output differs.
@@ -121,6 +129,22 @@ mod tests {
             (
                 DiffDivergenceKind::ProviderCallResponseDifference,
                 "provider_call_response_difference",
+            ),
+            (
+                DiffDivergenceKind::ProviderCallRequestDifference,
+                "provider_call_request_difference",
+            ),
+            (
+                DiffDivergenceKind::ProviderCallAttemptCountDifference,
+                "provider_call_attempt_count_difference",
+            ),
+            (
+                DiffDivergenceKind::ProviderCallAttemptStatusDifference,
+                "provider_call_attempt_status_difference",
+            ),
+            (
+                DiffDivergenceKind::ProviderCallAttemptErrorDifference,
+                "provider_call_attempt_error_difference",
             ),
             (
                 DiffDivergenceKind::ToolCallInputDifference,
