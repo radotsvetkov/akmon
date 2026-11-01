@@ -1,24 +1,24 @@
 class Akmon < Formula
   desc "Tamper-evident evidence and verification layer for AI agents"
   homepage "https://github.com/radotsvetkov/akmon"
-  version "2.2.0"
+  version "3.0.0"
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/radotsvetkov/akmon/releases/download/v2.2.0/akmon-darwin-arm64"
-      sha256 "ee6e77675202e09c36136fc31bd6e7eb89a1ff6712a3eb0de393cfad499b483a"
+      url "https://github.com/radotsvetkov/akmon/releases/download/v3.0.0/akmon-darwin-arm64"
+      sha256 "320f5c542bba637655fac8ef51f960d4dfa2280d51ae6ee8abf76588b05cef38"
     end
     on_intel do
-      url "https://github.com/radotsvetkov/akmon/releases/download/v2.2.0/akmon-darwin-x86_64"
-      sha256 "5433f7d7180c66b88470fbb02537d1b667185cf992f16ecdab5a81d38b8132e3"
+      url "https://github.com/radotsvetkov/akmon/releases/download/v3.0.0/akmon-darwin-x86_64"
+      sha256 "e16e7014ca743e745978d065e896e3f016855da4fdb0abf0ff1139cbd8b22ebb"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/radotsvetkov/akmon/releases/download/v2.2.0/akmon-linux-x86_64"
-      sha256 "5ac9cce0df55d7820162214a47d742c93b8145a05c7f6ab8c5158c862c5850ca"
+      url "https://github.com/radotsvetkov/akmon/releases/download/v3.0.0/akmon-linux-x86_64"
+      sha256 "2a4c0c1c503447257d09e23e55631e1d15d25db6038e54b6b3b2556c47fe3af2"
     end
   end
 
@@ -27,6 +27,6 @@ class Akmon < Formula
   end
 
   test do
-    assert_match "2.2.0", shell_output("#{bin}/akmon --version")
+    assert_match "3.0.0", shell_output("#{bin}/akmon --version")
   end
 end
